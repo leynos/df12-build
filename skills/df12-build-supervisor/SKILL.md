@@ -148,6 +148,15 @@ reviewer.
 - **Review halt** (dual review unsatisfied within the cap): the branch is left
   unmerged with the blocking items; either hand-fix and merge, or fold the
   findings back into the roadmap and re-file.
+- **Roadmap-prose-fix halt** (an addendum/task whose sole deliverable is editing
+  the roadmap's *own* text — a wrong success criterion, a mis-stated contract):
+  this is structurally un-runnable, because sub-agents are forbidden to edit
+  the roadmap, so it hard-blocks. The triage's **`editorial` lane** is meant to
+  catch these and apply them inline (triage is the one step that may edit the
+  roadmap); if one still reaches you blocked, **apply the prose fix yourself as
+  the operator** and tick the item. Watch for it specifically when a contract
+  was documented in two places (e.g. the roadmap *and* `SKILL.md`) and only one
+  was corrected — fix the stale copy to match the authoritative one.
 - **Recoverable API faults (500 / 429):** wait and retry. coderabbit 429
   backoffs are **expected and fine** — never shorten them. For a broad outage,
   schedule a long wake-up (≈1h) and relaunch; the fresh-restart model means
