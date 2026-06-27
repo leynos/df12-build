@@ -222,6 +222,14 @@ a task wearing a step's hat. When you see this accumulating:
   triage guidance): fold audit findings into the *relevant existing step* (or a
   single debt task), filtered by severity — **never a new step per finding**.
 
+This section is a summary; the full discipline is the **`roadmap-grooming`**
+skill (`df12-documentation-skills`) — the kind/lane taxonomy that keeps
+capability work out of refactoring phases, kind-specific value axes, the method
+for constructing proper steps from de-duped, seam-aligned refactoring and
+re-architecting tasks, and the genuine-debt-versus-churn test. Load it (paired
+with **`roadmap-doc`** for the GIST grammar and format it assumes) whenever you
+restructure a roadmap or feed remediation back into one.
+
 ## Knowing when to stop
 
 The spine (the core product an end user actually exercises) is the high-value
