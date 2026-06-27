@@ -246,7 +246,7 @@ function selectPrompt(processedIds) {
     '',
     ONLY_TASK
       ? `Restrict your answer to task id "${ONLY_TASK}": return it only if it is genuinely unblocked (or is a completed parent with open sub-tasks), otherwise hasTask=false with blockedSummary explaining what blocks it.`
-      : `Consider BOTH (a) unblocked incomplete tasks and (b) completed tasks that have open sub-tasks (addendum passes). Choose the one with the lowest id in document order. For an addendum pass set isAddendum=true and fill \`subtasks\`; for a normal task leave isAddendum false/omitted. Do NOT choose any of these ids already taken this run (merged, or currently being built in parallel — for an addendum pass this is the parent id): [${processedIds.join(', ') || 'none'}].`,
+      : `Consider BOTH (a) unblocked incomplete tasks and (b) completed tasks that have open sub-tasks (addendum passes). Choose the one with the lowest id in document order. For an addendum pass set isAddendum=true and fill \`subtasks\`; for a normal task leave isAddendum false/omitted. These ids are already taken this run (merged, or being built in parallel): [${processedIds.join(', ') || 'none'}]. Do NOT re-pick one as the SAME kind of work. CRITICAL: an id listed because its NORMAL task merged does NOT block an ADDENDUM PASS for the same id — a just-merged [x] task that has since gained open [ ] sub-tasks is a valid addendum pass and SHOULD be selected now (fix-debt-first), even though its id appears in the list. Only skip an addendum pass whose own addendum pass was already taken this run.`,
     '',
     'If no task qualifies, return hasTask=false. Do not modify any file.',
   ].join('\n')
@@ -413,7 +413,7 @@ function integratePrompt(task, worktree) {
     `  1. ${markStep}`,
     `  2. Fetch and rebase the branch onto the current origin/${BASE} (\`git fetch origin ${BASE}\` then rebase). Use the \`rebase\` skill for functionality-aware conflict resolution: resolve each conflict by preserving the INTENT of both sides (favour the design docs and existing contracts), not by blindly taking one side. If a conflict genuinely cannot be resolved safely, set ok=false, describe it in conflicts, and STOP without merging.`,
     `  3. Re-run \`make all\` after the rebase to confirm the branch is still green.`,
-    `  4. Switch to ${BASE} and bring the control worktree's local ${BASE} up to the current origin/${BASE} FIRST: \`git switch ${BASE}\` then \`git merge --ff-only origin/${BASE}\` (a remediation flush may have advanced origin/${BASE} without advancing local ${BASE}; without this the squash push is rejected non-fast-forward). Then squash-merge the branch (\`git merge --squash <branch>\`, commit with a clear squash message summarising the task) and push origin/${BASE}.`,
+    `  4. Land the squash ENTIRELY inside this worktree. NEVER \`git switch ${BASE}\` and never touch the control/root worktree or its checked-out ${BASE}: that switch fails when ${BASE} is checked out elsewhere, and it pollutes the control worktree (the root of recurring detritus). Step 2 left the task branch rebased on the current origin/${BASE}; from here, create a fresh temp branch there (\`git switch -c integrate-${task.id.replace(/[^0-9a-zA-Z]+/g, '-')} origin/${BASE}\`), squash-merge the task branch onto it (\`git merge --squash <task-branch>\` then \`git commit\` with a clear squash message summarising the task), and push it straight to the integration branch with \`git push origin HEAD:${BASE}\`. If the push is rejected non-fast-forward (a sibling advanced origin/${BASE} since step 2), go back to step 2 — re-fetch and re-rebase the task branch onto the new origin/${BASE} — then redo this step. Retry until it lands.`,
     '',
     'Return what you actually did (roadmapMarkedDone, rebased, squashMerged, mergeSha, pushed) and any conflict notes. Do not delete the worktree unless git donkey expects you to; leave the repo in a clean state.',
   ].join('\n')
@@ -471,8 +471,8 @@ async function runTask(task, mergeLock) {
         return agent(integratePrompt(task, worktree), { phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })
       }
       integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
-      if (!integration?.ok) {
-        return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration failed', worktree, proposals: [], kind: 'addendum' }
+      if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
+        return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals: [], kind: 'addendum' }
       }
     }
     return { id: tag, status: 'done', impl, integration, worktree, proposals: [], kind: 'addendum' }
@@ -577,8 +577,8 @@ async function runTask(task, mergeLock) {
       return agent(integratePrompt(task, worktree), { phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })
     }
     integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
-    if (!integration?.ok) {
-      return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration failed', worktree, proposals }
+    if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
+      return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals }
     }
   }
 
@@ -725,7 +725,7 @@ async function flushSettledSteps() {
   const inflightSteps = new Set([...inflight.keys()].map(stepOf))
   for (const [step, items] of [...pendingByStep.entries()]) {
     if (!items.length || inflightSteps.has(step)) continue
-    const tr = await runTriage(step, items)
+    const tr = await mergeLock(() => runTriage(step, items))
     triages.push({ step, ...(tr || {}) })
     const lanes = (tr?.decisions || []).reduce((m, d) => ((m[d.lane] = (m[d.lane] || 0) + 1), m), {})
     log(`[step ${step}] triaged ${items.length} proposal(s): ${Object.entries(lanes).map(([k, v]) => `${v} ${k}`).join(', ') || 'none recorded'}`)
@@ -809,7 +809,7 @@ while (true) {
       addPending(stepOf(done.id), result.proposals)
       let audit = null
       try {
-        audit = await runAudit({ id: done.id })
+        audit = await mergeLock(() => runAudit({ id: done.id }))
       } catch (err) {
         log(`[audit ${done.id}] failed (${(err && err.message) || String(err)}); skipping (task already merged)`)
       }

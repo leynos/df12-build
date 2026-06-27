@@ -235,7 +235,7 @@ restructure a roadmap or feed remediation back into one.
 The spine (the core product an end user actually exercises) is the high-value
 work. The hardening tail is **self-generating** — the audit loop manufactures
 DRY/robustness work faster than it clears it, and that work has near-zero
-user-facing value past a point. Recognise the inflection: when the spine is
+user-facing value past a point. Recognize the inflection: when the spine is
 done and dogfood-ready and the open frontier is almost all hardening, **do not
 grind indefinitely**. Surface it to your principal with concrete options: pause
 to dogfood the real thing (the highest-value next step — it produces the next
