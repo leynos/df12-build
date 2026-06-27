@@ -97,8 +97,11 @@ Every time a run completes you do the same loop:
    (proposals left unwritten because the run halted — triage them manually
    later).
 2. **Hoover orphan worktrees.** For each non-root worktree under
-   `…worktrees/roadmap-*`: stash any dirt (`git -C <wt> stash push -u`), remove
-   it (`git worktree remove <wt>` — not `--force`, which is blocked), point its
+   `…worktrees/roadmap-*`: stash any dirt with a **named** stash (see "Stash
+   hygiene" below —
+   `git -C <wt> stash push -u -m "df12-stash v1 task=<id> kind=discard reason=hoover-orphan"`,
+   deriving `<id>` from the `roadmap-<id>` branch), remove it
+   (`git worktree remove <wt>` — not `--force`, which is blocked), point its
    branch back at `origin/BASE` and delete it, then `git worktree prune`.
    Finally bring local `BASE` up:
    `git switch BASE && git merge --ff-only origin/BASE`.
@@ -230,6 +233,58 @@ grind indefinitely**. Surface it to your principal with concrete options: pause
 to dogfood the real thing (the highest-value next step — it produces the next
 round of *real* findings), cap the tail by severity, or continue. The principal
 sets the budget; you do not burn it silently.
+
+## Stash hygiene and the sweeper contract
+
+Agents and the operator both `git stash` constantly — to park unrelated
+formatter churn, to clean a worktree before removal, to clear control-worktree
+detritus before a squash. Because `git stash drop`/`clear` are often
+sandbox-blocked, these stashes accumulate (hundreds, over a long run). They are
+harmless against `origin/BASE` but become unmanageable if they are named
+opaquely, so the workflow imposes a **machine-parsable naming convention** that
+lets a deterministic sweeper clear stashes for completed tasks without touching
+in-flight work.
+
+**The format.** Every stash message is:
+
+```text
+df12-stash v1 task=<id> kind=<discard|park|keep> reason="<short>"
+```
+
+- `df12-stash v1` — a fixed sentinel and version, so a sweeper can tell a
+  managed stash from a hand-made or default (`WIP on …`) one and never touch
+  the latter.
+- `task=<id>` — the roadmap id the stash belongs to (`7.1.6`), or `control` for
+  control-worktree detritus not tied to one task. Git also prepends the free
+  `On <branch>:` prefix, a second task signal when the stash was made on a
+  `roadmap-<id>` branch.
+- `kind=` — disposition: `discard` (safe to drop once the task is done — most
+  parked formatter churn), `park` (review before dropping), `keep` (must be
+  re-applied; never auto-drop).
+
+**Never** use a bare `git stash push`; its default
+`WIP on <branch>: <sha> <subject>` names the last commit, not the stash's
+purpose.
+
+**The sweeper contract** (a deterministic tool can implement this; it is *safe
+by construction* and never interrupts ongoing work):
+
+1. Read `git stash list`; strip git's `On <branch>:` / `WIP on <branch>:`
+   prefix; match `^df12-stash v\d+ task=(\S+) kind=(\w+)`. A non-match is not
+   managed — skip it.
+2. Compute the **active** set: tasks with a live worktree or branch
+   (`git worktree list` → `roadmap-<id>`). These are in flight — skip their
+   stashes unconditionally.
+3. Compute the **completed** set: roadmap ids that are `[x]` on `origin/BASE`.
+4. Drop only entries where `kind=discard` **and** `task` is completed **and**
+   `task` is not active, iterating from the highest stash index down so refs
+   stay stable. Leave every `kind=keep`, every active-task stash, and every
+   unmanaged stash untouched.
+
+The operator applies the same convention when hoovering (cycle step 2). Until a
+sweeper exists, run `git stash clear` outside the sandbox during a quiet
+moment; the convention makes a filtered `git stash list | grep 'kind=discard'`
+audit the safe precursor.
 
 ## Environment safety-net constraints
 

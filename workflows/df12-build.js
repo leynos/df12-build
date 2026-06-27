@@ -54,6 +54,8 @@ function preamble(worktree) {
     '- Load the appropriate language router skill for any code you touch: python-router for Python, rust-router for Rust, and the matching router for other languages. Follow the smaller skills it routes you to.',
     `- Treat docs/ as the source of truth: ${DESIGN_DOCS}, the developers'/users' guides, the coding/scripting standards, and AGENTS.md. Obey AGENTS.md quality gates and the en-GB Oxford-spelling ("-ize"/"-yse"/"-our") convention in all prose, comments, and commits.`,
     `- The integration branch is "${BASE}"; treat origin/${BASE} as canonical. The roadmap lives at ${ROADMAP}.`,
+    '- Format ONLY the files you changed: run the markdown formatter on the specific paths you touched (`mdtablefix … <files>` then `markdownlint-cli2 --fix <files>`), then gate. Do NOT run a repo-global format such as `make fmt` / `mdformat-all` that reformats unrelated files — that churn only has to be parked and discarded.',
+    '- Never `git stash` with a bare or default message. Name every stash so a deterministic sweeper can tie it to a task and clear it safely: `df12-stash v1 task=<this roadmap id> kind=<discard|park|keep> reason="<short>"`. Formatter or build churn you park is kind=discard; anything you must re-apply later is kind=keep.',
     '- Signpost the documentation and skills you relied on in your output so the next agent can follow the same trail.',
     '',
   ].join('\n')
