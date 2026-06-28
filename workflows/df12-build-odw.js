@@ -718,9 +718,11 @@ async function runTriage(stepPrefix, proposals) {
 // remediation flush in the control loop. Runs until the frontier is dry, the
 // task ceiling or budget reserve is hit, or a task fails (then drain + stop).
 // ---------------------------------------------------------------------------
-const processed = [] // task ids merged (or terminal) this run
+const processed = [] // task ids pushed to BASE this run
 const processedNormal = new Set()
 const processedAddendum = new Set()
+const manualMergeReadyNormal = new Set()
+const manualMergeReadyAddendum = new Set()
 const results = []
 const audits = []
 const triages = []
@@ -753,14 +755,15 @@ async function doSelect(taken) {
 
 function takenSnapshot() {
   return {
-    normal: [...processedNormal, ...inflightNormal],
-    addendum: [...processedAddendum, ...inflightAddendum],
+    normal: [...processedNormal, ...manualMergeReadyNormal, ...inflightNormal],
+    addendum: [...processedAddendum, ...manualMergeReadyAddendum, ...inflightAddendum],
   }
 }
 
 function isAlreadyTaken(task) {
   const processedSet = task?.isAddendum ? processedAddendum : processedNormal
-  return processedSet.has(task.id) || inflightNormal.has(task.id) || inflightAddendum.has(task.id)
+  const manualMergeReadySet = task?.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal
+  return processedSet.has(task.id) || manualMergeReadySet.has(task.id) || inflightNormal.has(task.id) || inflightAddendum.has(task.id)
 }
 
 function markInflight(task) {
@@ -777,6 +780,11 @@ function markProcessed(task) {
   const processedSet = task?.isAddendum ? processedAddendum : processedNormal
   processedSet.add(task.id)
   processed.push(task.id)
+}
+
+function markManualMergeReady(task) {
+  const manualMergeReadySet = task?.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal
+  manualMergeReadySet.add(task.id)
 }
 
 function addPending(step, items) {
@@ -876,9 +884,9 @@ while (true) {
   const result = done.result
   results.push(result)
 
-  if (result.status === 'done' || result.status === 'manual-merge-ready') {
+  if (result.status === 'done' && result.integration?.pushed) {
     markProcessed(done.task)
-    if (result.status === 'done' && result.integration?.pushed && result.kind !== 'addendum') {
+    if (result.kind !== 'addendum') {
       // Addendum passes deliberately generate no audit and no proposals — that
       // is what breaks the remediation-of-remediation recursion.
       addPending(stepOf(done.id), result.proposals)
@@ -893,6 +901,8 @@ while (true) {
         addPending(stepOf(done.id), (audit.proposedRoadmapItems || []).map((p) => ({ ...p, source: `audit:${done.id}` })))
       }
     }
+  } else if (result.status === 'manual-merge-ready') {
+    markManualMergeReady(done.task)
   } else if (!halted) {
     // Record the failure, stop opening new work, and let in-flight siblings
     // finish rather than abandoning their (possibly mergeable) branches.
