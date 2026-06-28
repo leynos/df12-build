@@ -91,6 +91,16 @@ provides the doc skills):
    - `operator-notes.md` — run id, launch command, patches, validations,
      status checks, failures, and operator decisions.
 
+   Bootstrap the workflow script once so later launches do not overwrite
+   sidecar-local recovery edits:
+
+   ```bash
+   if [ ! -e "$SIDECAR/df12-build-odw.js" ]; then
+     cp /path/to/df12-build/workflows/df12-build-odw.js \
+       "$SIDECAR/df12-build-odw.js"
+   fi
+   ```
+
    Treat the sidecar as durable run state, not as source of truth for the
    product repository. `origin/<BASE>` remains the only product source of
    truth. Patch the sidecar script during a live workshop when needed, validate
@@ -100,8 +110,6 @@ provides the doc skills):
    checked-in ODW/Codex workflow when running Codex agents:
 
    ```bash
-   cp /path/to/df12-build/workflows/df12-build-odw.js \
-     "$SIDECAR/df12-build-odw.js"
    odw run "$SIDECAR/df12-build-odw.js" \
      --source "$PROJECT" \
      --config "$SIDECAR/odw.config.json" \
