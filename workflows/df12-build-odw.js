@@ -276,11 +276,12 @@ async function readRoadmapForSelection() {
       fallbackReason: '',
     }
   } catch (error) {
-    return {
-      text: await readFileText(ROADMAP),
-      source: ROADMAP,
-      fallbackReason: (error && error.message) || String(error),
-    }
+    const details = [
+      (error && error.message) || String(error),
+      error?.stderr ? `stderr: ${error.stderr.trim()}` : '',
+      error?.stdout ? `stdout: ${error.stdout.trim()}` : '',
+    ].filter(Boolean).join('; ')
+    throw new Error(`Failed to read canonical roadmap ref ${canonicalRef}: ${details}`)
   }
 }
 

@@ -102,7 +102,7 @@ project_slug="$(printf '%s' "$project" | tr -c '[:alnum:]._-' '-')"
 git diff --check "$(git merge-base HEAD origin/main)..HEAD" 2>&1 \
   | tee "/tmp/diff-check-${project_slug}-${rev}.out"
 
-markdownlint-cli2 docs/users-guide.md docs/developers-guide.md \
+markdownlint-cli2 AGENTS.md docs/users-guide.md docs/developers-guide.md \
   docs/architecture.md docs/adr-001-adopt-odw-sidecar-launches.md \
   skills/df12-build-supervisor/SKILL.md 2>&1 \
   | tee "/tmp/markdownlint-${project_slug}-${rev}.out"
