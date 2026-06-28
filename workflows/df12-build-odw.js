@@ -660,17 +660,22 @@ function implementAddendumPrompt(task, worktree) {
 
 function isDeferredReviewIssue(issue) {
   const text = String(issue || '').toLowerCase()
-  return (
-    text.includes('coderabbit') &&
-    (text.includes('rate limit') ||
-      text.includes('retry after') ||
-      text.includes('waittime') ||
-      text.includes('deferred') ||
-      text.includes('authentication') ||
-      text.includes('auth') ||
-      text.includes('browser') ||
-      text.includes('token'))
-  )
+  const deferredReviewMarkers = [
+    'rate limit',
+    'retry after',
+    'waittime',
+    'wait time',
+    'deferred review',
+    'deferred coderabbit review',
+    'coderabbit review deferred',
+    'unavailable',
+    'authentication failed',
+    'auth failed',
+    'browser login required',
+    'token missing',
+    'token expired',
+  ]
+  return text.includes('coderabbit') && deferredReviewMarkers.some((marker) => text.includes(marker))
 }
 
 function hasOnlyDeferredReviewIssues(openIssues) {
@@ -753,7 +758,7 @@ async function runTask(task, mergeLock) {
       if (addendumReview?.proposedRoadmapItems?.length) {
         proposals.push(...addendumReview.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
       }
-      const blocking = (addendumReview && addendumReview.verdict !== 'pass' && addendumReview.blocking) || []
+      const blocking = addendumReview?.blocking || []
       if (!addendumReview || addendumReview.verdict !== 'pass' || blocking.length > 0) {
         return { id: tag, status: 'halted', stage: 'addendum-review', detail: blocking.join('; ') || addendumReview?.summary || 'addendum fallback review did not pass', impl, addendumReview, worktree, proposals, kind: 'addendum' }
       }
