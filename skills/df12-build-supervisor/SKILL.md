@@ -73,7 +73,8 @@ provides the doc skills):
 
    ```bash
    PROJECT=/data/leynos/Projects/odw-lint
-   SIDECAR="${PROJECT}.workshop/df12-build-$(date +%F)"
+   RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+   SIDECAR="${PROJECT}.workshop/df12-build-${RUN_ID}"
    mkdir -p "$SIDECAR"
    ```
 
