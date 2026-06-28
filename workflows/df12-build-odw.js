@@ -45,6 +45,8 @@ const PLAN_MODEL = cfg.planModel || 'gpt-5.5'
 const REVIEW_MODEL = cfg.reviewModel || 'gpt-5.5'
 const SPARK_DELEGATION_GUIDANCE =
   "You are free to delegate to the `wyvern` 5.3 codex spark subagent for bounded read-only tasks on known surfaces as needed. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
+const SCRUTINEER_DELEGATION_GUIDANCE =
+  'Delegate deterministic gate execution and CodeRabbit invocation to the `scrutineer` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run `coderabbit review --agent`. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains.'
 
 function buildAgentOptions(options = {}) {
   return { adapter: BUILD_ADAPTER, model: BUILD_MODEL, ...options }
@@ -543,10 +545,12 @@ function implementPrompt(task, worktree, plan) {
     '',
     SPARK_DELEGATION_GUIDANCE,
     '',
+    SCRUTINEER_DELEGATION_GUIDANCE,
+    '',
     'For EACH execplan work item, in this exact order:',
     '  1. Implement the work item (code + tests + docs) per the plan and AGENTS.md.',
-    '  2. DETERMINISTIC GATE FIRST: run `make all`. If it fails, fix the failures (format, lint, typecheck, tests, audit) and re-run until green. For any markdown you touched, also run `make markdownlint` and `make nixie` and fix failures. Do not proceed to coderabbit until the deterministic gates are green.',
-    '  3. THEN run `coderabbit review --agent` from inside the worktree. Address its actionable feedback (highest severity first). After applying fixes, re-run `make all` to confirm the deterministic gates are still green.',
+    '  2. DETERMINISTIC GATE FIRST: summon `scrutineer` to run `make all`. If it reports failures, fix them yourself (format, lint, typecheck, tests, audit) and summon `scrutineer` again until green. For any markdown you touched, also have `scrutineer` run `make markdownlint` and `make nixie` and fix failures. Do not proceed to coderabbit until the deterministic gates are green.',
+    '  3. THEN summon `scrutineer` to run `coderabbit review --agent` from inside the worktree. Address actionable feedback yourself (highest severity first). After applying fixes, summon `scrutineer` again to re-run `make all` and confirm the deterministic gates are still green.',
     '     - If coderabbit reports a rate limit, READ the quoted wait time from its response (it usually states one, e.g. "waitTime ~16 min" or "retry after N"). Do NOT retry before that window elapses — earlier retries are guaranteed to fail and only burn the turn. Wait the quoted duration plus a small margin (via sleep), then retry ONCE. If no time is quoted, fall back to exponential backoff (30s, 60s, 120s, 240s, 480s, cap ~900s). If the quoted wait would not fit your remaining turn budget, do NOT sit in a doomed wait: the deterministic gates already passed, so record the deferred coderabbit review in the execplan and openIssues for a later run to complete before committing.',
     '  4. Update the execplan IN PLACE with findings, progress (tick the work item), and any decisions or deviations, with rationale.',
     '  5. Commit the work item and the execplan update together as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).',
@@ -565,10 +569,12 @@ function fixPrompt(task, worktree, plan, blocking, round) {
     '',
     SPARK_DELEGATION_GUIDANCE,
     '',
+    SCRUTINEER_DELEGATION_GUIDANCE,
+    '',
     'The dual review returned the following BLOCKING items. Resolve every one:',
     ...blocking.map((b, i) => `  ${i + 1}. ${b}`),
     '',
-    'Same per-change discipline as implementation: deterministic gate (`make all`, plus markdownlint/nixie for markdown) first and green, THEN `coderabbit review --agent` (on a rate limit, wait the quoted wait time before retrying — never retry before that window elapses — and if the quoted wait exceeds your turn, commit and record the deferred review), then an atomic commit, then update the execplan with what changed and why. Do not introduce scope beyond the blocking items.',
+    'Same per-change discipline as implementation: summon `scrutineer` for the deterministic gate (`make all`, plus markdownlint/nixie for markdown) first and green, THEN summon `scrutineer` for `coderabbit review --agent` (on a rate limit, wait the quoted wait time before retrying — never retry before that window elapses — and if the quoted wait exceeds your turn, commit and record the deferred review), then an atomic commit, then update the execplan with what changed and why. Do not introduce scope beyond the blocking items.',
   ].join('\n')
 }
 
@@ -609,12 +615,14 @@ function implementAddendumPrompt(task, worktree) {
     '',
     SPARK_DELEGATION_GUIDANCE,
     '',
+    SCRUTINEER_DELEGATION_GUIDANCE,
+    '',
     `These sub-tasks are recorded as unchecked items under an "## Addenda" section of the parent task's execplan (start at ${parentPlan}; if the leaf differs, find the execplan whose Addenda list contains ${ids}). Read that section for the precise scope and gate of each sub-task.`,
     '',
     'For EACH open sub-task, in id order:',
     '  1. Make ONLY the change the Addenda item describes. Do not expand scope.',
-    '  2. DETERMINISTIC GATE: run `make all`. For any Markdown you touched, also run `make markdownlint` and `make nixie`. Fix until green.',
-    '  3. Run `coderabbit review --agent` from inside the worktree; address actionable feedback (highest severity first); re-run `make all` to confirm green. On a coderabbit rate limit, read the QUOTED wait time from its response and wait at least that long before retrying (do NOT retry before that window elapses — it cannot succeed); if no time is quoted use exponential backoff (30s, 60s, 120s, 240s, 480s, cap ~900s); if the wait exceeds your turn, record the deferred review in openIssues before committing the gated work.',
+    '  2. DETERMINISTIC GATE: summon `scrutineer` to run `make all`. For any Markdown you touched, also have it run `make markdownlint` and `make nixie`. Fix until green.',
+    '  3. Summon `scrutineer` to run `coderabbit review --agent` from inside the worktree; address actionable feedback yourself (highest severity first); summon `scrutineer` again to re-run `make all` and confirm green. On a coderabbit rate limit, read the QUOTED wait time from its response and wait at least that long before retrying (do NOT retry before that window elapses — it cannot succeed); if no time is quoted use exponential backoff (30s, 60s, 120s, 240s, 480s, cap ~900s); if the wait exceeds your turn, record the deferred review in openIssues before committing the gated work.',
     `  4. Tick the sub-task in the Addenda checklist of its execplan (\`- [ ] ${task.id}.<n>\` → \`- [x] …\`).`,
     '  5. Commit the sub-task and Addenda tick together as one atomic commit (en-GB imperative subject).',
     '',
