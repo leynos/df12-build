@@ -606,6 +606,31 @@ function expertReviewPrompt(task, worktree, plan) {
   ].join('\n')
 }
 
+function addendumReviewPrompt(task, worktree, impl) {
+  const ids = (task.subtasks || []).join(', ')
+  const parentPlan = `docs/execplans/roadmap-${task.id.replace(/[^0-9a-zA-Z]+/g, '-')}.md`
+  return [
+    preamble(worktree),
+    `TASK: Review the committed addendum implementation for completed roadmap task ${task.id}, scoped ONLY to sub-task(s): ${ids}.`,
+    '',
+    'CodeRabbit review was deferred or unavailable for this addendum, so you are the high-model fallback reviewer. Use the `code-review` skill. Be strict, but keep the scope surgical: this is not a full design review and not a licence to expand the task.',
+    '',
+    `Compare the branch diff against the Addenda checklist in ${parentPlan}, the relevant design/developer docs, and AGENTS.md. Confirm:`,
+    '- each listed addendum sub-task is actually implemented and ticked in the execplan,',
+    '- the implementation is correct and does not regress existing behaviour,',
+    '- tests or property checks cover the new edge, and repository gates are meaningful evidence,',
+    '- documentation changes are present where AGENTS.md or the addendum requires them.',
+    '',
+    'Implementation summary from the builder:',
+    impl?.summary || '',
+    '',
+    'Builder-reported deferred/open issues:',
+    ...((impl?.openIssues || []).map((issue, index) => `  ${index + 1}. ${issue}`)),
+    '',
+    'Use leta for branch-local code navigation and sem for the committed diff. Return verdict=pass only if you would ship this addendum despite the deferred CodeRabbit review. If not, list precise blocking items. Follow-up ideas go in proposedRoadmapItems only.',
+  ].join('\n')
+}
+
 function implementAddendumPrompt(task, worktree) {
   const ids = (task.subtasks || []).join(', ')
   const parentPlan = `docs/execplans/roadmap-${task.id.replace(/[^0-9a-zA-Z]+/g, '-')}.md`
@@ -628,6 +653,26 @@ function implementAddendumPrompt(task, worktree) {
     '',
     'Use leta for navigation, sem for history, and the language router skill for the languages you touch. Do NOT edit the roadmap — integration ticks the roadmap sub-tasks. When all listed sub-tasks are done, ensure `make all` is green at HEAD. Return using the IMPL schema (execplanPath = the parent execplan): completion counts, commit subjects, gatesGreen, coderabbit run count, and any open issues.',
   ].join('\n')
+}
+
+function isDeferredReviewIssue(issue) {
+  const text = String(issue || '').toLowerCase()
+  return (
+    text.includes('coderabbit') &&
+    (text.includes('rate limit') ||
+      text.includes('retry after') ||
+      text.includes('waittime') ||
+      text.includes('deferred') ||
+      text.includes('authentication') ||
+      text.includes('auth') ||
+      text.includes('browser') ||
+      text.includes('token'))
+  )
+}
+
+function hasOnlyDeferredReviewIssues(openIssues) {
+  const issues = openIssues || []
+  return issues.length > 0 && issues.every(isDeferredReviewIssue)
 }
 
 function integratePrompt(task, worktree) {
@@ -692,8 +737,24 @@ async function runTask(task, mergeLock) {
   if (task.isAddendum) {
     phase('Implement')
     const impl = await agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: 'Implement', label: `addendum:${tag}`, schema: IMPL_SCHEMA }))
-    if (!impl || !impl.ok || !impl.gatesGreen || (impl.openIssues || []).length > 0) {
+    const openIssues = impl?.openIssues || []
+    const onlyDeferredReviewIssues = hasOnlyDeferredReviewIssues(openIssues)
+    if (!impl || !impl.ok || !impl.gatesGreen || (openIssues.length > 0 && !onlyDeferredReviewIssues)) {
       return { id: tag, status: 'failed', stage: 'addendum', detail: impl?.summary || 'addendum did not reach a green state or left open issues', openIssues: impl?.openIssues || [], worktree, proposals: [], kind: 'addendum' }
+    }
+    const proposals = []
+    let addendumReview = null
+    if (onlyDeferredReviewIssues) {
+      phase('Code Review')
+      addendumReview = await agent(addendumReviewPrompt(task, worktree, impl), reviewAgentOptions({ phase: 'Code Review', label: `addendum-review:${tag}`, schema: REVIEW_SCHEMA }))
+      if (addendumReview?.proposedRoadmapItems?.length) {
+        proposals.push(...addendumReview.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
+      }
+      const blocking = (addendumReview && addendumReview.verdict !== 'pass' && addendumReview.blocking) || []
+      if (!addendumReview || addendumReview.verdict !== 'pass' || blocking.length > 0) {
+        return { id: tag, status: 'halted', stage: 'addendum-review', detail: blocking.join('; ') || addendumReview?.summary || 'addendum fallback review did not pass', impl, addendumReview, worktree, proposals, kind: 'addendum' }
+      }
+      log(`[task ${tag}] addendum fallback review passed after deferred CodeRabbit review`)
     }
     let integration = null
     if (AUTO_MERGE) {
@@ -703,12 +764,12 @@ async function runTask(task, mergeLock) {
       }
       integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
       if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
-        return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals: [], kind: 'addendum' }
+        return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, kind: 'addendum' }
       }
     } else {
-      return { id: tag, status: 'manual-merge-ready', impl, integration, worktree, proposals: [], kind: 'addendum' }
+      return { id: tag, status: 'manual-merge-ready', impl, addendumReview, integration, worktree, proposals, kind: 'addendum' }
     }
-    return { id: tag, status: 'done', impl, integration, worktree, proposals: [], kind: 'addendum' }
+    return { id: tag, status: 'done', impl, addendumReview, integration, worktree, proposals, kind: 'addendum' }
   }
 
   // --- Plan <-> Design review (adversarial loop) --------------------------
