@@ -68,24 +68,63 @@ provides the doc skills):
 
 ## Launching a run
 
-1. **Keep the workflow script at a durable path OUTSIDE the repo working tree.**
-   `.claude/` is not `git clean -fdx`-proof — a clean run (by an agent or a
-   make target) will wipe it and can break a live run or a resume. Copy
-   `workflows/df12-build.js` to a stable location (e.g. under the session
-   directory) and launch from there with `Workflow({ scriptPath: "…" })`. If
-   the script is ever lost, recover its source from the run-metadata JSON
-   (`<session>/workflows/wf_<id>.json`, top-level `script` field).
-2. **Launch in the background** and let the harness notify you on completion (a
-   `task-notification`). Do **not** poll it — when harness-tracked work
-   finishes you are re-invoked automatically.
-3. **Config (the `args` object / top-of-file consts):** `base` (default `main`),
+1. **Create a `.workshop` sidecar outside the project Git worktree.** Use a
+   sibling directory named after the project, for example:
+
+   ```bash
+   PROJECT=/data/leynos/Projects/odw-lint
+   SIDECAR="${PROJECT}.workshop/df12-build-$(date +%F)"
+   mkdir -p "$SIDECAR"
+   ```
+
+   The sidecar is the durable operator workspace for the run. It survives root
+   branch switches, `git clean -fdx`, workflow-created worktree cleanup, and
+   accidental cleanup under `.claude/`. Do not place durable scripts, configs,
+   or notes in `.claude/`, `/tmp`, the project source tree, or a
+   workflow-owned `...worktrees/roadmap-*` worktree.
+2. **Put all run-control artefacts in that sidecar.** At minimum keep:
+
+   - `df12-build-odw.js` — a copied workflow script that the live run executes.
+   - `odw.config.json` — adapter, model, workspace, and runtime settings.
+   - `args.json` — project-specific workflow args.
+   - `operator-notes.md` — run id, launch command, patches, validations,
+     status checks, failures, and operator decisions.
+
+   Treat the sidecar as durable run state, not as source of truth for the
+   product repository. `origin/<BASE>` remains the only product source of
+   truth. Patch the sidecar script during a live workshop when needed, validate
+   it there, record the change in `operator-notes.md`, and later promote the
+   proven change back to the `df12-build` repository as an ordinary branch.
+3. **Launch ODW from the sidecar, with the project as `--source`.** Prefer the
+   checked-in ODW/Codex workflow when running Codex agents:
+
+   ```bash
+   cp /path/to/df12-build/workflows/df12-build-odw.js \
+     "$SIDECAR/df12-build-odw.js"
+   odw run "$SIDECAR/df12-build-odw.js" \
+     --source "$PROJECT" \
+     --config "$SIDECAR/odw.config.json" \
+     --args @"$SIDECAR/args.json"
+   ```
+
+   Start the run in the background and supervise it through `odw status`,
+   `odw logs`, `odw result`, and the dashboard. Keep periodic health notes in
+   `operator-notes.md`; the notes should be good enough for another operator
+   to continue after context compaction.
+4. **Config (the `args` object / top-of-file consts):** `base` (default `main`),
    `roadmap` (default `docs/roadmap.md`), `designDocs`, `researchNote` (a
    project-specific external-library research pointer, e.g. a vendored lib's
-   source path), `maxParallel` (pool width — default 2 to keep coderabbit from
+   source path), `grepaiWorkspace`, `grepaiProject` (the canonical main-branch
+   GrepAI project name; set this when agents run from sidecar or worktree
+   paths), `maxParallel` (pool width — default 2 to keep coderabbit from
    saturating), `maxTasks`, `maxDesignRounds` (4), `maxReviewRounds` (3),
-   `taskId` (run exactly one), `dryRun`, `autoMerge`, `documentAudit`.
-   **Caveat:** `args` do not reach `scriptPath` launches — to retune, edit the
-   defaults at the top of the script file itself.
+   `taskId` (run exactly one), `dryRun`, `autoMerge`, `documentAudit`,
+   `buildAdapter`/`buildModel`, `planAdapter`/`planModel`, and
+   `reviewAdapter`/`reviewModel`.
+5. **For legacy Claude `Workflow({ scriptPath: ... })` launches, use the same
+   sidecar rule.** `scriptPath` launches may not receive `args`; if you use
+   that harness, retune by editing the copied sidecar script itself and record
+   the edit in `operator-notes.md`.
 
 ## The supervision cycle
 
@@ -313,10 +352,10 @@ Use the safe equivalents:
 ## At a glance
 
 ```text
-  launch from durable scriptPath
+  launch ODW from .workshop sidecar
         │
         ▼
-  run builds in background  ──▶  task-notification on completion
+  run builds in background  ──▶  status/logs/result/dashboard checks
         │
         ▼
   parse result · hoover worktrees · ff BASE · make all
