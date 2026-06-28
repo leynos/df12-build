@@ -850,8 +850,8 @@ async function runTask(task, mergeLock) {
       if (r?.proposedRoadmapItems?.length) proposals.push(...r.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
     }
     const blocking = [
-      ...((codeReview && codeReview.verdict !== 'pass' && codeReview.blocking) || []),
-      ...((expertReview && expertReview.verdict !== 'pass' && expertReview.blocking) || []),
+      ...(codeReview?.blocking || []),
+      ...(expertReview?.blocking || []),
     ]
     if (blocking.length === 0 && codeReview?.verdict === 'pass' && expertReview?.verdict === 'pass') {
       reviewsPass = true
