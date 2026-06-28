@@ -35,6 +35,7 @@ const AUTO_MERGE = cfg.autoMerge !== false // false => stop after review, leave 
 const DOCUMENT_AUDIT = cfg.documentAudit !== false // false => return audit findings only, write nothing
 const DRY_RUN = cfg.dryRun === true // plan/review/audit only; skip implement, merge, and doc writes
 const BUDGET_RESERVE = 80_000 // stop opening new tasks when remaining budget falls below this
+const SELECTOR_MODEL = cfg.selectorModel || cfg.selectModel || 'gpt-5.3-codex-spark' // cheap deterministic frontier parsing
 
 // ---------------------------------------------------------------------------
 // Shared preamble — prepended to every agent so the standing rules are
@@ -706,7 +707,7 @@ const mergeLock = mutex()
 let selectSeq = 0
 async function doSelect(excludeIds) {
   phase('Select')
-  return await agent(selectPrompt(excludeIds), { phase: 'Select', label: `select#${++selectSeq}`, schema: SELECTION_SCHEMA })
+  return await agent(selectPrompt(excludeIds), { phase: 'Select', label: `select#${++selectSeq}`, model: SELECTOR_MODEL, schema: SELECTION_SCHEMA })
 }
 
 function addPending(step, items) {
