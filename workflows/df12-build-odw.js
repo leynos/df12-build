@@ -508,6 +508,8 @@ async function runTask(task, mergeLock) {
       if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
         return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals: [], kind: 'addendum' }
       }
+    } else {
+      return { id: tag, status: 'manual-merge-ready', impl, integration, worktree, proposals: [], kind: 'addendum' }
     }
     return { id: tag, status: 'done', impl, integration, worktree, proposals: [], kind: 'addendum' }
   }
@@ -614,6 +616,8 @@ async function runTask(task, mergeLock) {
     if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
       return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals }
     }
+  } else {
+    return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals }
   }
 
   return { id: tag, status: 'done', plan, impl, integration, worktree, proposals }
@@ -793,6 +797,10 @@ async function flushSettledSteps() {
     if (!items.length || inflightSteps.has(step)) continue
     const tr = await mergeLock(() => runTriage(step, items))
     triages.push({ step, ...(tr || {}) })
+    if (!tr?.ok || !tr.pushed) {
+      log(`[step ${step}] triage did not land; keeping ${items.length} proposal(s) pending`)
+      continue
+    }
     const lanes = (tr?.decisions || []).reduce((m, d) => ((m[d.lane] = (m[d.lane] || 0) + 1), m), {})
     log(`[step ${step}] triaged ${items.length} proposal(s): ${Object.entries(lanes).map(([k, v]) => `${v} ${k}`).join(', ') || 'none recorded'}`)
     pendingByStep.delete(step)
@@ -868,9 +876,9 @@ while (true) {
   const result = done.result
   results.push(result)
 
-  if (result.status === 'done') {
+  if (result.status === 'done' || result.status === 'manual-merge-ready') {
     markProcessed(done.task)
-    if (result.kind !== 'addendum') {
+    if (result.status === 'done' && result.integration?.pushed && result.kind !== 'addendum') {
       // Addendum passes deliberately generate no audit and no proposals — that
       // is what breaks the remediation-of-remediation recursion.
       addPending(stepOf(done.id), result.proposals)

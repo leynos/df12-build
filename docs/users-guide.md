@@ -99,7 +99,7 @@ Example `args.json`:
 {
   "base": "main",
   "roadmap": "docs/roadmap.md",
-  "designDocs": "docs/architecture.md, docs/adrs/*.md, docs/users-guide.md, docs/developers-guide.md",
+  "designDocs": "docs/architecture.md, docs/adr-001-adopt-odw-sidecar-launches.md, docs/users-guide.md, docs/developers-guide.md",
   "grepaiWorkspace": "Projects",
   "grepaiProject": "example-project",
   "maxParallel": 2,

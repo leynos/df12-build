@@ -95,13 +95,15 @@ This repository has no repo-wide `make` gates yet. Until that changes, run the
 available checks sequentially and capture output with `tee`:
 
 ```bash
+rev="$(git rev-parse --short HEAD)"
+
 git diff --check "$(git merge-base HEAD origin/main)..HEAD" 2>&1 \
-  | tee "/tmp/diff-check-$(get-project)-$(git branch --show).out"
+  | tee "/tmp/diff-check-$(get-project)-${rev}.out"
 
 markdownlint-cli2 docs/users-guide.md docs/developers-guide.md \
   docs/architecture.md docs/adr-001-adopt-odw-sidecar-launches.md \
   skills/df12-build-supervisor/SKILL.md 2>&1 \
-  | tee "/tmp/markdownlint-$(get-project)-$(git branch --show).out"
+  | tee "/tmp/markdownlint-$(get-project)-${rev}.out"
 ```
 
 For changes that touch `workflows/df12-build-odw.js`, also run an ODW wrapper
