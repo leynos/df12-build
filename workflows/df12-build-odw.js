@@ -816,7 +816,15 @@ async function runTask(task, mergeLock) {
   }
 
   if (DRY_RUN) {
-    return { id: tag, status: 'dry-run', stage: 'post-design', plan, worktree, proposals: [] }
+    return {
+      id: tag,
+      status: 'dry-run',
+      stage: 'post-design',
+      detail: 'dry run stopped after planning and design review',
+      plan,
+      worktree,
+      proposals: [],
+    }
   }
 
   // --- Implement ----------------------------------------------------------
@@ -989,6 +997,8 @@ const processedNormal = new Set()
 const processedAddendum = new Set()
 const manualMergeReadyNormal = new Set()
 const manualMergeReadyAddendum = new Set()
+const dryRunNormal = new Set()
+const dryRunAddendum = new Set()
 const results = []
 const audits = []
 const triages = []
@@ -1032,15 +1042,16 @@ async function doSelect(taken) {
 
 function takenSnapshot() {
   return {
-    normal: [...processedNormal, ...manualMergeReadyNormal, ...inflightNormal],
-    addendum: [...processedAddendum, ...manualMergeReadyAddendum, ...inflightAddendum],
+    normal: [...processedNormal, ...manualMergeReadyNormal, ...dryRunNormal, ...inflightNormal],
+    addendum: [...processedAddendum, ...manualMergeReadyAddendum, ...dryRunAddendum, ...inflightAddendum],
   }
 }
 
 function isAlreadyTaken(task) {
   const processedSet = task?.isAddendum ? processedAddendum : processedNormal
   const manualMergeReadySet = task?.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal
-  return processedSet.has(task.id) || manualMergeReadySet.has(task.id) || inflightNormal.has(task.id) || inflightAddendum.has(task.id)
+  const dryRunSet = task?.isAddendum ? dryRunAddendum : dryRunNormal
+  return processedSet.has(task.id) || manualMergeReadySet.has(task.id) || dryRunSet.has(task.id) || inflightNormal.has(task.id) || inflightAddendum.has(task.id)
 }
 
 function markInflight(task) {
@@ -1062,6 +1073,11 @@ function markProcessed(task) {
 function markManualMergeReady(task) {
   const manualMergeReadySet = task?.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal
   manualMergeReadySet.add(task.id)
+}
+
+function markDryRun(task) {
+  const dryRunSet = task?.isAddendum ? dryRunAddendum : dryRunNormal
+  dryRunSet.add(task.id)
 }
 
 function addPending(step, items) {
@@ -1178,6 +1194,8 @@ while (true) {
         addPending(stepOf(done.id), (audit.proposedRoadmapItems || []).map((p) => ({ ...p, source: `audit:${done.id}` })))
       }
     }
+  } else if (result.status === 'dry-run') {
+    markDryRun(done.task)
   } else if (result.status === 'manual-merge-ready') {
     markManualMergeReady(done.task)
   } else if (!halted) {
