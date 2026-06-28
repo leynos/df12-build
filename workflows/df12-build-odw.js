@@ -130,7 +130,7 @@ const WORKTREE_SCHEMA = {
     donkeyInvocation: { type: 'string', description: 'the exact git donkey command used' },
     notes: { type: 'string' },
   },
-  required: ['ok', 'worktreePath', 'branch'],
+  required: ['ok', 'worktreePath', 'branch', 'baseSha', 'donkeyInvocation'],
 }
 
 const PLAN_SCHEMA = {
