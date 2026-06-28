@@ -621,6 +621,8 @@ function addendumReviewPrompt(task, worktree, impl) {
     '- tests or property checks cover the new edge, and repository gates are meaningful evidence,',
     '- documentation changes are present where AGENTS.md or the addendum requires them.',
     '',
+    `Do not treat unchecked entries in ${ROADMAP} as a blocking issue for this review. The implementation agent is forbidden to edit the roadmap; the serialized integration phase ticks the roadmap after this review passes.`,
+    '',
     'Implementation summary from the builder:',
     impl?.summary || '',
     '',
