@@ -495,8 +495,8 @@ async function runTask(task, mergeLock) {
   if (task.isAddendum) {
     phase('Implement')
     const impl = await agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: 'Implement', label: `addendum:${tag}`, schema: IMPL_SCHEMA }))
-    if (!impl || !impl.ok || !impl.gatesGreen) {
-      return { id: tag, status: 'failed', stage: 'addendum', detail: impl?.summary || 'addendum did not reach a green state', openIssues: impl?.openIssues || [], worktree, proposals: [], kind: 'addendum' }
+    if (!impl || !impl.ok || !impl.gatesGreen || (impl.openIssues || []).length > 0) {
+      return { id: tag, status: 'failed', stage: 'addendum', detail: impl?.summary || 'addendum did not reach a green state or left open issues', openIssues: impl?.openIssues || [], worktree, proposals: [], kind: 'addendum' }
     }
     let integration = null
     if (AUTO_MERGE) {
