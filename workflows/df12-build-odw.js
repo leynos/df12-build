@@ -56,9 +56,14 @@ function reviewAgentOptions(options = {}) {
   return { adapter: REVIEW_ADAPTER, model: REVIEW_MODEL, ...options }
 }
 
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`
+}
+
 function grepaiSearchCommand() {
-  const projectArg = GREPAI_PROJECT || '$(get-project)'
-  return `grepai search --workspace ${GREPAI_WORKSPACE} --project ${projectArg} "<English intent query>" --toon --compact`
+  const workspaceArg = shellQuote(GREPAI_WORKSPACE)
+  const projectArg = GREPAI_PROJECT ? shellQuote(GREPAI_PROJECT) : '$(get-project)'
+  return `grepai search --workspace ${workspaceArg} --project ${projectArg} "<English intent query>" --toon --compact`
 }
 
 // ---------------------------------------------------------------------------
