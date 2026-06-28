@@ -35,9 +35,8 @@ const AUTO_MERGE = cfg.autoMerge !== false // false => stop after review, leave 
 const DOCUMENT_AUDIT = cfg.documentAudit !== false // false => return audit findings only, write nothing
 const DRY_RUN = cfg.dryRun === true // plan/review/audit only; skip implement, merge, and doc writes
 const BUDGET_RESERVE = 80_000 // stop opening new tasks when remaining budget falls below this
-const SELECTOR_MODEL = cfg.selectorModel || cfg.selectModel || 'gpt-5.3-codex-spark' // cheap deterministic frontier parsing
-const SPARK_DELEGATION_GUIDANCE =
-  "You are free to delegate to the `wyvern` 5.3 codex spark subagent for bounded read-only tasks on known surfaces as needed. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
+const WYVERN_DELEGATION_GUIDANCE =
+  "You are free to delegate to the `wyvern` subagent for bounded read-only tasks on known surfaces as needed. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
 
 // ---------------------------------------------------------------------------
 // Shared preamble — prepended to every agent so the standing rules are
@@ -288,7 +287,7 @@ function planPrompt(task, worktree, priorVerdict, round) {
     preamble(worktree),
     `TASK: Produce (or revise) a self-contained ExecPlan for roadmap task ${task.id} — "${task.title}".`,
     '',
-    SPARK_DELEGATION_GUIDANCE,
+    WYVERN_DELEGATION_GUIDANCE,
     '',
     'Use the `execplans` skill and follow it exactly. Name the plan docs/execplans/<branch-leaf>.md within the worktree (branch leaf = the part after the last "/").',
     'The plan must:',
@@ -329,7 +328,7 @@ function implementPrompt(task, worktree, plan) {
     preamble(worktree),
     `TASK: Implement roadmap task ${task.id} ("${task.title}") by executing the approved ExecPlan at ${plan.execplanPath}, work item by work item, in order.`,
     '',
-    SPARK_DELEGATION_GUIDANCE,
+    WYVERN_DELEGATION_GUIDANCE,
     '',
     'For EACH execplan work item, in this exact order:',
     '  1. Implement the work item (code + tests + docs) per the plan and AGENTS.md.',
@@ -351,7 +350,7 @@ function fixPrompt(task, worktree, plan, blocking, round) {
     preamble(worktree),
     `TASK: Address blocking review findings for roadmap task ${task.id} (fix round ${round}). Execplan: ${plan.execplanPath}.`,
     '',
-    SPARK_DELEGATION_GUIDANCE,
+    WYVERN_DELEGATION_GUIDANCE,
     '',
     'The dual review returned the following BLOCKING items. Resolve every one:',
     ...blocking.map((b, i) => `  ${i + 1}. ${b}`),
@@ -395,7 +394,7 @@ function implementAddendumPrompt(task, worktree) {
     preamble(worktree),
     `TASK: Lightweight ADDENDUM PASS for completed roadmap task ${task.id}. Implement ONLY its open sub-tasks: ${ids}. This is an addendum, NOT a full task — there is deliberately NO plan, NO design review, and NO dual logisphere review. Keep every change surgical and strictly in-scope; an addendum that grows into a redesign is a defect.`,
     '',
-    SPARK_DELEGATION_GUIDANCE,
+    WYVERN_DELEGATION_GUIDANCE,
     '',
     `These sub-tasks are recorded as unchecked items under an "## Addenda" section of the parent task's execplan (start at ${parentPlan}; if the leaf differs, find the execplan whose Addenda list contains ${ids}). Read that section for the precise scope and gate of each sub-task.`,
     '',
@@ -717,7 +716,7 @@ const mergeLock = mutex()
 let selectSeq = 0
 async function doSelect(excludeIds) {
   phase('Select')
-  return await agent(selectPrompt(excludeIds), { phase: 'Select', label: `select#${++selectSeq}`, model: SELECTOR_MODEL, schema: SELECTION_SCHEMA })
+  return await agent(selectPrompt(excludeIds), { phase: 'Select', label: `select#${++selectSeq}`, schema: SELECTION_SCHEMA })
 }
 
 function addPending(step, items) {
