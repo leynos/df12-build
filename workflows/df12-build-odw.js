@@ -43,6 +43,8 @@ const REVIEW_ADAPTER = cfg.reviewAdapter || 'codex-high'
 const BUILD_MODEL = cfg.buildModel || 'gpt-5.5'
 const PLAN_MODEL = cfg.planModel || 'gpt-5.5'
 const REVIEW_MODEL = cfg.reviewModel || 'gpt-5.5'
+const SPARK_DELEGATION_GUIDANCE =
+  "You are free to delegate to the `wyvern` 5.3 codex spark subagent for bounded read-only tasks on known surfaces as needed. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
 
 function buildAgentOptions(options = {}) {
   return { adapter: BUILD_ADAPTER, model: BUILD_MODEL, ...options }
@@ -497,6 +499,8 @@ function planPrompt(task, worktree, priorVerdict, round) {
     preamble(worktree),
     `TASK: Produce (or revise) a self-contained ExecPlan for roadmap task ${task.id} — "${task.title}".`,
     '',
+    SPARK_DELEGATION_GUIDANCE,
+    '',
     'Use the `execplans` skill and follow it exactly. Name the plan docs/execplans/<branch-leaf>.md within the worktree (branch leaf = the part after the last "/").',
     'The plan must:',
     '- Decompose the task into ordered, atomic work items, each independently committable and gate-passable.',
@@ -537,6 +541,8 @@ function implementPrompt(task, worktree, plan) {
     preamble(worktree),
     `TASK: Implement roadmap task ${task.id} ("${task.title}") by executing the approved ExecPlan at ${plan.execplanPath}, work item by work item, in order.`,
     '',
+    SPARK_DELEGATION_GUIDANCE,
+    '',
     'For EACH execplan work item, in this exact order:',
     '  1. Implement the work item (code + tests + docs) per the plan and AGENTS.md.',
     '  2. DETERMINISTIC GATE FIRST: run `make all`. If it fails, fix the failures (format, lint, typecheck, tests, audit) and re-run until green. For any markdown you touched, also run `make markdownlint` and `make nixie` and fix failures. Do not proceed to coderabbit until the deterministic gates are green.',
@@ -556,6 +562,8 @@ function fixPrompt(task, worktree, plan, blocking, round) {
   return [
     preamble(worktree),
     `TASK: Address blocking review findings for roadmap task ${task.id} (fix round ${round}). Execplan: ${plan.execplanPath}.`,
+    '',
+    SPARK_DELEGATION_GUIDANCE,
     '',
     'The dual review returned the following BLOCKING items. Resolve every one:',
     ...blocking.map((b, i) => `  ${i + 1}. ${b}`),
@@ -598,6 +606,8 @@ function implementAddendumPrompt(task, worktree) {
   return [
     preamble(worktree),
     `TASK: Lightweight ADDENDUM PASS for completed roadmap task ${task.id}. Implement ONLY its open sub-tasks: ${ids}. This is an addendum, NOT a full task — there is deliberately NO plan, NO design review, and NO dual logisphere review. Keep every change surgical and strictly in-scope; an addendum that grows into a redesign is a defect.`,
+    '',
+    SPARK_DELEGATION_GUIDANCE,
     '',
     `These sub-tasks are recorded as unchecked items under an "## Addenda" section of the parent task's execplan (start at ${parentPlan}; if the leaf differs, find the execplan whose Addenda list contains ${ids}). Read that section for the precise scope and gate of each sub-task.`,
     '',
