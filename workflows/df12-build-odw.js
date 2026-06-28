@@ -95,30 +95,6 @@ function preamble(worktree) {
 // ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
-const SELECTION_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    hasTask: { type: 'boolean' },
-    task: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        id: { type: 'string', description: 'roadmap id, e.g. "1.2.1"' },
-        title: { type: 'string' },
-        requires: { type: 'array', items: { type: 'string' } },
-        rationale: { type: 'string', description: 'why this task is unblocked (every Requires is [x] and it is [ ]); for an addendum pass, why the parent has open sub-tasks' },
-        isAddendum: { type: 'boolean', description: 'true when this is a lightweight ADDENDUM PASS: a completed [x] task that now carries open [ ] sub-tasks to clear' },
-        subtasks: { type: 'array', items: { type: 'string' }, description: 'for an addendum pass, the open sub-task ids to implement, e.g. ["1.2.8.1","1.2.8.3"]' },
-      },
-      required: ['id', 'title', 'requires', 'rationale'],
-    },
-    remainingUnblocked: { type: 'array', items: { type: 'string' }, description: 'other ids currently unblocked' },
-    blockedSummary: { type: 'string', description: 'short note on what is still blocked and by what' },
-  },
-  required: ['hasTask'],
-}
-
 const WORKTREE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -260,31 +236,234 @@ const AUDIT_SCHEMA = {
 }
 
 // ---------------------------------------------------------------------------
-// Prompt builders
+// Deterministic roadmap selection
 // ---------------------------------------------------------------------------
-function selectPrompt(taken) {
-  const normalTaken = taken?.normal || []
-  const addendumTaken = taken?.addendum || []
-  return [
-    preamble(null),
-    `TASK: Identify the next roadmap task that is ready to start.`,
-    '',
-    `Read the roadmap. Prefer the canonical copy on the integration branch: \`git show origin/${BASE}:${ROADMAP}\` (fall back to the working-tree ${ROADMAP} if origin/${BASE} is unreachable, and say so).`,
-    '',
-    'Roadmap conventions:',
-    '- A task is a line like `- [ ] 1.2.1. <title>` (incomplete) or `- [x] ...` (complete).',
-    '- A task may declare dependencies in a child bullet such as `- Requires 1.1.2 and 1.2.1.` (zero or more ids).',
-    '- A task is UNBLOCKED when it is `[ ]` AND every id it Requires is `[x]`. A task with no Requires line is unblocked once incomplete.',
-    '- ADDENDUM PASSES: a COMPLETED task (`- [x] <id>.`) may carry nested `- [ ] <id>.<n>.` sub-tasks — lightweight addenda folded back onto it (e.g. `- [ ] 1.2.8.3.` under `- [x] 1.2.8.`). A parent with one or more OPEN sub-tasks is itself ready to work as a single ADDENDUM PASS, regardless of the parent being [x]. Represent it with the PARENT id as `id`, `isAddendum=true`, and every open sub-task id listed in `subtasks`. Its own dependencies are already satisfied (the parent is done), so an addendum pass is always unblocked.',
-    '',
-    ONLY_TASK
-      ? `Restrict your answer to task id "${ONLY_TASK}": return it only if it is genuinely unblocked (or is a completed parent with open sub-tasks), otherwise hasTask=false with blockedSummary explaining what blocks it.`
-      : `Consider BOTH (a) unblocked incomplete tasks and (b) completed tasks that have open sub-tasks (addendum passes). Choose the one with the lowest id in document order. For an addendum pass set isAddendum=true and fill \`subtasks\`; for a normal task leave isAddendum false/omitted. Normal tasks already taken this run (merged, or being built in parallel): [${normalTaken.join(', ') || 'none'}]. Addendum passes already taken this run (merged, or being built in parallel): [${addendumTaken.join(', ') || 'none'}]. Do NOT re-pick the same kind of work. CRITICAL: a task id listed under normal tasks does NOT block an ADDENDUM PASS for the same id — a just-merged [x] task that has since gained open [ ] sub-tasks is a valid addendum pass and SHOULD be selected now (fix-debt-first). Only skip an addendum pass whose own addendum pass was already taken this run.`,
-    '',
-    'If no task qualifies, return hasTask=false. Do not modify any file.',
-  ].join('\n')
+const TASK_LINE_RE = /^(\s*)-\s+\[([ xX])\]\s+(\d+(?:\.\d+)+)\.\s*(.*)$/
+const REQUIRES_LINE_RE = /^\s*-\s+Requires\s+(.+?)\.?\s*$/
+const STEP_RANGE_RE = /\bsteps?\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)\b/gi
+const ROADMAP_ID_RE = /\b\d+(?:\.\d+)+\b/g
+
+async function execFileText(command, commandArgs) {
+  const { execFile } = process.getBuiltinModule('node:child_process')
+  return await new Promise((resolve, reject) => {
+    execFile(command, commandArgs, { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout
+        error.stderr = stderr
+        reject(error)
+        return
+      }
+      resolve(stdout)
+    })
+  })
 }
 
+async function readFileText(path) {
+  const { readFile } = process.getBuiltinModule('node:fs/promises')
+  return await readFile(path, 'utf8')
+}
+
+async function readRoadmapForSelection() {
+  const canonicalRef = `origin/${BASE}:${ROADMAP}`
+  try {
+    return {
+      text: await execFileText('git', ['show', canonicalRef]),
+      source: canonicalRef,
+      fallbackReason: '',
+    }
+  } catch (error) {
+    return {
+      text: await readFileText(ROADMAP),
+      source: ROADMAP,
+      fallbackReason: (error && error.message) || String(error),
+    }
+  }
+}
+
+function parentIdOf(id) {
+  const parts = id.split('.')
+  return parts.length > 1 ? parts.slice(0, -1).join('.') : ''
+}
+
+function isComplete(task) {
+  return task?.checked?.toLowerCase() === 'x'
+}
+
+function extractRoadmapIds(text) {
+  const ids = new Set([...text.matchAll(ROADMAP_ID_RE)].map((match) => match[0]))
+  for (const match of text.matchAll(STEP_RANGE_RE)) {
+    const expanded = expandStepRange(match[1], match[2])
+    if (expanded.length) {
+      ids.delete(match[1])
+      ids.delete(match[2])
+      for (const id of expanded) ids.add(id)
+    }
+  }
+  return [...ids]
+}
+
+function expandStepRange(start, end) {
+  const startParts = start.split('.').map(Number)
+  const endParts = end.split('.').map(Number)
+  if (startParts.length !== 2 || endParts.length !== 2 || startParts[0] !== endParts[0]) return []
+  const [phaseId, firstStep] = startParts
+  const lastStep = endParts[1]
+  if (!Number.isInteger(phaseId) || !Number.isInteger(firstStep) || !Number.isInteger(lastStep) || firstStep > lastStep) return []
+  return Array.from({ length: lastStep - firstStep + 1 }, (_, index) => `${phaseId}.${firstStep + index}`)
+}
+
+function parseRoadmap(text) {
+  const tasks = []
+  const byId = new Map()
+  let currentTask = null
+
+  for (const [index, line] of text.split(/\r?\n/).entries()) {
+    const taskMatch = line.match(TASK_LINE_RE)
+    if (taskMatch) {
+      const [, indent, checked, id, rawTitle] = taskMatch
+      const task = {
+        id,
+        checked,
+        title: rawTitle.trim(),
+        requires: [],
+        line: index + 1,
+        indent: indent.length,
+        subtasks: [],
+      }
+      const parent = byId.get(parentIdOf(id))
+      if (parent && isComplete(parent) && task.indent > parent.indent) {
+        task.parentId = parent.id
+        task.isAddendumSubtask = true
+        parent.subtasks.push(task)
+      } else {
+        tasks.push(task)
+      }
+      byId.set(id, task)
+      currentTask = task
+      continue
+    }
+
+    const requiresMatch = line.match(REQUIRES_LINE_RE)
+    if (requiresMatch && currentTask) {
+      currentTask.requires.push(...extractRoadmapIds(requiresMatch[1]))
+    }
+  }
+
+  for (const task of byId.values()) {
+    task.requires = [...new Set(task.requires)]
+  }
+
+  return {
+    tasks,
+    completed: completedIds(tasks),
+  }
+}
+
+function completedIds(tasks) {
+  const completed = new Set()
+  const prefixes = new Map()
+
+  for (const task of tasks) {
+    if (isTaskFullyComplete(task)) completed.add(task.id)
+    const parts = task.id.split('.')
+    for (let length = 1; length < parts.length; length += 1) {
+      const prefix = parts.slice(0, length).join('.')
+      if (!prefixes.has(prefix)) prefixes.set(prefix, [])
+      prefixes.get(prefix).push(task)
+    }
+  }
+
+  for (const [prefix, groupedTasks] of prefixes.entries()) {
+    if (groupedTasks.length && groupedTasks.every(isTaskFullyComplete)) completed.add(prefix)
+  }
+
+  return completed
+}
+
+function isTaskFullyComplete(task) {
+  return isComplete(task) && task.subtasks.every(isComplete)
+}
+
+function taskMatchesOnlyTask(candidate) {
+  if (!ONLY_TASK) return true
+  if (candidate.task.id === ONLY_TASK) return true
+  return Boolean(candidate.task.subtasks?.includes(ONLY_TASK))
+}
+
+function blockedSummary(blocked) {
+  if (!blocked.length) return ''
+  const sample = blocked.slice(0, 5).join('; ')
+  const suffix = blocked.length > 5 ? `; ${blocked.length - 5} more` : ''
+  return `${blocked.length} blocked task(s): ${sample}${suffix}`
+}
+
+function selectRoadmapTask(roadmapText, taken) {
+  const { tasks, completed } = parseRoadmap(roadmapText)
+  const normalTaken = new Set(taken?.normal || [])
+  const addendumTaken = new Set(taken?.addendum || [])
+  const candidates = []
+  const blocked = []
+
+  for (const task of tasks) {
+    const openSubtasks = task.subtasks.filter((subtask) => !isComplete(subtask))
+    if (isComplete(task) && openSubtasks.length && !addendumTaken.has(task.id)) {
+      candidates.push({
+        order: task.line,
+        kind: 'addendum',
+        task: {
+          id: task.id,
+          title: task.title,
+          requires: [],
+          rationale: `Completed parent ${task.id} has open addendum sub-task(s): ${openSubtasks.map((subtask) => subtask.id).join(', ')}.`,
+          isAddendum: true,
+          subtasks: openSubtasks.map((subtask) => subtask.id),
+        },
+      })
+    }
+
+    if (!isComplete(task) && !normalTaken.has(task.id)) {
+      const missing = task.requires.filter((id) => !completed.has(id))
+      if (missing.length) {
+        blocked.push(`${task.id} requires ${missing.join(', ')}`)
+      } else {
+        candidates.push({
+          order: task.line,
+          kind: 'normal',
+          task: {
+            id: task.id,
+            title: task.title,
+            requires: task.requires,
+            rationale: task.requires.length
+              ? `Every declared dependency is complete: ${task.requires.join(', ')}.`
+              : 'The task has no declared dependencies.',
+            isAddendum: false,
+            subtasks: [],
+          },
+        })
+      }
+    }
+  }
+
+  const matchingCandidates = candidates.filter(taskMatchesOnlyTask).sort((left, right) => left.order - right.order)
+  const selected = matchingCandidates[0]
+  if (!selected) {
+    const reason = ONLY_TASK
+      ? `Task ${ONLY_TASK} is not currently unblocked as a normal task or addendum pass. ${blockedSummary(blocked)}`
+      : blockedSummary(blocked)
+    return { hasTask: false, remainingUnblocked: [], blockedSummary: reason.trim() }
+  }
+
+  return {
+    hasTask: true,
+    task: selected.task,
+    remainingUnblocked: matchingCandidates.slice(1).map((candidate) => (candidate.kind === 'addendum' ? `${candidate.task.id} (addendum)` : candidate.task.id)),
+    blockedSummary: blockedSummary(blocked),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Prompt builders
+// ---------------------------------------------------------------------------
 function worktreePrompt(task) {
   const slug = `roadmap-${task.id.replace(/[^0-9a-zA-Z]+/g, '-')}${task.isAddendum ? '-addendum' : ''}`
   return [
@@ -750,7 +929,18 @@ const mergeLock = mutex()
 let selectSeq = 0
 async function doSelect(taken) {
   phase('Select')
-  return await agent(selectPrompt(taken), buildAgentOptions({ phase: 'Select', label: `select#${++selectSeq}`, schema: SELECTION_SCHEMA }))
+  const label = `select#${++selectSeq}`
+  const roadmap = await readRoadmapForSelection()
+  if (roadmap.fallbackReason) {
+    log(`[${label}] using working-tree ${ROADMAP}; origin/${BASE} read failed: ${roadmap.fallbackReason}`)
+  }
+  const selection = selectRoadmapTask(roadmap.text, taken)
+  if (selection?.hasTask && selection.task) {
+    log(`[${label}] selected ${selection.task.isAddendum ? 'addendum pass' : 'normal task'} ${selection.task.id} from ${roadmap.source}`)
+  } else {
+    log(`[${label}] no unblocked roadmap task found from ${roadmap.source}`)
+  }
+  return selection
 }
 
 function takenSnapshot() {
