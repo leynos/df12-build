@@ -6,6 +6,7 @@ export const meta = {
     'When you want to autonomously advance docs/roadmap.md across MULTIPLE independent unblocked tasks at once, each fully planned, reviewed, implemented, gated, merged, and audited. Opt-in only (heavy, many agents in parallel, performs commits/merges). Recovery model is fresh-restart against git state, not cache-resume.',
   phases: [
     { title: 'Select' },
+    { title: 'Auth Preflight' },
     { title: 'Worktree' },
     { title: 'Plan' },
     { title: 'Design Review' },
@@ -34,6 +35,8 @@ const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review
 const AUTO_MERGE = cfg.autoMerge !== false // false => stop after review, leave branch for manual merge
 const DOCUMENT_AUDIT = cfg.documentAudit !== false // false => return audit findings only, write nothing
 const DRY_RUN = cfg.dryRun === true // plan/review/audit only; skip implement, merge, and doc writes
+const AUTH_PREFLIGHT = cfg.authPreflight !== false // false => skip local CLI auth checks before spawning agents
+const REQUIRE_CODERABBIT_AUTH = cfg.requireCoderabbitAuth !== false && !DRY_RUN // CodeRabbit is required once implementation/review can run
 const BUDGET_RESERVE = 80_000 // stop opening new tasks when remaining budget falls below this
 const GREPAI_WORKSPACE = cfg.grepaiWorkspace || 'Projects'
 const GREPAI_PROJECT = cfg.grepaiProject || cfg.project || null // canonical main-branch GrepAI project; set this when source is a worktree
@@ -252,6 +255,70 @@ async function execFileText(command, commandArgs) {
       resolve(stdout)
     })
   })
+}
+
+async function execFileStatus(command, commandArgs) {
+  try {
+    return { ok: true, stdout: await execFileText(command, commandArgs), stderr: '' }
+  } catch (error) {
+    return {
+      ok: false,
+      stdout: error?.stdout || '',
+      stderr: error?.stderr || '',
+      message: (error && error.message) || String(error),
+    }
+  }
+}
+
+function authFailureDetail(value) {
+  const text = String(value || '')
+  const patterns = [
+    /401 Unauthorized/i,
+    /Missing bearer or basic authentication/i,
+    /no Codex credentials/i,
+    /\bNot logged in\b/i,
+    /\bsigned out\b/i,
+    /no token is available/i,
+    /Run `?coderabbit auth login`?/i,
+    /Run codex login/i,
+  ]
+  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
+}
+
+async function runAuthPreflight() {
+  if (!AUTH_PREFLIGHT) return []
+  phase('Auth Preflight')
+  const failures = []
+
+  const codex = await execFileStatus('codex', ['login', 'status'])
+  const codexOutput = [codex.stdout, codex.stderr, codex.message].filter(Boolean).join('\n')
+  if (!codex.ok || authFailureDetail(codexOutput)) {
+    failures.push({
+      tool: 'codex',
+      command: 'codex login status',
+      detail: authFailureDetail(codexOutput) || codexOutput.trim() || 'Codex auth status check failed',
+    })
+  }
+
+  if (REQUIRE_CODERABBIT_AUTH) {
+    const coderabbit = await execFileStatus('coderabbit', ['auth', 'status'])
+    const coderabbitOutput = [coderabbit.stdout, coderabbit.stderr, coderabbit.message].filter(Boolean).join('\n')
+    if (!coderabbit.ok || authFailureDetail(coderabbitOutput)) {
+      failures.push({
+        tool: 'coderabbit',
+        command: 'coderabbit auth status',
+        detail: authFailureDetail(coderabbitOutput) || coderabbitOutput.trim() || 'CodeRabbit auth status check failed',
+      })
+    }
+  }
+
+  if (failures.length) {
+    log(`[auth] fatal preflight failure: ${failures.map((failure) => `${failure.tool}: ${failure.detail.split(/\r?\n/)[0]}`).join('; ')}`)
+  } else {
+    log(`[auth] preflight passed${REQUIRE_CODERABBIT_AUTH ? ' for Codex and CodeRabbit' : ' for Codex'}`)
+  }
+
+  return failures
 }
 
 function slugForTask(task) {
@@ -1186,11 +1253,21 @@ async function fillPool() {
       // whole run — convert it to a failed result the control loop drains.
       runTask(task, mergeLock).then(
         (result) => ({ id: task.id, task, result }),
-        (err) => ({
-          id: task.id,
-          task,
-          result: { id: task.id, status: 'failed', stage: 'error', detail: `unhandled agent error: ${(err && err.message) || String(err)}`, proposals: [] },
-        }),
+        (err) => {
+          const detail = `unhandled agent error: ${(err && err.message) || String(err)}`
+          const authDetail = authFailureDetail(detail)
+          return {
+            id: task.id,
+            task,
+            result: {
+              id: task.id,
+              status: authDetail ? 'fatal-auth' : 'failed',
+              stage: authDetail ? 'auth' : 'error',
+              detail,
+              proposals: [],
+            },
+          }
+        },
       ),
     )
   }
@@ -1202,7 +1279,11 @@ async function fillPool() {
 // failed task stops new work but lets in-flight siblings drain. Audits and
 // remediation triage run here in the control loop (serialized), so their
 // worktrees and BASE writes never collide with each other.
-let stop = false
+const authPreflight = await runAuthPreflight()
+if (authPreflight.length) {
+  halted = `fatal auth preflight failed: ${authPreflight.map((failure) => `${failure.tool} (${failure.command})`).join(', ')}`
+}
+let stop = Boolean(halted)
 while (true) {
   if (!stop && !halted) {
     try {
@@ -1241,6 +1322,9 @@ while (true) {
     markDryRun(done.task)
   } else if (result.status === 'manual-merge-ready') {
     markManualMergeReady(done.task)
+  } else if (result.status === 'fatal-auth') {
+    halted = `task ${done.id} fatal auth failure at ${result.stage}: ${result.detail}`
+    stop = true
   } else if (!halted) {
     // Record the failure, stop opening new work, and let in-flight siblings
     // finish rather than abandoning their (possibly mergeable) branches.
@@ -1275,6 +1359,7 @@ return {
   processed,
   results,
   audits,
+  authPreflight,
   // Remediation GIST-triaged into addendum / step-task / reroute lanes when each
   // step quiesced (see remediationTriage). Anything in pendingProposals was left
   // unwritten because the run halted — triage it manually.
