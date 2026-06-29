@@ -472,7 +472,14 @@ function selectRoadmapTask(roadmapText, taken) {
 function worktreePrompt(task) {
   const slug = `roadmap-${task.id.replace(/[^0-9a-zA-Z]+/g, '-')}${task.isAddendum ? '-addendum' : ''}`
   return [
-    preamble(null),
+    'You are the setup agent for one df12-build roadmap task. Your final message IS your return value — return one JSON object and no chat.',
+    '',
+    'This setup step is intentionally narrow:',
+    '- Do not inspect code, load skills, run tests, edit tracked files, or implement task work.',
+    '- You may run the git commands required below to create and verify the task worktree.',
+    '- Do not switch, edit, reset, or otherwise mutate the root/control worktree checkout.',
+    '- Mutating refs and the new git-donkey worktree for this task is allowed.',
+    '',
     `TASK: Create an isolated worktree + branch for roadmap task ${task.id} ("${task.title}") using \`git donkey\`, rooted on the CURRENT tip of origin/${BASE}. Do NOT do any task work here.`,
     '',
     `Syntax: \`git donkey <branch-name> [parent-ref]\`. It creates the branch + worktree and PRINTS the worktree path in its output — capture that path from stdout.`,
