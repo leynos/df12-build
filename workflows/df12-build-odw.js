@@ -40,12 +40,10 @@ const GREPAI_PROJECT = cfg.grepaiProject || cfg.project || null // canonical mai
 const BUILD_ADAPTER = cfg.buildAdapter || 'codex-medium'
 const PLAN_ADAPTER = cfg.planAdapter || 'codex-xhigh'
 const REVIEW_ADAPTER = cfg.reviewAdapter || 'codex-high'
-const WORKTREE_ADAPTER = cfg.worktreeAdapter || PLAN_ADAPTER
 const TRIAGE_ADAPTER = cfg.triageAdapter || PLAN_ADAPTER
 const BUILD_MODEL = cfg.buildModel || 'gpt-5.5'
 const PLAN_MODEL = cfg.planModel || 'gpt-5.5'
 const REVIEW_MODEL = cfg.reviewModel || 'gpt-5.5'
-const WORKTREE_MODEL = cfg.worktreeModel || PLAN_MODEL
 const TRIAGE_MODEL = cfg.triageModel || PLAN_MODEL
 const SPARK_DELEGATION_GUIDANCE =
   "You are free to delegate to the `wyvern` 5.3 codex spark subagent for bounded read-only tasks on known surfaces as needed. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
@@ -54,10 +52,6 @@ const SCRUTINEER_DELEGATION_GUIDANCE =
 
 function buildAgentOptions(options = {}) {
   return { adapter: BUILD_ADAPTER, model: BUILD_MODEL, ...options }
-}
-
-function worktreeAgentOptions(options = {}) {
-  return { adapter: WORKTREE_ADAPTER, model: WORKTREE_MODEL, ...options }
 }
 
 function planAgentOptions(options = {}) {
@@ -111,20 +105,6 @@ function preamble(worktree) {
 // ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
-const WORKTREE_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    ok: { type: 'boolean' },
-    worktreePath: { type: 'string' },
-    branch: { type: 'string' },
-    baseSha: { type: 'string' },
-    donkeyInvocation: { type: 'string', description: 'the exact git donkey command used' },
-    notes: { type: 'string' },
-  },
-  required: ['ok', 'worktreePath', 'branch', 'baseSha', 'donkeyInvocation'],
-}
-
 const PLAN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -272,6 +252,64 @@ async function execFileText(command, commandArgs) {
       resolve(stdout)
     })
   })
+}
+
+function slugForTask(task) {
+  return `roadmap-${task.id.replace(/[^0-9a-zA-Z]+/g, '-')}${task.isAddendum ? '-addendum' : ''}`
+}
+
+function worktreeParentPath() {
+  const path = process.getBuiltinModule('node:path')
+  const cwd = process.cwd()
+  return path.join(path.dirname(cwd), `${path.basename(cwd)}.worktrees`)
+}
+
+async function createWorktree(task) {
+  const fs = process.getBuiltinModule('node:fs/promises')
+  const path = process.getBuiltinModule('node:path')
+  const branch = slugForTask(task)
+  const worktreePath = path.join(worktreeParentPath(), branch)
+  const setupCommand = `git worktree add -b ${branch} ${worktreePath} origin/${BASE}`
+
+  try {
+    await execFileText('git', ['fetch', 'origin', BASE])
+    const baseSha = (await execFileText('git', ['rev-parse', `origin/${BASE}`])).trim()
+    await fs.mkdir(path.dirname(worktreePath), { recursive: true })
+    await execFileText('git', ['worktree', 'add', '-b', branch, worktreePath, `origin/${BASE}`])
+    const worktreeSha = (await execFileText('git', ['-C', worktreePath, 'rev-parse', 'HEAD'])).trim()
+    if (worktreeSha !== baseSha) {
+      return {
+        ok: false,
+        worktreePath,
+        branch,
+        baseSha,
+        donkeyInvocation: setupCommand,
+        notes: `worktree HEAD ${worktreeSha} did not match origin/${BASE} ${baseSha}`,
+      }
+    }
+    return {
+      ok: true,
+      worktreePath,
+      branch,
+      baseSha,
+      donkeyInvocation: setupCommand,
+      notes: 'created deterministically by the ODW control loop; no setup agent required',
+    }
+  } catch (error) {
+    const details = [
+      (error && error.message) || String(error),
+      error?.stderr ? `stderr: ${error.stderr.trim()}` : '',
+      error?.stdout ? `stdout: ${error.stdout.trim()}` : '',
+    ].filter(Boolean).join('; ')
+    return {
+      ok: false,
+      worktreePath,
+      branch,
+      baseSha: '',
+      donkeyInvocation: setupCommand,
+      notes: details,
+    }
+  }
 }
 
 async function readFileText(path) {
@@ -481,34 +519,6 @@ function selectRoadmapTask(roadmapText, taken) {
 // ---------------------------------------------------------------------------
 // Prompt builders
 // ---------------------------------------------------------------------------
-function worktreePrompt(task) {
-  const slug = `roadmap-${task.id.replace(/[^0-9a-zA-Z]+/g, '-')}${task.isAddendum ? '-addendum' : ''}`
-  return [
-    'You are the setup agent for one df12-build roadmap task. Your final message IS your return value — return one JSON object and no chat.',
-    '',
-    'This setup step is intentionally narrow:',
-    '- Do not inspect code, load skills, run tests, edit tracked files, or implement task work.',
-    '- You may run the git commands required below to create and verify the task worktree.',
-    '- Do not switch, edit, reset, or otherwise mutate the root/control worktree checkout.',
-    '- Mutating refs and the new git-donkey worktree for this task is allowed.',
-    '',
-    `TASK: Create an isolated worktree + branch for roadmap task ${task.id} ("${task.title}") using \`git donkey\`, rooted on the CURRENT tip of origin/${BASE}. Do NOT do any task work here.`,
-    '',
-    `Syntax: \`git donkey <branch-name> [parent-ref]\`. It creates the branch + worktree and PRINTS the worktree path in its output — capture that path from stdout.`,
-    '',
-    `Procedure — this MUST end with the branch at the current origin/${BASE} tip, even when the control worktree's local ${BASE} is stale (it usually is after a remediation flush pushes origin/${BASE} without advancing local ${BASE}):`,
-    `  1. \`git fetch origin ${BASE}\` to retrieve the current origin/${BASE} tip.`,
-    `  2. Create the worktree with \`git donkey ${slug}\` and NO parent ref. With no second argument git donkey pulls local ${BASE} forward to origin/${BASE} and roots the new branch there — the behaviour we want. Do NOT pass \`origin/${BASE}\` (git donkey misparses a remote-qualified ref as a bare branch name and fails looking for \`origin/origin/${BASE}\`), and avoid passing a bare \`${BASE}\` parent (that pins to the local ref, which may be stale, and is a known git donkey bug).`,
-    `  3. SAFETY NET for non-interactive runs: git donkey advances ${BASE} via an interactive pull-rebase prompt that defaults to "no" when stdin is non-interactive, so it may still root on a stale commit. If \`git -C <worktree> rev-parse HEAD\` does not already equal \`git rev-parse origin/${BASE}\`, re-root from INSIDE the new worktree (the branch has no work yet, so this loses nothing): \`cd <worktree>\` then \`git reset --hard origin/${BASE}\`. This mutates ONLY the new worktree — never the root/control worktree.`,
-    `  4. VERIFY the base: \`git -C <worktree> rev-parse HEAD\` MUST equal \`git rev-parse origin/${BASE}\`. If they differ, set ok=false and explain.`,
-    '',
-    'Requirements:',
-    `- The new worktree branch MUST sit at the current origin/${BASE} tip (verified in step 4); return that sha as baseSha.`,
-    '- Return the absolute worktree path, the branch name, the verified base sha, and the exact commands you ran (in donkeyInvocation).',
-    `- Stay within the worktree: never edit or advance any ref in the root/control worktree. If you cannot produce a correctly-based worktree without doing so, set ok=false and explain in notes.`,
-  ].join('\n')
-}
-
 function planPrompt(task, worktree, priorVerdict, round) {
   const revision =
     round === 1
@@ -750,7 +760,7 @@ async function runTask(task, mergeLock) {
 
   // --- Worktree -----------------------------------------------------------
   phase('Worktree')
-  const wt = await agent(worktreePrompt(task), worktreeAgentOptions({ phase: 'Worktree', label: `worktree:${tag}`, schema: WORKTREE_SCHEMA }))
+  const wt = await createWorktree(task)
   if (!wt || !wt.ok || !wt.worktreePath) {
     return { id: tag, status: 'failed', stage: 'worktree', detail: wt?.notes || 'worktree creation failed', proposals: [] }
   }
@@ -1255,7 +1265,7 @@ const pendingProposals = [...pendingByStep.values()].flat()
 return {
   base: BASE,
   modelRouting: {
-    worktree: { adapter: WORKTREE_ADAPTER, model: WORKTREE_MODEL },
+    worktree: { mode: 'deterministic-git-worktree' },
     build: { adapter: BUILD_ADAPTER, model: BUILD_MODEL },
     plan: { adapter: PLAN_ADAPTER, model: PLAN_MODEL },
     review: { adapter: REVIEW_ADAPTER, model: REVIEW_MODEL },
