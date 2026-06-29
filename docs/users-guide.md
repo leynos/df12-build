@@ -215,3 +215,8 @@ re-selects unblocked roadmap work from the current roadmap state.
 Use the `df12-build-supervisor` skill for the detailed operator playbook:
 failure-mode diagnosis, orphan worktree cleanup, remediation triage, stash
 hygiene, and deciding when a roadmap frontier is actually dry.
+
+Read `docs/security-and-permissions.md` before granting a workshop write,
+network, or GitHub access. It names the permissions and external services a run
+can use, and explains why roadmap, design, audit, and review text must be
+treated as prompt-injection input rather than trusted control logic.

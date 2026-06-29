@@ -162,8 +162,190 @@ Every time a run completes you do the same loop:
      unblocked work) or stop (see "Knowing when to stop").
    - **Halted:** diagnose with the failure-mode playbook, apply the fix to the
      roadmap (or environment), then relaunch.
-5. **Relaunch** from the durable script path. The run re-selects from the
+5. **Run mandatory roadmap maintenance before editing the roadmap.** If the run
+   produced `remediationTriage`, `pendingProposals`, audit findings, addenda, or
+   any roadmap restructure work, load `roadmap-grooming` together with
+   `roadmap-doc` before changing `docs/roadmap.md`. This is a supervisor
+   requirement, not an optional clean-up pass.
+6. **Relaunch** from the durable script path. The run re-selects from the
    current `origin/BASE` roadmap — no resume needed.
+
+## Worked operator examples
+
+These are examples of the shapes you should recognize after context compaction.
+They are not templates for fabricating evidence; copy the live run facts.
+
+### Result JSON
+
+```json
+{
+  "base": "main",
+  "processed": ["2.1.1", "2.1.2"],
+  "results": [
+    {
+      "id": "2.1.1",
+      "status": "done",
+      "stage": "integrate",
+      "detail": "squash merged and pushed"
+    },
+    {
+      "id": "2.1.2",
+      "status": "halted",
+      "stage": "review",
+      "detail": "reviewers not satisfied within cap"
+    }
+  ],
+  "audits": [
+    {
+      "afterTask": "2.1.1",
+      "proposedRoadmapItems": [
+        {
+          "title": "Cover empty-input recovery",
+          "severity": "high"
+        }
+      ]
+    }
+  ],
+  "remediationTriage": [
+    {
+      "step": "2.1",
+      "ok": true,
+      "pushed": true,
+      "decisions": [
+        {
+          "lane": "addendum",
+          "target": "2.1.1"
+        }
+      ]
+    }
+  ],
+  "pendingProposals": [],
+  "halted": "task 2.1.2 halted at review: reviewers not satisfied within cap"
+}
+```
+
+Operator reading: `2.1.1` landed and may have generated an addendum. `2.1.2`
+did not land. Hoover worktrees, fast-forward `BASE`, run `make all`, inspect the
+review blockers for `2.1.2`, and load `roadmap-grooming` before editing any
+remediation back into the roadmap.
+
+### Operator notes
+
+```markdown
+# df12-build run 20260629T101500Z-4242
+
+- Project: `/data/leynos/Projects/example`
+- Sidecar: `/data/leynos/Projects/example.workshop/df12-build-20260629T101500Z-4242`
+- Base: `main`
+- Args: `maxParallel=2`, `maxTasks=4`, `autoMerge=true`
+- Launch: `odw run "$SIDECAR/df12-build-odw.js" --source "$PROJECT" ...`
+- 10:22: `2.1.1` integrated; audit proposed one high-severity addendum.
+- 10:41: `2.1.2` halted at review; branch left unmerged.
+- Decision: hoover, gate `origin/main`, repair `2.1.2` task wording, relaunch.
+```
+
+Good notes record enough state for another operator to continue: paths, args,
+run id, status checks, failures, decisions, and validations.
+
+### Halted design-review repair
+
+Failure:
+
+```text
+task 3.2.4 halted at design-review:
+design review unsatisfied after 4 rounds: removal is not complete by
+construction; plan does not enumerate all consumers before deleting the adapter
+```
+
+Repair in `docs/roadmap.md`:
+
+```markdown
+- [ ] 3.2.4. Remove the legacy adapter after proving every consumer has moved.
+  - Requires 3.2.1 and 3.2.3.
+  - Enumerate every import and runtime lookup of the legacy adapter, re-point
+    each consumer, delete the adapter, and gate the deletion with a grep that
+    proves no stale import remains.
+  - Success: the adapter file is gone, no stale reference remains, and `make
+    all` passes.
+```
+
+The repair changes the task so the next planner starts from the blocking design
+requirement. Do not relax the reviewer. Fix the task.
+
+### Review halt
+
+Failure:
+
+```text
+task 4.1.2 halted at review:
+reviewers not satisfied within cap; branch left unmerged for the root agent
+```
+
+Operator action:
+
+1. Inspect the task branch and the returned `codeReview` / `expertReview`
+   blockers.
+2. If the branch is sound but incomplete, finish the fix in a separate
+   worktree, run `make all`, run the relevant markdown gates, and merge through
+   the same protected integration path.
+3. If the blockers reveal broader scope, do not hand-wave it into the branch.
+   Fold the finding back into the roadmap after loading `roadmap-grooming` and
+   relaunch.
+
+### Triage batch
+
+Input proposals:
+
+```json
+[
+  {
+    "title": "Cover empty-input parser recovery",
+    "severity": "high",
+    "source": "audit:2.1.1"
+  },
+  {
+    "title": "Rename local helper for style consistency",
+    "severity": "low",
+    "source": "review:2.1.2"
+  },
+  {
+    "title": "Move retry policy docs beside the operator guide",
+    "severity": "medium",
+    "source": "audit:2.1.1"
+  }
+]
+```
+
+Expected operator reading:
+
+- The high-severity recovery gap can become an addendum under the completed
+  task if it is small.
+- The low-severity rename is likely dropped unless it serves an existing step
+  hypothesis.
+- The documentation move belongs under the step whose hypothesis covers
+  operator recovery, not necessarily under the step that happened to produce
+  the audit.
+
+### Audit-inflation grooming pass
+
+Symptom:
+
+```text
+5.7. Single-home retry labels
+5.8. Single-home retry parsing
+5.9. Harden retry labels
+5.10. Harden retry parsing
+5.11. Single-home retry docs
+```
+
+Operator action:
+
+1. Stop adding one new step per audit finding.
+2. Load `roadmap-grooming` and `roadmap-doc`.
+3. Group the findings by the real seam, for example one retry-policy
+   consolidation step followed by one hardening task that depends on it.
+4. Preserve dotted dependencies and validate every `Requires` reference before
+   merging the restructure.
 
 ## Failure-mode playbook
 

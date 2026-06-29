@@ -54,6 +54,31 @@ The workflow must keep merge and remediation writes serialized. Parallelism is
 allowed for independent task work, but operations that advance `origin/<base>`
 must pass through the merge queue.
 
+## Enforcement boundary
+
+`df12-build` mixes host-enforced workflow logic with prompt-enforced agent
+contracts. Treat that distinction as a security and reliability boundary. A
+JavaScript branch, schema check, merge lock, or returned status is enforced by
+the workflow host. A sentence inside an agent prompt is an instruction to an
+autonomous CLI process, and only becomes reliable when the adapter sandbox,
+GitHub permissions, and operator gates make violating it impossible or visible.
+
+| Boundary | Host-enforced | Prompt-enforced | Runtime support that matters |
+| - | - | - | - |
+| Task selection | Reads `origin/<base>:<roadmap>`, parses checked tasks, `Requires`, addenda, dry-run/manual-merge suppression, and in-flight ids. | Agents are told to work only on the selected task. | Canonical remote refs must be readable; local working-tree roadmap edits are not selection input. |
+| Dry run | `DRY_RUN` returns terminal `dry-run` statuses before implementation, integration, audit writes, or remediation flushes. | Agents still see dry-run wording in prompts that remain reachable, such as planning and review. | Do not grant write-heavy permissions when running exploratory dry runs unless they are needed for worktree creation. |
+| Worktree base | The worktree response schema requires `baseSha` and `donkeyInvocation`, and failed setup halts the task. | The worktree agent is instructed to reset and verify against the current `origin/<base>`. | Git credentials and remote freshness are required; the schema proves evidence was returned, not that the shell obeyed absent permissions. |
+| Implementation scope | The control loop only advances statuses that satisfy schema and status checks. | Build agents are told to follow the ExecPlan, use skills, keep scope narrow, update the execplan, run gates, and commit atomically. | Sandbox file scope, Git permissions, `make all`, `scrutineer`, and review gates are the real containment for bad edits. |
+| Tests and deterministic gates | The workflow consumes `impl.gatesGreen` and review verdicts before integration. | Implementers and fix agents are told to summon `scrutineer` for `make all`, markdown gates, and CodeRabbit. | The adapter must allow command execution, and `scrutineer` must run in the task worktree with the same repository state the commit uses. |
+| Code review | Review schemas require verdict and blocker fields; blocker arrays are checked regardless of verdict. | Code-review, expert-review, fallback review, and CodeRabbit instructions define what reviewers should inspect. | Model quality, CodeRabbit availability, and explicit fallback criteria determine whether the review is useful. |
+| Integration | A JavaScript merge lock serializes integration, and success requires `ok`, `pushed`, `squashMerged`, and roadmap evidence. | The integration agent is told to rebase, gate, squash, push, and avoid the root worktree. | GitHub branch permissions, non-fast-forward push handling, and sandbox write access to the task worktree are decisive. |
+| Audit and triage | Audits run only after pushed integrations; triage only deletes pending proposals when `ok` and `pushed` land. | Audit and triage prompts classify debt into addendum, step-task, reroute, editorial, or dropped lanes. | `documentAudit=false` and `autoMerge=false` change write behaviour; roadmap edits still need operator review. |
+| Fresh restart | Returned `processed`, `results`, `halted`, `audits`, `remediationTriage`, and `pendingProposals` describe the run outcome. | Operator notes and prompts describe how to recover. | `origin/<base>`, durable sidecar files, and clean worktree hoovering are the only recovery source of truth. |
+
+Any change that moves a contract from host enforcement into prompt text weakens
+the system. Document that deliberately, add the missing runtime permission or
+gate, or keep the contract in JavaScript.
+
 ## Configuration contract
 
 Runtime configuration comes from the ODW `args` object. The checked-in workflow
@@ -79,6 +104,8 @@ agents to verify branch-local facts directly inside their worktree.
 The sidecar contract is documented at three levels:
 
 - `docs/users-guide.md` explains how to launch and supervise a run.
+- `docs/security-and-permissions.md` explains the required permissions,
+  external services, prompt-injection surface, and sandbox profiles.
 - `docs/developers-guide.md` explains how contributors change the workflow and
   keep documentation synchronized.
 - `docs/adr-001-adopt-odw-sidecar-launches.md` records the architectural

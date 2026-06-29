@@ -11,6 +11,8 @@ Read these before changing launch or workflow behaviour:
 
 - `docs/architecture.md` for the repository, target-project, and sidecar state
   boundaries.
+- `docs/security-and-permissions.md` for runtime permissions, external service
+  access, prompt-injection risk, and sandbox recommendations.
 - `docs/adr-001-adopt-odw-sidecar-launches.md` for the accepted sidecar launch
   decision.
 - `docs/users-guide.md` for the public launch flow and configuration surface.
@@ -31,6 +33,7 @@ Relevant paths:
 - `workflows/df12-build.js`: baseline workflow.
 - `skills/df12-build-supervisor/SKILL.md`: operator skill.
 - `docs/users-guide.md`: user-facing launch guide.
+- `docs/security-and-permissions.md`: runtime permissions and sandbox guide.
 - `docs/developers-guide.md`: contributor-facing maintenance guide.
 - `docs/architecture.md`: design-level sidecar and workflow contract.
 - `docs/adr-001-adopt-odw-sidecar-launches.md`: accepted launch decision.
@@ -80,7 +83,9 @@ Keep documentation layers aligned:
 - User guide: what an operator runs and which files they maintain.
 - Developer guide: how contributors change the workflow and docs safely.
 - Architecture: state boundaries, workflow structure, configuration contract,
-  and verification contract.
+  enforcement boundary, configuration contract, and verification contract.
+- Security guide: file, Git, network, and GitHub permissions; external
+  services; prompt-injection surface; and sandbox profiles.
 - ADRs: accepted decisions and alternatives for durable architectural choices.
 - Supervisor skill: detailed runbook procedures, failure diagnosis, and
   cleanup guidance.
@@ -103,7 +108,8 @@ git diff --check "$(git merge-base HEAD origin/main)..HEAD" 2>&1 \
   | tee "/tmp/diff-check-${project_slug}-${rev}.out"
 
 markdownlint-cli2 AGENTS.md docs/users-guide.md docs/developers-guide.md \
-  docs/architecture.md docs/adr-001-adopt-odw-sidecar-launches.md \
+  docs/security-and-permissions.md docs/architecture.md \
+  docs/adr-001-adopt-odw-sidecar-launches.md \
   skills/df12-build-supervisor/SKILL.md 2>&1 \
   | tee "/tmp/markdownlint-${project_slug}-${rev}.out"
 ```
