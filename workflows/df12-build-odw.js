@@ -839,6 +839,18 @@ async function runTask(task, mergeLock) {
   // merge. No audit afterwards (the control loop skips it), which is what stops
   // remediation from spawning more remediation.
   if (task.isAddendum) {
+    if (DRY_RUN) {
+      return {
+        id: tag,
+        status: 'dry-run',
+        stage: 'addendum',
+        detail: 'dry run stopped before addendum implementation',
+        worktree,
+        proposals: [],
+        kind: 'addendum',
+      }
+    }
+
     phase('Implement')
     const impl = await agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: 'Implement', label: `addendum:${tag}`, schema: IMPL_SCHEMA }))
     const openIssues = impl?.openIssues || []
