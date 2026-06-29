@@ -40,9 +40,13 @@ const GREPAI_PROJECT = cfg.grepaiProject || cfg.project || null // canonical mai
 const BUILD_ADAPTER = cfg.buildAdapter || 'codex-medium'
 const PLAN_ADAPTER = cfg.planAdapter || 'codex-xhigh'
 const REVIEW_ADAPTER = cfg.reviewAdapter || 'codex-high'
+const WORKTREE_ADAPTER = cfg.worktreeAdapter || PLAN_ADAPTER
+const TRIAGE_ADAPTER = cfg.triageAdapter || PLAN_ADAPTER
 const BUILD_MODEL = cfg.buildModel || 'gpt-5.5'
 const PLAN_MODEL = cfg.planModel || 'gpt-5.5'
 const REVIEW_MODEL = cfg.reviewModel || 'gpt-5.5'
+const WORKTREE_MODEL = cfg.worktreeModel || PLAN_MODEL
+const TRIAGE_MODEL = cfg.triageModel || PLAN_MODEL
 const SPARK_DELEGATION_GUIDANCE =
   "You are free to delegate to the `wyvern` 5.3 codex spark subagent for bounded read-only tasks on known surfaces as needed. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
 const SCRUTINEER_DELEGATION_GUIDANCE =
@@ -52,12 +56,20 @@ function buildAgentOptions(options = {}) {
   return { adapter: BUILD_ADAPTER, model: BUILD_MODEL, ...options }
 }
 
+function worktreeAgentOptions(options = {}) {
+  return { adapter: WORKTREE_ADAPTER, model: WORKTREE_MODEL, ...options }
+}
+
 function planAgentOptions(options = {}) {
   return { adapter: PLAN_ADAPTER, model: PLAN_MODEL, ...options }
 }
 
 function reviewAgentOptions(options = {}) {
   return { adapter: REVIEW_ADAPTER, model: REVIEW_MODEL, ...options }
+}
+
+function triageAgentOptions(options = {}) {
+  return { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL, ...options }
 }
 
 function shellQuote(value) {
@@ -738,7 +750,7 @@ async function runTask(task, mergeLock) {
 
   // --- Worktree -----------------------------------------------------------
   phase('Worktree')
-  const wt = await agent(worktreePrompt(task), buildAgentOptions({ phase: 'Worktree', label: `worktree:${tag}`, schema: WORKTREE_SCHEMA }))
+  const wt = await agent(worktreePrompt(task), worktreeAgentOptions({ phase: 'Worktree', label: `worktree:${tag}`, schema: WORKTREE_SCHEMA }))
   if (!wt || !wt.ok || !wt.worktreePath) {
     return { id: tag, status: 'failed', stage: 'worktree', detail: wt?.notes || 'worktree creation failed', proposals: [] }
   }
@@ -1004,7 +1016,7 @@ function triagePrompt(stepPrefix, proposals) {
 
 async function runTriage(stepPrefix, proposals) {
   phase('Remediation')
-  return await agent(triagePrompt(stepPrefix, proposals), buildAgentOptions({ phase: 'Remediation', label: `triage:${stepPrefix}`, schema: TRIAGE_SCHEMA }))
+  return await agent(triagePrompt(stepPrefix, proposals), triageAgentOptions({ phase: 'Remediation', label: `triage:${stepPrefix}`, schema: TRIAGE_SCHEMA }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1243,9 +1255,11 @@ const pendingProposals = [...pendingByStep.values()].flat()
 return {
   base: BASE,
   modelRouting: {
+    worktree: { adapter: WORKTREE_ADAPTER, model: WORKTREE_MODEL },
     build: { adapter: BUILD_ADAPTER, model: BUILD_MODEL },
     plan: { adapter: PLAN_ADAPTER, model: PLAN_MODEL },
     review: { adapter: REVIEW_ADAPTER, model: REVIEW_MODEL },
+    triage: { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL },
   },
   maxParallel: MAX_PARALLEL,
   processed,
