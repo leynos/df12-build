@@ -59,6 +59,98 @@ Start normal workshop runs in the background. Supervise them with `odw status`,
 `odw logs`, `odw result`, and the ODW dashboard. Keep `operator-notes.md` current
 enough that another operator can continue after context compaction.
 
+## Roadmap format
+
+`df12-build` expects the target roadmap to follow the df12-house GIST shape:
+Goals -> Ideas -> Steps -> Tasks. New projects should use this as the baseline
+format before launching a workshop. Older project roadmaps may need grooming
+first, because the ODW workflow now uses a deterministic selector rather than a
+model-based selector.
+
+The roadmap path defaults to `docs/roadmap.md`. Selection reads the canonical
+roadmap from `origin/<base>:<roadmap>`, not from a worker branch or a local
+working-tree edit. Keep the integration branch current before launching or
+relaunching a run.
+
+At minimum, a runnable roadmap task must be a Markdown checkbox line with a
+dotted numeric id:
+
+```markdown
+- [ ] 1.2.3. Add parser diagnostics.
+  - Success: Parser failures include a stable diagnostic code and source span.
+```
+
+The selector recognises checked and unchecked task lines in this form:
+
+```markdown
+- [ ] 1.2.3. Task title.
+- [x] 1.2.4. Completed task title.
+```
+
+Use dependency lines directly under the task body when a task must wait for
+other roadmap ids:
+
+```markdown
+- [ ] 1.2.5. Wire diagnostics into the CLI.
+  - Requires 1.2.3 and 1.2.4.
+  - Success: CLI output includes parser diagnostic codes in error reports.
+```
+
+Step ranges are also accepted in `Requires` lines:
+
+```markdown
+- [ ] 1.6.1. Stabilize the integration surface.
+  - Requires steps 1.2 - 1.5.
+  - Success: The integration API is documented and covered by tests.
+```
+
+The deterministic selector treats a task as unblocked when all of these are
+true:
+
+- The task checkbox is unchecked.
+- Every id named by its `Requires` lines is complete.
+- The task has not already been processed, left manual-merge-ready, marked as a
+  dry run, or spawned in the current workflow run.
+
+A task is complete when its own checkbox is checked and every nested addendum
+subtask below it is also checked. The selector also treats a prefix id as
+complete when every task under that prefix is complete. For example, if every
+task under `1.2.*` is complete, then `1.2` can satisfy a later `Requires 1.2`
+dependency.
+
+Completed tasks may carry nested unchecked addendum subtasks. These are used for
+small follow-up corrections that do not need a full plan and review cycle:
+
+```markdown
+- [x] 1.2.8. Implement the parser state machine.
+  - Success: The parser accepts valid fixtures and rejects invalid fixtures.
+  - [ ] 1.2.8.1. Addendum (from review:high). Cover empty-input recovery.
+    Lightweight addendum pass.
+```
+
+When an addendum subtask is open under a completed parent, the workflow selects
+an addendum pass for the parent task and scopes the implementation to the open
+nested ids.
+
+Selection is deliberately simple and reproducible:
+
+- Build all normal and addendum candidates from the canonical roadmap.
+- Exclude blocked or already-taken work.
+- Apply `taskId` if one was supplied.
+- Sort remaining candidates by roadmap line number.
+- Select the first candidate.
+
+The workflow parses only the mechanical parts needed for scheduling: checkbox
+lines, dotted ids, `Requires` lines, step ranges, and nested addendum subtasks.
+The broader GIST discipline is still required for useful planning and triage:
+each phase should carry an `Idea:`, each step should state the hypothesis it
+answers, and each task should include a clear `Success:` criterion.
+
+Treat this section as the baseline contract for future roadmap tooling. A
+roadmap editor or linter should preserve these parseable forms, verify that
+`Requires` references resolve, and flag malformed ids or dependency lines before
+a long-running workshop starts.
+
 ## Workflow arguments
 
 Set project-specific behaviour in `args.json`. The workflow also has matching
