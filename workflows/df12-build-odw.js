@@ -857,9 +857,23 @@ async function runTask(task, mergeLock) {
     for (const r of [codeReview, expertReview]) {
       if (r?.proposedRoadmapItems?.length) proposals.push(...r.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
     }
+    if (!codeReview || !expertReview) {
+      const missing = [
+        !codeReview ? 'code review' : null,
+        !expertReview ? 'expert review' : null,
+      ].filter(Boolean).join(' and ')
+      return {
+        id: tag,
+        status: 'failed',
+        stage: 'review',
+        detail: `dual review failed to return a structured verdict from ${missing}; branch left unmerged for the root agent`,
+        worktree,
+        proposals,
+      }
+    }
     const blocking = [
-      ...(codeReview?.blocking || []),
-      ...(expertReview?.blocking || []),
+      ...(codeReview.blocking || []),
+      ...(expertReview.blocking || []),
     ]
     if (blocking.length === 0 && codeReview?.verdict === 'pass' && expertReview?.verdict === 'pass') {
       reviewsPass = true
