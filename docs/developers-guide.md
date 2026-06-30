@@ -25,9 +25,9 @@ Read these before changing launch or workflow behaviour:
 
 ## Repository shape
 
-The repository currently contains workflow scripts, skill documentation, and
-docs. It does not contain a project roadmap, ExecPlan, package manifest, or
-`Makefile`.
+The repository currently contains workflow scripts, skill documentation, docs,
+and a small validation `Makefile`. It does not contain a project roadmap,
+ExecPlan, or package manifest.
 
 Relevant paths:
 
@@ -42,8 +42,8 @@ Relevant paths:
 - `docs/adr-002-assess-partial-task-branches.md`: proposed recovery assessment
   decision.
 
-If a future branch adds `docs/roadmap.md` or `docs/execplans/`, update the
-matching task or ExecPlan whenever the branch lands planned work.
+If a future branch adds `docs/roadmap.md` or new `docs/execplans/` entries,
+update the matching task or ExecPlan whenever the branch lands planned work.
 
 ## ODW workflow contract
 
@@ -100,38 +100,18 @@ appear in documentation.
 
 ## Validation
 
-This repository has no repo-wide `make` gates yet. Until that changes, run the
-available checks sequentially and capture output with `tee`:
+Run the repo-wide validation targets before committing workflow or
+documentation changes:
 
 ```bash
-rev="$(git rev-parse --short HEAD)"
-project="$(get-project)"
-project_slug="$(printf '%s' "$project" | tr -c '[:alnum:]._-' '-')"
-
-git diff --check "$(git merge-base HEAD origin/main)..HEAD" 2>&1 \
-  | tee "/tmp/diff-check-${project_slug}-${rev}.out"
-
-markdownlint-cli2 AGENTS.md docs/users-guide.md docs/developers-guide.md \
-  docs/security-and-permissions.md docs/architecture.md \
-  docs/adr-001-adopt-odw-sidecar-launches.md \
-  docs/adr-002-assess-partial-task-branches.md \
-  skills/df12-build-supervisor/SKILL.md 2>&1 \
-  | tee "/tmp/markdownlint-${project_slug}-${rev}.out"
+make all
 ```
 
-For changes that touch `workflows/df12-build-odw.js`, also run an ODW wrapper
-parse check. This validates host-authored workflow syntax without spawning
-agents:
+The `typecheck` target runs an ODW-style wrapper parse check for both workflow
+files. This validates host-authored workflow syntax without spawning agents:
 
 ```bash
-node - <<'NODE'
-const fs = require('fs');
-const path = 'workflows/df12-build-odw.js';
-let source = fs.readFileSync(path, 'utf8');
-source = source.replace(/^export const meta\s*=/, 'const meta =');
-new Function(`return (async function __odw_wrapped__() {\n${source}\n})`);
-console.log(`${path}: ODW-wrapped JavaScript parses`);
-NODE
+make typecheck
 ```
 
 Do not use a live `odw run` as a routine gate. Run it only when the task

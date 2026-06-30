@@ -119,12 +119,13 @@ agent-routing defaults must update all affected layers in the same branch.
 
 ## Verification contract
 
-This repository has no `Makefile` or package manifest. Until a broader gate
-stack exists, workflow and documentation changes must at least pass:
+This repository has a small `Makefile` for local and hook-driven validation.
+Workflow and documentation changes must at least pass:
 
-- `git diff --check $(git merge-base HEAD origin/main)..HEAD`
-- `markdownlint-cli2 <changed markdown files>`
-- An ODW wrapper parse check for `workflows/df12-build-odw.js`
+- `make check-fmt`
+- `make markdownlint`
+- `make nixie`
+- `make typecheck`
 
 Do not start a live `odw run` as a routine documentation gate. A live run can
 spawn agents and mutate target-project state, so it is reserved for explicit
