@@ -164,10 +164,19 @@ Common arguments:
 - `designDocs`: design document and ADR locations cited in planner prompts.
 - `researchNote`: optional external-library research pointer, such as a vendored
   source path.
+- `projectRoot`: target-project checkout to `chdir` into before the workflow
+  creates worktrees. Use this when launching a copied workflow from a sidecar.
+- `searchBackend`: canonical code-search backend for prompt guidance. Supported
+  values are `grepai` and `memtrace`. Defaults to `grepai`, or to `memtrace`
+  when `memtraceRepoId` is set.
 - `grepaiWorkspace`: GrepAI workspace name. Defaults to `Projects`.
 - `grepaiProject`: canonical main-branch GrepAI project name. Set this when the
   ODW source path or worker worktree path would make `$(get-project)` resolve to
   the wrong project.
+- `memtraceRepoId`: canonical Memtrace repository id. Set this, or set
+  `searchBackend` to `memtrace`, when GrepAI is unavailable on the host.
+- `coderabbitReviewCommand`: CodeRabbit command used in implementation prompts.
+  Defaults to `timeout 300s coderabbit review --agent`.
 - `maxParallel`: worker pool width. Defaults to `2` unless `taskId` is set.
 - `maxTasks`: maximum roadmap tasks for one run.
 - `maxDesignRounds`: planning and design-review exchange cap. Defaults to `4`.
@@ -195,7 +204,9 @@ Example `args.json`:
 {
   "base": "main",
   "roadmap": "docs/roadmap.md",
+  "projectRoot": "/home/example/Projects/example-project",
   "designDocs": "docs/architecture.md, docs/adr-001-adopt-odw-sidecar-launches.md, docs/users-guide.md, docs/developers-guide.md",
+  "searchBackend": "grepai",
   "grepaiWorkspace": "Projects",
   "grepaiProject": "example-project",
   "maxParallel": 2,

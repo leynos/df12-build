@@ -21,6 +21,10 @@ File access:
   validation logs.
 - Read and write access to the target project checkout and its sibling
   `...worktrees/roadmap-*` worktrees.
+- Adapter sandbox write scope for task agents must include the assigned
+  `roadmap-*` worktree. A sandbox rooted only at the target project's control
+  checkout is not enough when the workflow creates sibling worktrees; planning
+  can report an ExecPlan path while the file cannot be written.
 - Read and write access to the target project's normal build caches and package
   caches. Do not point build outputs at `/tmp`; use the project's normal cache
   policy.
@@ -46,7 +50,9 @@ Network access:
 - Access to GitHub or the configured Git remote.
 - Access to the selected ODW adapter providers, such as Codex, Claude, Gemini,
   Qwen, or Kimi, depending on `odw.config.json`.
-- Access to GrepAI when `grepaiWorkspace` and `grepaiProject` are used.
+- Access to the configured code-search backend: GrepAI when
+  `searchBackend=grepai`, or the Memtrace MCP server when
+  `searchBackend=memtrace`.
 - Access to CodeRabbit for `coderabbit review --agent`.
 - Access to package registries needed by the target project's gates.
 - Access to Firecrawl or official documentation sources only when a plan or
@@ -132,6 +138,8 @@ Manual-merge profile:
 
 - Allow target-project worktree writes, task branch commits, build caches, and
   package-manager caches.
+- Ensure the adapter's writable root is the active task worktree, or explicitly
+  includes the sibling `...worktrees/roadmap-*` directory.
 - Deny pushes to the integration branch.
 - Use `autoMerge=false`.
 - Use this when agents may implement but a human must inspect branches before
@@ -141,6 +149,9 @@ Trusted workshop profile:
 
 - Allow sidecar writes, sibling worktree writes, normal build caches, package
   registries, GitHub, selected model providers, GrepAI, and CodeRabbit.
+- Verify early that a planner can write `docs/execplans/<branch-leaf>.md` in
+  the assigned task worktree; a missing ExecPlan after planning is a sandbox or
+  workflow launch fault, not a roadmap design decision.
 - Allow pushing task, audit, triage, and integration branches.
 - Keep branch protection and required repository gates enabled where possible.
 - Use only for repositories and credentials where autonomous branch, commit,

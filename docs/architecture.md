@@ -55,6 +55,15 @@ The workflow must keep merge and remediation writes serialized. Parallelism is
 allowed for independent task work, but operations that advance `origin/<base>`
 must pass through the merge queue.
 
+Task agents must execute with a writable filesystem root that includes their
+assigned task worktree. Prompt text that says "cd into the worktree" is not
+sufficient when the adapter sandbox was launched with a different writable
+root. The workflow must either launch each task agent from the assigned
+worktree or grant the adapter an explicit writable scope covering the sibling
+`...worktrees/roadmap-*` directory. Otherwise planners can return
+`execplanPath` values that reviewers cannot read from disk, and the design loop
+burns rounds on a workflow-environment fault rather than a task defect.
+
 ## Enforcement boundary
 
 `df12-build` mixes host-enforced workflow logic with prompt-enforced agent
@@ -69,6 +78,7 @@ GitHub permissions, and operator gates make violating it impossible or visible.
 | Task selection | Reads `origin/<base>:<roadmap>`, parses checked tasks, `Requires`, addenda, dry-run/manual-merge suppression, and in-flight ids. | Agents are told to work only on the selected task. | Canonical remote refs must be readable; local working-tree roadmap edits are not selection input. |
 | Dry run | `DRY_RUN` returns terminal `dry-run` statuses before implementation, integration, audit writes, or remediation flushes. | Agents still see dry-run wording in prompts that remain reachable, such as planning and review. | Do not grant write-heavy permissions when running exploratory dry runs unless they are needed for worktree creation. |
 | Worktree base | The worktree response schema requires `baseSha` and `donkeyInvocation`, and failed setup halts the task. | The worktree agent is instructed to reset and verify against the current `origin/<base>`. | Git credentials and remote freshness are required; the schema proves evidence was returned, not that the shell obeyed absent permissions. |
+| Task-agent writable root | Every task-phase `agent()` call must run with write access to the assigned task worktree before its output can be trusted as a durable side effect. | Agents are told to `cd` into the worktree and write ExecPlans, code, gate logs, commits, and integration state there. | Adapter sandbox scope is decisive. If the sandbox root is the control checkout while task worktrees are siblings, writes to `...worktrees/roadmap-*` can fail even when prompts and `workdir` values look correct. |
 | Implementation scope | The control loop only advances statuses that satisfy schema and status checks. | Build agents are told to follow the ExecPlan, use skills, keep scope narrow, update the execplan, run gates, and commit atomically. | Sandbox file scope, Git permissions, `make all`, `scrutineer`, and review gates are the real containment for bad edits. |
 | Tests and deterministic gates | The workflow consumes `impl.gatesGreen` and review verdicts before integration. | Implementers and fix agents are told to summon `scrutineer` for `make all`, markdown gates, and CodeRabbit. | The adapter must allow command execution, and `scrutineer` must run in the task worktree with the same repository state the commit uses. |
 | Code review | Review schemas require verdict and blocker fields; blocker arrays are checked regardless of verdict. | Code-review, expert-review, fallback review, and CodeRabbit instructions define what reviewers should inspect. | Model quality, CodeRabbit availability, and explicit fallback criteria determine whether the review is useful. |
@@ -90,7 +100,8 @@ retune a live launch.
 The key argument groups are:
 
 - Target-project pointers: `base`, `roadmap`, `designDocs`, and `researchNote`.
-- Search routing: `grepaiWorkspace`, `grepaiProject`, and the `project` alias.
+- Search routing: `searchBackend`, `grepaiWorkspace`, `grepaiProject`,
+  `memtraceRepoId`, and the `project` alias.
 - Run bounds: `taskId`, `maxTasks`, `maxParallel`, `maxDesignRounds`,
   `maxReviewRounds`, `dryRun`, `autoMerge`, `documentAudit`, and
   `assessPartialBranches`.
@@ -99,10 +110,13 @@ The key argument groups are:
 - Assessment routing: `assessmentAdapter`/`assessmentModel`, defaulting to the
   review adapter and model.
 
-`grepaiProject` is part of the architecture because sidecar and worktree launch
-paths can make `$(get-project)` resolve to the wrong name. The workflow builds a
-canonical GrepAI command from the configured workspace and project, then tells
-agents to verify branch-local facts directly inside their worktree.
+`searchBackend` selects the canonical code-search guidance passed to task
+agents. It defaults to `grepai`, or to `memtrace` when `memtraceRepoId` is set.
+`grepaiProject` and `memtraceRepoId` are part of the architecture because
+sidecar and worktree launch paths can make automatic project discovery resolve
+to the wrong name. The workflow builds canonical GrepAI or Memtrace guidance
+from those configured values, then tells agents to verify branch-local facts
+directly inside their worktree.
 
 ## Documentation contract
 

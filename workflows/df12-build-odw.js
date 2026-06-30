@@ -24,6 +24,14 @@ export const meta = {
 // Configuration (all overridable through the ODW `args` object).
 // ---------------------------------------------------------------------------
 const cfg = args || {}
+const PROJECT_ROOT = cfg.projectRoot || process.cwd()
+if (PROJECT_ROOT !== process.cwd()) {
+  const fs = process.getBuiltinModule('node:fs')
+  if (!fs.statSync(PROJECT_ROOT).isDirectory()) {
+    throw new Error(`Configured projectRoot is not a directory: ${PROJECT_ROOT}`)
+  }
+  process.chdir(PROJECT_ROOT)
+}
 const BASE = cfg.base || 'main' // integration branch: rebase + squash-merge target, roadmap source of truth
 const ROADMAP = cfg.roadmap || 'docs/roadmap.md'
 const DESIGN_DOCS = cfg.designDocs || 'the design document(s) and the ADRs (docs/adr-*.md) under docs/' // project design sources cited in prompts
@@ -40,8 +48,10 @@ const AUTH_PREFLIGHT = cfg.authPreflight !== false // false => skip local CLI au
 const REQUIRE_CODERABBIT_AUTH = cfg.requireCoderabbitAuth !== false && !DRY_RUN // CodeRabbit is required once implementation/review can run
 const ASSESS_PARTIAL_BRANCHES = cfg.assessPartialBranches !== false // false => skip report-only assessment of failed task branches
 const BUDGET_RESERVE = 80_000 // stop opening new tasks when remaining budget falls below this
+const SEARCH_BACKEND = String(cfg.searchBackend || cfg.codeSearchBackend || (cfg.memtraceRepoId ? 'memtrace' : 'grepai')).toLowerCase()
 const GREPAI_WORKSPACE = cfg.grepaiWorkspace || 'Projects'
-const GREPAI_PROJECT = cfg.grepaiProject || cfg.project || null // canonical main-branch GrepAI project; set this when source is a worktree
+const GREPAI_PROJECT = cfg.grepaiProject || (SEARCH_BACKEND === 'grepai' ? cfg.project : null) || null // canonical main-branch GrepAI project; set this when source is a worktree
+const MEMTRACE_REPO_ID = cfg.memtraceRepoId || (SEARCH_BACKEND === 'memtrace' ? cfg.project : null) || null // canonical Memtrace repo id; discover with list_indexed_repositories when unset
 const BUILD_ADAPTER = cfg.buildAdapter || 'codex-medium'
 const PLAN_ADAPTER = cfg.planAdapter || 'codex'
 const REVIEW_ADAPTER = cfg.reviewAdapter || 'codex-high'
@@ -52,10 +62,11 @@ const PLAN_MODEL = cfg.planModel || 'gpt-5.5@high'
 const REVIEW_MODEL = cfg.reviewModel || 'gpt-5.5'
 const TRIAGE_MODEL = cfg.triageModel || 'gpt-5.5@high'
 const ASSESSMENT_MODEL = cfg.assessmentModel || REVIEW_MODEL
+const CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || 'timeout 300s coderabbit review --agent'
 const SPARK_DELEGATION_GUIDANCE =
   "You are free to delegate to the `wyvern` 5.3 codex spark subagent for bounded read-only tasks on known surfaces as needed. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
 const SCRUTINEER_DELEGATION_GUIDANCE =
-  'Delegate deterministic gate execution and CodeRabbit invocation to the `scrutineer` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run `coderabbit review --agent`. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains.'
+  `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. If CodeRabbit exits via the timeout while still only at \`connecting_to_review_service\` with no findings and no quoted rate-limit wait, record the log path and elapsed time, and treat it as a deferred CodeRabbit review rather than retrying indefinitely.`
 
 function buildAgentOptions(options = {}) {
   return { adapter: BUILD_ADAPTER, model: BUILD_MODEL, ...options }
@@ -87,6 +98,22 @@ function grepaiSearchCommand() {
   return `grepai search --workspace ${workspaceArg} --project ${projectArg} "<English intent query>" --toon --compact`
 }
 
+function memtraceRepoGuidance() {
+  return MEMTRACE_REPO_ID
+    ? `Use repo_id ${shellQuote(MEMTRACE_REPO_ID)} for Memtrace calls after confirming it appears in list_indexed_repositories.`
+    : 'Call list_indexed_repositories first and select the repo_id for this project before using other Memtrace tools.'
+}
+
+function codeSearchGuidance() {
+  if (SEARCH_BACKEND === 'memtrace') {
+    return `Use the Memtrace MCP server as the PRIMARY tool for canonical main-branch code search and graph context. ${memtraceRepoGuidance()} Use find_code for intent/concept search, find_symbol for exact identifiers, list_communities/find_central_symbols for orientation, get_symbol_context/get_impact/get_timeline before changing load-bearing symbols, and get_source_window only for bounded source reads. Treat Memtrace's committed/main view as canonical context, not branch-local evidence; verify every branch-local or newly changed fact directly inside your worktree with \`leta\`, exact text search, or file inspection before acting. If a Memtrace MCP call is unavailable because the host session rejects, cancels, or lacks the tool, record that exact tooling failure in the ExecPlan and continue with bounded branch-local evidence; do not make the plan impossible to execute solely because Memtrace was unavailable in the planning session. Memtrace unavailability is not a valid reason to set ExecPlan status to BLOCKED.`
+  }
+  if (SEARCH_BACKEND !== 'grepai') {
+    throw new Error(`Unsupported searchBackend: ${SEARCH_BACKEND}`)
+  }
+  return `Use \`${grepaiSearchCommand()}\` as the PRIMARY tool for intent/concept code search against the canonical main-branch index. The grepai index reflects \`main\` only: never treat it as evidence for branch-local or newly changed code. Verify every branch-local fact directly inside your worktree with \`leta\`, exact text search, or file inspection before acting. If GrepAI is unavailable in the agent session, record the exact tooling failure in the ExecPlan and continue with bounded branch-local evidence; do not make the plan impossible to execute solely because GrepAI was unavailable.`
+}
+
 // ---------------------------------------------------------------------------
 // Shared preamble — prepended to every agent so the standing rules are
 // non-negotiable: tooling, worktree isolation, doc adherence, en-GB spelling.
@@ -100,8 +127,9 @@ function preamble(worktree) {
     '',
     'Standing rules (apply to every step, no exceptions):',
     `- ${loc}`,
-    `- Use \`${grepaiSearchCommand()}\` as the PRIMARY tool for intent/concept code search against the canonical main-branch index. The grepai index reflects \`main\` only: never treat it as evidence for branch-local or newly changed code. Verify every branch-local fact directly inside your worktree with \`leta\`, exact text search, or file inspection before acting.`,
-    '- Use `leta` for symbol navigation, references, call graphs, and branch-local verification (leta show / refs / grep / files) instead of ad-hoc ripgrep or read-file.',
+    '- File edits must target the assigned git-donkey worktree. When using an edit tool whose target is not scoped by shell `cd` or command `workdir`, use absolute paths under the assigned worktree; never let relative edit paths hit the root/control worktree.',
+    `- ${codeSearchGuidance()}`,
+    '- Use `leta` for symbol navigation, references, call graphs, and branch-local verification (leta show / refs / grep / files) instead of ad-hoc ripgrep or read-file. If Leta is unavailable because its daemon or workspace tooling fails, record the exact failure and fall back to precise file inspection for the current task; do not add a hard implementation blocker solely for a transient Leta startup failure. Leta unavailability is not a valid reason to set ExecPlan status to BLOCKED.',
     '- Use `sem` for codebase history navigation (semantic, entity-level diffs and blame) instead of raw git log/blame.',
     '- Load the appropriate language router skill for any code you touch: python-router for Python, rust-router for Rust, and the matching router for other languages. Follow the smaller skills it routes you to.',
     `- Treat docs/ as the source of truth: ${DESIGN_DOCS}, the developers guide, any users guide present, the coding/scripting standards, and AGENTS.md. Obey AGENTS.md quality gates and the en-GB Oxford-spelling ("-ize"/"-yse"/"-our") convention in all prose, comments, and commits.`,
@@ -768,7 +796,8 @@ function planPrompt(task, worktree, priorVerdict, round) {
     `- Adhere to the design documents (${DESIGN_DOCS}), the developers guide, the coding standards, and AGENTS.md. Cite the exact sections/ADRs each work item implements.`,
     '- Signpost, per work item, the documentation to read and the skills to load (router skills, hypothesis/crosshair/mutmut for verification, etc.).',
     '- Specify the tests (unit, behavioural, property, snapshot, e2e) each work item must add or update, per the AGENTS.md testing rules.',
-    '- State the validation commands (make all; plus make markdownlint and make nixie for markdown changes).',
+    '- The ExecPlan must be implementable as written. Do NOT set Status: BLOCKED merely because Memtrace, GrepAI, Leta, Firecrawl, sem, or another advisory tool is unavailable in your agent session. Record the failed command and use bounded local docs/source/tests as fallback evidence. Only mark blocked for a true product/design ambiguity or missing requirement that cannot be resolved from the repository.',
+    '- State the validation commands (`make all`; plus `make markdownlint` and `make nixie` for markdown changes). `make all` includes the `typecheck` target on current `origin/main`.',
     '- VALIDATION COMMANDS MUST BE PATH-SAFE: prefer repository gates such as `make all`, `make markdownlint`, and `make nixie` over hand-written file lists. If a work item lists direct formatter/linter commands, every listed path must definitely exist at that point in the work item. Do not include a file that the same work item may delete, an optional file such as an optional snapshot, or a file that the work item does not edit. If a path is conditional, make the command conditional (`test -e path && …`) or omit that path and rely on the repository gate. This is a blocking design-review requirement.',
     '',
     'RESEARCH before you commit to any mechanism — do not leave the implementer a menu of unverified workarounds:',
@@ -788,10 +817,10 @@ function designReviewPrompt(task, worktree, plan, round) {
     `TASK: Conduct an ADVERSARIAL Logisphere DESIGN review of the ExecPlan for roadmap task ${task.id} at ${plan.execplanPath}. Round ${round}.`,
     '',
     'Invoke the `logisphere-design-review` skill and run the plan past the full crew (Pandalump structural integrity, Wafflecat alternatives, Buzzy Bee scaling, Telefono contracts, Doggylump failure modes, Dinolump long-term viability), plus the pre-mortem and alternatives checkpoint.',
-    'Be genuinely adversarial: assume the plan is flawed until proven otherwise. Check it against the design documents, ADRs, developers guide, and AGENTS.md. Verify the work items are atomic, ordered, testable, and complete; that validation is specified; that direct formatter/linter file lists only name files guaranteed to exist and changed by that work item; and that nothing contradicts the deterministic/judgemental boundary or the established contracts.',
+    'Be genuinely adversarial: assume the plan is flawed until proven otherwise. Check it against the design documents, ADRs, developers guide, and AGENTS.md. Verify the work items are atomic, ordered, testable, and complete; that validation includes `make all` (which includes `typecheck` on current `origin/main`) plus markdown gates when markdown changes; that direct formatter/linter file lists only name files guaranteed to exist and changed by that work item; that no standalone red-test commit is required; and that nothing contradicts the deterministic/judgemental boundary or the established contracts.',
     '',
     'Read the execplan from disk yourself — do not trust the planner\'s summary. You may leave review notes in the execplan or an adjacent review file, but do NOT implement anything and do NOT relax the design to make it pass.',
-    'Where the plan asserts any external or locked-library behaviour, verify it against the REAL source (a vendored or sibling checkout if the project has one) and the official docs. Treat any uncited memory-based claim about library behaviour as a blocking defect: the plan must verify and cite (firecrawl the official docs) or pin the behaviour with a test.',
+    'Where the plan asserts any external or locked-library behaviour, verify it against the REAL source (a vendored or sibling checkout if the project has one) and the official docs. Treat any uncited memory-based claim about library behaviour as a blocking defect: the plan must verify and cite official docs when tools permit, or pin the behaviour with a test. Do not reject an otherwise implementable plan solely because Memtrace, GrepAI, Leta, Firecrawl, or sem was unavailable in the planner session; reject it if that unavailability was turned into a hard blocker instead of a documented fallback.',
     '',
     'Set satisfied=true ONLY when you would stake your name on the plan being implementable and design-conformant as written. Otherwise list precise, addressable blocking defects (these go straight back to the planner).',
   ].join('\n')
@@ -808,8 +837,8 @@ function implementPrompt(task, worktree, plan) {
     '',
     'For EACH execplan work item, in this exact order:',
     '  1. Implement the work item (code + tests + docs) per the plan and AGENTS.md.',
-    '  2. DETERMINISTIC GATE FIRST: summon `scrutineer` to run `make all`. If it reports failures, fix them yourself (format, lint, typecheck, tests, audit) and summon `scrutineer` again until green. For any markdown you touched, also have `scrutineer` run `make markdownlint` and `make nixie` and fix failures. Do not proceed to coderabbit until the deterministic gates are green.',
-    '  3. THEN summon `scrutineer` to run `coderabbit review --agent` from inside the worktree. Address actionable feedback yourself (highest severity first). After applying fixes, summon `scrutineer` again to re-run `make all` and confirm the deterministic gates are still green.',
+    '  2. DETERMINISTIC GATE FIRST: summon `scrutineer` to run `make all` (which includes typecheck on current `origin/main`). If it reports failures, fix them yourself (format, lint, typecheck, tests, audit) and summon `scrutineer` again until green. For any markdown you touched, also have `scrutineer` run `make markdownlint` and `make nixie` and fix failures. Do not proceed to coderabbit until the deterministic gates are green.',
+    `  3. THEN summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. Address actionable feedback yourself (highest severity first). After applying fixes, summon \`scrutineer\` again to re-run \`make all\` and confirm the deterministic gates are still green.`,
     '     - If coderabbit reports a rate limit, READ the quoted wait time from its response (it usually states one, e.g. "waitTime ~16 min" or "retry after N"). Do NOT retry before that window elapses — earlier retries are guaranteed to fail and only burn the turn. Wait the quoted duration plus a small margin (via sleep), then retry ONCE. If no time is quoted, fall back to exponential backoff (30s, 60s, 120s, 240s, 480s, cap ~900s). If the quoted wait would not fit your remaining turn budget, do NOT sit in a doomed wait: the deterministic gates already passed, so record the deferred coderabbit review in the execplan and openIssues for a later run to complete before committing.',
     '  4. Update the execplan IN PLACE with findings, progress (tick the work item), and any decisions or deviations, with rationale.',
     '  5. Commit the work item and the execplan update together as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).',
@@ -833,7 +862,7 @@ function fixPrompt(task, worktree, plan, blocking, round) {
     'The dual review returned the following BLOCKING items. Resolve every one:',
     ...blocking.map((b, i) => `  ${i + 1}. ${b}`),
     '',
-    'Same per-change discipline as implementation: summon `scrutineer` for the deterministic gate (`make all`, plus markdownlint/nixie for markdown) first and green, THEN summon `scrutineer` for `coderabbit review --agent` (on a rate limit, wait the quoted wait time before retrying — never retry before that window elapses — and if the quoted wait exceeds your turn, commit and record the deferred review), then an atomic commit, then update the execplan with what changed and why. Do not introduce scope beyond the blocking items.',
+    `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gate (\`make all\`, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND}\` (on a rate limit, wait the quoted wait time before retrying — never retry before that window elapses — and if the quoted wait exceeds your turn, commit and record the deferred review), then an atomic commit, then update the execplan with what changed and why. Do not introduce scope beyond the blocking items.`,
   ].join('\n')
 }
 
@@ -907,8 +936,8 @@ function implementAddendumPrompt(task, worktree) {
     '',
     'For EACH open sub-task, in id order:',
     '  1. Make ONLY the change the Addenda item describes. Do not expand scope.',
-    '  2. DETERMINISTIC GATE: summon `scrutineer` to run `make all`. For any Markdown you touched, also have it run `make markdownlint` and `make nixie`. Fix until green.',
-    '  3. Summon `scrutineer` to run `coderabbit review --agent` from inside the worktree; address actionable feedback yourself (highest severity first); summon `scrutineer` again to re-run `make all` and confirm green. On a coderabbit rate limit, read the QUOTED wait time from its response and wait at least that long before retrying (do NOT retry before that window elapses — it cannot succeed); if no time is quoted use exponential backoff (30s, 60s, 120s, 240s, 480s, cap ~900s); if the wait exceeds your turn, record the deferred review in openIssues before committing the gated work.',
+    '  2. DETERMINISTIC GATE: summon `scrutineer` to run `make all` (which includes typecheck on current `origin/main`). For any Markdown you touched, also have it run `make markdownlint` and `make nixie`. Fix until green.',
+    `  3. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to re-run \`make all\` and confirm green. On a coderabbit rate limit, read the QUOTED wait time from its response and wait at least that long before retrying (do NOT retry before that window elapses — it cannot succeed); if no time is quoted use exponential backoff (30s, 60s, 120s, 240s, 480s, cap ~900s); if the wait exceeds your turn, record the deferred review in openIssues before committing the gated work.`,
     `  4. Tick the sub-task in the Addenda checklist of its execplan (\`- [ ] ${task.id}.<n>\` → \`- [x] …\`).`,
     '  5. Commit the sub-task and Addenda tick together as one atomic commit (en-GB imperative subject).',
     '',
