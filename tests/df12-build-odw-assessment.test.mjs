@@ -29,6 +29,9 @@ return {
   collectAssessmentEvidence,
   shouldAssessFailure,
   authFailureDetail,
+  isDeferredReviewIssue,
+  hasOnlyDeferredReviewIssues,
+  implementationAuthFailureDetail,
 }
 `,
   )
@@ -81,6 +84,53 @@ test('assessment schema exposes only ADR 002 classifications', async () => {
     surface.ASSESSMENT_CLASSIFICATIONS,
   )
   assert.equal(surface.ASSESSMENT_SCHEMA.additionalProperties, false)
+  assert.deepEqual(surface.ASSESSMENT_SCHEMA.required, [
+    'classification',
+    'branchName',
+    'worktreePath',
+    'baseCommit',
+    'currentCommit',
+    'dirtyState',
+    'changedFiles',
+    'taskScoped',
+    'execPlan',
+    'roadmap',
+    'validation',
+    'missingEvidence',
+    'risks',
+    'rationale',
+    'recommendation',
+    'nextActions',
+  ])
+})
+
+test('auth-shaped implementation issues are fatal, not deferred review', async () => {
+  const surface = await loadAssessmentSurface()
+  const impl = {
+    ok: true,
+    gatesGreen: true,
+    summary: 'Implementation complete',
+    openIssues: ['CodeRabbit auth failed'],
+  }
+
+  assert.equal(surface.isDeferredReviewIssue('CodeRabbit auth failed'), false)
+  assert.equal(surface.hasOnlyDeferredReviewIssues(['CodeRabbit auth failed']), false)
+  assert.equal(surface.hasOnlyDeferredReviewIssues(['CodeRabbit rate limit retry after 10m']), true)
+  assert.equal(surface.implementationAuthFailureDetail(impl), 'Implementation complete\nCodeRabbit auth failed')
+  assert.equal(surface.authFailureDetail('CodeRabbit browser login required'), 'CodeRabbit browser login required')
+})
+
+test('normal and addendum implementations gate auth before integration', async () => {
+  const source = await readFile(WORKFLOW_PATH, 'utf8')
+
+  assert.match(
+    source,
+    /if \(task\.isAddendum\)[\s\S]*?const authDetail = implementationAuthFailureDetail\(impl\)[\s\S]*?status: 'fatal-auth'/,
+  )
+  assert.match(
+    source,
+    /const impl = await agent\(implementPrompt\(task, worktree, plan\)[\s\S]*?const authDetail = implementationAuthFailureDetail\(impl\)[\s\S]*?status: 'fatal-auth'/,
+  )
 })
 
 test('assessment guard admits only non-auth failed or halted task branches', async () => {

@@ -278,9 +278,15 @@ const ASSESSMENT_SCHEMA = {
     'currentCommit',
     'dirtyState',
     'changedFiles',
+    'taskScoped',
+    'execPlan',
+    'roadmap',
+    'validation',
     'missingEvidence',
     'risks',
+    'rationale',
     'recommendation',
+    'nextActions',
   ],
 }
 
@@ -329,6 +335,11 @@ function authFailureDetail(value) {
     /\bNot logged in\b/i,
     /\bsigned out\b/i,
     /no token is available/i,
+    /\bauth(?:entication)? failed\b/i,
+    /\bbrowser login required\b/i,
+    /\btoken missing\b/i,
+    /\bmissing token\b/i,
+    /\btoken expired\b/i,
     /Run `?coderabbit auth login`?/i,
     /Run codex login/i,
   ]
@@ -916,11 +927,6 @@ function isDeferredReviewIssue(issue) {
     'deferred coderabbit review',
     'coderabbit review deferred',
     'unavailable',
-    'authentication failed',
-    'auth failed',
-    'browser login required',
-    'token missing',
-    'token expired',
   ]
   return text.includes('coderabbit') && deferredReviewMarkers.some((marker) => text.includes(marker))
 }
@@ -928,6 +934,11 @@ function isDeferredReviewIssue(issue) {
 function hasOnlyDeferredReviewIssues(openIssues) {
   const issues = openIssues || []
   return issues.length > 0 && issues.every(isDeferredReviewIssue)
+}
+
+function implementationAuthFailureDetail(impl) {
+  const detail = [impl?.summary, ...(impl?.openIssues || [])].filter(Boolean).join('\n')
+  return authFailureDetail(detail)
 }
 
 function integratePrompt(task, worktree) {
@@ -1074,6 +1085,19 @@ async function runTask(task, mergeLock) {
 
     phase('Implement')
     const impl = await agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: 'Implement', label: `addendum:${tag}`, schema: IMPL_SCHEMA }))
+    const authDetail = implementationAuthFailureDetail(impl)
+    if (authDetail) {
+      return {
+        id: tag,
+        status: 'fatal-auth',
+        stage: 'auth',
+        detail: authDetail,
+        openIssues: impl?.openIssues || [],
+        worktree,
+        proposals: [],
+        kind: 'addendum',
+      }
+    }
     const openIssues = impl?.openIssues || []
     const onlyDeferredReviewIssues = hasOnlyDeferredReviewIssues(openIssues)
     if (!impl || !impl.ok || !impl.gatesGreen || (openIssues.length > 0 && !onlyDeferredReviewIssues)) {
@@ -1163,6 +1187,18 @@ async function runTask(task, mergeLock) {
     label: `implement:${tag}`,
     schema: IMPL_SCHEMA,
   }))
+  const authDetail = implementationAuthFailureDetail(impl)
+  if (authDetail) {
+    return {
+      id: tag,
+      status: 'fatal-auth',
+      stage: 'auth',
+      detail: authDetail,
+      openIssues: impl?.openIssues || [],
+      worktree,
+      proposals: [],
+    }
+  }
   if (!impl || !impl.ok || !impl.gatesGreen) {
     return await attachAssessment(task, wt, {
       id: tag,

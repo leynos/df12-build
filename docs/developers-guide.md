@@ -15,7 +15,7 @@ Read these before changing launch or workflow behaviour:
   access, prompt-injection risk, and sandbox recommendations.
 - `docs/adr-001-adopt-odw-sidecar-launches.md` for the accepted sidecar launch
   decision.
-- `docs/adr-002-assess-partial-task-branches.md` for the proposed partial
+- `docs/adr-002-assess-partial-task-branches.md` for the accepted partial
   branch assessment and adoption model.
 - `docs/users-guide.md` for the public launch flow and configuration surface.
 - `skills/df12-build-supervisor/SKILL.md` for the detailed operator playbook.
@@ -39,7 +39,7 @@ Relevant paths:
 - `docs/developers-guide.md`: contributor-facing maintenance guide.
 - `docs/architecture.md`: design-level sidecar and workflow contract.
 - `docs/adr-001-adopt-odw-sidecar-launches.md`: accepted launch decision.
-- `docs/adr-002-assess-partial-task-branches.md`: proposed recovery assessment
+- `docs/adr-002-assess-partial-task-branches.md`: accepted recovery assessment
   decision.
 
 If a future branch adds `docs/roadmap.md` or new `docs/execplans/` entries,

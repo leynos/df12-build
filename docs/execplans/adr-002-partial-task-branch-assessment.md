@@ -129,6 +129,15 @@ conflict in `Decision Log`, and ask for direction.
 - [x] (2026-06-30T15:47:19Z) Ran `make all`; diff check, Markdown lint, ODW
   wrapper parse, Nixie diagram validation, and Node assessment tests all
   passed.
+- [x] (2026-06-30T16:11:11Z) Verified three review findings against current
+  code: auth-shaped implementation issues were not fatal, assessment evidence
+  fields were optional in the schema, and two docs still called ADR 002
+  proposed.
+- [x] (2026-06-30T16:11:11Z) Patched the still-valid findings and extended
+  focused tests for auth-shaped implementation issues, both implementation
+  paths, and the full assessment required-field set.
+- [x] (2026-06-30T16:11:11Z) Ran the focused test and `make all`; both passed
+  with 6 Node tests.
 
 ## Surprises & discoveries
 
@@ -223,18 +232,29 @@ conflict in `Decision Log`, and ask for direction.
   so ADR 002 assessment can run; auth-shaped failures still bypass assessment.
   Date/Author: 2026-06-30T15:35:32Z / Codex.
 
+- Decision: Treat auth-shaped implementation issues as fatal before any review
+  or integration fallback.
+  Rationale: ADR 002 says auth failures remain fatal, and authentication
+  failures are not useful partial-branch evidence. Both normal and addendum
+  implementation results now share the same auth detector and return
+  `fatal-auth` before deferred-review handling or mergeability checks.
+  Date/Author: 2026-06-30T16:11:11Z / Codex.
+
+- Decision: Require the assessment agent to return all core evidence fields in
+  the schema.
+  Rationale: The schema is the hard contract between the assessment agent and
+  the workflow host. `taskScoped`, `execPlan`, `roadmap`, `validation`,
+  `rationale`, and `nextActions` must be present so an operator does not
+  receive a bare classification without the evidence ADR 002 relies on.
+  Date/Author: 2026-06-30T16:11:11Z / Codex.
+
 ## Outcomes & retrospective
 
-No implementation has started. The intended outcome is a workflow that returns
-partial-branch assessments for failed task branches while keeping all branch
-adoption manual.
-
-Implementation started on 2026-06-30. The red test stage is complete and
-confirms the missing assessment surface before production-code changes.
-
-The workflow implementation is now present. The focused assessment tests pass,
-the documentation updates are present, and `make all` passes. This milestone
-keeps all partial-branch adoption manual and report-only.
+The workflow returns partial-branch assessments for failed task branches while
+keeping all branch adoption manual. Auth-shaped implementation issues now halt
+as `fatal-auth` before review or integration fallback. The focused assessment
+tests pass, the documentation updates are present, and `make all` passes. This
+milestone keeps all partial-branch adoption manual and report-only.
 
 ## Context and orientation
 
@@ -536,8 +556,8 @@ markdownlint-cli2: Summary: 0 error(s)
 workflows/df12-build-odw.js: wrapped JavaScript parses
 workflows/df12-build.js: wrapped JavaScript parses
 All diagrams validated successfully
-# tests 4
-# pass 4
+# tests 6
+# pass 6
 # fail 0
 ```
 
@@ -633,3 +653,7 @@ agent errors. Final validation remains.
 
 Revision 6 on 2026-06-30: Recorded final `make all` validation and marked the
 plan complete.
+
+Revision 7 on 2026-06-30: Recorded review follow-up fixes for fatal auth
+handling, required assessment evidence fields, and stale ADR wording. Updated
+validation evidence to 6 focused Node tests.
