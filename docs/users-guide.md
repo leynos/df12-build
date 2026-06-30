@@ -179,11 +179,15 @@ Common arguments:
   integration.
 - `documentAudit`: when `false`, return audit findings without writing audit
   files.
+- `assessPartialBranches`: when `false`, skip the report-only assessment of
+  failed or halted task branches. Defaults to enabled.
 - `buildAdapter` and `buildModel`: adapter and model for worktree creation,
   implementation, integration, and remediation agents.
 - `planAdapter` and `planModel`: adapter and model for planning agents.
 - `reviewAdapter` and `reviewModel`: adapter and model for design review, code
   review, expert review, and audit agents.
+- `assessmentAdapter` and `assessmentModel`: adapter and model for partial
+  branch assessment. Defaults to the review adapter and model.
 
 Example `args.json`:
 
@@ -200,6 +204,8 @@ Example `args.json`:
   "buildModel": "gpt-5.5",
   "planAdapter": "codex-high",
   "planModel": "gpt-5.5",
+  "assessmentAdapter": "codex-high",
+  "assessmentModel": "gpt-5.5",
   "triageAdapter": "codex-high",
   "triageModel": "gpt-5.5",
   "reviewAdapter": "codex-high",
@@ -213,6 +219,25 @@ Do not try to resume a failed workflow from transient cache state. Treat
 `origin/<base>` as the source of truth, inspect the result, clean up or repair
 the target project as needed, and relaunch from the sidecar. The workflow
 re-selects unblocked roadmap work from the current roadmap state.
+
+When a normal task or addendum fails or halts after its worktree exists, the
+ODW workflow runs a read-only assessment of the surviving task branch unless
+`assessPartialBranches=false`. The per-task result may include an `assessment`
+object and the top-level result includes an `assessments` summary array. The
+classification is one of:
+
+- `adopt-complete`: the branch appears to satisfy the task and can continue
+  through the ordinary review and integration path after gates are verified.
+- `adopt-partial`: the branch contains a coherent useful slice, but the roadmap
+  task must remain unchecked.
+- `continue-manual`: the branch needs operator judgement before any merge.
+- `discard`: the branch is stale, unsafe, incoherent, or too incomplete to keep.
+
+Assessment is report-only. It never marks roadmap checkboxes, pushes, merges,
+or cherry-picks. Use it to decide whether to preserve, manually finish, park, or
+discard the branch before relaunching from `origin/<base>`. Auth failures,
+worktree-creation failures, dry runs, successful tasks, and
+manual-merge-ready branches are not assessed.
 
 Use the `df12-build-supervisor` skill for the detailed operator playbook:
 failure-mode diagnosis, orphan worktree cleanup, remediation triage, stash

@@ -128,8 +128,9 @@ provides the doc skills):
    paths), `maxParallel` (pool width — default 2 to keep coderabbit from
    saturating), `maxTasks`, `maxDesignRounds` (4), `maxReviewRounds` (3),
    `taskId` (run exactly one), `dryRun`, `autoMerge`, `documentAudit`,
-   `buildAdapter`/`buildModel`, `planAdapter`/`planModel`, and
-   `reviewAdapter`/`reviewModel`.
+   `assessPartialBranches`, `buildAdapter`/`buildModel`,
+   `planAdapter`/`planModel`, `reviewAdapter`/`reviewModel`, and
+   `assessmentAdapter`/`assessmentModel`.
 5. **For legacy Claude `Workflow({ scriptPath: ... })` launches, use the same
    sidecar rule.** `scriptPath` launches may not receive `args`; if you use
    that harness, retune by editing the copied sidecar script itself and record
@@ -140,10 +141,11 @@ provides the doc skills):
 Every time a run completes you do the same loop:
 
 1. **Parse the result JSON.** Key fields: `processed` (ids merged this run),
-   `results[]` (per-task `{id, status, stage, detail}`), `halted` (null on a
-   clean stop), `audits[]`, `remediationTriage[]`, `pendingProposals`
-   (proposals left unwritten because the run halted — triage them manually
-   later).
+   `results[]` (per-task `{id, status, stage, detail}` plus any
+   `assessment`), `assessments[]` (summaries for failed or halted branches that
+   were assessed), `halted` (null on a clean stop), `audits[]`,
+   `remediationTriage[]`, `pendingProposals` (proposals left unwritten because
+   the run halted — triage them manually later).
 2. **Hoover orphan worktrees.** For each non-root worktree under
    `…worktrees/roadmap-*`: stash any dirt with a **named** stash (see "Stash
    hygiene" below —
@@ -192,7 +194,20 @@ They are not templates for fabricating evidence; copy the live run facts.
       "id": "2.1.2",
       "status": "halted",
       "stage": "review",
-      "detail": "reviewers not satisfied within cap"
+      "detail": "reviewers not satisfied within cap",
+      "assessment": {
+        "classification": "continue-manual",
+        "recommendation": "Inspect review blockers before deciding whether to keep the branch"
+      }
+    }
+  ],
+  "assessments": [
+    {
+      "id": "2.1.2",
+      "stage": "review",
+      "status": "halted",
+      "classification": "continue-manual",
+      "recommendation": "Inspect review blockers before deciding whether to keep the branch"
     }
   ],
   "audits": [
@@ -225,9 +240,10 @@ They are not templates for fabricating evidence; copy the live run facts.
 ```
 
 Operator reading: `2.1.1` landed and may have generated an addendum. `2.1.2`
-did not land. Hoover worktrees, fast-forward `BASE`, run `make all`, inspect the
-review blockers for `2.1.2`, and load `roadmap-grooming` before editing any
-remediation back into the roadmap.
+did not land. Its assessment says the branch needs manual judgement, so inspect
+the review blockers and branch evidence before deciding whether to keep it.
+Hoover worktrees, fast-forward `BASE`, run `make all`, and load
+`roadmap-grooming` before editing any remediation back into the roadmap.
 
 ### Operator notes
 
@@ -371,15 +387,23 @@ reviewer.
     cannot repeat it.
 - **Implement halt** (often a turn-budget/size issue): a task with many work
   items, each gated by `make all` + a per-item coderabbit review, can exceed
-  one agent turn — it gets the code green but runs out before committing.
-  **Decompose into fewer-work-item tasks.** This and design-review size halts
-  are the same root cause: tasks that are too big for one plan/implement turn.
+  one agent turn. Check `result.assessment` before decomposing the task. A
+  timeout may leave a coherent partial slice worth preserving, but the roadmap
+  task stays unchecked unless its success criterion is complete and gates/review
+  prove it. If the assessment does not identify useful partial work, decompose
+  into fewer-work-item tasks. This and design-review size halts are the same
+  root cause: tasks that are too big for one plan/implement turn.
 - **Integrate halt** (rebase conflict the agent would not resolve safely):
   inspect the conflict; resolve it preserving the intent of both sides (favour
   the design docs/contracts), or re-file the task. The branch is left unmerged
   for you.
 - **Review halt** (dual review unsatisfied within the cap): the branch is left
-  unmerged with the blocking items; either hand-fix and merge, or fold the
+  unmerged with the blocking items. Check `result.assessment` first. If it says
+  `adopt-complete`, verify gates and continue through the ordinary review and
+  integration path. If it says `adopt-partial`, preserve only the coherent slice
+  without ticking the roadmap task. If it says `continue-manual`, inspect the
+  branch before deciding. If it says `discard`, hoover it unless live evidence
+  contradicts the recommendation. Either hand-fix and merge, or fold the
   findings back into the roadmap and re-file.
 - **Roadmap-prose-fix halt** (an addendum/task whose sole deliverable is editing
   the roadmap's *own* text — a wrong success criterion, a mis-stated contract):

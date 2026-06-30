@@ -5,7 +5,7 @@ This ExecPlan (execution plan) is a living document. The sections
 `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work
 proceeds.
 
-Status: DRAFT
+Status: COMPLETE
 
 ## Purpose / big picture
 
@@ -114,13 +114,21 @@ conflict in `Decision Log`, and ask for direction.
   pattern guidance, and ODW's dynamic-workflow research and technical plan.
 - [x] (2026-06-30T15:12:48Z) Revised this ExecPlan with prior-art findings and
   the ODW-versus-Claude runtime boundary.
-- [ ] Get explicit approval to implement this plan.
-- [ ] Add red tests for assessment eligibility, schema shape, auth skipping,
-  and fixture evidence collection.
-- [ ] Implement the schema, prompt, host evidence collection, and result wiring.
-- [ ] Update user, developer, architecture, security, and supervisor docs.
-- [ ] Run focused tests, markdown lint, diff check, and the ODW wrapper parse
-  check; record evidence here.
+- [x] (2026-06-30T15:35:32Z) Got explicit approval to implement this plan.
+- [x] (2026-06-30T15:35:32Z) Added red tests for assessment eligibility,
+  schema shape, auth skipping, and fixture evidence collection.
+- [x] (2026-06-30T15:35:32Z) Ran the focused red test. It failed for the
+  expected reason: `ReferenceError: ASSESSMENT_CLASSIFICATIONS is not defined`.
+- [x] (2026-06-30T15:35:32Z) Implemented the schema, prompt, host evidence
+  collection, result wiring, and top-level `assessments` summary.
+- [x] (2026-06-30T15:35:32Z) Ran the focused green test:
+  `node --test tests/df12-build-odw-assessment.test.mjs` passed 4 tests.
+- [x] (2026-06-30T15:35:32Z) Updated ADR 002, user guide,
+  architecture, developer guide, security guide, and supervisor skill for the
+  report-only assessment behaviour.
+- [x] (2026-06-30T15:47:19Z) Ran `make all`; diff check, Markdown lint, ODW
+  wrapper parse, Nixie diagram validation, and Node assessment tests all
+  passed.
 
 ## Surprises & discoveries
 
@@ -203,11 +211,30 @@ conflict in `Decision Log`, and ask for direction.
   reliability model and can disappear across process/session boundaries.
   Date/Author: 2026-06-30T15:12:48Z / Codex.
 
+- Decision: Include the focused assessment test in `make all`.
+  Rationale: Assessment is now executable workflow behaviour, not just
+  documentation. The repository gate should fail when the schema, eligibility
+  guard, or deterministic git evidence collector regresses.
+  Date/Author: 2026-06-30T15:35:32Z / Codex.
+
+- Decision: Assess unhandled post-worktree agent errors inside `runTask`.
+  Rationale: A thrown agent call after worktree creation is still a failure with
+  a durable branch. Catching it inside `runTask` preserves the worktree context
+  so ADR 002 assessment can run; auth-shaped failures still bypass assessment.
+  Date/Author: 2026-06-30T15:35:32Z / Codex.
+
 ## Outcomes & retrospective
 
 No implementation has started. The intended outcome is a workflow that returns
 partial-branch assessments for failed task branches while keeping all branch
 adoption manual.
+
+Implementation started on 2026-06-30. The red test stage is complete and
+confirms the missing assessment surface before production-code changes.
+
+The workflow implementation is now present. The focused assessment tests pass,
+the documentation updates are present, and `make all` passes. This milestone
+keeps all partial-branch adoption manual and report-only.
 
 ## Context and orientation
 
@@ -482,8 +509,37 @@ item. Do not attempt to recover by running a live ODW workshop.
 
 ## Artifacts and notes
 
-No validation transcripts exist yet because this is the draft phase. During
-implementation, paste only concise command outcomes here.
+Concise validation transcripts are recorded here instead of full command logs.
+
+Red test evidence:
+
+```plaintext
+$ node --test tests/df12-build-odw-assessment.test.mjs
+not ok 1 - assessment schema exposes only ADR 002 classifications
+ReferenceError: ASSESSMENT_CLASSIFICATIONS is not defined
+```
+
+Green test evidence:
+
+```plaintext
+$ node --test tests/df12-build-odw-assessment.test.mjs
+# tests 4
+# pass 4
+# fail 0
+```
+
+Final repository validation:
+
+```plaintext
+$ make all
+markdownlint-cli2: Summary: 0 error(s)
+workflows/df12-build-odw.js: wrapped JavaScript parses
+workflows/df12-build.js: wrapped JavaScript parses
+All diagrams validated successfully
+# tests 4
+# pass 4
+# fail 0
+```
 
 ## Interfaces and dependencies
 
@@ -564,3 +620,16 @@ not treat that style as portable Claude Code workflow dialect or change
 Revision 2 on 2026-06-30: Added a hook-compatible `Makefile` and updated the
 plan's validation instructions from ad hoc commands to `make all`. This changes
 only the validation driver, not the planned assessment implementation.
+
+Revision 3 on 2026-06-30: Marked the plan in progress, recorded explicit
+approval, and captured the red-test evidence before implementation.
+
+Revision 4 on 2026-06-30: Recorded the implemented assessment surface and
+focused green-test evidence. Documentation and final gates remain.
+
+Revision 5 on 2026-06-30: Recorded documentation completion and decisions to
+include assessment tests in `make all` and to assess unhandled post-worktree
+agent errors. Final validation remains.
+
+Revision 6 on 2026-06-30: Recorded final `make all` validation and marked the
+plan complete.

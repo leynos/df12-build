@@ -58,6 +58,12 @@ Keep the ODW script contract intact:
 - Keep target-project mutation inside agent prompts and real git worktrees;
   ODW copy isolation is not a persistent handoff mechanism for this workflow.
 - Serialize operations that advance `origin/<base>` through the merge lock.
+- Keep partial-branch assessment report-only. Assessment helpers may gather
+  deterministic git evidence in the ODW host script, but classification output
+  must not directly merge, push, cherry-pick, mark roadmap checkboxes, or alter
+  `processed`.
+- Skip assessment for auth failures, dry runs, successful tasks,
+  manual-merge-ready branches, and failures before worktree creation.
 
 Changes to workflow behaviour must update all relevant prompts, schemas, docs,
 and validation notes in the same branch.
@@ -105,6 +111,12 @@ documentation changes:
 
 ```bash
 make all
+```
+
+Run focused assessment tests while changing partial-branch recovery:
+
+```bash
+node --test tests/df12-build-odw-assessment.test.mjs
 ```
 
 The `typecheck` target runs an ODW-style wrapper parse check for both workflow

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed.
+Accepted and implemented for the ODW workflow.
 
 ## Date
 
@@ -28,7 +28,10 @@ must be Git state, not transcript state.
 
 ## Decision outcome
 
-Add an assessment stage for halted or failed task branches.
+Add an assessment stage for halted or failed task branches. The first
+implementation is report-only: it returns structured assessment recommendations
+in workflow result JSON, but it does not automatically merge, cherry-pick, push,
+or mark roadmap tasks complete.
 
 The assessment stage inspects a surviving task branch or worktree after a task
 fails, then classifies it as one of:
@@ -65,7 +68,7 @@ The assessment prompt must ask for bounded, evidence-first output:
 - missing validation or review evidence;
 - recommendation using the classification enum above.
 
-The workflow host should consume assessment output through a schema. Free-text
+The workflow host consumes assessment output through a schema. Free-text
 recommendations must not drive integration directly.
 
 `adopt-complete` can enter the ordinary review and integration path only after
@@ -146,3 +149,8 @@ An implementation branch for this decision should include:
 The first implementation should default to reporting assessment recommendations
 without automatic partial adoption. Automatic adoption can be enabled later only
 after the manual recommendation path has been dogfooded.
+
+The implemented verification path includes focused Node tests for the assessment
+schema, eligibility guard, auth skipping, and git evidence collection, plus the
+repository `make all` gate. A live `odw run` remains outside routine
+verification because it can spawn agents and mutate target-project state.

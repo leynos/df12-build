@@ -74,10 +74,14 @@ Workshops may contact:
 - Documentation fetch services such as Firecrawl, when the task asks for
   external verification.
 
+Partial branch assessment may also send branch names, worktree paths, commit
+ids, changed-file lists, dirty-state summaries, ExecPlan text, roadmap text,
+validation evidence, and failure details to the selected assessment adapter.
+
 Treat prompts, code snippets, logs, roadmap text, design documents, audit
-findings, and review comments as data that may be sent to those services. Do
-not run a workshop on a repository whose confidentiality requirements forbid
-that data flow.
+findings, review comments, and assessment evidence as data that may be sent to
+those services. Do not run a workshop on a repository whose confidentiality
+requirements forbid that data flow.
 
 ## Prompt-injection surface
 
@@ -88,6 +92,8 @@ The workflow deliberately feeds repository text into autonomous agents:
 - ExecPlans are written by agents and then read by other agents.
 - Review and audit findings are passed into fix, triage, and remediation
   prompts.
+- Partial branch assessment prompts include host-collected git evidence and ask
+  an agent to classify surviving task branches.
 - `AGENTS.md` and skill instructions shape command execution and gates.
 
 Any of those files can contain prompt injection. A malicious or sloppy roadmap
@@ -105,6 +111,8 @@ Controls that matter:
   automatically.
 - Review `pendingProposals`, `remediationTriage`, and addenda before
   accepting roadmap churn.
+- Treat `assessment` recommendations as advisory. They are designed to guide
+  operator judgement, not to bypass review, gates, or branch protection.
 - Treat sidecar-local patches as untrusted until promoted through the normal
   `df12-build` review path.
 

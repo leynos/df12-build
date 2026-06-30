@@ -13,6 +13,7 @@ export const meta = {
     { title: 'Implement' },
     { title: 'Code Review' },
     { title: 'Expert Review' },
+    { title: 'Assess' },
     { title: 'Integrate' },
     { title: 'Audit' },
     { title: 'Remediation' },
@@ -37,6 +38,7 @@ const DOCUMENT_AUDIT = cfg.documentAudit !== false // false => return audit find
 const DRY_RUN = cfg.dryRun === true // plan/review/audit only; skip implement, merge, and doc writes
 const AUTH_PREFLIGHT = cfg.authPreflight !== false // false => skip local CLI auth checks before spawning agents
 const REQUIRE_CODERABBIT_AUTH = cfg.requireCoderabbitAuth !== false && !DRY_RUN // CodeRabbit is required once implementation/review can run
+const ASSESS_PARTIAL_BRANCHES = cfg.assessPartialBranches !== false // false => skip report-only assessment of failed task branches
 const BUDGET_RESERVE = 80_000 // stop opening new tasks when remaining budget falls below this
 const GREPAI_WORKSPACE = cfg.grepaiWorkspace || 'Projects'
 const GREPAI_PROJECT = cfg.grepaiProject || cfg.project || null // canonical main-branch GrepAI project; set this when source is a worktree
@@ -44,10 +46,12 @@ const BUILD_ADAPTER = cfg.buildAdapter || 'codex-medium'
 const PLAN_ADAPTER = cfg.planAdapter || 'codex'
 const REVIEW_ADAPTER = cfg.reviewAdapter || 'codex-high'
 const TRIAGE_ADAPTER = cfg.triageAdapter || 'codex'
+const ASSESSMENT_ADAPTER = cfg.assessmentAdapter || REVIEW_ADAPTER
 const BUILD_MODEL = cfg.buildModel || 'gpt-5.5'
 const PLAN_MODEL = cfg.planModel || 'gpt-5.5@high'
 const REVIEW_MODEL = cfg.reviewModel || 'gpt-5.5'
 const TRIAGE_MODEL = cfg.triageModel || 'gpt-5.5@high'
+const ASSESSMENT_MODEL = cfg.assessmentModel || REVIEW_MODEL
 const SPARK_DELEGATION_GUIDANCE =
   "You are free to delegate to the `wyvern` 5.3 codex spark subagent for bounded read-only tasks on known surfaces as needed. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
 const SCRUTINEER_DELEGATION_GUIDANCE =
@@ -67,6 +71,10 @@ function reviewAgentOptions(options = {}) {
 
 function triageAgentOptions(options = {}) {
   return { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL, ...options }
+}
+
+function assessmentAgentOptions(options = {}) {
+  return { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL, ...options }
 }
 
 function shellQuote(value) {
@@ -234,6 +242,48 @@ const AUDIT_SCHEMA = {
   required: ['findings', 'summary'],
 }
 
+const ASSESSMENT_CLASSIFICATIONS = [
+  'adopt-complete',
+  'adopt-partial',
+  'continue-manual',
+  'discard',
+]
+
+const ASSESSMENT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    classification: { type: 'string', enum: ASSESSMENT_CLASSIFICATIONS },
+    branchName: { type: 'string' },
+    worktreePath: { type: 'string' },
+    baseCommit: { type: 'string' },
+    currentCommit: { type: 'string' },
+    dirtyState: { type: 'string', enum: ['clean', 'dirty', 'unknown'] },
+    changedFiles: { type: 'array', items: { type: 'string' } },
+    taskScoped: { type: 'boolean' },
+    execPlan: { type: 'string' },
+    roadmap: { type: 'string' },
+    validation: { type: 'string' },
+    missingEvidence: { type: 'array', items: { type: 'string' } },
+    risks: { type: 'array', items: { type: 'string' } },
+    rationale: { type: 'string' },
+    recommendation: { type: 'string' },
+    nextActions: { type: 'array', items: { type: 'string' } },
+  },
+  required: [
+    'classification',
+    'branchName',
+    'worktreePath',
+    'baseCommit',
+    'currentCommit',
+    'dirtyState',
+    'changedFiles',
+    'missingEvidence',
+    'risks',
+    'recommendation',
+  ],
+}
+
 // ---------------------------------------------------------------------------
 // Deterministic roadmap selection
 // ---------------------------------------------------------------------------
@@ -283,6 +333,107 @@ function authFailureDetail(value) {
     /Run codex login/i,
   ]
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
+}
+
+function parseNameStatus(output) {
+  return String(output || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [status, firstPath, secondPath] = line.split(/\t+/)
+      return secondPath
+        ? { status, path: secondPath, oldPath: firstPath }
+        : { status, path: firstPath || '' }
+    })
+    .filter((entry) => entry.path)
+}
+
+function parsePorcelainDirty(output) {
+  return String(output || '')
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .flatMap((line) => {
+      const status = line.slice(0, 2)
+      const pathText = line.slice(3).trim()
+      if (!pathText) return []
+      if (status === '??') return [{ status, path: pathText }]
+      if (status[1] && status[1] !== ' ') return [{ status: status[1], path: pathText }]
+      return []
+    })
+}
+
+async function gitEvidence(worktreePath, commandArgs, parse = (text) => String(text || '').trim()) {
+  const result = await execFileStatus('git', ['-C', worktreePath, ...commandArgs])
+  if (result.ok) {
+    return { ok: true, value: parse(result.stdout) }
+  }
+  return {
+    ok: false,
+    value: parse(result.stdout),
+    error: [result.message, result.stderr, result.stdout].filter(Boolean).join('\n').trim(),
+  }
+}
+
+async function collectAssessmentEvidence(task, wt) {
+  const worktreePath = wt?.worktreePath || ''
+  const baseCommit = wt?.baseSha || ''
+  const branchName = wt?.branch || ''
+  const errors = []
+
+  const current = await gitEvidence(worktreePath, ['rev-parse', 'HEAD'])
+  if (!current.ok) errors.push(`rev-parse HEAD: ${current.error}`)
+
+  const branch = branchName
+    ? { ok: true, value: branchName }
+    : await gitEvidence(worktreePath, ['rev-parse', '--abbrev-ref', 'HEAD'])
+  if (!branch.ok) errors.push(`rev-parse --abbrev-ref HEAD: ${branch.error}`)
+
+  const status = await gitEvidence(worktreePath, ['status', '--porcelain=v1'])
+  if (!status.ok) errors.push(`status --porcelain=v1: ${status.error}`)
+
+  const committed = baseCommit
+    ? await gitEvidence(worktreePath, ['diff', '--name-status', `${baseCommit}...HEAD`], parseNameStatus)
+    : { ok: false, value: [], error: 'missing base commit' }
+  if (!committed.ok) errors.push(`diff base...HEAD: ${committed.error}`)
+
+  const dirty = await gitEvidence(worktreePath, ['diff', '--name-status'], parseNameStatus)
+  if (!dirty.ok) errors.push(`diff --name-status: ${dirty.error}`)
+
+  const staged = await gitEvidence(worktreePath, ['diff', '--cached', '--name-status'], parseNameStatus)
+  if (!staged.ok) errors.push(`diff --cached --name-status: ${staged.error}`)
+
+  const commits = baseCommit
+    ? await gitEvidence(worktreePath, ['log', '--oneline', '--max-count=20', `${baseCommit}..HEAD`], (text) => String(text || '').trim().split(/\r?\n/).filter(Boolean))
+    : { ok: false, value: [], error: 'missing base commit' }
+  if (!commits.ok) errors.push(`log base..HEAD: ${commits.error}`)
+
+  const untrackedOrModified = parsePorcelainDirty(status.value)
+  const dirtyChanges = [
+    ...dirty.value,
+    ...untrackedOrModified.filter((entry) => !dirty.value.some((item) => item.path === entry.path)),
+  ]
+  const allChanged = new Set([
+    ...committed.value.map((entry) => entry.path),
+    ...dirtyChanges.map((entry) => entry.path),
+    ...staged.value.map((entry) => entry.path),
+  ])
+
+  return {
+    taskId: task?.id || '',
+    taskTitle: task?.title || '',
+    branchName: branch.value || branchName,
+    worktreePath,
+    baseCommit,
+    currentCommit: current.value || '',
+    dirtyState: status.ok ? (String(status.value || '').trim() ? 'dirty' : 'clean') : 'unknown',
+    changedFiles: [...allChanged].sort(),
+    committedChanges: committed.value,
+    dirtyChanges,
+    stagedChanges: staged.value,
+    recentCommits: commits.value,
+    collectionErrors: errors.filter(Boolean),
+  }
 }
 
 async function runAuthPreflight() {
@@ -818,6 +969,75 @@ function auditPrompt(task, worktree) {
   ].join('\n')
 }
 
+function assessmentPrompt(task, wt, result, evidence) {
+  return [
+    preamble(wt.worktreePath),
+    `TASK: Assess the surviving task branch for roadmap task ${task.id} ("${task.title}") after a workflow failure.`,
+    '',
+    'This is a READ-ONLY recovery assessment. Do not edit files, commit, stash, merge, cherry-pick, push, delete worktrees, mark roadmap checkboxes, or run any command that mutates repository state. Do not resume or rely on the failed agent transcript. Inspect only durable state that exists on disk or in Git.',
+    '',
+    'Use ADR 002 (`docs/adr-002-assess-partial-task-branches.md`) as the classification contract. Return exactly one classification:',
+    '- `adopt-complete`: the branch satisfies the roadmap task success criterion, has an up-to-date ExecPlan, required gates are green, and can proceed through the ordinary review and integration path.',
+    '- `adopt-partial`: the branch contains a coherent useful slice, but the roadmap task must remain unchecked and the work should be preserved only through Git state.',
+    '- `continue-manual`: the branch is promising, but scope, roadmap state, validation, or review evidence needs operator judgement before any merge.',
+    '- `discard`: the branch is stale, unsafe, incoherent, unrelated, or too incomplete to keep.',
+    '',
+    'Assess evidence first:',
+    '- branch name, worktree path, base commit, and current commit;',
+    '- dirty-state summary;',
+    '- changed files and whether they are scoped to the task;',
+    '- ExecPlan status, progress notes, decision log, and retrospective state;',
+    '- roadmap checkbox state for the task;',
+    '- available validation evidence;',
+    '- missing validation or review evidence;',
+    '- safety risks and recommended operator next actions.',
+    '',
+    'Host-collected git evidence:',
+    '```json',
+    JSON.stringify(evidence, null, 2),
+    '```',
+    '',
+    'Original workflow failure result:',
+    '```json',
+    JSON.stringify(result, null, 2),
+    '```',
+    '',
+    'Return only the schema-bound assessment object. Free-text recommendations do not drive integration; make the enum classification and evidence fields precise.',
+  ].join('\n')
+}
+
+function shouldAssessFailure(result, wt) {
+  if (!ASSESS_PARTIAL_BRANCHES) return false
+  if (!wt?.branch || !wt?.worktreePath) return false
+  if (!result || !['failed', 'halted'].includes(result.status)) return false
+  if (result.stage === 'worktree' || result.stage === 'auth' || result.status === 'fatal-auth') return false
+  const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
+  return !authFailureDetail(detail)
+}
+
+async function attachAssessment(task, wt, result) {
+  if (!shouldAssessFailure(result, wt)) return result
+  phase('Assess')
+  const evidence = await collectAssessmentEvidence(task, wt)
+  try {
+    const assessment = await agent(assessmentPrompt(task, wt, result, evidence), assessmentAgentOptions({
+      phase: 'Assess',
+      label: `assess:${task.id}`,
+      schema: ASSESSMENT_SCHEMA,
+    }))
+    if (!assessment) {
+      return { ...result, assessmentError: 'assessment agent returned no structured output', assessmentEvidence: evidence }
+    }
+    return { ...result, assessment: { ...assessment, hostEvidence: evidence } }
+  } catch (error) {
+    return {
+      ...result,
+      assessmentError: (error && error.message) || String(error),
+      assessmentEvidence: evidence,
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Per-task pipeline
 // ---------------------------------------------------------------------------
@@ -834,6 +1054,7 @@ async function runTask(task, mergeLock) {
   const worktree = wt.worktreePath
   log(`[task ${tag}] worktree ${wt.branch} @ ${worktree}`)
 
+  try {
   // --- Addendum pass: lightweight lane (no plan / design / dual review) ----
   // A completed task with open sub-tasks: implement the sub-tasks, gate, and
   // merge. No audit afterwards (the control loop skips it), which is what stops
@@ -856,7 +1077,7 @@ async function runTask(task, mergeLock) {
     const openIssues = impl?.openIssues || []
     const onlyDeferredReviewIssues = hasOnlyDeferredReviewIssues(openIssues)
     if (!impl || !impl.ok || !impl.gatesGreen || (openIssues.length > 0 && !onlyDeferredReviewIssues)) {
-      return { id: tag, status: 'failed', stage: 'addendum', detail: impl?.summary || 'addendum did not reach a green state or left open issues', openIssues: impl?.openIssues || [], worktree, proposals: [], kind: 'addendum' }
+      return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: impl?.summary || 'addendum did not reach a green state or left open issues', openIssues: impl?.openIssues || [], worktree, proposals: [], kind: 'addendum' })
     }
     const proposals = []
     let addendumReview = null
@@ -868,7 +1089,7 @@ async function runTask(task, mergeLock) {
       }
       const blocking = addendumReview?.blocking || []
       if (!addendumReview || addendumReview.verdict !== 'pass' || blocking.length > 0) {
-        return { id: tag, status: 'halted', stage: 'addendum-review', detail: blocking.join('; ') || addendumReview?.summary || 'addendum fallback review did not pass', impl, addendumReview, worktree, proposals, kind: 'addendum' }
+        return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: blocking.join('; ') || addendumReview?.summary || 'addendum fallback review did not pass', impl, addendumReview, worktree, proposals, kind: 'addendum' })
       }
       log(`[task ${tag}] addendum fallback review passed after deferred CodeRabbit review`)
     }
@@ -880,7 +1101,7 @@ async function runTask(task, mergeLock) {
       }
       integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
       if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
-        return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, kind: 'addendum' }
+        return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, kind: 'addendum' })
       }
     } else {
       return { id: tag, status: 'manual-merge-ready', impl, addendumReview, integration, worktree, proposals, kind: 'addendum' }
@@ -898,7 +1119,7 @@ async function runTask(task, mergeLock) {
       label: `plan:${tag} r${round}`,
       schema: PLAN_SCHEMA,
     }))
-    if (!plan) return { id: tag, status: 'failed', stage: 'plan', detail: 'planner returned nothing', proposals: [] }
+    if (!plan) return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'plan', detail: 'planner returned nothing', worktree, proposals: [] })
 
     phase('Design Review')
     designVerdict = await agent(designReviewPrompt(task, worktree, plan, round), reviewAgentOptions({
@@ -912,14 +1133,14 @@ async function runTask(task, mergeLock) {
     }
     log(`[task ${tag}] design round ${round}: ${(designVerdict?.blocking || []).length} blocking point(s)`)
     if (round === MAX_DESIGN_ROUNDS) {
-      return {
+      return await attachAssessment(task, wt, {
         id: tag,
         status: 'halted',
         stage: 'design-review',
         detail: `design review unsatisfied after ${MAX_DESIGN_ROUNDS} rounds: ${(designVerdict?.blocking || []).join('; ')}`,
         worktree,
         proposals: [],
-      }
+      })
     }
   }
 
@@ -943,7 +1164,7 @@ async function runTask(task, mergeLock) {
     schema: IMPL_SCHEMA,
   }))
   if (!impl || !impl.ok || !impl.gatesGreen) {
-    return {
+    return await attachAssessment(task, wt, {
       id: tag,
       status: 'failed',
       stage: 'implement',
@@ -951,7 +1172,7 @@ async function runTask(task, mergeLock) {
       openIssues: impl?.openIssues || [],
       worktree,
       proposals: [],
-    }
+    })
   }
 
   // --- Dual review (code-review + experts) with fix loop ------------------
@@ -970,14 +1191,14 @@ async function runTask(task, mergeLock) {
         !codeReview ? 'code review' : null,
         !expertReview ? 'expert review' : null,
       ].filter(Boolean).join(' and ')
-      return {
+      return await attachAssessment(task, wt, {
         id: tag,
         status: 'failed',
         stage: 'review',
         detail: `dual review failed to return a structured verdict from ${missing}; branch left unmerged for the root agent`,
         worktree,
         proposals,
-      }
+      })
     }
     const blocking = [
       ...(codeReview.blocking || []),
@@ -995,7 +1216,7 @@ async function runTask(task, mergeLock) {
   }
 
   if (!reviewsPass) {
-    return { id: tag, status: 'halted', stage: 'review', detail: 'reviewers not satisfied within cap; branch left unmerged for the root agent', worktree, proposals }
+    return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'review', detail: 'reviewers not satisfied within cap; branch left unmerged for the root agent', worktree, proposals })
   }
 
   // --- Integrate (serialized behind the merge queue) ----------------------
@@ -1010,13 +1231,26 @@ async function runTask(task, mergeLock) {
     }
     integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
     if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
-      return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals }
+      return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals })
     }
   } else {
     return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals }
   }
 
   return { id: tag, status: 'done', plan, impl, integration, worktree, proposals }
+  } catch (error) {
+    const detail = `unhandled agent error: ${(error && error.message) || String(error)}`
+    const authDetail = authFailureDetail(detail)
+    const result = {
+      id: tag,
+      status: authDetail ? 'fatal-auth' : 'failed',
+      stage: authDetail ? 'auth' : 'error',
+      detail,
+      worktree,
+      proposals: [],
+    }
+    return await attachAssessment(task, wt, result)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1357,6 +1591,16 @@ if (canFlush) {
   }
 }
 const pendingProposals = [...pendingByStep.values()].flat()
+const assessments = results
+  .filter((result) => result.assessment || result.assessmentError)
+  .map((result) => ({
+    id: result.id,
+    stage: result.stage,
+    status: result.status,
+    classification: result.assessment?.classification || '',
+    recommendation: result.assessment?.recommendation || '',
+    assessmentError: result.assessmentError || '',
+  }))
 
 return {
   base: BASE,
@@ -1366,10 +1610,12 @@ return {
     plan: { adapter: PLAN_ADAPTER, model: PLAN_MODEL },
     review: { adapter: REVIEW_ADAPTER, model: REVIEW_MODEL },
     triage: { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL },
+    assessment: { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL },
   },
   maxParallel: MAX_PARALLEL,
   processed,
   results,
+  assessments,
   audits,
   authPreflight,
   // Remediation GIST-triaged into addendum / step-task / reroute lanes when each
@@ -1381,6 +1627,7 @@ return {
   summary:
     `Processed ${processed.length} roadmap task(s) (pool width ${MAX_PARALLEL}): ` +
     results.map((r) => `${r.id}=${r.status}`).join(', ') +
+    (assessments.length ? ` | assessed ${assessments.length} failed/halted branch(es)` : '') +
     (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : '') +
     (halted ? ` | halted: ${halted}` : ' | clean stop (no more unblocked tasks).'),
 }
