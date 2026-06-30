@@ -110,6 +110,9 @@ The sidecar contract is documented at three levels:
   keep documentation synchronized.
 - `docs/adr-001-adopt-odw-sidecar-launches.md` records the architectural
   decision to use ODW sidecar launches for Codex-oriented runs.
+- `docs/adr-002-assess-partial-task-branches.md` records the proposed
+  assessment stage for preserving useful partial task branches without resuming
+  transient agent transcripts.
 
 Changes to launch behaviour, sidecar artefacts, configuration arguments, or
 agent-routing defaults must update all affected layers in the same branch.

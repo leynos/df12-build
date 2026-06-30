@@ -15,6 +15,8 @@ Read these before changing launch or workflow behaviour:
   access, prompt-injection risk, and sandbox recommendations.
 - `docs/adr-001-adopt-odw-sidecar-launches.md` for the accepted sidecar launch
   decision.
+- `docs/adr-002-assess-partial-task-branches.md` for the proposed partial
+  branch assessment and adoption model.
 - `docs/users-guide.md` for the public launch flow and configuration surface.
 - `skills/df12-build-supervisor/SKILL.md` for the detailed operator playbook.
 - `workflows/df12-build-odw.js` for the ODW/Codex workflow implementation.
@@ -37,6 +39,8 @@ Relevant paths:
 - `docs/developers-guide.md`: contributor-facing maintenance guide.
 - `docs/architecture.md`: design-level sidecar and workflow contract.
 - `docs/adr-001-adopt-odw-sidecar-launches.md`: accepted launch decision.
+- `docs/adr-002-assess-partial-task-branches.md`: proposed recovery assessment
+  decision.
 
 If a future branch adds `docs/roadmap.md` or `docs/execplans/`, update the
 matching task or ExecPlan whenever the branch lands planned work.
@@ -110,6 +114,7 @@ git diff --check "$(git merge-base HEAD origin/main)..HEAD" 2>&1 \
 markdownlint-cli2 AGENTS.md docs/users-guide.md docs/developers-guide.md \
   docs/security-and-permissions.md docs/architecture.md \
   docs/adr-001-adopt-odw-sidecar-launches.md \
+  docs/adr-002-assess-partial-task-branches.md \
   skills/df12-build-supervisor/SKILL.md 2>&1 \
   | tee "/tmp/markdownlint-${project_slug}-${rev}.out"
 ```
