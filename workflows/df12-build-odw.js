@@ -41,13 +41,13 @@ const BUDGET_RESERVE = 80_000 // stop opening new tasks when remaining budget fa
 const GREPAI_WORKSPACE = cfg.grepaiWorkspace || 'Projects'
 const GREPAI_PROJECT = cfg.grepaiProject || cfg.project || null // canonical main-branch GrepAI project; set this when source is a worktree
 const BUILD_ADAPTER = cfg.buildAdapter || 'codex-medium'
-const PLAN_ADAPTER = cfg.planAdapter || 'codex-high'
+const PLAN_ADAPTER = cfg.planAdapter || 'codex'
 const REVIEW_ADAPTER = cfg.reviewAdapter || 'codex-high'
-const TRIAGE_ADAPTER = cfg.triageAdapter || 'codex-high'
+const TRIAGE_ADAPTER = cfg.triageAdapter || 'codex'
 const BUILD_MODEL = cfg.buildModel || 'gpt-5.5'
-const PLAN_MODEL = cfg.planModel || 'gpt-5.5'
+const PLAN_MODEL = cfg.planModel || 'gpt-5.5@high'
 const REVIEW_MODEL = cfg.reviewModel || 'gpt-5.5'
-const TRIAGE_MODEL = cfg.triageModel || PLAN_MODEL
+const TRIAGE_MODEL = cfg.triageModel || 'gpt-5.5@high'
 const SPARK_DELEGATION_GUIDANCE =
   "You are free to delegate to the `wyvern` 5.3 codex spark subagent for bounded read-only tasks on known surfaces as needed. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
 const SCRUTINEER_DELEGATION_GUIDANCE =
