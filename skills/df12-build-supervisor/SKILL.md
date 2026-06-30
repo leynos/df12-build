@@ -172,6 +172,33 @@ Every time a run completes you do the same loop:
 6. **Relaunch** from the durable script path. The run re-selects from the
    current `origin/BASE` roadmap — no resume needed.
 
+## Active invariant checks
+
+Do not only watch phase logs. At each check-in, verify that the workflow's
+claimed df12-build side effects exist in the real repository state. The
+supervisor is responsible for catching workshop loops that are spending rounds
+on impossible environment or orchestration faults.
+
+For every active `roadmap-*` worktree, check:
+
+- the worktree exists and is writable;
+- `git status --short --branch`;
+- `git log --oneline origin/BASE..HEAD`;
+- any returned `execplanPath` exists on disk;
+- advertised gate logs exist;
+- claimed commits, dirty files, or clean branches match the agent output.
+
+If a planner returns an ExecPlan path but the file is missing, inspect the
+child transcript immediately. Repeated missing ExecPlans usually indicate a
+sandbox, workspace-root, or worktree write failure, not an intractable roadmap
+task. Pause or stop the run and repair the workflow or environment rather than
+burning further design-review rounds.
+
+Treat design-review blockers as probably correct only after the reviewed
+artifact actually exists and is readable from the assigned worktree. If the
+reviewed artifact is absent, diagnose the missing side effect before editing
+the roadmap.
+
 ## Worked operator examples
 
 These are examples of the shapes you should recognize after context compaction.

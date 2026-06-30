@@ -106,6 +106,15 @@ The diagram has one important constraint: only the `Review -> Integrate` branch
 can mutate the target project, and it is reachable only when the operator opts
 into review-mode resume.
 
+The existing task phases remain responsible for writing into real task
+worktrees before any resume path can trust their durable state. Planning,
+review, implementation, fix, addendum, and integration agents must run with a
+writable root that includes the assigned `roadmap-*` worktree. If an adapter is
+launched with the control checkout as its only writable root while the task
+worktree is a sibling directory, the workflow can receive an `execplanPath`
+that was never created on disk. Recovery must treat that as a launch or sandbox
+fault, not as a reviewable task plan.
+
 ## Runtime configuration
 
 Add these ODW `args` fields:

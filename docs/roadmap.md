@@ -36,6 +36,16 @@ non-mutating.
     "Security and permissions".
   - Success: operators can distinguish assess-only recovery from review-mode
     resume before launching a run.
+- [ ] 1.1.3. Enforce writable task-agent roots for real git worktrees.
+  - Requires 1.1.1.
+  - See `docs/architecture.md` sections "Workflow structure" and "Enforcement
+    boundary".
+  - Ensure planning, review, implementation, fix, addendum, and integration
+    agents can read and write the assigned `roadmap-*` worktree rather than
+    only the control checkout.
+  - Success: a planner can create `docs/execplans/<branch-leaf>.md` in a
+    sibling task worktree, and design review reads that same on-disk artifact
+    before judging the plan.
 
 ### 1.2. Discover candidates without mutating the target project
 
