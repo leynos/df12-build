@@ -194,6 +194,16 @@ sandbox, workspace-root, or worktree write failure, not an intractable roadmap
 task. Pause or stop the run and repair the workflow or environment rather than
 burning further design-review rounds.
 
+Known concrete failure:
+
+- Symptom: agents repeatedly return missing or unwritten plan or changed-file
+  paths under sibling worktrees.
+- Cause: Codex was launched with `--cd` at the control checkout, so
+  `workspace-write` rejects writes to sibling worktrees.
+- Fix: launch task agents with the assigned git worktree as their execution
+  root, or configure the adapter to include the worktree parent as an allowed
+  writable root.
+
 Treat design-review blockers as probably correct only after the reviewed
 artifact actually exists and is readable from the assigned worktree. If the
 reviewed artifact is absent, diagnose the missing side effect before editing
