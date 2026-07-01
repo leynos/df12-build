@@ -180,7 +180,8 @@ Every time a run completes you do the same loop:
    produced `remediationTriage`, `pendingProposals`, audit findings, addenda, or
    any roadmap restructure work, load `roadmap-grooming` together with
    `roadmap-doc` before changing `docs/roadmap.md`. This is a supervisor
-   requirement, not an optional clean-up pass.
+   requirement, not an optional clean-up pass. Do not groom merely because a
+   normal run is in progress; use the trigger thresholds below.
 6. **Relaunch** from the durable script path. The run re-selects from the
    current `origin/BASE` roadmap — no resume needed.
 
@@ -510,6 +511,36 @@ restructuring). While a run may be live:
   resolves, gates green, and the unrelated phases are untouched. Measure twice.
 - **Place new work at step boundaries** (`phase.step.task`), live and
   fix-debt-first, so the pool picks it up on the next refill.
+
+
+## Roadmap grooming thresholds
+
+Grooming is trigger-based, not time-based. A healthy roadmap should be left
+alone during ordinary supervision. Hourly check-ins should stay lightweight:
+sample roadmap health every few check-ins, or after a run reaches a terminal
+state, but do not run a broad grooming pass unless the roadmap has actually
+accreted new material or structural debt.
+
+Trigger a full grooming pass when any of these are true:
+
+- A run emits `remediationTriage`, `pendingProposals`, audit findings, addenda,
+  or explicit roadmap restructure work.
+- A phase grows past roughly five or six open steps.
+- Two or more single-task steps accrue in the same phase.
+- Two or more same-theme refactor, hardening, or reconciliation fragments sit
+  unconsolidated.
+- Capability work appears inside a refactor, hardening, or reconciliation
+  phase.
+
+Do not groom merely because there is one active task, one partial ExecPlan, a
+normal dependency chain, or a roadmap that still looks structurally coherent.
+Those are ordinary workshop states, not grooming signals.
+
+Trigger local task repair immediately when a workflow blocker is caused by
+ambiguous roadmap wording. Keep that repair narrow: clarify the task's expected
+fixture updates, success criterion, or contract text, then relaunch. A
+design-review-discarded task whose fixture expectations were implicit is a
+targeted task clarification, not a broad roadmap grooming pass.
 
 ## Feeding back remediation, and the bucket-inflation trap
 
