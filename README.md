@@ -91,8 +91,7 @@ ______________________________________________________________________
 
 ## Licence
 
-No licence file is currently checked in. Add a `LICENSE` file before
-redistributing this project outside df12 Productions.
+ISC — see [LICENSE](LICENSE) for details.
 
 ______________________________________________________________________
 
