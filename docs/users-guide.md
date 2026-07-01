@@ -36,6 +36,12 @@ Keep these files together in the sidecar:
 - `operator-notes.md`: the run id, launch command, local sidecar patches,
   validation notes, health checks, failures, and operator decisions.
 
+Set `concurrency` to `16` in `odw.config.json` for normal Codex workshops. That
+leaves room for an eight-task worker pool, four planning-stage agents, four
+build-stage agents, and review, triage, audit, or assessment slack. Keep
+`maxAgents` high, such as the ODW default of `1000`, because it is the
+per-run dispatch guard rather than the live process-pool size.
+
 Patch the sidecar copy only to recover or tune a live workshop. Record the patch
 in `operator-notes.md`, validate it there, then promote the proven change back
 to the `df12-build` repository through a normal branch.
@@ -176,8 +182,11 @@ Common arguments:
 - `memtraceRepoId`: canonical Memtrace repository id. Set this, or set
   `searchBackend` to `memtrace`, when GrepAI is unavailable on the host.
 - `coderabbitReviewCommand`: CodeRabbit command used in implementation prompts.
-  Defaults to `timeout 300s coderabbit review --agent`.
-- `maxParallel`: worker pool width. Defaults to `2` unless `taskId` is set.
+  Defaults to `coderabbit review --agent`.
+- `maxParallel`: task worker-pool width. Defaults to `8` unless `taskId` is
+  set.
+- `maxPlanningParallel`: concurrent planning-stage agents. Defaults to `4`.
+- `maxBuildParallel`: concurrent build-stage agents. Defaults to `4`.
 - `maxTasks`: maximum roadmap tasks for one run.
 - `maxDesignRounds`: planning and design-review exchange cap. Defaults to `4`.
 - `maxReviewRounds`: implementation review/fix exchange cap. Defaults to `3`.
@@ -209,8 +218,10 @@ Example `args.json`:
   "searchBackend": "grepai",
   "grepaiWorkspace": "Projects",
   "grepaiProject": "example-project",
-  "maxParallel": 2,
-  "maxTasks": 6,
+  "maxParallel": 8,
+  "maxPlanningParallel": 4,
+  "maxBuildParallel": 4,
+  "maxTasks": 12,
   "buildAdapter": "codex-medium",
   "buildModel": "gpt-5.5",
   "planAdapter": "codex-high",

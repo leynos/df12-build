@@ -38,7 +38,9 @@ const DESIGN_DOCS = cfg.designDocs || 'the design document(s) and the ADRs (docs
 const RESEARCH_NOTE = cfg.researchNote || null // optional project-specific external-library research note (e.g. a vendored lib source path to verify against)
 const ONLY_TASK = cfg.taskId || null // process exactly one named roadmap id (e.g. "1.2.1")
 const MAX_TASKS = ONLY_TASK ? 1 : cfg.maxTasks || 12 // hard ceiling on roadmap steps per run
-const MAX_PARALLEL = ONLY_TASK ? 1 : Math.max(1, cfg.maxParallel || 2) // worker-pool width: tasks built concurrently. Default 2 to keep coderabbit (a shared, rate-limited quota) from saturating and timing out tasks. Agents are globally capped at min(16, cores-2).
+const MAX_PARALLEL = ONLY_TASK ? 1 : Math.max(1, cfg.maxParallel || 8) // worker-pool width: tasks in flight. Defaults to 8 so planning/review and build can overlap.
+const MAX_PLANNING_PARALLEL = Math.max(1, cfg.maxPlanningParallel || cfg.maxPlanParallel || 4) // concurrent planning-stage agents.
+const MAX_BUILD_PARALLEL = Math.max(1, cfg.maxBuildParallel || 4) // concurrent build-stage agents.
 const MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4 // plan <-> design-review exchanges before halting
 const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review cycles
 const AUTO_MERGE = cfg.autoMerge !== false // false => stop after review, leave branch for manual merge
@@ -62,11 +64,13 @@ const PLAN_MODEL = cfg.planModel || 'gpt-5.5@high'
 const REVIEW_MODEL = cfg.reviewModel || 'gpt-5.5'
 const TRIAGE_MODEL = cfg.triageModel || 'gpt-5.5@high'
 const ASSESSMENT_MODEL = cfg.assessmentModel || REVIEW_MODEL
-const CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || 'timeout 300s coderabbit review --agent'
+const CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || 'coderabbit review --agent'
+const CODERABBIT_REVIEW_GUIDANCE =
+  'Use `coderabbit review --agent` to validate your work after each major milestone, and clear all concerns prior to moving onto the next. It is important that all applicable code quality and correctness gates succeed **before** each CodeRabbit review is requested, as CodeRabbit should not be used for errors that can be caught deterministically. If the CodeRabbit rate limit is exceeded, sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt.'
 const SPARK_DELEGATION_GUIDANCE =
   "You are free to delegate to the `wyvern` 5.3 codex spark subagent for bounded read-only tasks on known surfaces as needed. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
 const SCRUTINEER_DELEGATION_GUIDANCE =
-  `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. If CodeRabbit exits via the timeout while still only at \`connecting_to_review_service\` with no findings and no quoted rate-limit wait, record the log path and elapsed time, and treat it as a deferred CodeRabbit review rather than retrying indefinitely.`
+  `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`
 
 function buildAgentOptions(options = {}) {
   return { adapter: BUILD_ADAPTER, model: BUILD_MODEL, ...options }
@@ -839,7 +843,7 @@ function implementPrompt(task, worktree, plan) {
     '  1. Implement the work item (code + tests + docs) per the plan and AGENTS.md.',
     '  2. DETERMINISTIC GATE FIRST: summon `scrutineer` to run `make all` (which includes typecheck on current `origin/main`). If it reports failures, fix them yourself (format, lint, typecheck, tests, audit) and summon `scrutineer` again until green. For any markdown you touched, also have `scrutineer` run `make markdownlint` and `make nixie` and fix failures. Do not proceed to coderabbit until the deterministic gates are green.',
     `  3. THEN summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. Address actionable feedback yourself (highest severity first). After applying fixes, summon \`scrutineer\` again to re-run \`make all\` and confirm the deterministic gates are still green.`,
-    '     - If coderabbit reports a rate limit, READ the quoted wait time from its response (it usually states one, e.g. "waitTime ~16 min" or "retry after N"). Do NOT retry before that window elapses — earlier retries are guaranteed to fail and only burn the turn. Wait the quoted duration plus a small margin (via sleep), then retry ONCE. If no time is quoted, fall back to exponential backoff (30s, 60s, 120s, 240s, 480s, cap ~900s). If the quoted wait would not fit your remaining turn budget, do NOT sit in a doomed wait: the deterministic gates already passed, so record the deferred coderabbit review in the execplan and openIssues for a later run to complete before committing.',
+    `     - ${CODERABBIT_REVIEW_GUIDANCE}`,
     '  4. Update the execplan IN PLACE with findings, progress (tick the work item), and any decisions or deviations, with rationale.',
     '  5. Commit the work item and the execplan update together as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).',
     '',
@@ -862,7 +866,7 @@ function fixPrompt(task, worktree, plan, blocking, round) {
     'The dual review returned the following BLOCKING items. Resolve every one:',
     ...blocking.map((b, i) => `  ${i + 1}. ${b}`),
     '',
-    `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gate (\`make all\`, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND}\` (on a rate limit, wait the quoted wait time before retrying — never retry before that window elapses — and if the quoted wait exceeds your turn, commit and record the deferred review), then an atomic commit, then update the execplan with what changed and why. Do not introduce scope beyond the blocking items.`,
+    `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gate (\`make all\`, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND}\`, then an atomic commit, then update the execplan with what changed and why. ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
   ].join('\n')
 }
 
@@ -937,7 +941,7 @@ function implementAddendumPrompt(task, worktree) {
     'For EACH open sub-task, in id order:',
     '  1. Make ONLY the change the Addenda item describes. Do not expand scope.',
     '  2. DETERMINISTIC GATE: summon `scrutineer` to run `make all` (which includes typecheck on current `origin/main`). For any Markdown you touched, also have it run `make markdownlint` and `make nixie`. Fix until green.',
-    `  3. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to re-run \`make all\` and confirm green. On a coderabbit rate limit, read the QUOTED wait time from its response and wait at least that long before retrying (do NOT retry before that window elapses — it cannot succeed); if no time is quoted use exponential backoff (30s, 60s, 120s, 240s, 480s, cap ~900s); if the wait exceeds your turn, record the deferred review in openIssues before committing the gated work.`,
+    `  3. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to re-run \`make all\` and confirm green. ${CODERABBIT_REVIEW_GUIDANCE}`,
     `  4. Tick the sub-task in the Addenda checklist of its execplan (\`- [ ] ${task.id}.<n>\` → \`- [x] …\`).`,
     '  5. Commit the sub-task and Addenda tick together as one atomic commit (en-GB imperative subject).',
     '',
@@ -1113,7 +1117,7 @@ async function runTask(task, mergeLock) {
     }
 
     phase('Implement')
-    const impl = await agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: 'Implement', label: `addendum:${tag}`, schema: IMPL_SCHEMA }))
+    const impl = await buildLock(() => agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: 'Implement', label: `addendum:${tag}`, schema: IMPL_SCHEMA })))
     const authDetail = implementationAuthFailureDetail(impl)
     if (authDetail) {
       return {
@@ -1150,7 +1154,7 @@ async function runTask(task, mergeLock) {
     if (AUTO_MERGE) {
       const doIntegrate = () => {
         phase('Integrate')
-        return agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA }))
+        return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
       }
       integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
       if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
@@ -1167,19 +1171,19 @@ async function runTask(task, mergeLock) {
   let designVerdict = null
   for (let round = 1; round <= MAX_DESIGN_ROUNDS; round++) {
     phase('Plan')
-    plan = await agent(planPrompt(task, worktree, designVerdict, round), planAgentOptions({
+    plan = await planningLock(() => agent(planPrompt(task, worktree, designVerdict, round), planAgentOptions({
       phase: 'Plan',
       label: `plan:${tag} r${round}`,
       schema: PLAN_SCHEMA,
-    }))
+    })))
     if (!plan) return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'plan', detail: 'planner returned nothing', worktree, proposals: [] })
 
     phase('Design Review')
-    designVerdict = await agent(designReviewPrompt(task, worktree, plan, round), reviewAgentOptions({
+    designVerdict = await planningLock(() => agent(designReviewPrompt(task, worktree, plan, round), reviewAgentOptions({
       phase: 'Design Review',
       label: `design-review:${tag} r${round}`,
       schema: DESIGN_VERDICT_SCHEMA,
-    }))
+    })))
     if (designVerdict?.satisfied) {
       log(`[task ${tag}] design approved in round ${round}`)
       break
@@ -1211,11 +1215,11 @@ async function runTask(task, mergeLock) {
 
   // --- Implement ----------------------------------------------------------
   phase('Implement')
-  const impl = await agent(implementPrompt(task, worktree, plan), buildAgentOptions({
+  const impl = await buildLock(() => agent(implementPrompt(task, worktree, plan), buildAgentOptions({
     phase: 'Implement',
     label: `implement:${tag}`,
     schema: IMPL_SCHEMA,
-  }))
+  })))
   const authDetail = implementationAuthFailureDetail(impl)
   if (authDetail) {
     return {
@@ -1277,7 +1281,7 @@ async function runTask(task, mergeLock) {
     log(`[task ${tag}] review round ${round}: ${blocking.length} blocking item(s)`)
     if (round === MAX_REVIEW_ROUNDS) break
     phase('Implement')
-    await agent(fixPrompt(task, worktree, plan, blocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}` }))
+    await buildLock(() => agent(fixPrompt(task, worktree, plan, blocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}` })))
   }
 
   if (!reviewsPass) {
@@ -1292,7 +1296,7 @@ async function runTask(task, mergeLock) {
   if (AUTO_MERGE) {
     const doIntegrate = () => {
       phase('Integrate')
-      return agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA }))
+      return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
     }
     integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
     if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
@@ -1443,6 +1447,34 @@ function mutex() {
   }
 }
 const mergeLock = mutex()
+
+function semaphore(limit) {
+  const max = Math.max(1, limit)
+  const queue = []
+  let active = 0
+
+  const drain = () => {
+    while (active < max && queue.length) {
+      const item = queue.shift()
+      active += 1
+      Promise.resolve()
+        .then(item.fn)
+        .then(item.resolve, item.reject)
+        .finally(() => {
+          active -= 1
+          drain()
+        })
+    }
+  }
+
+  return (fn) => new Promise((resolve, reject) => {
+    queue.push({ fn, resolve, reject })
+    drain()
+  })
+}
+
+const planningLock = semaphore(MAX_PLANNING_PARALLEL)
+const buildLock = semaphore(MAX_BUILD_PARALLEL)
 
 let selectSeq = 0
 async function doSelect(taken) {
@@ -1678,6 +1710,8 @@ return {
     assessment: { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL },
   },
   maxParallel: MAX_PARALLEL,
+  maxPlanningParallel: MAX_PLANNING_PARALLEL,
+  maxBuildParallel: MAX_BUILD_PARALLEL,
   processed,
   results,
   assessments,

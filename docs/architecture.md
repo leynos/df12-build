@@ -102,9 +102,9 @@ The key argument groups are:
 - Target-project pointers: `base`, `roadmap`, `designDocs`, and `researchNote`.
 - Search routing: `searchBackend`, `grepaiWorkspace`, `grepaiProject`,
   `memtraceRepoId`, and the `project` alias.
-- Run bounds: `taskId`, `maxTasks`, `maxParallel`, `maxDesignRounds`,
-  `maxReviewRounds`, `dryRun`, `autoMerge`, `documentAudit`, and
-  `assessPartialBranches`.
+- Run bounds: `taskId`, `maxTasks`, `maxParallel`, `maxPlanningParallel`,
+  `maxBuildParallel`, `maxDesignRounds`, `maxReviewRounds`, `dryRun`,
+  `autoMerge`, `documentAudit`, and `assessPartialBranches`.
 - Agent routing: `buildAdapter`/`buildModel`, `planAdapter`/`planModel`, and
   `reviewAdapter`/`reviewModel`.
 - Assessment routing: `assessmentAdapter`/`assessmentModel`, defaulting to the

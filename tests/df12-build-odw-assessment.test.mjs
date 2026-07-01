@@ -129,7 +129,7 @@ test('normal and addendum implementations gate auth before integration', async (
   )
   assert.match(
     source,
-    /const impl = await agent\(implementPrompt\(task, worktree, plan\)[\s\S]*?const authDetail = implementationAuthFailureDetail\(impl\)[\s\S]*?status: 'fatal-auth'/,
+    /const impl = await buildLock\(\(\) => agent\(implementPrompt\(task, worktree, plan\)[\s\S]*?const authDetail = implementationAuthFailureDetail\(impl\)[\s\S]*?status: 'fatal-auth'/,
   )
 })
 

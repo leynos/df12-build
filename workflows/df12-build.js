@@ -28,13 +28,15 @@ const DESIGN_DOCS = cfg.designDocs || 'the design document(s) and the ADRs (docs
 const RESEARCH_NOTE = cfg.researchNote || null // optional project-specific external-library research note (e.g. a vendored lib source path to verify against)
 const ONLY_TASK = cfg.taskId || null // process exactly one named roadmap id (e.g. "1.2.1")
 const MAX_TASKS = ONLY_TASK ? 1 : cfg.maxTasks || 12 // hard ceiling on roadmap steps per run
-const MAX_PARALLEL = ONLY_TASK ? 1 : Math.max(1, cfg.maxParallel || 2) // worker-pool width: tasks built concurrently. Default 2 to keep coderabbit (a shared, rate-limited quota) from saturating and timing out tasks. Agents are globally capped at min(16, cores-2). Note: args do not currently reach scriptPath launches, so change THIS default to retune.
+const MAX_PARALLEL = ONLY_TASK ? 1 : Math.max(1, cfg.maxParallel || 8) // worker-pool width: tasks built concurrently. Note: args do not currently reach scriptPath launches, so change THIS default to retune.
 const MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4 // plan <-> design-review exchanges before halting
 const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review cycles
 const AUTO_MERGE = cfg.autoMerge !== false // false => stop after review, leave branch for manual merge
 const DOCUMENT_AUDIT = cfg.documentAudit !== false // false => return audit findings only, write nothing
 const DRY_RUN = cfg.dryRun === true // plan/review/audit only; skip implement, merge, and doc writes
 const BUDGET_RESERVE = 80_000 // stop opening new tasks when remaining budget falls below this
+const CODERABBIT_REVIEW_GUIDANCE =
+  'Use `coderabbit review --agent` to validate your work after each major milestone, and clear all concerns prior to moving onto the next. It is important that all applicable code quality and correctness gates succeed **before** each CodeRabbit review is requested, as CodeRabbit should not be used for errors that can be caught deterministically. If the CodeRabbit rate limit is exceeded, sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt.'
 const WYVERN_DELEGATION_GUIDANCE =
   "You are free to delegate to the `wyvern` subagent for bounded read-only tasks on known surfaces as needed. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
 
@@ -334,7 +336,7 @@ function implementPrompt(task, worktree, plan) {
     '  1. Implement the work item (code + tests + docs) per the plan and AGENTS.md.',
     '  2. DETERMINISTIC GATE FIRST: run `make all`. If it fails, fix the failures (format, lint, typecheck, tests, audit) and re-run until green. For any markdown you touched, also run `make markdownlint` and `make nixie` and fix failures. Do not proceed to coderabbit until the deterministic gates are green.',
     '  3. THEN run `coderabbit review --agent` from inside the worktree. Address its actionable feedback (highest severity first). After applying fixes, re-run `make all` to confirm the deterministic gates are still green.',
-    '     - If coderabbit reports a rate limit, READ the quoted wait time from its response (it usually states one, e.g. "waitTime ~16 min" or "retry after N"). Do NOT retry before that window elapses — earlier retries are guaranteed to fail and only burn the turn. Wait the quoted duration plus a small margin (via sleep), then retry ONCE. If no time is quoted, fall back to exponential backoff (30s, 60s, 120s, 240s, 480s, cap ~900s). If the quoted wait would not fit your remaining turn budget, do NOT sit in a doomed wait: the deterministic gates already passed, so commit the work item now and record the deferred coderabbit review in the execplan and openIssues for a later run to complete.',
+    `     - ${CODERABBIT_REVIEW_GUIDANCE}`,
     '  4. Commit the work item as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).',
     '  5. Update the execplan IN PLACE with findings, progress (tick the work item), and any decisions or deviations, with rationale.',
     '',
@@ -355,7 +357,7 @@ function fixPrompt(task, worktree, plan, blocking, round) {
     'The dual review returned the following BLOCKING items. Resolve every one:',
     ...blocking.map((b, i) => `  ${i + 1}. ${b}`),
     '',
-    'Same per-change discipline as implementation: deterministic gate (`make all`, plus markdownlint/nixie for markdown) first and green, THEN `coderabbit review --agent` (on a rate limit, wait the quoted wait time before retrying — never retry before that window elapses — and if the quoted wait exceeds your turn, commit and record the deferred review), then an atomic commit, then update the execplan with what changed and why. Do not introduce scope beyond the blocking items.',
+    `Same per-change discipline as implementation: deterministic gate (\`make all\`, plus markdownlint/nixie for markdown) first and green, THEN \`coderabbit review --agent\`, then an atomic commit, then update the execplan with what changed and why. ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
   ].join('\n')
 }
 
@@ -401,7 +403,7 @@ function implementAddendumPrompt(task, worktree) {
     'For EACH open sub-task, in id order:',
     '  1. Make ONLY the change the Addenda item describes. Do not expand scope.',
     '  2. DETERMINISTIC GATE: run `make all`. For any Markdown you touched, also run `make markdownlint` and `make nixie`. Fix until green.',
-    '  3. Run `coderabbit review --agent` from inside the worktree; address actionable feedback (highest severity first); re-run `make all` to confirm green. On a coderabbit rate limit, read the QUOTED wait time from its response and wait at least that long before retrying (do NOT retry before that window elapses — it cannot succeed); if no time is quoted use exponential backoff (30s, 60s, 120s, 240s, 480s, cap ~900s); if the wait exceeds your turn, commit the gated work and record the deferred review in openIssues.',
+    `  3. Run \`coderabbit review --agent\` from inside the worktree; address actionable feedback (highest severity first); re-run \`make all\` to confirm green. ${CODERABBIT_REVIEW_GUIDANCE}`,
     '  4. Commit the sub-task as one atomic commit (en-GB imperative subject).',
     `  5. Tick the sub-task in the Addenda checklist of its execplan (\`- [ ] ${task.id}.<n>\` → \`- [x] …\`).`,
     '',

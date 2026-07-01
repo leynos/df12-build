@@ -106,6 +106,9 @@ provides the doc skills):
    truth. Patch the sidecar script during a live workshop when needed, validate
    it there, record the change in `operator-notes.md`, and later promote the
    proven change back to the `df12-build` repository as an ordinary branch.
+   For normal Codex workshops, set ODW `concurrency` to `16`; keep `maxAgents`
+   high (for example `1000`) because it is the per-run dispatch guard, not the
+   live process-pool size.
 3. **Launch ODW from the sidecar, with the project as `--source`.** Prefer the
    checked-in ODW/Codex workflow when running Codex agents:
 
@@ -125,8 +128,10 @@ provides the doc skills):
    project-specific external-library research pointer, e.g. a vendored lib's
    source path), `grepaiWorkspace`, `grepaiProject` (the canonical main-branch
    GrepAI project name; set this when agents run from sidecar or worktree
-   paths), `maxParallel` (pool width — default 2 to keep coderabbit from
-   saturating), `maxTasks`, `maxDesignRounds` (4), `maxReviewRounds` (3),
+   paths), `maxParallel` (task pool width — default 8),
+   `maxPlanningParallel` (planning-stage width — default 4),
+   `maxBuildParallel` (build-stage width — default 4), `maxTasks`,
+   `maxDesignRounds` (4), `maxReviewRounds` (3),
    `taskId` (run exactly one), `dryRun`, `autoMerge`, `documentAudit`,
    `assessPartialBranches`, `buildAdapter`/`buildModel`,
    `planAdapter`/`planModel`, `reviewAdapter`/`reviewModel`, and
@@ -290,7 +295,8 @@ Hoover worktrees, fast-forward `BASE`, run `make all`, and load
 - Project: `/data/leynos/Projects/example`
 - Sidecar: `/data/leynos/Projects/example.workshop/df12-build-20260629T101500Z-4242`
 - Base: `main`
-- Args: `maxParallel=2`, `maxTasks=4`, `autoMerge=true`
+- Args: `maxParallel=8`, `maxPlanningParallel=4`, `maxBuildParallel=4`,
+  `maxTasks=12`, `autoMerge=true`
 - Launch: `odw run "$SIDECAR/df12-build-odw.js" --source "$PROJECT" ...`
 - 10:22: `2.1.1` integrated; audit proposed one high-severity addendum.
 - 10:41: `2.1.2` halted at review; branch left unmerged.
