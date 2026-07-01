@@ -68,34 +68,89 @@ provides the doc skills):
 
 ## Launching a run
 
-1. **Keep the workflow script at a durable path OUTSIDE the repo working tree.**
-   `.claude/` is not `git clean -fdx`-proof — a clean run (by an agent or a
-   make target) will wipe it and can break a live run or a resume. Copy
-   `workflows/df12-build.js` to a stable location (e.g. under the session
-   directory) and launch from there with `Workflow({ scriptPath: "…" })`. If
-   the script is ever lost, recover its source from the run-metadata JSON
-   (`<session>/workflows/wf_<id>.json`, top-level `script` field).
-2. **Launch in the background** and let the harness notify you on completion (a
-   `task-notification`). Do **not** poll it — when harness-tracked work
-   finishes you are re-invoked automatically.
-3. **Config (the `args` object / top-of-file consts):** `base` (default `main`),
+1. **Create a `.workshop` sidecar outside the project Git worktree.** Use a
+   sibling directory named after the project, for example:
+
+   ```bash
+   PROJECT=/data/leynos/Projects/odw-lint
+   RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+   SIDECAR="${PROJECT}.workshop/df12-build-${RUN_ID}"
+   mkdir -p "$SIDECAR"
+   ```
+
+   The sidecar is the durable operator workspace for the run. It survives root
+   branch switches, `git clean -fdx`, workflow-created worktree cleanup, and
+   accidental cleanup under `.claude/`. Do not place durable scripts, configs,
+   or notes in `.claude/`, `/tmp`, the project source tree, or a
+   workflow-owned `...worktrees/roadmap-*` worktree.
+2. **Put all run-control artefacts in that sidecar.** At minimum keep:
+
+   - `df12-build-odw.js` — a copied workflow script that the live run executes.
+   - `odw.config.json` — adapter, model, workspace, and runtime settings.
+   - `args.json` — project-specific workflow args.
+   - `operator-notes.md` — run id, launch command, patches, validations,
+     status checks, failures, and operator decisions.
+
+   Bootstrap the workflow script once so later launches do not overwrite
+   sidecar-local recovery edits:
+
+   ```bash
+   if [ ! -e "$SIDECAR/df12-build-odw.js" ]; then
+     cp /path/to/df12-build/workflows/df12-build-odw.js \
+       "$SIDECAR/df12-build-odw.js"
+   fi
+   ```
+
+   Treat the sidecar as durable run state, not as source of truth for the
+   product repository. `origin/<BASE>` remains the only product source of
+   truth. Patch the sidecar script during a live workshop when needed, validate
+   it there, record the change in `operator-notes.md`, and later promote the
+   proven change back to the `df12-build` repository as an ordinary branch.
+   For normal Codex workshops, set ODW `concurrency` to `16`; keep `maxAgents`
+   high (for example `1000`) because it is the per-run dispatch guard, not the
+   live process-pool size.
+3. **Launch ODW from the sidecar, with the project as `--source`.** Prefer the
+   checked-in ODW/Codex workflow when running Codex agents:
+
+   ```bash
+   odw run "$SIDECAR/df12-build-odw.js" \
+     --source "$PROJECT" \
+     --config "$SIDECAR/odw.config.json" \
+     --args @"$SIDECAR/args.json"
+   ```
+
+   Start the run in the background and supervise it through `odw status`,
+   `odw logs`, `odw result`, and the dashboard. Keep periodic health notes in
+   `operator-notes.md`; the notes should be good enough for another operator
+   to continue after context compaction.
+4. **Config (the `args` object / top-of-file consts):** `base` (default `main`),
    `roadmap` (default `docs/roadmap.md`), `designDocs`, `researchNote` (a
    project-specific external-library research pointer, e.g. a vendored lib's
-   source path), `maxParallel` (pool width — default 2 to keep coderabbit from
-   saturating), `maxTasks`, `maxDesignRounds` (4), `maxReviewRounds` (3),
-   `taskId` (run exactly one), `dryRun`, `autoMerge`, `documentAudit`.
-   **Caveat:** `args` do not reach `scriptPath` launches — to retune, edit the
-   defaults at the top of the script file itself.
+   source path), `grepaiWorkspace`, `grepaiProject` (the canonical main-branch
+   GrepAI project name; set this when agents run from sidecar or worktree
+   paths), `maxParallel` (task pool width — default 8),
+   `maxPlanningParallel` (planning-stage width — default 4),
+   `maxBuildParallel` (build-stage width — default 4), `maxTasks`,
+   `maxDesignRounds` (4), `maxReviewRounds` (3),
+   `taskId` (run exactly one), `dryRun`, `autoMerge`, `documentAudit`,
+   `assessPartialBranches`, `buildAdapter`/`buildModel`,
+   `planAdapter`/`planModel`, `reviewAdapter`/`reviewModel`, and
+   `assessmentAdapter`/`assessmentModel`.
+5. **For legacy Claude `Workflow({ scriptPath: ... })` launches, use the same
+   sidecar rule.** `scriptPath` launches may not receive `args`; if you use
+   that harness, retune by editing the copied sidecar script itself and record
+   the edit in `operator-notes.md`.
 
 ## The supervision cycle
 
 Every time a run completes you do the same loop:
 
 1. **Parse the result JSON.** Key fields: `processed` (ids merged this run),
-   `results[]` (per-task `{id, status, stage, detail}`), `halted` (null on a
-   clean stop), `audits[]`, `remediationTriage[]`, `pendingProposals`
-   (proposals left unwritten because the run halted — triage them manually
-   later).
+   `results[]` (per-task `{id, status, stage, detail}` plus any
+   `assessment`), `assessments[]` (summaries for failed or halted branches that
+   were assessed), `halted` (null on a clean stop), `audits[]`,
+   `remediationTriage[]`, `pendingProposals` (proposals left unwritten because
+   the run halted — triage them manually later).
 2. **Hoover orphan worktrees.** For each non-root worktree under
    `…worktrees/roadmap-*`: stash any dirt with a **named** stash (see "Stash
    hygiene" below —
@@ -114,8 +169,242 @@ Every time a run completes you do the same loop:
      unblocked work) or stop (see "Knowing when to stop").
    - **Halted:** diagnose with the failure-mode playbook, apply the fix to the
      roadmap (or environment), then relaunch.
-5. **Relaunch** from the durable script path. The run re-selects from the
+5. **Run mandatory roadmap maintenance before editing the roadmap.** If the run
+   produced `remediationTriage`, `pendingProposals`, audit findings, addenda, or
+   any roadmap restructure work, load `roadmap-grooming` together with
+   `roadmap-doc` before changing `docs/roadmap.md`. This is a supervisor
+   requirement, not an optional clean-up pass.
+6. **Relaunch** from the durable script path. The run re-selects from the
    current `origin/BASE` roadmap — no resume needed.
+
+## Active invariant checks
+
+Do not only watch phase logs. At each check-in, verify that the workflow's
+claimed df12-build side effects exist in the real repository state. The
+supervisor is responsible for catching workshop loops that are spending rounds
+on impossible environment or orchestration faults.
+
+For every active `roadmap-*` worktree, check:
+
+- the worktree exists and is writable;
+- `git status --short --branch`;
+- `git log --oneline origin/BASE..HEAD`;
+- any returned `execplanPath` exists on disk;
+- advertised gate logs exist;
+- claimed commits, dirty files, or clean branches match the agent output.
+
+If a planner returns an ExecPlan path but the file is missing, inspect the
+child transcript immediately. Repeated missing ExecPlans usually indicate a
+sandbox, workspace-root, or worktree write failure, not an intractable roadmap
+task. Pause or stop the run and repair the workflow or environment rather than
+burning further design-review rounds.
+
+Known concrete failure:
+
+- Symptom: agents repeatedly return missing or unwritten plan or changed-file
+  paths under sibling worktrees.
+- Cause: Codex was launched with `--cd` at the control checkout, so
+  `workspace-write` rejects writes to sibling worktrees.
+- Fix: launch task agents with the assigned git worktree as their execution
+  root, or configure the adapter to include the worktree parent as an allowed
+  writable root.
+
+Treat design-review blockers as probably correct only after the reviewed
+artifact actually exists and is readable from the assigned worktree. If the
+reviewed artifact is absent, diagnose the missing side effect before editing
+the roadmap.
+
+## Worked operator examples
+
+These are examples of the shapes you should recognize after context compaction.
+They are not templates for fabricating evidence; copy the live run facts.
+
+### Result JSON
+
+```json
+{
+  "base": "main",
+  "processed": ["2.1.1", "2.1.2"],
+  "results": [
+    {
+      "id": "2.1.1",
+      "status": "done",
+      "stage": "integrate",
+      "detail": "squash merged and pushed"
+    },
+    {
+      "id": "2.1.2",
+      "status": "halted",
+      "stage": "review",
+      "detail": "reviewers not satisfied within cap",
+      "assessment": {
+        "classification": "continue-manual",
+        "recommendation": "Inspect review blockers before deciding whether to keep the branch"
+      }
+    }
+  ],
+  "assessments": [
+    {
+      "id": "2.1.2",
+      "stage": "review",
+      "status": "halted",
+      "classification": "continue-manual",
+      "recommendation": "Inspect review blockers before deciding whether to keep the branch"
+    }
+  ],
+  "audits": [
+    {
+      "afterTask": "2.1.1",
+      "proposedRoadmapItems": [
+        {
+          "title": "Cover empty-input recovery",
+          "severity": "high"
+        }
+      ]
+    }
+  ],
+  "remediationTriage": [
+    {
+      "step": "2.1",
+      "ok": true,
+      "pushed": true,
+      "decisions": [
+        {
+          "lane": "addendum",
+          "target": "2.1.1"
+        }
+      ]
+    }
+  ],
+  "pendingProposals": [],
+  "halted": "task 2.1.2 halted at review: reviewers not satisfied within cap"
+}
+```
+
+Operator reading: `2.1.1` landed and may have generated an addendum. `2.1.2`
+did not land. Its assessment says the branch needs manual judgement, so inspect
+the review blockers and branch evidence before deciding whether to keep it.
+Hoover worktrees, fast-forward `BASE`, run `make all`, and load
+`roadmap-grooming` before editing any remediation back into the roadmap.
+
+### Operator notes
+
+```markdown
+# df12-build run 20260629T101500Z-4242
+
+- Project: `/data/leynos/Projects/example`
+- Sidecar: `/data/leynos/Projects/example.workshop/df12-build-20260629T101500Z-4242`
+- Base: `main`
+- Args: `maxParallel=8`, `maxPlanningParallel=4`, `maxBuildParallel=4`,
+  `maxTasks=12`, `autoMerge=true`
+- Launch: `odw run "$SIDECAR/df12-build-odw.js" --source "$PROJECT" ...`
+- 10:22: `2.1.1` integrated; audit proposed one high-severity addendum.
+- 10:41: `2.1.2` halted at review; branch left unmerged.
+- Decision: hoover, gate `origin/main`, repair `2.1.2` task wording, relaunch.
+```
+
+Good notes record enough state for another operator to continue: paths, args,
+run id, status checks, failures, decisions, and validations.
+
+### Halted design-review repair
+
+Failure:
+
+```text
+task 3.2.4 halted at design-review:
+design review unsatisfied after 4 rounds: removal is not complete by
+construction; plan does not enumerate all consumers before deleting the adapter
+```
+
+Repair in `docs/roadmap.md`:
+
+```markdown
+- [ ] 3.2.4. Remove the legacy adapter after proving every consumer has moved.
+  - Requires 3.2.1 and 3.2.3.
+  - Enumerate every import and runtime lookup of the legacy adapter, re-point
+    each consumer, delete the adapter, and gate the deletion with a grep that
+    proves no stale import remains.
+  - Success: the adapter file is gone, no stale reference remains, and `make
+    all` passes.
+```
+
+The repair changes the task so the next planner starts from the blocking design
+requirement. Do not relax the reviewer. Fix the task.
+
+### Review halt
+
+Failure:
+
+```text
+task 4.1.2 halted at review:
+reviewers not satisfied within cap; branch left unmerged for the root agent
+```
+
+Operator action:
+
+1. Inspect the task branch and the returned `codeReview` / `expertReview`
+   blockers.
+2. If the branch is sound but incomplete, finish the fix in a separate
+   worktree, run `make all`, run the relevant markdown gates, and merge through
+   the same protected integration path.
+3. If the blockers reveal broader scope, do not hand-wave it into the branch.
+   Fold the finding back into the roadmap after loading `roadmap-grooming` and
+   relaunch.
+
+### Triage batch
+
+Input proposals:
+
+```json
+[
+  {
+    "title": "Cover empty-input parser recovery",
+    "severity": "high",
+    "source": "audit:2.1.1"
+  },
+  {
+    "title": "Rename local helper for style consistency",
+    "severity": "low",
+    "source": "review:2.1.2"
+  },
+  {
+    "title": "Move retry policy docs beside the operator guide",
+    "severity": "medium",
+    "source": "audit:2.1.1"
+  }
+]
+```
+
+Expected operator reading:
+
+- The high-severity recovery gap can become an addendum under the completed
+  task if it is small.
+- The low-severity rename is likely dropped unless it serves an existing step
+  hypothesis.
+- The documentation move belongs under the step whose hypothesis covers
+  operator recovery, not necessarily under the step that happened to produce
+  the audit.
+
+### Audit-inflation grooming pass
+
+Symptom:
+
+```text
+5.7. Single-home retry labels
+5.8. Single-home retry parsing
+5.9. Harden retry labels
+5.10. Harden retry parsing
+5.11. Single-home retry docs
+```
+
+Operator action:
+
+1. Stop adding one new step per audit finding.
+2. Load `roadmap-grooming` and `roadmap-doc`.
+3. Group the findings by the real seam, for example one retry-policy
+   consolidation step followed by one hardening task that depends on it.
+4. Preserve dotted dependencies and validate every `Requires` reference before
+   merging the restructure.
 
 ## Failure-mode playbook
 
@@ -141,15 +430,23 @@ reviewer.
     cannot repeat it.
 - **Implement halt** (often a turn-budget/size issue): a task with many work
   items, each gated by `make all` + a per-item coderabbit review, can exceed
-  one agent turn — it gets the code green but runs out before committing.
-  **Decompose into fewer-work-item tasks.** This and design-review size halts
-  are the same root cause: tasks that are too big for one plan/implement turn.
+  one agent turn. Check `result.assessment` before decomposing the task. A
+  timeout may leave a coherent partial slice worth preserving, but the roadmap
+  task stays unchecked unless its success criterion is complete and gates/review
+  prove it. If the assessment does not identify useful partial work, decompose
+  into fewer-work-item tasks. This and design-review size halts are the same
+  root cause: tasks that are too big for one plan/implement turn.
 - **Integrate halt** (rebase conflict the agent would not resolve safely):
   inspect the conflict; resolve it preserving the intent of both sides (favour
   the design docs/contracts), or re-file the task. The branch is left unmerged
   for you.
 - **Review halt** (dual review unsatisfied within the cap): the branch is left
-  unmerged with the blocking items; either hand-fix and merge, or fold the
+  unmerged with the blocking items. Check `result.assessment` first. If it says
+  `adopt-complete`, verify gates and continue through the ordinary review and
+  integration path. If it says `adopt-partial`, preserve only the coherent slice
+  without ticking the roadmap task. If it says `continue-manual`, inspect the
+  branch before deciding. If it says `discard`, hoover it unless live evidence
+  contradicts the recommendation. Either hand-fix and merge, or fold the
   findings back into the roadmap and re-file.
 - **Roadmap-prose-fix halt** (an addendum/task whose sole deliverable is editing
   the roadmap's *own* text — a wrong success criterion, a mis-stated contract):
@@ -313,10 +610,10 @@ Use the safe equivalents:
 ## At a glance
 
 ```text
-  launch from durable scriptPath
+  launch ODW from .workshop sidecar
         │
         ▼
-  run builds in background  ──▶  task-notification on completion
+  run builds in background  ──▶  status/logs/result/dashboard checks
         │
         ▼
   parse result · hoover worktrees · ff BASE · make all
