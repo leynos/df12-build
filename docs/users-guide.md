@@ -147,6 +147,10 @@ odw run "$SIDECAR/df12-build-odw.js" \
   --args @"$SIDECAR/args.json"
 ```
 
+Use an absolute or fully expanded sidecar path for the workflow script. When
+`--source` is present, ODW anchors relative workflow paths under the source
+project, not under the shell's current working directory.
+
 Start normal workshop runs in the background. Supervise them with `odw status`,
 `odw logs`, `odw result`, and the ODW dashboard. Keep `operator-notes.md` current
 enough that another operator can continue after context compaction.

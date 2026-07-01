@@ -132,6 +132,10 @@ provides the doc skills):
      --args @"$SIDECAR/args.json"
    ```
 
+   Use the absolute sidecar workflow path. With `--source`, ODW resolves
+   relative workflow paths under the source project, not under the shell's
+   current working directory.
+
    Start the run in the background and supervise it through `odw status`,
    `odw logs`, `odw result`, and the dashboard. Keep periodic health notes in
    `operator-notes.md`; the notes should be good enough for another operator
