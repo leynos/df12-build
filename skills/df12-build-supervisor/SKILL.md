@@ -106,11 +106,12 @@ provides the doc skills):
    truth. Patch the sidecar script during a live workshop when needed, validate
    it there, record the change in `operator-notes.md`, and later promote the
    proven change back to the `df12-build` repository as an ordinary branch.
-   For normal Codex workshops, set ODW `concurrency` to `16`; keep `maxAgents`
-   high (for example `1000`) because it is the per-run dispatch guard, not the
-   live process-pool size.
+   For normal Codex and Claude Code workshops, set ODW `concurrency` to `16`;
+   keep `maxAgents` high (for example `1000`) because it is the per-run
+   dispatch guard, not the live process-pool size.
 3. **Launch ODW from the sidecar, with the project as `--source`.** Prefer the
-   checked-in ODW/Codex workflow when running Codex agents:
+   checked-in ODW workflow when running the Codex build-side agents together
+   with the Claude Code planning and review agents:
 
    ```bash
    odw run "$SIDECAR/df12-build-odw.js" \
@@ -136,6 +137,12 @@ provides the doc skills):
    `assessPartialBranches`, `buildAdapter`/`buildModel`,
    `planAdapter`/`planModel`, `reviewAdapter`/`reviewModel`, and
    `assessmentAdapter`/`assessmentModel`.
+
+   The checked-in defaults split execution from judgement. Build-side work
+   uses Codex defaults, while planning and review judgement use Claude Code
+   with `claude-opus-4-8`. Partial-branch assessment inherits the review route
+   unless the sidecar `args.json` sets `assessmentAdapter` and
+   `assessmentModel` explicitly.
 5. **For legacy Claude `Workflow({ scriptPath: ... })` launches, use the same
    sidecar rule.** `scriptPath` launches may not receive `args`; if you use
    that harness, retune by editing the copied sidecar script itself and record
