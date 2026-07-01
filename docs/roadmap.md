@@ -6,8 +6,10 @@ promise dates. Each phase carries one GIST idea, each step answers a delivery
 question, and each task is intended to be review-sized.
 
 The scope is intentionally narrow: discover surviving branches, report
-assessments on fresh launch, and then allow explicit review-mode resume for
-clean `adopt-complete` branches. Automatic partial adoption stays deferred.
+assessments on fresh launch, allow explicit review-mode resume for clean
+`adopt-complete` branches, and then add an explicit accepted-plan reuse path
+for open tasks whose durable ExecPlan has already passed design review.
+Automatic partial adoption stays deferred.
 
 ## 1. Fresh-run recovery discovery
 
@@ -151,7 +153,79 @@ workflow modes. It covers the small combination surface that matters for v1.
   - Success: `resumeMode="assess"` reports an existing branch, and
     `resumeMode="review"` attempts only the eligible branch.
 
-## 3. Deferred recovery extensions
+## 3. Accepted ExecPlan reuse for unbuilt tasks
+
+Idea: if the workflow can recognize a durable, fresh, accepted ExecPlan for an
+open roadmap task, it can avoid repeating planning work while preserving the
+same implementation, review, and integration gates.
+
+This phase handles plan-state continuation, not branch-state continuation. It
+must sit after normal deterministic selection and fail closed to the ordinary
+plan/design loop whenever plan acceptance or freshness cannot be proven.
+
+### 3.1. Define durable accepted-plan evidence
+
+This step answers what evidence is strong enough to skip the planner and design
+reviewer. Its output informs the host-side checks and the ExecPlan-writing
+contract.
+
+- [ ] 3.1.1. Define the accepted ExecPlan metadata contract.
+  - Requires phase 2.
+  - See `docs/failure-resume-design.md` section "Accepted ExecPlan reuse".
+  - Include the roadmap task id, approval status, approving design-review
+    evidence, source roadmap commit, design-input fingerprint, and validation
+    commands.
+  - Success: a workflow can distinguish a durable accepted plan from a stale
+    draft, an uncommitted plan, or a transcript-only approval.
+- [ ] 3.1.2. Document the accepted-plan reuse controls.
+  - Requires 3.1.1.
+  - See `docs/failure-resume-design.md` sections "Runtime configuration" and
+    "Accepted ExecPlan reuse".
+  - Cover `reuseAcceptedExecPlans`, `acceptedPlanMode`, freshness failure
+    behaviour, and the fallback to ordinary planning.
+  - Success: operators can run report-only plan verification before allowing a
+    build from an accepted plan.
+
+### 3.2. Adopt fresh plans after deterministic selection
+
+This step answers whether the workflow can reuse an accepted plan without
+changing roadmap frontier semantics. Selection should remain pure; plan
+adoption happens only after an ordinary open task is selected.
+
+- [ ] 3.2.1. Add the post-selection accepted-plan adoption gate.
+  - Requires 3.1.1.
+  - See `docs/failure-resume-design.md` section "Accepted ExecPlan reuse".
+  - Success: the workflow checks the matching ExecPlan for the selected task
+    and falls back to the normal plan/design loop when the plan is absent,
+    unapproved, stale, or ambiguous.
+- [ ] 3.2.2. Route accepted plans into the existing implementation path.
+  - Requires 3.2.1.
+  - See `docs/failure-resume-design.md` sections "Accepted ExecPlan reuse" and
+    "Review-mode resume path".
+  - Success: `acceptedPlanMode="build"` can launch implementation from a fresh
+    accepted plan while preserving CodeRabbit, expert review, merge-lock,
+    roadmap-marking, and audit behaviour.
+
+### 3.3. Prove accepted-plan reuse combinations
+
+This step answers whether the plan-reuse controls interact safely with normal
+selection, dry runs, and recovery resume.
+
+- [ ] 3.3.1. Add fixture-driven tests for accepted-plan adoption.
+  - Requires 3.2.2.
+  - Cover disabled reuse, report-only verification, build-mode adoption,
+    missing plan, stale task text, changed design inputs, and uncommitted plan
+    files.
+  - See `docs/failure-resume-design.md` section "Verification".
+  - Success: tests prove accepted-plan reuse never changes task selection and
+    never skips implementation or review gates.
+- [ ] 3.3.2. Run a bounded operator-approved ODW smoke test for plan reuse.
+  - Requires 3.3.1.
+  - See `docs/failure-resume-design.md` section "Verification".
+  - Success: a throwaway target repository with an accepted plan enters
+    implementation in build mode, while a stale plan falls back to planning.
+
+## 4. Deferred recovery extensions
 
 Idea: if the first recovery slice remains boring and operator-controlled, later
 automation can be evaluated on product value rather than used to fix v1 safety
@@ -159,24 +233,24 @@ gaps.
 
 These tasks are intentionally outside the quick build path.
 
-### 3.1. Evaluate partial adoption after dogfooding
+### 4.1. Evaluate partial adoption after dogfooding
 
 This step keeps `adopt-partial` useful without making it automatic before the
 manual path has evidence.
 
-- [ ] 3.1.1. Decide whether `adopt-partial` should create addenda, recovery
+- [ ] 4.1.1. Decide whether `adopt-partial` should create addenda, recovery
   ExecPlans, or manual merge proposals.
   - Requires phase 2.
   - See `docs/failure-resume-design.md` section "Deferred decisions".
   - Success: an ADR records whether any partial adoption path should become
     automatic.
 
-### 3.2. Evaluate cleanup automation separately
+### 4.2. Evaluate cleanup automation separately
 
 This step separates resume from destructive cleanup so operators can trust the
 first recovery slice.
 
-- [ ] 3.2.1. Decide whether `discard` branches can be deleted by a managed
+- [ ] 4.2.1. Decide whether `discard` branches can be deleted by a managed
   sweeper.
   - Requires phase 2.
   - See `docs/failure-resume-design.md` sections "Failure modes" and
