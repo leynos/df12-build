@@ -36,11 +36,11 @@ Keep these files together in the sidecar:
 - `operator-notes.md`: the run id, launch command, local sidecar patches,
   validation notes, health checks, failures, and operator decisions.
 
-Set `concurrency` to `16` in `odw.config.json` for normal Codex workshops. That
-leaves room for an eight-task worker pool, four planning-stage agents, four
-build-stage agents, and review, triage, audit, or assessment slack. Keep
-`maxAgents` high, such as the ODW default of `1000`, because it is the
-per-run dispatch guard rather than the live process-pool size.
+Set `concurrency` to `16` in `odw.config.json` for normal Codex and Claude Code
+workshops. That leaves room for an eight-task worker pool, four planning-stage
+agents, four build-stage agents, and review, triage, audit, or assessment
+slack. Keep `maxAgents` high, such as the ODW default of `1000`, because it is
+the per-run dispatch guard rather than the live process-pool size.
 
 Patch the sidecar copy only to recover or tune a live workshop. Record the patch
 in `operator-notes.md`, validate it there, then promote the proven change back
@@ -206,6 +206,15 @@ Common arguments:
   review, expert review, and audit agents.
 - `assessmentAdapter` and `assessmentModel`: adapter and model for partial
   branch assessment. Defaults to the review adapter and model.
+
+Current defaults deliberately split execution and judgement. Build,
+implementation, integration, remediation, and triage stay on the Codex adapter
+defaults, while planning and review judgement default to Claude Code with
+`claude-opus-4-8`. That means the plan stage, design review, code review,
+expert review, addendum fallback review, and post-merge audit all use the
+`reviewAdapter` or `planAdapter` Claude routing unless `args.json` overrides
+them. Set `assessmentAdapter` explicitly when partial-branch assessment should
+stay on Codex instead of inheriting the review adapter.
 
 Example `args.json`:
 

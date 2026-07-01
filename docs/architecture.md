@@ -110,6 +110,16 @@ The key argument groups are:
 - Assessment routing: `assessmentAdapter`/`assessmentModel`, defaulting to the
   review adapter and model.
 
+The default routing separates execution from judgement. Build-side stages
+default to Codex: worktree creation, implementation, fix rounds, integration,
+remediation, and triage use the build or triage adapter/model defaults.
+Planning and review judgement default to Claude Code with
+`claude-opus-4-8`: the plan stage uses `planAdapter`/`planModel`, while design
+review, code review, expert review, addendum fallback review, and audit use
+`reviewAdapter`/`reviewModel`. Partial-branch assessment inherits the review
+route unless `assessmentAdapter`/`assessmentModel` are set explicitly, so a
+sidecar that wants Codex assessment must say so in `args.json`.
+
 `searchBackend` selects the canonical code-search guidance passed to task
 agents. It defaults to `grepai`, or to `memtrace` when `memtraceRepoId` is set.
 `grepaiProject` and `memtraceRepoId` are part of the architecture because
@@ -128,7 +138,7 @@ The sidecar contract is documented at three levels:
 - `docs/developers-guide.md` explains how contributors change the workflow and
   keep documentation synchronized.
 - `docs/adr-001-adopt-odw-sidecar-launches.md` records the architectural
-  decision to use ODW sidecar launches for Codex-oriented runs.
+  decision to use ODW sidecar launches for Codex- and Claude-oriented runs.
 - `docs/adr-002-assess-partial-task-branches.md` records the accepted
   assessment stage for preserving useful partial task branches without resuming
   transient agent transcripts.

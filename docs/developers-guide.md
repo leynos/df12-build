@@ -68,6 +68,14 @@ Keep the ODW script contract intact:
 Changes to workflow behaviour must update all relevant prompts, schemas, docs,
 and validation notes in the same branch.
 
+Adapter and model routing are part of the workflow contract. The ODW workflow
+currently uses Codex defaults for build-side work, and Claude Code with
+`claude-opus-4-8` for planning and review judgement. `planAgentOptions` covers
+the plan stage. `reviewAgentOptions` covers design review, code review, expert
+review, addendum fallback review, and audit. Because partial-branch assessment
+defaults to the review adapter, keep `assessmentAdapter` explicit in examples
+or operator notes when that stage must remain on Codex.
+
 ## Sidecar tooling contract
 
 ODW/Codex launches use a `.workshop` sidecar outside the target project's Git
@@ -84,7 +92,7 @@ Contributor rules:
 - When adding or renaming an argument, update `docs/users-guide.md`,
   `docs/architecture.md`, this guide, and the supervisor skill as needed.
 - When changing adapter/model routing, update both the code defaults and the
-  configuration examples that describe them.
+  configuration examples and routing-contract prose that describe them.
 
 ## Documentation maintenance
 
