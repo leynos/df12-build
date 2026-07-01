@@ -30,8 +30,8 @@ ______________________________________________________________________
 ### Installation
 
 Clone this repository and make sure the df12 toolchain, Open Dynamic Workflows
-(ODW), Codex adapters, Git, Node.js, `markdownlint-cli2`, and `nixie` are
-available on the machine that will supervise the workshop.
+(ODW), Codex and Claude adapters, Git, Node.js, `markdownlint-cli2`, and
+`nixie` are available on the machine that will supervise the workshop.
 
 Verify the checked-in workflow assets before launching a workshop:
 

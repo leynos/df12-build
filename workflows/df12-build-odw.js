@@ -1,7 +1,7 @@
 export const meta = {
   name: 'df12-build-odw',
   description:
-    'ODW/Codex variant of df12-build: drive a roadmap to completion with a parallel worker pool, Codex GPT 5.5 routing, branch-local verification guidance, serialized integration, and post-merge audit.',
+    'ODW/Codex variant of df12-build: drive a roadmap to completion with a parallel worker pool, Claude Opus planning/review routing, branch-local verification guidance, serialized integration, and post-merge audit.',
   whenToUse:
     'When you want to autonomously advance docs/roadmap.md across MULTIPLE independent unblocked tasks at once, each fully planned, reviewed, implemented, gated, merged, and audited. Opt-in only (heavy, many agents in parallel, performs commits/merges). Recovery model is fresh-restart against git state, not cache-resume.',
   phases: [
@@ -55,20 +55,20 @@ const GREPAI_WORKSPACE = cfg.grepaiWorkspace || 'Projects'
 const GREPAI_PROJECT = cfg.grepaiProject || (SEARCH_BACKEND === 'grepai' ? cfg.project : null) || null // canonical main-branch GrepAI project; set this when source is a worktree
 const MEMTRACE_REPO_ID = cfg.memtraceRepoId || (SEARCH_BACKEND === 'memtrace' ? cfg.project : null) || null // canonical Memtrace repo id; discover with list_indexed_repositories when unset
 const BUILD_ADAPTER = cfg.buildAdapter || 'codex-medium'
-const PLAN_ADAPTER = cfg.planAdapter || 'codex'
-const REVIEW_ADAPTER = cfg.reviewAdapter || 'codex-high'
+const PLAN_ADAPTER = cfg.planAdapter || 'claude'
+const REVIEW_ADAPTER = cfg.reviewAdapter || 'claude'
 const TRIAGE_ADAPTER = cfg.triageAdapter || 'codex'
 const ASSESSMENT_ADAPTER = cfg.assessmentAdapter || REVIEW_ADAPTER
 const BUILD_MODEL = cfg.buildModel || 'gpt-5.5'
-const PLAN_MODEL = cfg.planModel || 'gpt-5.5@high'
-const REVIEW_MODEL = cfg.reviewModel || 'gpt-5.5'
+const PLAN_MODEL = cfg.planModel || 'claude-opus-4-8'
+const REVIEW_MODEL = cfg.reviewModel || 'claude-opus-4-8'
 const TRIAGE_MODEL = cfg.triageModel || 'gpt-5.5@high'
 const ASSESSMENT_MODEL = cfg.assessmentModel || REVIEW_MODEL
 const CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || 'coderabbit review --agent'
 const CODERABBIT_REVIEW_GUIDANCE =
   'Use `coderabbit review --agent` to validate your work after each major milestone, and clear all concerns prior to moving onto the next. It is important that all applicable code quality and correctness gates succeed **before** each CodeRabbit review is requested, as CodeRabbit should not be used for errors that can be caught deterministically. If the CodeRabbit rate limit is exceeded, sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt.'
 const SPARK_DELEGATION_GUIDANCE =
-  "You are free to delegate to the `wyvern` 5.3 codex spark subagent for bounded read-only tasks on known surfaces as needed. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
+  "You are free to delegate to bounded read-only helper subagents for known surfaces as needed. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
 const SCRUTINEER_DELEGATION_GUIDANCE =
   `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`
 

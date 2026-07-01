@@ -224,14 +224,14 @@ Example `args.json`:
   "maxTasks": 12,
   "buildAdapter": "codex-medium",
   "buildModel": "gpt-5.5",
-  "planAdapter": "codex-high",
-  "planModel": "gpt-5.5",
+  "planAdapter": "claude",
+  "planModel": "claude-opus-4-8",
   "assessmentAdapter": "codex-high",
   "assessmentModel": "gpt-5.5",
   "triageAdapter": "codex-high",
   "triageModel": "gpt-5.5",
-  "reviewAdapter": "codex-high",
-  "reviewModel": "gpt-5.5"
+  "reviewAdapter": "claude",
+  "reviewModel": "claude-opus-4-8"
 }
 ```
 
