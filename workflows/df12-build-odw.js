@@ -64,6 +64,13 @@ const PLAN_MODEL = cfg.planModel || 'claude-opus-4-8'
 const REVIEW_MODEL = cfg.reviewModel || 'claude-opus-4-8'
 const TRIAGE_MODEL = cfg.triageModel || 'gpt-5.5@high'
 const ASSESSMENT_MODEL = cfg.assessmentModel || REVIEW_MODEL
+const AUTH_REQUIRED_ADAPTERS = new Set([
+  BUILD_ADAPTER,
+  PLAN_ADAPTER,
+  REVIEW_ADAPTER,
+  TRIAGE_ADAPTER,
+  ASSESSMENT_ADAPTER,
+].map((adapter) => String(adapter || '').toLowerCase()))
 const CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || 'coderabbit review --agent'
 const CODERABBIT_REVIEW_GUIDANCE =
   'Use `coderabbit review --agent` to validate your work after each major milestone, and clear all concerns prior to moving onto the next. It is important that all applicable code quality and correctness gates succeed **before** each CodeRabbit review is requested, as CodeRabbit should not be used for errors that can be caught deterministically. If the CodeRabbit rate limit is exceeded, sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt.'
@@ -372,6 +379,8 @@ function authFailureDetail(value) {
     /\btoken missing\b/i,
     /\bmissing token\b/i,
     /\btoken expired\b/i,
+    /\bnot authenticated\b/i,
+    /"loggedIn"\s*:\s*false/i,
     /Run `?coderabbit auth login`?/i,
     /Run codex login/i,
   ]
@@ -494,6 +503,18 @@ async function runAuthPreflight() {
     })
   }
 
+  if (AUTH_REQUIRED_ADAPTERS.has('claude')) {
+    const claude = await execFileStatus('claude', ['auth', 'status'])
+    const claudeOutput = [claude.stdout, claude.stderr, claude.message].filter(Boolean).join('\n')
+    if (!claude.ok || authFailureDetail(claudeOutput)) {
+      failures.push({
+        tool: 'claude',
+        command: 'claude auth status',
+        detail: authFailureDetail(claudeOutput) || claudeOutput.trim() || 'Claude auth status check failed',
+      })
+    }
+  }
+
   if (REQUIRE_CODERABBIT_AUTH) {
     const coderabbit = await execFileStatus('coderabbit', ['auth', 'status'])
     const coderabbitOutput = [coderabbit.stdout, coderabbit.stderr, coderabbit.message].filter(Boolean).join('\n')
@@ -509,7 +530,10 @@ async function runAuthPreflight() {
   if (failures.length) {
     log(`[auth] fatal preflight failure: ${failures.map((failure) => `${failure.tool}: ${failure.detail.split(/\r?\n/)[0]}`).join('; ')}`)
   } else {
-    log(`[auth] preflight passed${REQUIRE_CODERABBIT_AUTH ? ' for Codex and CodeRabbit' : ' for Codex'}`)
+    const passed = ['Codex']
+    if (AUTH_REQUIRED_ADAPTERS.has('claude')) passed.push('Claude')
+    if (REQUIRE_CODERABBIT_AUTH) passed.push('CodeRabbit')
+    log(`[auth] preflight passed for ${passed.join(', ')}`)
   }
 
   return failures

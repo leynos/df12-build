@@ -26,6 +26,7 @@ async function loadAssessmentSurface() {
 return {
   ASSESSMENT_CLASSIFICATIONS,
   ASSESSMENT_SCHEMA,
+  AUTH_REQUIRED_ADAPTERS,
   collectAssessmentEvidence,
   shouldAssessFailure,
   authFailureDetail,
@@ -118,6 +119,18 @@ test('auth-shaped implementation issues are fatal, not deferred review', async (
   assert.equal(surface.hasOnlyDeferredReviewIssues(['CodeRabbit rate limit retry after 10m']), true)
   assert.equal(surface.implementationAuthFailureDetail(impl), 'Implementation complete\nCodeRabbit auth failed')
   assert.equal(surface.authFailureDetail('CodeRabbit browser login required'), 'CodeRabbit browser login required')
+  assert.equal(surface.authFailureDetail('{"loggedIn":false}'), '{"loggedIn":false}')
+  assert.equal(surface.AUTH_REQUIRED_ADAPTERS.has('claude'), true)
+})
+
+test('auth preflight checks Claude when routing uses the Claude adapter', async () => {
+  const source = await readFile(WORKFLOW_PATH, 'utf8')
+
+  assert.match(
+    source,
+    /if \(AUTH_REQUIRED_ADAPTERS\.has\('claude'\)\)[\s\S]*?execFileStatus\('claude', \['auth', 'status'\]\)/,
+  )
+  assert.match(source, /preflight passed for \$\{passed\.join\(', '\)\}/)
 })
 
 test('normal and addendum implementations gate auth before integration', async () => {

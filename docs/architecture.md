@@ -120,6 +120,18 @@ review, code review, expert review, addendum fallback review, and audit use
 route unless `assessmentAdapter`/`assessmentModel` are set explicitly, so a
 sidecar that wants Codex assessment must say so in `args.json`.
 
+Auth preflight is adapter-aware. The workflow always checks Codex auth because
+build-side stages depend on it, checks CodeRabbit auth when implementation can
+run, and checks Claude auth whenever any configured stage uses the `claude`
+adapter. Auth failures are terminal workflow failures rather than ordinary
+task failures or partial-branch recovery candidates.
+
+ODW adapter timeout is also part of the runtime contract. The implementation
+prompt can legitimately ask agents to wait through CodeRabbit rate-limit
+backoff with `vsleep`, including three retries of up to 90 minutes each. A
+sidecar `odw.config.json` that keeps the default one-hour timeout is therefore
+misconfigured for a full workshop run.
+
 `searchBackend` selects the canonical code-search guidance passed to task
 agents. It defaults to `grepai`, or to `memtrace` when `memtraceRepoId` is set.
 `grepaiProject` and `memtraceRepoId` are part of the architecture because

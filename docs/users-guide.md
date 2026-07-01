@@ -42,6 +42,92 @@ agents, four build-stage agents, and review, triage, audit, or assessment
 slack. Keep `maxAgents` high, such as the ODW default of `1000`, because it is
 the per-run dispatch guard rather than the live process-pool size.
 
+Set the adapter `timeout` high enough for the workflow's CodeRabbit policy.
+Implementation agents may legitimately wait through three 45-90 minute
+CodeRabbit rate-limit backoffs using `vsleep`, so a one-hour adapter timeout can
+kill a healthy task. A normal long-running workshop should use a timeout of at
+least `21600` seconds unless the operator deliberately wants a shorter cap.
+
+Make sure every adapter named by `args.json` exists in `odw.config.json` or in
+ODW's built-in adapter set. The checked-in ODW workflow now defaults planning
+and review judgement to the `claude` adapter, so a Codex-only sidecar config
+must either add a `claude` adapter or explicitly route those stages back to
+Codex.
+
+Minimal sidecar `odw.config.json` shape for the Claude/Codex split:
+
+```json
+{
+  "defaultAdapter": "codex-medium",
+  "concurrency": 16,
+  "maxAgents": 1000,
+  "workspaceMode": "inplace",
+  "timeout": 21600,
+  "schemaRetries": 2,
+  "runsRoot": "~/.odw/runs",
+  "workflowsRoot": "~/.odw/workflows",
+  "claudeJobsScope": "project",
+  "adapters": {
+    "claude": {
+      "label": "Claude Code",
+      "command": [
+        "claude",
+        "--print",
+        "--permission-mode",
+        "acceptEdits",
+        "--no-session-persistence"
+      ],
+      "stdin": "{prompt}",
+      "flags": {
+        "model": ["--model"]
+      }
+    },
+    "codex-medium": {
+      "label": "Codex GPT 5.5 medium",
+      "command": [
+        "codex",
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "danger-full-access",
+        "-c",
+        "model_reasoning_effort=\"medium\"",
+        "--cd",
+        "{workspace}",
+        "-"
+      ],
+      "stdin": "{prompt}",
+      "flags": {
+        "model": ["--model"]
+      }
+    },
+    "codex-high": {
+      "label": "Codex GPT 5.5 high",
+      "command": [
+        "codex",
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "danger-full-access",
+        "-c",
+        "model_reasoning_effort=\"high\"",
+        "--cd",
+        "{workspace}",
+        "-"
+      ],
+      "stdin": "{prompt}",
+      "flags": {
+        "model": ["--model"]
+      }
+    }
+  }
+}
+```
+
 Patch the sidecar copy only to recover or tune a live workshop. Record the patch
 in `operator-notes.md`, validate it there, then promote the proven change back
 to the `df12-build` repository through a normal branch.
@@ -64,6 +150,11 @@ odw run "$SIDECAR/df12-build-odw.js" \
 Start normal workshop runs in the background. Supervise them with `odw status`,
 `odw logs`, `odw result`, and the ODW dashboard. Keep `operator-notes.md` current
 enough that another operator can continue after context compaction.
+
+When adopting a newer checked-in workflow into an existing sidecar, audit
+`args.json` before relaunching. Older sidecars may still carry Codex-only
+`planAdapter`, `reviewAdapter`, or `assessmentAdapter` overrides, and those
+overrides deliberately win over the workflow defaults.
 
 ## Roadmap format
 

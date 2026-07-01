@@ -108,7 +108,19 @@ provides the doc skills):
    proven change back to the `df12-build` repository as an ordinary branch.
    For normal Codex and Claude Code workshops, set ODW `concurrency` to `16`;
    keep `maxAgents` high (for example `1000`) because it is the per-run
-   dispatch guard, not the live process-pool size.
+   dispatch guard, not the live process-pool size. Set the adapter `timeout`
+   high enough for CodeRabbit's expected rate-limit backoff: agents may
+   legitimately sleep for three 45-90 minute retries, so a one-hour timeout can
+   kill healthy work. Use `21600` seconds for ordinary long-running workshops
+   unless you deliberately want a shorter cap.
+
+   When copying a newer workflow into an existing sidecar, audit `args.json`
+   before relaunch. Stale `planAdapter`, `reviewAdapter`, or
+   `assessmentAdapter` overrides from a Codex-only run will override the
+   workflow's current Claude/Codex split. Make sure every adapter named in
+   `args.json` exists in `odw.config.json` or in ODW's built-in adapter set;
+   the current ODW workflow expects a `claude` adapter for default planning and
+   review judgement.
 3. **Launch ODW from the sidecar, with the project as `--source`.** Prefer the
    checked-in ODW workflow when running the Codex build-side agents together
    with the Claude Code planning and review agents:
