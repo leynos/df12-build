@@ -1041,6 +1041,14 @@ function implementationAuthFailureDetail(impl) {
   return authFailureDetail(detail)
 }
 
+function addendumImplementationNeedsManualMerge(impl) {
+  if (!impl || impl.ok || !impl.gatesGreen) return false
+  if ((impl.openIssues || []).length > 0) return false
+  const completed = Number(impl.workItemsCompleted)
+  const total = Number(impl.workItemsTotal)
+  return Number.isFinite(completed) && Number.isFinite(total) && total > 0 && completed >= total
+}
+
 function integratePrompt(task, worktree) {
   const markStep = task.isAddendum
     ? `Tick each completed sub-task in ${ROADMAP}: for every id in [${(task.subtasks || []).join(', ')}], change its nested \`- [ ] ${task.id}.<n>.\` to \`- [x] …\`. LEAVE the parent ${task.id} as \`[x]\` (it was already done). Run \`make markdownlint\` and \`make nixie\`; commit the roadmap update (en-GB).`
@@ -1200,6 +1208,18 @@ async function runTask(task, mergeLock) {
     }
     const openIssues = impl?.openIssues || []
     const onlyDeferredReviewIssues = hasOnlyDeferredReviewIssues(openIssues)
+    if (addendumImplementationNeedsManualMerge(impl)) {
+      return {
+        id: tag,
+        status: 'manual-merge-ready',
+        stage: 'addendum',
+        detail: 'addendum implementation reported completed work, green gates, and no open issues, but did not set ok=true; branch left for operator verification before integration',
+        impl,
+        worktree,
+        proposals: [],
+        kind: 'addendum',
+      }
+    }
     if (!impl || !impl.ok || !impl.gatesGreen || (openIssues.length > 0 && !onlyDeferredReviewIssues)) {
       return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: impl?.summary || 'addendum did not reach a green state or left open issues', openIssues: impl?.openIssues || [], worktree, proposals: [], kind: 'addendum' })
     }

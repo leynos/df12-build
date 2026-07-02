@@ -35,6 +35,7 @@ return {
   isDeferredReviewIssue,
   hasOnlyDeferredReviewIssues,
   implementationAuthFailureDetail,
+  addendumImplementationNeedsManualMerge,
 }
 `,
   )
@@ -138,6 +139,44 @@ test('provider-shaped agent failures are retry-later infrastructure faults', asy
     detail,
     proposals: [],
   })
+})
+
+test('green addendum implementation contract drift is manual merge ready', async () => {
+  const surface = await loadAssessmentSurface()
+
+  assert.equal(
+    surface.addendumImplementationNeedsManualMerge({
+      ok: false,
+      gatesGreen: true,
+      workItemsCompleted: 1,
+      workItemsTotal: 1,
+      openIssues: [],
+      summary: 'Implemented addendum and gates passed',
+    }),
+    true,
+  )
+  assert.equal(
+    surface.addendumImplementationNeedsManualMerge({
+      ok: false,
+      gatesGreen: true,
+      workItemsCompleted: 0,
+      workItemsTotal: 1,
+      openIssues: [],
+      summary: 'Still incomplete',
+    }),
+    false,
+  )
+  assert.equal(
+    surface.addendumImplementationNeedsManualMerge({
+      ok: false,
+      gatesGreen: true,
+      workItemsCompleted: 1,
+      workItemsTotal: 1,
+      openIssues: ['review still pending'],
+      summary: 'Implemented addendum and gates passed',
+    }),
+    false,
+  )
 })
 
 test('auth preflight checks Claude when routing uses the Claude adapter', async () => {

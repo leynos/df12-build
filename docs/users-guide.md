@@ -367,6 +367,14 @@ dry runs, successful tasks, and manual-merge-ready branches are not assessed.
 Provider outages also suppress the final remediation flush, so transient
 adapter failures do not create roadmap work.
 
+Addendum implementations have one extra recovery state. If an addendum agent
+reports all work items complete, green gates, and no open issues, but fails to
+set the strict `ok=true` schema field, the workflow returns
+`manual-merge-ready` instead of treating the branch as ordinary failed work.
+That preserves throughput without auto-merging ambiguous output: an operator
+must rerun gates, confirm review evidence, reconcile the roadmap checkbox, and
+then integrate or discard the branch.
+
 Use the `df12-build-supervisor` skill for the detailed operator playbook:
 failure-mode diagnosis, orphan worktree cleanup, remediation triage, stash
 hygiene, and deciding when a roadmap frontier is actually dry.

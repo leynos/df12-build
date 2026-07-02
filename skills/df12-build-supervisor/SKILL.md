@@ -476,6 +476,13 @@ reviewer.
   inspect the conflict; resolve it preserving the intent of both sides (favour
   the design docs/contracts), or re-file the task. The branch is left unmerged
   for you.
+- **Addendum manual-merge-ready** (the addendum agent reported completed work,
+  green gates, and no open issues, but did not satisfy the strict `ok=true`
+  schema contract): preserve the branch and verify it manually before any merge.
+  Rerun `make all` plus `make markdownlint`/`make nixie` when Markdown changed,
+  confirm CodeRabbit or equivalent review evidence, reconcile the roadmap
+  sub-task checkbox, then integrate or discard. Do not relaunch before deciding,
+  or the same open addendum can be selected again from `origin/BASE`.
 - **Review halt** (dual review unsatisfied within the cap): the branch is left
   unmerged with the blocking items. Check `result.assessment` first. If it says
   `adopt-complete`, verify gates and continue through the ordinary review and
