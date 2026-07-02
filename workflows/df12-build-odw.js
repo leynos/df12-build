@@ -103,11 +103,15 @@ function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`
 }
 
-async function fileExists(pathValue) {
+async function fileExists(pathValue, baseDir = process.cwd()) {
   if (!pathValue) return false
+  const path = process.getBuiltinModule('node:path')
+  const candidate = path.isAbsolute(String(pathValue))
+    ? String(pathValue)
+    : path.join(baseDir, String(pathValue))
   const fs = process.getBuiltinModule('node:fs/promises')
   try {
-    const stat = await fs.stat(pathValue)
+    const stat = await fs.stat(candidate)
     return stat.isFile()
   } catch {
     return false
@@ -1278,7 +1282,7 @@ async function runTask(task, mergeLock) {
       schema: PLAN_SCHEMA,
     })))
     if (!plan) return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'plan', detail: 'planner returned nothing', worktree, proposals: [] })
-    if (!await fileExists(plan.execplanPath)) {
+    if (!await fileExists(plan.execplanPath, worktree)) {
       return await attachAssessment(task, wt, {
         id: tag,
         status: 'failed',
