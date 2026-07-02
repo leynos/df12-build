@@ -362,8 +362,10 @@ classification is one of:
 Assessment is report-only. It never marks roadmap checkboxes, pushes, merges,
 or cherry-picks. Use it to decide whether to preserve, manually finish, park, or
 discard the branch before relaunching from `origin/<base>`. Auth failures,
-worktree-creation failures, dry runs, successful tasks, and
-manual-merge-ready branches are not assessed.
+provider outages such as `429`, `500`, or `529`, worktree-creation failures,
+dry runs, successful tasks, and manual-merge-ready branches are not assessed.
+Provider outages also suppress the final remediation flush, so transient
+adapter failures do not create roadmap work.
 
 Use the `df12-build-supervisor` skill for the detailed operator playbook:
 failure-mode diagnosis, orphan worktree cleanup, remediation triage, stash

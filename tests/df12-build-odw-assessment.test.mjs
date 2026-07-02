@@ -30,6 +30,8 @@ return {
   collectAssessmentEvidence,
   shouldAssessFailure,
   authFailureDetail,
+  providerFailureDetail,
+  resultFromUnhandledAgentError,
   isDeferredReviewIssue,
   hasOnlyDeferredReviewIssues,
   implementationAuthFailureDetail,
@@ -123,6 +125,21 @@ test('auth-shaped implementation issues are fatal, not deferred review', async (
   assert.equal(surface.AUTH_REQUIRED_ADAPTERS.has('claude'), true)
 })
 
+test('provider-shaped agent failures are retry-later infrastructure faults', async () => {
+  const surface = await loadAssessmentSurface()
+  const detail =
+    'unhandled agent error: adapter exited with code 1: API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment.'
+
+  assert.equal(surface.providerFailureDetail(detail), detail)
+  assert.deepEqual(surface.resultFromUnhandledAgentError('2.1.8', detail), {
+    id: '2.1.8',
+    status: 'provider-fault',
+    stage: 'provider',
+    detail,
+    proposals: [],
+  })
+})
+
 test('auth preflight checks Claude when routing uses the Claude adapter', async () => {
   const source = await readFile(WORKFLOW_PATH, 'utf8')
 
@@ -161,7 +178,9 @@ test('assessment guard admits only non-auth failed or halted task branches', asy
   assert.equal(shouldAssessFailure({ status: 'manual-merge-ready', stage: 'review', detail: '' }, wt), false)
   assert.equal(shouldAssessFailure({ status: 'done', stage: 'integrate', detail: '' }, wt), false)
   assert.equal(shouldAssessFailure({ status: 'fatal-auth', stage: 'auth', detail: 'Run codex login' }, wt), false)
+  assert.equal(shouldAssessFailure({ status: 'provider-fault', stage: 'provider', detail: 'API Error: 529 Overloaded' }, wt), false)
   assert.equal(shouldAssessFailure({ status: 'failed', stage: 'implement', detail: '401 Unauthorized' }, wt), false)
+  assert.equal(shouldAssessFailure({ status: 'failed', stage: 'implement', detail: 'API Error: 429 rate limited' }, wt), false)
   assert.equal(shouldAssessFailure({ status: 'failed', stage: 'implement', detail: 'turn exhausted' }, null), false)
 })
 

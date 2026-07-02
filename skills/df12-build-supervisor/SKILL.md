@@ -493,10 +493,12 @@ reviewer.
   the operator** and tick the item. Watch for it specifically when a contract
   was documented in two places (e.g. the roadmap *and* `SKILL.md`) and only one
   was corrected — fix the stale copy to match the authoritative one.
-- **Recoverable API faults (500 / 429):** wait and retry. coderabbit 429
-  backoffs are **expected and fine** — never shorten them. For a broad outage,
-  schedule a long wake-up (≈1h) and relaunch; the fresh-restart model means
-  nothing is lost.
+- **Recoverable API faults (500 / 429 / 529):** wait and retry. The ODW
+  variant reports these as `provider-fault` halts, skips partial-branch
+  assessment, and leaves pending remediation unwritten so an outage is not
+  mistaken for task evidence. CodeRabbit 429 backoffs are **expected and
+  fine** — never shorten them. For a broad outage, schedule a long wake-up
+  (≈1h) and relaunch; the fresh-restart model means nothing is lost.
 - **Worktree base-skew:** git-donkey can root a worktree on a stale local `BASE`
   (its pull-rebase prompt defaults to "no" non-interactively). The workflow's
   worktree step already mitigates this (no-param `git donkey` + an in-worktree

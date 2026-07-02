@@ -387,6 +387,49 @@ function authFailureDetail(value) {
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
 }
 
+function providerFailureDetail(value) {
+  const text = String(value || '')
+  const patterns = [
+    /\bAPI Error:\s*(?:429|500|502|503|504|529)\b/i,
+    /\b(?:429|500|502|503|504|529)\b.*\b(?:gateway|overload|rate limit|server-side|temporar|timeout|unavailable)\b/i,
+    /\b(?:gateway timeout|model overloaded|overloaded|rate limited|server-side issue|service unavailable|temporarily unavailable|try again in a moment)\b/i,
+  ]
+  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
+}
+
+function resultFromUnhandledAgentError(id, detail, extra = {}) {
+  const authDetail = authFailureDetail(detail)
+  if (authDetail) {
+    return {
+      id,
+      status: 'fatal-auth',
+      stage: 'auth',
+      detail,
+      proposals: [],
+      ...extra,
+    }
+  }
+  const providerDetail = providerFailureDetail(detail)
+  if (providerDetail) {
+    return {
+      id,
+      status: 'provider-fault',
+      stage: 'provider',
+      detail,
+      proposals: [],
+      ...extra,
+    }
+  }
+  return {
+    id,
+    status: 'failed',
+    stage: 'error',
+    detail,
+    proposals: [],
+    ...extra,
+  }
+}
+
 function parseNameStatus(output) {
   return String(output || '')
     .split(/\r?\n/)
@@ -1078,9 +1121,9 @@ function shouldAssessFailure(result, wt) {
   if (!ASSESS_PARTIAL_BRANCHES) return false
   if (!wt?.branch || !wt?.worktreePath) return false
   if (!result || !['failed', 'halted'].includes(result.status)) return false
-  if (result.stage === 'worktree' || result.stage === 'auth' || result.status === 'fatal-auth') return false
+  if (result.stage === 'worktree' || result.stage === 'auth' || result.stage === 'provider' || result.status === 'fatal-auth' || result.status === 'provider-fault') return false
   const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
-  return !authFailureDetail(detail)
+  return !authFailureDetail(detail) && !providerFailureDetail(result.detail)
 }
 
 async function attachAssessment(task, wt, result) {
@@ -1333,15 +1376,7 @@ async function runTask(task, mergeLock) {
   return { id: tag, status: 'done', plan, impl, integration, worktree, proposals }
   } catch (error) {
     const detail = `unhandled agent error: ${(error && error.message) || String(error)}`
-    const authDetail = authFailureDetail(detail)
-    const result = {
-      id: tag,
-      status: authDetail ? 'fatal-auth' : 'failed',
-      stage: authDetail ? 'auth' : 'error',
-      detail,
-      worktree,
-      proposals: [],
-    }
+    const result = resultFromUnhandledAgentError(tag, detail, { worktree })
     return await attachAssessment(task, wt, result)
   }
 }
@@ -1622,17 +1657,10 @@ async function fillPool() {
         (result) => ({ id: task.id, task, result }),
         (err) => {
           const detail = `unhandled agent error: ${(err && err.message) || String(err)}`
-          const authDetail = authFailureDetail(detail)
           return {
             id: task.id,
             task,
-            result: {
-              id: task.id,
-              status: authDetail ? 'fatal-auth' : 'failed',
-              stage: authDetail ? 'auth' : 'error',
-              detail,
-              proposals: [],
-            },
+            result: resultFromUnhandledAgentError(task.id, detail),
           }
         },
       ),
@@ -1651,6 +1679,7 @@ if (authPreflight.length) {
   halted = `fatal auth preflight failed: ${authPreflight.map((failure) => `${failure.tool} (${failure.command})`).join(', ')}`
 }
 let stop = Boolean(halted)
+let providerFaultHalt = false
 while (true) {
   if (!stop && !halted) {
     try {
@@ -1692,6 +1721,10 @@ while (true) {
   } else if (result.status === 'fatal-auth') {
     halted = `task ${done.id} fatal auth failure at ${result.stage}: ${result.detail}`
     stop = true
+  } else if (result.status === 'provider-fault') {
+    halted = `task ${done.id} provider fault at ${result.stage}: ${result.detail}`
+    providerFaultHalt = true
+    stop = true
   } else if (!halted) {
     // Record the failure, stop opening new work, and let in-flight siblings
     // finish rather than abandoning their (possibly mergeable) branches.
@@ -1701,10 +1734,9 @@ while (true) {
 }
 
 // End-of-run: the pool is drained, so every step has quiesced. Fold any
-// remaining remediation into the roadmap — even on a halt, since triage only
-// RECORDS proposals (it never implements), so accrued audit findings are not
-// lost to a single task's failure.
-if (canFlush) {
+// remaining remediation into the roadmap after product failures; skip that
+// write on provider faults so an outage does not look like task evidence.
+if (canFlush && !providerFaultHalt) {
   try {
     await flushSettledSteps()
   } catch (err) {
