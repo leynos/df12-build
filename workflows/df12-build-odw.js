@@ -103,6 +103,17 @@ function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`
 }
 
+async function fileExists(pathValue) {
+  if (!pathValue) return false
+  const fs = process.getBuiltinModule('node:fs/promises')
+  try {
+    const stat = await fs.stat(pathValue)
+    return stat.isFile()
+  } catch {
+    return false
+  }
+}
+
 function grepaiSearchCommand() {
   const workspaceArg = shellQuote(GREPAI_WORKSPACE)
   const projectArg = GREPAI_PROJECT ? shellQuote(GREPAI_PROJECT) : '$(get-project)'
@@ -1267,6 +1278,17 @@ async function runTask(task, mergeLock) {
       schema: PLAN_SCHEMA,
     })))
     if (!plan) return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'plan', detail: 'planner returned nothing', worktree, proposals: [] })
+    if (!await fileExists(plan.execplanPath)) {
+      return await attachAssessment(task, wt, {
+        id: tag,
+        status: 'failed',
+        stage: 'plan',
+        detail: `planner returned missing ExecPlan path: ${plan.execplanPath || '<empty>'}`,
+        plan,
+        worktree,
+        proposals: [],
+      })
+    }
 
     phase('Design Review')
     designVerdict = await planningLock(() => agent(designReviewPrompt(task, worktree, plan, round), reviewAgentOptions({
