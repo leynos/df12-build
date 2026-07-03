@@ -1662,9 +1662,31 @@ function writeProbePrompt(probeFile, token) {
   ].join('\n')
 }
 
+// The worktree is untrusted content: a branch can commit a symlink or a decoy
+// file at a probe path. `fs.rm` removes the link itself (never its target),
+// so clearing before writing or dispatching keeps the host from writing
+// through, reading through, or trusting anything it did not create.
+async function clearProbeArtifact(probeFile) {
+  const fs = process.getBuiltinModule('node:fs/promises')
+  try {
+    await fs.lstat(probeFile)
+  } catch {
+    return // nothing at the path
+  }
+  await fs.rm(probeFile, { force: true, recursive: true })
+}
+
 async function verifyWriteProbe(probeFile, token) {
   const fs = process.getBuiltinModule('node:fs/promises')
   try {
+    // lstat + reject non-regular files: never read through a symlink the
+    // agent (or a committed tree) left at the probe path. The agent finished
+    // before verification, so there is no live writer to race.
+    const stat = await fs.lstat(probeFile)
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      await fs.rm(probeFile, { force: true, recursive: true })
+      return { ok: false, detail: 'probe path is not a regular file (symlink or special file rejected)' }
+    }
     const content = await fs.readFile(probeFile, 'utf8')
     await fs.rm(probeFile, { force: true })
     if (content.trim() === token) return { ok: true, detail: '' }
@@ -1679,7 +1701,11 @@ async function hostWriteProbe(worktree) {
   const path = process.getBuiltinModule('node:path')
   const hostProbe = path.join(worktree, '.df12-write-probe-host')
   try {
-    await fs.writeFile(hostProbe, 'df12-write-probe host', 'utf8')
+    // Clear any committed artefact first, then create exclusively ('wx'
+    // fails on any pre-existing path), so the write can never follow a
+    // symlink out of the worktree.
+    await clearProbeArtifact(hostProbe)
+    await fs.writeFile(hostProbe, 'df12-write-probe host', { encoding: 'utf8', flag: 'wx' })
     await fs.rm(hostProbe, { force: true })
     return { ok: true, detail: '' }
   } catch (error) {
@@ -1696,6 +1722,10 @@ async function runTaskAgentWritePreflight(worktree, tag) {
   for (const target of writeProbeTargets()) {
     const probeFile = writeProbePath(worktree, target.adapter)
     const token = writeProbeToken(tag, target.adapter)
+    // Clear committed decoys before dispatch: the token is predictable, so a
+    // pre-existing file (or symlink) at the probe path must never be able to
+    // satisfy — or redirect — the verification that follows.
+    await clearProbeArtifact(probeFile)
     let reply = null
     let agentError = ''
     try {

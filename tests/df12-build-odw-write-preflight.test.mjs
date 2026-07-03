@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, chmodSync, symlinkSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -137,6 +137,55 @@ test('preflight surfaces agent-reported sandbox rejections and thrown errors', a
   const byAdapter = new Map(outcome.failures.map((failure) => [failure.adapter, failure.detail]))
   assert.match(byAdapter.get('claude'), /sandbox denied write/)
   assert.match(byAdapter.get('codex-medium'), /workspace-write rejected path/)
+})
+
+test('verification rejects a symlink at the probe path without reading its target', async () => {
+  const surface = await loadPreflightSurface({})
+  const dir = mkdtempSync(path.join(tmpdir(), 'df12-probe-'))
+  const secret = path.join(dir, 'secret.txt')
+  const token = surface.writeProbeToken('1.2.3', 'claude')
+  writeFileSync(secret, token, 'utf8')
+  const probeFile = surface.writeProbePath(dir, 'claude')
+  symlinkSync(secret, probeFile)
+
+  const verdict = await surface.verifyWriteProbe(probeFile, token)
+
+  assert.equal(verdict.ok, false)
+  assert.match(verdict.detail, /not a regular file/)
+  assert.ok(!verdict.detail.includes(token), 'target content must not leak into the failure detail')
+  assert.equal(existsSync(probeFile), false, 'the symlink itself should be removed')
+  assert.equal(readFileSync(secret, 'utf8'), token, 'the symlink target must be untouched')
+})
+
+test('a committed decoy at the probe path cannot pre-satisfy the preflight', async () => {
+  const surface = await loadPreflightSurface({ planAdapter: 'codex', buildAdapter: 'codex' }, async () => ({ ok: true }))
+  const dir = mkdtempSync(path.join(tmpdir(), 'df12-probe-'))
+  const probeFile = surface.writeProbePath(dir, 'codex')
+  writeFileSync(probeFile, surface.writeProbeToken('1.2.3', 'codex'), 'utf8')
+
+  const outcome = await surface.runTaskAgentWritePreflight(dir, '1.2.3')
+
+  assert.equal(outcome.ok, false, 'a decoy with a predictable token must not stand in for the agent write')
+  assert.deepEqual(outcome.failures.map((failure) => failure.adapter), ['codex'])
+})
+
+test('the host probe clears a committed symlink instead of writing through it', async () => {
+  const surface = await loadPreflightSurface({ planAdapter: 'codex', buildAdapter: 'codex' }, async (prompt) => {
+    const { file, token } = probeDetailsFromPrompt(prompt)
+    await writeFile(file, token, 'utf8')
+    return { ok: true }
+  })
+  const dir = mkdtempSync(path.join(tmpdir(), 'df12-probe-'))
+  const outside = mkdtempSync(path.join(tmpdir(), 'df12-probe-target-'))
+  const target = path.join(outside, 'victim.txt')
+  writeFileSync(target, 'operator data\n', 'utf8')
+  symlinkSync(target, path.join(dir, '.df12-write-probe-host'))
+
+  const outcome = await surface.runTaskAgentWritePreflight(dir, '1.2.3')
+
+  assert.equal(outcome.ok, true)
+  assert.equal(readFileSync(target, 'utf8'), 'operator data\n', 'the symlink target must never be overwritten')
+  assert.equal(existsSync(path.join(dir, '.df12-write-probe-host')), false)
 })
 
 // chmod-based denial does not bind root, so this scenario cannot fail there.
