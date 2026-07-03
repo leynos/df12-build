@@ -154,6 +154,15 @@ provides the doc skills):
    `planAdapter`/`planModel`, `reviewAdapter`/`reviewModel`, and
    `assessmentAdapter`/`assessmentModel`.
 
+   Recovery and enforcement knobs: `resumePartialBranches` (opt-in fresh-run
+   discovery of surviving `roadmap-*` branches, default off), `resumeMode`
+   (`assess` reports only — the default; `review` may route clean, committed,
+   task-scoped `adopt-complete` branches with validation evidence back through
+   the ordinary review + integration path), `resumeTaskId` (narrow discovery
+   to one id; separate from `taskId`), `resumeMaxCandidates` (default 4), and
+   `worktreeWritePreflight` (host-verified probe that the plan and build
+   adapters can write into sibling task worktrees; on by default).
+
    The checked-in defaults split execution from judgement. Build-side work
    uses Codex defaults, while planning and review judgement use Claude Code
    with `claude-opus-4-8`. Partial-branch assessment inherits the review route
@@ -170,8 +179,12 @@ Every time a run completes you do the same loop:
 
 1. **Parse the result JSON.** Key fields: `processed` (ids merged this run),
    `results[]` (per-task `{id, status, stage, detail}` plus any
-   `assessment`), `assessments[]` (summaries for failed or halted branches that
-   were assessed), `halted` (null on a clean stop), `audits[]`,
+   `assessment`; recovery-resumed branches carry `kind: "recovery-resume"`),
+   `assessments[]` (summaries for failed or halted branches that
+   were assessed), `recovery` (the fresh-run recovery index when
+   `resumePartialBranches=true`: `candidates`, `assessed`, `resumed`,
+   per-candidate `results` with classification/action/reason, and `skipped`
+   with machine-readable reasons), `halted` (null on a clean stop), `audits[]`,
    `remediationTriage[]`, `pendingProposals` (proposals left unwritten because
    the run halted — triage them manually later).
 2. **Hoover orphan worktrees.** For each non-root worktree under
@@ -511,9 +524,32 @@ reviewer.
   worktree step already mitigates this (no-param `git donkey` + an in-worktree
   `git reset --hard origin/BASE` + a base-sha verify). If you see "based on a
   stale commit" failures, that mitigation is the place to look.
-- **A run that dies mid-flight:** do not try to resume. Hoover, then relaunch
-  fresh. Worker interleaving is non-deterministic, so prefix-resume is
-  unreliable by design.
+- **A run that dies mid-flight:** do not try to resume transcripts or cached
+  scheduler state. Worker interleaving is non-deterministic, so prefix-resume
+  is unreliable by design. You now have two recovery options, in order of
+  preference:
+  1. **Assess-first relaunch:** relaunch with `resumePartialBranches=true`
+     (default `resumeMode="assess"`). The fresh run discovers surviving
+     `roadmap-*` branches, assesses each against ADR 002, and reports them in
+     the top-level `recovery` object without mutating anything. Read the
+     classifications, then decide per branch: enable `resumeMode="review"` on
+     a follow-up run to let clean `adopt-complete` branches re-enter review
+     and integration, finish `continue-manual` branches by hand, or hoover
+     `discard` branches.
+  2. **Hoover and rebuild:** the pre-recovery behaviour — stash-park, remove
+     worktrees, reset branches, and let selection rebuild the task from
+     `origin/BASE`. Still correct when the surviving work is worthless.
+  While recovery is enabled, every id with a surviving branch is held out of
+  normal selection for that run (a fresh `git worktree add -b` would collide
+  with the surviving branch), so reported-but-unresolved branches must be
+  resumed, finished manually, or hoovered before the pool will rebuild those
+  tasks.
+- **`worktree-write` failure (task-agent writable-root preflight):** the plan
+  or build adapter could not write a host-verified probe file inside the task
+  worktree. This is a launch/sandbox fault — fix the adapter config (writable
+  roots covering `...worktrees/roadmap-*`) and relaunch; do not burn design
+  rounds or reword roadmap tasks. The verdict is computed once per run, so
+  every task fails fast together.
 
 ## Editing or restructuring the roadmap safely
 
@@ -529,14 +565,20 @@ restructuring). While a run may be live:
 - **Land it concurrency-safely.** If no run is live: ff-merge to `BASE` and
   push. If a run is live: push with a fetch-rebase-retry loop (the roadmap has
   a merge driver that weaves concurrent edits; rebases are usually clean).
+- **Use `mapsplice` for structural roadmap edits.** The `mapsplice` CLI (load
+  its skill for usage) appends, inserts, deletes, and replaces numbered
+  phases, steps, tasks, and addendum sub-tasks while preserving renumbering
+  and `Requires` references. Prefer it over hand-editing whenever the change
+  is structural rather than prose-only.
 - **Large restructures deserve a deterministic transform.** For a big renumber
-  (e.g. collapsing bucket-steps), write a script that preserves task bodies
-  byte-for-byte and remaps ids + cross-references via an explicit map, then
-  **validate hard before merging**: task-count in == out, every `Requires`
-  resolves, gates green, and the unrelated phases are untouched. Measure twice.
+  (e.g. collapsing bucket-steps), drive it with `mapsplice` where its
+  operations fit; otherwise write a script that preserves task bodies
+  byte-for-byte and remaps ids + cross-references via an explicit map. Either
+  way, **validate hard before merging**: task-count in == out, every
+  `Requires` resolves, gates green, and the unrelated phases are untouched.
+  Measure twice.
 - **Place new work at step boundaries** (`phase.step.task`), live and
   fix-debt-first, so the pool picks it up on the next refill.
-
 
 ## Roadmap grooming thresholds
 

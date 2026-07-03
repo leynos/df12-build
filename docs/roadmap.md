@@ -31,7 +31,7 @@ non-mutating.
   - See `docs/failure-resume-design.md` section "Runtime configuration".
   - Success: default workflow behaviour is unchanged unless
     `resumePartialBranches=true`.
-- [ ] 1.1.2. Document the recovery arguments in the user guide, architecture
+- [x] 1.1.2. Document the recovery arguments in the user guide, architecture
   guide, security guide, developer guide, and supervisor skill.
   - Requires 1.1.1.
   - See `docs/failure-resume-design.md` sections "Runtime configuration" and

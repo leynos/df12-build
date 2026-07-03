@@ -294,6 +294,22 @@ Common arguments:
   files.
 - `assessPartialBranches`: when `false`, skip the report-only assessment of
   failed or halted task branches. Defaults to enabled.
+- `resumePartialBranches`: when `true`, discover surviving `roadmap-*` branches
+  on launch and assess them before normal roadmap selection. Defaults to
+  `false`; the default workflow behaviour is unchanged unless an operator opts
+  in.
+- `resumeMode`: the maximum recovery action for discovered branches. `assess`
+  (the default) reports only. `review` may additionally route clean, committed,
+  task-scoped `adopt-complete` branches with validation evidence into the
+  ordinary review and integration path. Any other value fails fast at launch.
+- `resumeTaskId`: limit recovery discovery to one roadmap id. This is separate
+  from `taskId`, which selects normal roadmap work.
+- `resumeMaxCandidates`: bound on recovery candidates per run. Defaults to `4`;
+  excess candidates are reported as skipped with reason `candidate-cap`.
+- `worktreeWritePreflight`: when `false`, skip the once-per-run probe that
+  proves the planning and build adapters can write into sibling task
+  worktrees. Defaults to enabled; a failed probe fails the task at stage
+  `worktree-write` as an environment fault.
 - `buildAdapter` and `buildModel`: adapter and model for worktree creation,
   implementation, integration, and remediation agents.
 - `planAdapter` and `planModel`: adapter and model for planning agents.
@@ -374,6 +390,39 @@ set the strict `ok=true` schema field, the workflow returns
 That preserves throughput without auto-merging ambiguous output: an operator
 must rerun gates, confirm review evidence, reconcile the roadmap checkbox, and
 then integrate or discard the branch.
+
+### Fresh-run recovery
+
+A fresh launch can also discover branches that survived an earlier failed run.
+Set `resumePartialBranches=true` and choose the maximum action with
+`resumeMode` before launching:
+
+- **Assess-only** (`resumeMode="assess"`, the default): the workflow maps
+  surviving `roadmap-*` branches back to roadmap ids, assesses each candidate
+  with the same ADR 002 contract used for in-run failures, and reports the
+  outcome in a top-level `recovery` object. Nothing is merged, pushed, ticked,
+  or deleted, and `processed` is unchanged. Use this mode first: it is safe on
+  any repository the workflow can read.
+- **Review-mode resume** (`resumeMode="review"`): in addition to assessment,
+  a candidate classified `adopt-complete` that is clean, committed,
+  task-scoped, and carries validation evidence re-enters the ordinary dual
+  review and merge-lock integration path without re-running implementation.
+  Everything else is still report-only, and an `adopt-complete` verdict with
+  incomplete evidence is downgraded to `continue-manual` with an explicit skip
+  reason (`dirty-worktree`, `no-committed-work`, `not-task-scoped`,
+  `missing-validation-evidence`, `evidence-collection-error`, or
+  `addendum-branch`). Review-mode resume mutates the target project exactly as
+  ordinary integration does, so grant it the same permissions and trust.
+
+The `recovery` result object indexes the pass for operators: `candidates`,
+`assessed`, `resumed`, per-candidate `results` (classification and action), and
+`skipped` entries with machine-readable reasons (including `unmapped-branch`,
+`already-complete`, `missing-worktree`, and `candidate-cap` from discovery).
+Ids with surviving branches are held out of normal selection for the rest of
+the run so the pool cannot collide with an existing branch; hoover the branch
+or resume it before expecting normal selection to rebuild that task. A fatal
+auth preflight blocks recovery entirely (`recovery.blocked =
+"auth-preflight-failed"`), and dry runs never resume.
 
 Use the `df12-build-supervisor` skill for the detailed operator playbook:
 failure-mode diagnosis, orphan worktree cleanup, remediation triage, stash

@@ -64,6 +64,13 @@ Keep the ODW script contract intact:
   `processed`.
 - Skip assessment for auth failures, dry runs, successful tasks,
   manual-merge-ready branches, and failures before worktree creation.
+- Keep fresh-run recovery fail-closed. Assess mode must stay non-mutating (the
+  no-mutation regression suite pins this), review-mode resume may only land
+  through `runDualReviewAndIntegration` and the merge lock, and eligibility
+  must be decided by host JavaScript over host-collected evidence — never by
+  agent prose alone.
+- Keep the task-agent write preflight host-verified: the probe outcome is the
+  bytes on disk, not the agent's claimed `ok`.
 
 Changes to workflow behaviour must update all relevant prompts, schemas, docs,
 and validation notes in the same branch.
@@ -125,6 +132,19 @@ Run focused assessment tests while changing partial-branch recovery:
 
 ```bash
 node --test tests/df12-build-odw-assessment.test.mjs
+```
+
+Run the recovery suites while changing fresh-run recovery, the resume decision
+table, or the write preflight. The combination suite executes the whole
+control loop in a subprocess against fixture repositories, and the smoke suite
+drives the real `odw` runtime with deterministic mock adapters (it skips when
+`odw` is not installed):
+
+```bash
+node --test tests/df12-build-odw-recovery.test.mjs
+node --test tests/df12-build-odw-write-preflight.test.mjs
+node --test tests/df12-build-odw-recovery-combinations.test.mjs
+node --test tests/df12-build-odw-recovery-smoke.test.mjs
 ```
 
 The `typecheck` target runs an ODW-style wrapper parse check for both workflow
