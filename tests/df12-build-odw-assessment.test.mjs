@@ -217,9 +217,16 @@ test('assessment guard admits only non-auth failed or halted task branches', asy
   assert.equal(shouldAssessFailure({ status: 'manual-merge-ready', stage: 'review', detail: '' }, wt), false)
   assert.equal(shouldAssessFailure({ status: 'done', stage: 'integrate', detail: '' }, wt), false)
   assert.equal(shouldAssessFailure({ status: 'fatal-auth', stage: 'auth', detail: 'Run codex login' }, wt), false)
-  assert.equal(shouldAssessFailure({ status: 'provider-fault', stage: 'provider', detail: 'API Error: 529 Overloaded' }, wt), false)
+  assert.equal(shouldAssessFailure({ status: 'failed', stage: 'provider', detail: 'API Error: 529 Overloaded' }, wt), false)
   assert.equal(shouldAssessFailure({ status: 'failed', stage: 'implement', detail: '401 Unauthorized' }, wt), false)
   assert.equal(shouldAssessFailure({ status: 'failed', stage: 'implement', detail: 'API Error: 429 rate limited' }, wt), false)
+  assert.equal(
+    shouldAssessFailure(
+      { status: 'failed', stage: 'implement', detail: 'turn exhausted', openIssues: ['API Error: 529 Overloaded'] },
+      wt,
+    ),
+    false,
+  )
   assert.equal(shouldAssessFailure({ status: 'failed', stage: 'implement', detail: 'turn exhausted' }, null), false)
 })
 

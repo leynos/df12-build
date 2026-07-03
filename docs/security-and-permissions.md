@@ -127,9 +127,9 @@ Controls that matter:
   confused agent; recovery assessment reads them, and review-mode resume asks
   reviewers to judge them. The resume path fails closed (only clean, committed,
   task-scoped `adopt-complete` branches with validation evidence enter review),
-  and everything still passes the ordinary review and integration gates, but do
-  not enable `resumeMode="review"` on branches you would not hand to a
-  reviewer.
+  and everything still passes the ordinary review and integration gates, but
+  `resumeMode="review"` should only be enabled for branches an operator would
+  willingly hand to a reviewer.
 - Treat sidecar-local patches as untrusted until promoted through the normal
   `df12-build` review path.
 

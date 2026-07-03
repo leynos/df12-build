@@ -139,7 +139,8 @@ test('preflight surfaces agent-reported sandbox rejections and thrown errors', a
   assert.match(byAdapter.get('codex-medium'), /workspace-write rejected path/)
 })
 
-test('preflight fails fast on an unwritable host root before spawning agents', async () => {
+// chmod-based denial does not bind root, so this scenario cannot fail there.
+test('preflight fails fast on an unwritable host root before spawning agents', { skip: process.getuid?.() === 0 }, async () => {
   let agentCalls = 0
   const surface = await loadPreflightSurface({}, async () => {
     agentCalls += 1

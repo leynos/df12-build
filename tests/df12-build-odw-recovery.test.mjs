@@ -737,5 +737,9 @@ test('control loop wires recovery ahead of normal selection', async () => {
     /normal: \[\.\.\.processedNormal[\s\S]*?\.\.\.recoveryHeldNormal\]/,
     'takenSnapshot must exclude recovery-held ids from normal selection',
   )
-  assert.match(source, /\n  recovery,\n/, 'workflow result must expose the recovery summary')
+  assert.match(
+    source,
+    /return \{[\s\S]*?\brecovery,[\s\S]*?\bsummary:/,
+    'workflow result must expose the recovery summary',
+  )
 })

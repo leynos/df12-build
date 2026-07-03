@@ -1206,7 +1206,7 @@ function shouldAssessFailure(result, wt) {
   if (!result || !['failed', 'halted'].includes(result.status)) return false
   if (result.stage === 'worktree' || result.stage === 'worktree-write' || result.stage === 'auth' || result.stage === 'provider' || result.status === 'fatal-auth' || result.status === 'provider-fault') return false
   const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
-  return !authFailureDetail(detail) && !providerFailureDetail(result.detail)
+  return !authFailureDetail(detail) && !providerFailureDetail(detail)
 }
 
 async function attachAssessment(task, wt, result) {
