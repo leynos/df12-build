@@ -79,7 +79,7 @@ assessment contract instead of creating a second recovery classifier.
     `docs/adr-002-assess-partial-task-branches.md`.
   - Success: recovered candidates produce the same classification enum and
     evidence fields as in-run failed task assessments.
-- [ ] 1.3.2. Add no-mutation regression coverage for assess-only recovery.
+- [x] 1.3.2. Add no-mutation regression coverage for assess-only recovery.
   - Requires 1.3.1.
   - See `docs/failure-resume-design.md` section "Verification".
   - Success: tests prove assess-only recovery does not mark roadmap tasks,

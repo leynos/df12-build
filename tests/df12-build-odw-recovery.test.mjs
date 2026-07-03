@@ -82,7 +82,22 @@ function makeRecoveryRepo({ withAddendumWorktree = false } = {}) {
     addendumWorktree = addBranch('roadmap-2-1-2-addendum', { worktree: true })
   }
 
-  return { root, dir, baseSha, parserWorktree, addendumWorktree }
+  return { root, dir, originDir, baseSha, parserWorktree, addendumWorktree }
+}
+
+// Every observable piece of durable state assess-only recovery must not touch:
+// local refs, origin refs, control-checkout dirt, worktree dirt, stashes, and
+// the canonical roadmap text.
+function repoStateSnapshot(repo) {
+  return {
+    localRefs: git(repo.dir, 'for-each-ref', '--format=%(refname) %(objectname)'),
+    originRefs: git(repo.originDir, 'for-each-ref', '--format=%(refname) %(objectname)'),
+    controlStatus: git(repo.dir, 'status', '--porcelain=v1'),
+    worktreeStatus: repo.parserWorktree ? git(repo.parserWorktree, 'status', '--porcelain=v1') : '',
+    stashes: git(repo.dir, 'stash', 'list'),
+    worktrees: git(repo.dir, 'worktree', 'list', '--porcelain'),
+    canonicalRoadmap: git(repo.dir, 'show', 'origin/main:docs/roadmap.md'),
+  }
 }
 
 async function loadRecoverySurface(args = {}, agentImpl = async () => null) {
@@ -468,6 +483,47 @@ test('skip reasons are a stable published contract', async () => {
     'candidate-cap',
     'assessment-error',
   ])
+})
+
+test('assess-only recovery leaves every piece of durable git state untouched', async () => {
+  const repo = makeRecoveryRepo({ withAddendumWorktree: true })
+  writeFileSync(path.join(repo.parserWorktree, 'dirty.txt'), 'uncommitted operator work\n')
+  const before = repoStateSnapshot(repo)
+
+  for (const classification of ['adopt-complete', 'adopt-partial', 'continue-manual', 'discard']) {
+    const surface = await loadRecoverySurface(
+      { resumePartialBranches: true },
+      async () => sampleAssessment({ classification }),
+    )
+    const outcome = await surface.runRecovery(repo.dir)
+
+    assert.equal(outcome.summary.assessed, 2, `both candidates assessed for ${classification}`)
+    assert.equal(outcome.summary.resumed, 0, 'assess-only mode never resumes')
+    assert.deepEqual(outcome.taskResults, [], 'assess-only mode never produces task results')
+    assert.ok(
+      outcome.summary.results.every((entry) => entry.action === 'reported'),
+      'assess-only mode only reports',
+    )
+  }
+
+  assert.deepEqual(
+    repoStateSnapshot(repo),
+    before,
+    'no branch tip, origin ref, roadmap text, stash, worktree, or dirty file may change',
+  )
+})
+
+test('recovery marks processed only for pushed, integrated resume results', async () => {
+  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  assert.match(
+    source,
+    new RegExp(
+      String.raw`for \(const entry of outcome\.taskResults\) \{` +
+        String.raw`[\s\S]*?status === 'done' && entry\.result\.integration\?\.pushed` +
+        String.raw`[\s\S]*?markProcessed\(entry\.task\)`,
+    ),
+    'processed ids may only come from pushed integrations, never from reported assessments',
+  )
 })
 
 test('control loop wires recovery ahead of normal selection', async () => {
