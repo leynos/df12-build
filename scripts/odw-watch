@@ -5,6 +5,20 @@
 #   "cyclopts>=3.0",
 # ]
 # ///
+"""Tail Open Dynamic Workflows (ODW) events for one source project.
+
+Operator companion to ``odw logs``: given a source directory, this script
+finds every *running* ODW run whose metadata records that source, prints the
+most recent events across those runs, then follows their ``events.jsonl``
+files, discovering newly started runs on each poll. Torn trailing lines are
+tolerated and re-read on the next poll, matching the run-directory contract.
+
+Example
+-------
+Follow the runs building a project, starting with the last 20 events::
+
+    scripts/odw-watch ~/Projects/my-project -n 20
+"""
 
 from __future__ import annotations
 
@@ -25,17 +39,44 @@ app = App(help="Watch events for running ODW runs from a source directory.")
 
 @dataclass(frozen=True)
 class Run:
+    """A discovered ODW run directory matched to the watched source.
+
+    Attributes
+    ----------
+    path : Path
+        Run directory (``<runs_dir>/<workflow>/<run-id>``).
+    run_id : str
+        Run identifier from metadata, or the directory name.
+    source : str
+        Source directory recorded in the run's metadata.
+    """
+
     path: Path
     run_id: str
     source: str
 
     @property
     def events_path(self) -> Path:
+        """Path of the run's append-only ``events.jsonl`` stream."""
         return self.path / "events.jsonl"
 
 
 @dataclass(frozen=True)
 class Event:
+    """One decoded event line, ordered by timestamp then file sequence.
+
+    Attributes
+    ----------
+    ts : float
+        Event timestamp (epoch seconds), ``0.0`` when absent.
+    sequence : int
+        Line index within the batch that read it; tie-breaker for sorting.
+    run : Run
+        Run the event belongs to.
+    data : dict[str, Any]
+        Raw decoded event payload.
+    """
+
     ts: float
     sequence: int
     run: Run
@@ -43,6 +84,7 @@ class Event:
 
 
 def read_json(path: Path) -> dict[str, Any]:
+    """Read a JSON object from ``path``, returning ``{}`` on any failure."""
     try:
         with path.open(encoding="utf-8") as handle:
             data = json.load(handle)
@@ -55,20 +97,24 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def normalized_path(path: Path) -> str:
+    """Expand and resolve ``path`` into a comparable absolute string."""
     return str(path.expanduser().resolve(strict=False))
 
 
 def normalize_source(source: str) -> str:
+    """Normalize a metadata source string for path comparison."""
     return normalized_path(Path(source))
 
 
 def is_matching_source(meta_source: Any, source: Path) -> bool:
+    """Report whether a run's recorded source matches the watched source."""
     if not isinstance(meta_source, str) or not meta_source:
         return False
     return normalize_source(meta_source) == normalized_path(source)
 
 
 def is_running(run_dir: Path) -> bool:
+    """Report whether the run's ``status.json`` records a running state."""
     status_data = read_json(run_dir / "status.json")
     return str(status_data.get("state") or status_data.get("status") or "").casefold() == (
         "running"
@@ -76,6 +122,20 @@ def is_running(run_dir: Path) -> bool:
 
 
 def discover_running_runs(runs_dir: Path, source: Path) -> list[Run]:
+    """Find running runs under ``runs_dir`` whose metadata matches ``source``.
+
+    Parameters
+    ----------
+    runs_dir : Path
+        ODW runs root laid out as ``<runs_dir>/<workflow>/<run-id>/``.
+    source : Path
+        Source directory to match against each run's metadata.
+
+    Returns
+    -------
+    list[Run]
+        Matching running runs, in sorted directory order.
+    """
     runs: list[Run] = []
 
     for run_dir in sorted(path for path in runs_dir.glob("*/*") if path.is_dir()):
@@ -98,6 +158,22 @@ def discover_running_runs(runs_dir: Path, source: Path) -> list[Run]:
 
 
 def parse_event(line: bytes, *, sequence: int, run: Run) -> Event | None:
+    """Decode one ``events.jsonl`` line into an :class:`Event`.
+
+    Parameters
+    ----------
+    line : bytes
+        Raw line, including its trailing newline.
+    sequence : int
+        Line index within the current read batch.
+    run : Run
+        Run the line belongs to.
+
+    Returns
+    -------
+    Event | None
+        The decoded event, or ``None`` for undecodable or non-object lines.
+    """
     try:
         raw_data = json.loads(line.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -116,6 +192,22 @@ def parse_event(line: bytes, *, sequence: int, run: Run) -> Event | None:
 
 
 def read_events(run: Run, *, start_offset: int = 0) -> tuple[list[Event], int]:
+    """Read complete event lines from ``start_offset`` onwards.
+
+    Parameters
+    ----------
+    run : Run
+        Run whose ``events.jsonl`` should be read.
+    start_offset : int
+        Byte offset to resume from.
+
+    Returns
+    -------
+    tuple[list[Event], int]
+        Decoded events and the next resume offset. A torn (unterminated)
+        final line is not consumed: the offset points at its start so the
+        next poll re-reads it once complete.
+    """
     events: list[Event] = []
     offset = start_offset
 
@@ -146,26 +238,38 @@ def read_events(run: Run, *, start_offset: int = 0) -> tuple[list[Event], int]:
     return events, offset
 
 
-def event_file_size(run: Run) -> int:
-    try:
-        return run.events_path.stat().st_size
-    except OSError:
-        return 0
+def recent_events(runs: list[Run], limit: int) -> tuple[list[Event], dict[Path, int]]:
+    """Read each run's full event history and keep the most recent events.
 
+    Parameters
+    ----------
+    runs : list[Run]
+        Runs to read.
+    limit : int
+        Number of trailing events to keep across all runs; ``0`` or a
+        negative value keeps none (offsets are still collected).
 
-def recent_events(runs: list[Run], limit: int) -> list[Event]:
-    if limit <= 0:
-        return []
-
+    Returns
+    -------
+    tuple[list[Event], dict[Path, int]]
+        The most recent events in display order, and each run's resume
+        offset so the caller can continue tailing exactly where these
+        reads stopped without re-reading or skipping lines.
+    """
     events: list[Event] = []
+    offsets: dict[Path, int] = {}
     for run in runs:
-        run_events, _ = read_events(run)
+        run_events, offset = read_events(run)
+        offsets[run.path] = offset
         events.extend(run_events)
 
-    return sorted(events, key=lambda event: (event.ts, event.sequence))[-limit:]
+    if limit <= 0:
+        return [], offsets
+    return sorted(events, key=lambda event: (event.ts, event.sequence))[-limit:], offsets
 
 
 def display_time(ts: float) -> str:
+    """Format an epoch timestamp as a local 12-hour clock reading."""
     if ts <= 0:
         return ""
     formatted = datetime.fromtimestamp(ts).strftime("%I:%M:%S %p")
@@ -173,6 +277,7 @@ def display_time(ts: float) -> str:
 
 
 def stringify(value: Any) -> str:
+    """Render an event field as text; non-strings become compact JSON."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -181,6 +286,19 @@ def stringify(value: Any) -> str:
 
 
 def event_detail(event: dict[str, Any]) -> str:
+    """Build the human-readable detail column for one event payload.
+
+    Parameters
+    ----------
+    event : dict[str, Any]
+        Raw event payload.
+
+    Returns
+    -------
+    str
+        A short ``(phase) detail`` string for known event types, otherwise
+        the remaining payload as sorted JSON (or ``""`` when empty).
+    """
     event_type = stringify(event.get("type"))
 
     if event_type == "log":
@@ -188,7 +306,7 @@ def event_detail(event: dict[str, Any]) -> str:
 
     if event_type == "phase_started":
         phase = stringify(event.get("phase"))
-        return f"({phase}) phase: {phase}"
+        return f"({phase}) phase started"
 
     if event_type in {"agent_started", "agent_finished"}:
         phase = stringify(event.get("phase"))
@@ -217,26 +335,43 @@ def event_detail(event: dict[str, Any]) -> str:
 
 
 def format_event(event: Event) -> str:
+    """Format one event as a single ``[time] type detail`` output line."""
     event_type = stringify(event.data.get("type"))
     return f"[{display_time(event.ts)}] {event_type:<15} {event_detail(event.data)}"
 
 
 def emit(events: list[Event]) -> None:
+    """Print events in timestamp-then-sequence order, flushing each line."""
     for event in sorted(events, key=lambda item: (item.ts, item.sequence)):
         print(format_event(event), flush=True)
 
 
 def watch(source: Path, *, runs_dir: Path, recent: int, poll: float) -> None:
+    """Print recent events, then poll matching running runs forever.
+
+    Parameters
+    ----------
+    source : Path
+        Source directory recorded in the target runs' metadata.
+    runs_dir : Path
+        ODW runs root to discover runs under.
+    recent : int
+        Number of historical events to print before tailing.
+    poll : float
+        Seconds to sleep between discovery/tail iterations.
+
+    Notes
+    -----
+    The initial tail offsets are the exact resume offsets returned by
+    :func:`recent_events`, so events appended between the initial read and
+    the first poll are never skipped.
+    """
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
-    offsets: dict[Path, int] = {}
-    known_runs: set[Path] = set()
-
     initial_runs = discover_running_runs(runs_dir, source)
-    emit(recent_events(initial_runs, recent))
-    for run in initial_runs:
-        offsets[run.path] = event_file_size(run)
-        known_runs.add(run.path)
+    initial_events, offsets = recent_events(initial_runs, recent)
+    emit(initial_events)
+    known_runs: set[Path] = {run.path for run in initial_runs}
 
     while True:
         loop_events: list[Event] = []
@@ -270,9 +405,9 @@ def main(
     ],
     *,
     runs_dir: Annotated[
-        Path,
-        Parameter(help="Root ODW runs directory."),
-    ] = Path.home() / ".odw" / "runs",
+        Path | None,
+        Parameter(help="Root ODW runs directory. Defaults to ~/.odw/runs."),
+    ] = None,
     recent: Annotated[
         int,
         Parameter(name=("--recent", "-n"), help="Records to print before tailing."),
@@ -289,6 +424,8 @@ def main(
     if poll <= 0:
         print("--poll must be positive", file=sys.stderr)
         raise SystemExit(2)
+    if runs_dir is None:
+        runs_dir = Path.home() / ".odw" / "runs"
 
     watch(source.expanduser(), runs_dir=runs_dir.expanduser(), recent=recent, poll=poll)
 
