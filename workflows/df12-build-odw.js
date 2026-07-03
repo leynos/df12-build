@@ -1432,6 +1432,27 @@ function recoveryDecision(candidate, evidence, assessment, mode, flags = {}) {
 // `git worktree add -b` would collide with the surviving branch.
 const RECOVERY_HOLD_REASONS = new Set(['missing-worktree', 'candidate-cap', 'unreadable-commit', 'assessment-error'])
 
+// Bridge an eligible recovered branch into the ordinary review path without
+// re-running implementation. The synthetic result mirrors IMPL_SCHEMA but is
+// NOT proof the branch is shippable: code review, expert review, gates, and
+// integration remain decisive, and the open issue makes that explicit to
+// reviewers reading the implementation summary.
+async function syntheticRecoveryImpl(candidate, evidence) {
+  const canonicalPlan = `docs/execplans/${candidate.branchName}.md`
+  const execplanPath = (await fileExists(canonicalPlan, candidate.worktreePath)) ? canonicalPlan : ''
+  return {
+    ok: true,
+    gatesGreen: true,
+    execplanPath,
+    workItemsCompleted: 0,
+    workItemsTotal: 0,
+    commits: evidence?.recentCommits || [],
+    coderabbitRuns: 0,
+    openIssues: ['recovered branch requires fresh review'],
+    summary: 'Recovered adopt-complete branch from durable git state.',
+  }
+}
+
 // Fresh-run recovery pass: discover -> assess -> report (assess-only, phase 1
 // of the failure-resume design). Review-mode resume for eligible
 // adopt-complete candidates arrives with the phase 2 roadmap tasks. This pass

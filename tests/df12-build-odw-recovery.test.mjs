@@ -120,9 +120,11 @@ return {
   RESUME_TASK_ID,
   RESUME_MAX_CANDIDATES,
   ASSESSMENT_SCHEMA,
+  IMPL_SCHEMA,
   RECOVERY_SKIP_REASONS,
   recoveryResumeEligibility,
   recoveryDecision,
+  syntheticRecoveryImpl,
   branchToRoadmapId,
   parseWorktreeList,
   discoverRecoveryCandidates,
@@ -581,6 +583,37 @@ test('review-mode resume fails closed: ineligible adopt-complete downgrades to c
     reason: 'dry-run',
     skip: true,
   })
+})
+
+test('synthetic recovery implementation bridges into review without faking evidence', async () => {
+  const surface = await loadRecoverySurface({})
+  const repo = makeRecoveryRepo()
+  const candidate = sampleCandidate(repo)
+  const evidence = { recentCommits: ['abc1234 Work on roadmap-1-2-3'] }
+
+  const missingPlan = await surface.syntheticRecoveryImpl(candidate, evidence)
+  assert.equal(missingPlan.ok, true)
+  assert.equal(missingPlan.gatesGreen, true)
+  assert.equal(missingPlan.execplanPath, '', 'absent canonical plan must not be claimed')
+  assert.equal(missingPlan.workItemsCompleted, 0)
+  assert.equal(missingPlan.workItemsTotal, 0)
+  assert.deepEqual(missingPlan.commits, ['abc1234 Work on roadmap-1-2-3'])
+  assert.equal(missingPlan.coderabbitRuns, 0)
+  assert.deepEqual(missingPlan.openIssues, ['recovered branch requires fresh review'])
+  assert.match(missingPlan.summary, /Recovered adopt-complete branch from durable git state/)
+
+  mkdirSync(path.join(repo.parserWorktree, 'docs', 'execplans'), { recursive: true })
+  writeFileSync(
+    path.join(repo.parserWorktree, 'docs', 'execplans', 'roadmap-1-2-3.md'),
+    '# ExecPlan\n',
+  )
+  const withPlan = await surface.syntheticRecoveryImpl(candidate, evidence)
+  assert.equal(withPlan.execplanPath, 'docs/execplans/roadmap-1-2-3.md')
+
+  const allowed = new Set(Object.keys(surface.IMPL_SCHEMA.properties))
+  for (const key of Object.keys(withPlan)) {
+    assert.ok(allowed.has(key), `synthetic field ${key} must exist in IMPL_SCHEMA`)
+  }
 })
 
 test('assess-only recovery leaves every piece of durable git state untouched', async () => {

@@ -119,7 +119,7 @@ This step answers whether resume can finish a recovered branch without a custom
 merge path. Reuse is the safety property: the same gates should apply to
 ordinary and recovered work.
 
-- [ ] 2.2.1. Build a synthetic implementation result for eligible recovered
+- [x] 2.2.1. Build a synthetic implementation result for eligible recovered
   branches.
   - Requires 2.1.1.
   - See `docs/failure-resume-design.md` section "Review-mode resume path".
