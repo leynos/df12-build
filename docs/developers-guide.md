@@ -25,15 +25,23 @@ Read these before changing launch or workflow behaviour:
 
 ## Repository shape
 
-The repository currently contains workflow scripts, skill documentation, docs,
-and a small validation `Makefile`. It does not contain a project roadmap,
-ExecPlan, or package manifest.
+The repository contains workflow scripts, skill documentation, docs, operator
+scripts, focused test suites, a project roadmap with ExecPlans, and a small
+validation `Makefile`. It does not contain a package manifest.
 
 Relevant paths:
 
 - `workflows/df12-build-odw.js`: ODW/Codex workflow.
 - `workflows/df12-build.js`: baseline workflow.
 - `skills/df12-build-supervisor/SKILL.md`: operator skill.
+- `scripts/list-odw-runs.py` and `scripts/odw-watch`: operator run-monitoring
+  scripts (documented in the user guide's "Monitoring runs" section).
+- `tests/`: Node suites for the ODW workflow plus
+  `tests/run-odw-script-tests.py` for the operator scripts.
+- `docs/roadmap.md`: this repository's own GIST roadmap.
+- `docs/execplans/`: ExecPlans for landed roadmap work.
+- `docs/failure-resume-design.md`: the failure-resume design the recovery
+  phases implement.
 - `docs/users-guide.md`: user-facing launch guide.
 - `docs/security-and-permissions.md`: runtime permissions and sandbox guide.
 - `docs/developers-guide.md`: contributor-facing maintenance guide.
@@ -42,8 +50,8 @@ Relevant paths:
 - `docs/adr-002-assess-partial-task-branches.md`: accepted recovery assessment
   decision.
 
-If a future branch adds `docs/roadmap.md` or new `docs/execplans/` entries,
-update the matching task or ExecPlan whenever the branch lands planned work.
+Tick the matching roadmap task and update the relevant ExecPlan whenever a
+branch lands planned work.
 
 ## ODW workflow contract
 
@@ -145,6 +153,13 @@ node --test tests/df12-build-odw-recovery.test.mjs
 node --test tests/df12-build-odw-write-preflight.test.mjs
 node --test tests/df12-build-odw-recovery-combinations.test.mjs
 node --test tests/df12-build-odw-recovery-smoke.test.mjs
+```
+
+The operator scripts have their own behavioural suite (run by `make test`
+via `uv`):
+
+```bash
+uv run tests/run-odw-script-tests.py
 ```
 
 The `typecheck` target runs an ODW-style wrapper parse check for both workflow

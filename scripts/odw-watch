@@ -83,12 +83,36 @@ class Event:
     data: dict[str, Any]
 
 
+_warned: set[str] = set()
+
+
+def warn_once(message: str) -> None:
+    """Print ``message`` to stderr once per process, deduplicated by text.
+
+    The poll loop re-reads mutable state files every cycle, and a torn
+    ``status.json`` mid-write is an expected transient, so repeating the same
+    warning every poll would drown the event stream.
+    """
+    if message in _warned:
+        return
+    _warned.add(message)
+    print(message, file=sys.stderr, flush=True)
+
+
 def read_json(path: Path) -> dict[str, Any]:
-    """Read a JSON object from ``path``, returning ``{}`` on any failure."""
+    """Read a JSON object from ``path``, returning ``{}`` on any failure.
+
+    Absence is silent (runs legitimately lack some files); malformed or
+    unreadable content warns once on stderr so operators can spot corrupt
+    run state without the watcher crashing or spamming.
+    """
     try:
         with path.open(encoding="utf-8") as handle:
             data = json.load(handle)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, OSError) as error:
+        warn_once(f"warning: skipping unreadable {path}: {error}")
         return {}
 
     if isinstance(data, dict):
@@ -230,6 +254,12 @@ def read_events(run: Run, *, start_offset: int = 0) -> tuple[list[Event], int]:
                 sequence += 1
                 if event is not None:
                     events.append(event)
+                else:
+                    # Complete but undecodable lines are abnormal (torn lines
+                    # never reach here); surface them instead of hiding them.
+                    warn_once(
+                        f"warning: skipping undecodable event line at byte {line_start} in {run.events_path}"
+                    )
     except FileNotFoundError:
         return [], 0
     except OSError:
@@ -261,7 +291,10 @@ def recent_events(runs: list[Run], limit: int) -> tuple[list[Event], dict[Path, 
     for run in runs:
         run_events, offset = read_events(run)
         offsets[run.path] = offset
-        events.extend(run_events)
+        # The global most-recent `limit` is a subset of each run's trailing
+        # `limit`, so retained memory stays bounded at runs x limit events.
+        if limit > 0:
+            events.extend(run_events[-limit:])
 
     if limit <= 0:
         return [], offsets
@@ -364,34 +397,25 @@ def watch(source: Path, *, runs_dir: Path, recent: int, poll: float) -> None:
     -----
     The initial tail offsets are the exact resume offsets returned by
     :func:`recent_events`, so events appended between the initial read and
-    the first poll are never skipped.
+    the first poll are never skipped. Offsets are retained for the whole
+    session — one integer per run ever seen — so a run that pauses and
+    resumes continues from where it left off instead of replaying its
+    history.
     """
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
     initial_runs = discover_running_runs(runs_dir, source)
     initial_events, offsets = recent_events(initial_runs, recent)
     emit(initial_events)
-    known_runs: set[Path] = {run.path for run in initial_runs}
 
     while True:
         loop_events: list[Event] = []
-        running_runs = discover_running_runs(runs_dir, source)
-        running_paths = {run.path for run in running_runs}
-
-        for run in running_runs:
-            if run.path not in known_runs:
-                events, offset = read_events(run)
-                loop_events.extend(events)
-                offsets[run.path] = offset
-                known_runs.add(run.path)
-                continue
-
+        for run in discover_running_runs(runs_dir, source):
+            # A run first seen mid-session starts from offset 0, printing its
+            # short history; a known run resumes from its recorded offset.
             events, offset = read_events(run, start_offset=offsets.get(run.path, 0))
             loop_events.extend(events)
             offsets[run.path] = offset
-
-        for stopped_path in set(offsets) - running_paths:
-            offsets.pop(stopped_path, None)
 
         emit(loop_events)
         time.sleep(poll)

@@ -3,8 +3,8 @@
 `df12-build` is not a passive documentation tool. A normal ODW/Codex workshop
 can create branches, create worktrees, edit source, run commands, commit,
 push, request CodeRabbit review, write audit files, and update roadmap state in
-another repository. Do not run it with credentials or filesystem access you
-would not give to an autonomous engineer working on that target project.
+another repository. Do not run it with credentials or filesystem access that
+would not be granted to an autonomous engineer working on that target project.
 
 The workflow's prompts are part of the control system, but they are not a
 sandbox. Runtime permissions, GitHub rights, branch protection, repository

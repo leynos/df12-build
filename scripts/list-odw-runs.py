@@ -27,6 +27,7 @@ List every failed or stopped run::
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -76,12 +77,17 @@ def read_json(path: Path) -> dict[str, Any]:
     -------
     dict[str, Any]
         The decoded object, or ``{}`` when the file is missing, unreadable,
-        torn mid-write, or does not contain a JSON object.
+        torn mid-write, or does not contain a JSON object. Absence is
+        silent; malformed or unreadable content warns on stderr so corrupt
+        run state is visible without failing the listing.
     """
     try:
         with path.open(encoding="utf-8") as handle:
             data = json.load(handle)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, OSError) as error:
+        print(f"warning: skipping unreadable {path}: {error}", file=sys.stderr)
         return {}
 
     if isinstance(data, dict):
