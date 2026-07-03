@@ -146,7 +146,7 @@ workflow modes. It covers the small combination surface that matters for v1.
   - See `docs/failure-resume-design.md` section "Verification".
   - Success: the same fixture suite proves both non-mutating assess-only and
     opt-in review-mode behaviour.
-- [ ] 2.3.2. Run a bounded operator-approved ODW smoke test against a throwaway
+- [x] 2.3.2. Run a bounded operator-approved ODW smoke test against a throwaway
   target repository.
   - Requires 2.3.1.
   - See `docs/failure-resume-design.md` section "Verification".
