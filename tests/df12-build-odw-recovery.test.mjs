@@ -85,7 +85,7 @@ function makeRecoveryRepo({ withAddendumWorktree = false } = {}) {
   return { root, dir, baseSha, parserWorktree, addendumWorktree }
 }
 
-async function loadRecoverySurface(args = {}) {
+async function loadRecoverySurface(args = {}, agentImpl = async () => null) {
   let source = await readFile(WORKFLOW_PATH, 'utf8')
   source = source.replace(/^export const meta\s*=/, 'const meta =')
   const markerIndex = source.indexOf(CONTROL_LOOP_MARKER)
@@ -104,9 +104,13 @@ return {
   RESUME_MODE,
   RESUME_TASK_ID,
   RESUME_MAX_CANDIDATES,
+  ASSESSMENT_SCHEMA,
   branchToRoadmapId,
   parseWorktreeList,
   discoverRecoveryCandidates,
+  assessmentPrompt,
+  recoveryAssessmentPrompt,
+  assessRecoveryCandidate,
 }
 `,
   )
@@ -114,7 +118,7 @@ return {
     args,
     () => {},
     () => {},
-    async () => null,
+    agentImpl,
     async (thunks) => Promise.all(thunks.map((thunk) => thunk())),
     { total: null, remaining: () => Infinity, spent: () => 0 },
   )
@@ -264,6 +268,112 @@ test('discovery honours resumeTaskId and the candidate cap', async () => {
     capped.skipped.filter((entry) => entry.reason === 'candidate-cap').map((entry) => entry.branchName),
     ['roadmap-2-1-2-addendum'],
   )
+})
+
+function sampleCandidate(repo) {
+  return {
+    taskId: '1.2.3',
+    taskTitle: 'Implement the parser state machine.',
+    branchName: 'roadmap-1-2-3',
+    worktreePath: repo.parserWorktree,
+    baseCommit: repo.baseSha,
+    currentCommit: git(repo.parserWorktree, 'rev-parse', 'HEAD'),
+    roadmapComplete: false,
+    isAddendum: false,
+    line: 5,
+  }
+}
+
+function sampleAssessment(overrides = {}) {
+  return {
+    classification: 'adopt-complete',
+    branchName: 'roadmap-1-2-3',
+    worktreePath: '/tmp/wt',
+    baseCommit: 'abc',
+    currentCommit: 'def',
+    dirtyState: 'clean',
+    changedFiles: ['roadmap-1-2-3.txt'],
+    taskScoped: true,
+    execPlan: 'ExecPlan complete with retrospective',
+    roadmap: 'task unchecked',
+    validation: 'make all green at HEAD',
+    missingEvidence: [],
+    risks: [],
+    rationale: 'complete slice',
+    recommendation: 'review and integrate',
+    nextActions: [],
+    ...overrides,
+  }
+}
+
+test('recovery and failure assessments share one ADR 002 prompt contract', async () => {
+  const surface = await loadRecoverySurface({})
+  const task = { id: '1.2.3', title: 'Implement the parser state machine.' }
+  const evidence = { taskId: '1.2.3' }
+  const failurePrompt = surface.assessmentPrompt(
+    task,
+    { worktreePath: '/tmp/wt' },
+    { status: 'failed' },
+    evidence,
+  )
+  const recoveryPrompt = surface.recoveryAssessmentPrompt(
+    task,
+    { worktreePath: '/tmp/wt', taskId: '1.2.3' },
+    evidence,
+  )
+
+  const contractOf = (prompt) => {
+    const start = prompt.indexOf('Use ADR 002')
+    const end = prompt.indexOf('Host-collected git evidence:')
+    assert.ok(start !== -1 && end > start, 'prompt should carry the ADR 002 contract block')
+    return prompt.slice(start, end)
+  }
+  assert.equal(contractOf(recoveryPrompt), contractOf(failurePrompt))
+  assert.match(recoveryPrompt, /discovered during fresh-run recovery/)
+  assert.match(recoveryPrompt, /READ-ONLY recovery assessment/)
+})
+
+test('recovered candidates reuse the assessment evidence collector and schema', async () => {
+  const calls = []
+  const stubAgent = async (prompt, opts = {}) => {
+    calls.push({ prompt, opts })
+    return sampleAssessment()
+  }
+  const surface = await loadRecoverySurface({}, stubAgent)
+  const repo = makeRecoveryRepo()
+  const candidate = sampleCandidate(repo)
+
+  const outcome = await surface.assessRecoveryCandidate(candidate)
+
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].opts.schema, surface.ASSESSMENT_SCHEMA, 'recovery must reuse the ADR 002 schema object')
+  assert.equal(calls[0].opts.label, 'recover-assess:1.2.3')
+  assert.equal(calls[0].opts.phase, 'Recovery')
+  assert.equal(outcome.assessmentError, '')
+  assert.equal(outcome.assessment.classification, 'adopt-complete')
+  assert.equal(outcome.evidence.taskId, '1.2.3')
+  assert.equal(outcome.evidence.branchName, 'roadmap-1-2-3')
+  assert.equal(outcome.evidence.baseCommit, repo.baseSha)
+  assert.deepEqual(outcome.evidence.committedChanges, [{ status: 'A', path: 'roadmap-1-2-3.txt' }])
+  assert.deepEqual(outcome.assessment.hostEvidence, outcome.evidence)
+})
+
+test('recovery assessment failures are reported, not thrown', async () => {
+  const repo = makeRecoveryRepo()
+  const candidate = sampleCandidate(repo)
+
+  const silent = await (await loadRecoverySurface({}, async () => null)).assessRecoveryCandidate(candidate)
+  assert.equal(silent.assessment, null)
+  assert.match(silent.assessmentError, /no structured output/)
+  assert.equal(silent.evidence.taskId, '1.2.3', 'evidence should survive an assessment failure')
+
+  const thrown = await (
+    await loadRecoverySurface({}, async () => {
+      throw new Error('adapter exited with code 1')
+    })
+  ).assessRecoveryCandidate(candidate)
+  assert.equal(thrown.assessment, null)
+  assert.match(thrown.assessmentError, /adapter exited with code 1/)
 })
 
 test('discovery reports git failures as errors instead of throwing', async () => {

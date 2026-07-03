@@ -1117,10 +1117,14 @@ function auditPrompt(task, worktree) {
   ].join('\n')
 }
 
-function assessmentPrompt(task, wt, result, evidence) {
+// Shared ADR 002 assessment prompt body — the classification contract is ONE
+// contract: in-run failure assessment and fresh-run recovery assessment feed
+// the same schema, enum, and evidence expectations. Only the task header and
+// the context block differ between the two entry points.
+function assessmentPromptLines(taskHeader, worktreePath, evidence, contextTitle, contextValue) {
   return [
-    preamble(wt.worktreePath),
-    `TASK: Assess the surviving task branch for roadmap task ${task.id} ("${task.title}") after a workflow failure.`,
+    preamble(worktreePath),
+    taskHeader,
     '',
     'This is a READ-ONLY recovery assessment. Do not edit files, commit, stash, merge, cherry-pick, push, delete worktrees, mark roadmap checkboxes, or run any command that mutates repository state. Do not resume or rely on the failed agent transcript. Inspect only durable state that exists on disk or in Git.',
     '',
@@ -1145,13 +1149,54 @@ function assessmentPrompt(task, wt, result, evidence) {
     JSON.stringify(evidence, null, 2),
     '```',
     '',
-    'Original workflow failure result:',
+    contextTitle,
     '```json',
-    JSON.stringify(result, null, 2),
+    JSON.stringify(contextValue, null, 2),
     '```',
     '',
     'Return only the schema-bound assessment object. Free-text recommendations do not drive integration; make the enum classification and evidence fields precise.',
   ].join('\n')
+}
+
+function assessmentPrompt(task, wt, result, evidence) {
+  return assessmentPromptLines(
+    `TASK: Assess the surviving task branch for roadmap task ${task.id} ("${task.title}") after a workflow failure.`,
+    wt.worktreePath,
+    evidence,
+    'Original workflow failure result:',
+    result,
+  )
+}
+
+function recoveryAssessmentPrompt(task, candidate, evidence) {
+  return assessmentPromptLines(
+    `TASK: Assess the surviving task branch for roadmap task ${task.id} ("${task.title}") discovered during fresh-run recovery.`,
+    candidate.worktreePath,
+    evidence,
+    "Recovery discovery context (fresh launch; the failed run's transcript and result are unavailable by design):",
+    candidate,
+  )
+}
+
+// Route a discovered candidate through the SAME ADR 002 assessment contract as
+// in-run failures: same evidence collector, same schema, same adapter routing.
+async function assessRecoveryCandidate(candidate) {
+  const task = { id: candidate.taskId, title: candidate.taskTitle }
+  const wt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit }
+  const evidence = await collectAssessmentEvidence(task, wt)
+  try {
+    const assessment = await agent(recoveryAssessmentPrompt(task, candidate, evidence), assessmentAgentOptions({
+      phase: 'Recovery',
+      label: `recover-assess:${candidate.taskId}${candidate.isAddendum ? '-addendum' : ''}`,
+      schema: ASSESSMENT_SCHEMA,
+    }))
+    if (!assessment) {
+      return { evidence, assessment: null, assessmentError: 'assessment agent returned no structured output' }
+    }
+    return { evidence, assessment: { ...assessment, hostEvidence: evidence }, assessmentError: '' }
+  } catch (error) {
+    return { evidence, assessment: null, assessmentError: (error && error.message) || String(error) }
+  }
 }
 
 function shouldAssessFailure(result, wt) {

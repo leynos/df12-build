@@ -72,7 +72,7 @@ later review-mode resume.
 This step answers whether fresh-run discovery can share the existing
 assessment contract instead of creating a second recovery classifier.
 
-- [ ] 1.3.1. Route discovered candidates through the existing assessment
+- [x] 1.3.1. Route discovered candidates through the existing assessment
   evidence collector and schema.
   - Requires 1.2.1.
   - See `docs/failure-resume-design.md` section "Assessment reuse" and
