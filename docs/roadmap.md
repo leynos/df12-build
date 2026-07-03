@@ -138,7 +138,7 @@ ordinary and recovered work.
 This step answers whether the recovery controls interact safely with ordinary
 workflow modes. It covers the small combination surface that matters for v1.
 
-- [ ] 2.3.1. Add fixture-driven combination tests for recovery modes.
+- [x] 2.3.1. Add fixture-driven combination tests for recovery modes.
   - Requires 2.2.2.
   - Cover `resumePartialBranches=false`, assess-only, review-mode clean
     `adopt-complete`, dirty branch, completed roadmap task, and auth preflight
