@@ -1187,6 +1187,148 @@ async function attachAssessment(task, wt, result) {
 }
 
 // ---------------------------------------------------------------------------
+// Fresh-run recovery discovery (failure resume, phase 1) — reconstruct
+// recovery candidates from durable Git state alone: local roadmap-* branches,
+// live worktrees, and the canonical roadmap. Discovery never mutates the
+// target project; it only reads refs, worktree metadata, and commit ids.
+// ---------------------------------------------------------------------------
+const TASK_BRANCH_RE = /^roadmap-((?:\d+-)*\d+)(-addendum)?$/
+
+function branchToRoadmapId(branch) {
+  const match = TASK_BRANCH_RE.exec(String(branch || ''))
+  if (!match) return null
+  return { id: match[1].replace(/-/g, '.'), isAddendum: Boolean(match[2]) }
+}
+
+function parseWorktreeList(output) {
+  const entries = []
+  let current = null
+  for (const line of String(output || '').split(/\r?\n/)) {
+    if (!line.trim()) {
+      if (current) entries.push(current)
+      current = null
+      continue
+    }
+    const spaceIndex = line.indexOf(' ')
+    const key = spaceIndex === -1 ? line : line.slice(0, spaceIndex)
+    const value = spaceIndex === -1 ? '' : line.slice(spaceIndex + 1)
+    if (key === 'worktree') {
+      current = { worktreePath: value, branch: '', head: '' }
+    } else if (current && key === 'HEAD') {
+      current.head = value
+    } else if (current && key === 'branch') {
+      current.branch = value.replace(/^refs\/heads\//, '')
+    }
+  }
+  if (current) entries.push(current)
+  return entries
+}
+
+async function directoryExists(pathValue) {
+  if (!pathValue) return false
+  const fs = process.getBuiltinModule('node:fs/promises')
+  try {
+    const stat = await fs.stat(String(pathValue))
+    return stat.isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function roadmapTaskIndex(roadmapText) {
+  const { tasks } = parseRoadmap(roadmapText)
+  const byId = new Map()
+  for (const task of tasks) {
+    byId.set(task.id, task)
+    for (const subtask of task.subtasks || []) byId.set(subtask.id, subtask)
+  }
+  return byId
+}
+
+// A normal branch is stale once its task checkbox is ticked; an addendum
+// branch is stale once the parent AND every addendum sub-task are ticked.
+function candidateRoadmapComplete(task, isAddendum) {
+  if (!isAddendum) return isComplete(task)
+  return isTaskFullyComplete(task)
+}
+
+async function discoverRecoveryCandidates(roadmapText, gitRoot) {
+  const root = gitRoot || process.cwd()
+  const skipped = []
+  const errors = []
+
+  const branchList = await execFileStatus('git', ['-C', root, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/roadmap-*'])
+  if (!branchList.ok) {
+    errors.push(`for-each-ref failed: ${[branchList.message, branchList.stderr].filter(Boolean).join('; ')}`)
+    return { candidates: [], skipped, errors }
+  }
+  const branches = branchList.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+
+  const worktreeList = await execFileStatus('git', ['-C', root, 'worktree', 'list', '--porcelain'])
+  if (!worktreeList.ok) {
+    errors.push(`worktree list failed: ${[worktreeList.message, worktreeList.stderr].filter(Boolean).join('; ')}`)
+  }
+  const worktreeByBranch = new Map(
+    parseWorktreeList(worktreeList.stdout)
+      .filter((entry) => entry.branch)
+      .map((entry) => [entry.branch, entry.worktreePath]),
+  )
+
+  const byId = roadmapTaskIndex(roadmapText)
+  const mapped = []
+  for (const branch of branches) {
+    const parsed = branchToRoadmapId(branch)
+    const task = parsed ? byId.get(parsed.id) : null
+    if (!parsed || !task) {
+      skipped.push({ id: parsed?.id || '', branchName: branch, reason: 'unmapped-branch' })
+      continue
+    }
+    if (candidateRoadmapComplete(task, parsed.isAddendum)) {
+      skipped.push({ id: parsed.id, branchName: branch, reason: 'already-complete' })
+      continue
+    }
+
+    const commit = await execFileStatus('git', ['-C', root, 'rev-parse', '--verify', `${branch}^{commit}`])
+    if (!commit.ok) {
+      skipped.push({ id: parsed.id, branchName: branch, reason: 'unreadable-commit' })
+      continue
+    }
+    const mergeBase = await execFileStatus('git', ['-C', root, 'merge-base', `origin/${BASE}`, branch])
+
+    const worktreePath = worktreeByBranch.get(branch) || ''
+    mapped.push({
+      taskId: parsed.id,
+      taskTitle: task.title || '',
+      branchName: branch,
+      worktreePath: (await directoryExists(worktreePath)) ? worktreePath : '',
+      baseCommit: mergeBase.ok ? mergeBase.stdout.trim() : '',
+      currentCommit: commit.stdout.trim(),
+      roadmapComplete: false,
+      isAddendum: parsed.isAddendum,
+      line: task.line || Number.MAX_SAFE_INTEGER,
+    })
+  }
+
+  mapped.sort((left, right) => (left.line - right.line) || left.branchName.localeCompare(right.branchName))
+
+  const candidates = []
+  for (const candidate of mapped) {
+    if (RESUME_TASK_ID && candidate.taskId !== RESUME_TASK_ID) continue
+    if (!candidate.worktreePath) {
+      skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: 'missing-worktree' })
+      continue
+    }
+    if (candidates.length >= RESUME_MAX_CANDIDATES) {
+      skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: 'candidate-cap' })
+      continue
+    }
+    candidates.push(candidate)
+  }
+
+  return { candidates, skipped, errors }
+}
+
+// ---------------------------------------------------------------------------
 // Task-agent writable-root preflight — ODW launches every adapter with the
 // control checkout as its working directory, so a sandbox scoped to that
 // checkout silently rejects writes to sibling ...worktrees/roadmap-* paths.

@@ -55,7 +55,7 @@ This step answers whether the workflow can reconstruct useful recovery
 candidates from Git and roadmap state alone. Its output feeds assessment and
 later review-mode resume.
 
-- [ ] 1.2.1. Implement candidate discovery for `roadmap-*` branches and live
+- [x] 1.2.1. Implement candidate discovery for `roadmap-*` branches and live
   worktrees.
   - Requires 1.1.1.
   - See `docs/failure-resume-design.md` section "Recovery candidate discovery".
