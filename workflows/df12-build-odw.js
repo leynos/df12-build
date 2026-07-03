@@ -59,6 +59,7 @@ const RESUME_MAX_CANDIDATES_RAW = Number(cfg.resumeMaxCandidates ?? 4)
 const RESUME_MAX_CANDIDATES = Number.isFinite(RESUME_MAX_CANDIDATES_RAW)
   ? Math.max(1, Math.floor(RESUME_MAX_CANDIDATES_RAW))
   : 4 // bound startup recovery fan-in so a messy repository does not consume the whole run
+const WORKTREE_WRITE_PREFLIGHT = cfg.worktreeWritePreflight !== false // false => skip the once-per-run probe that proves task agents can write into sibling roadmap-* worktrees
 const BUDGET_RESERVE = 80_000 // stop opening new tasks when remaining budget falls below this
 const SEARCH_BACKEND = String(cfg.searchBackend || cfg.codeSearchBackend || (cfg.memtraceRepoId ? 'memtrace' : 'grepai')).toLowerCase()
 const GREPAI_WORKSPACE = cfg.grepaiWorkspace || 'Projects'
@@ -1157,7 +1158,7 @@ function shouldAssessFailure(result, wt) {
   if (!ASSESS_PARTIAL_BRANCHES) return false
   if (!wt?.branch || !wt?.worktreePath) return false
   if (!result || !['failed', 'halted'].includes(result.status)) return false
-  if (result.stage === 'worktree' || result.stage === 'auth' || result.stage === 'provider' || result.status === 'fatal-auth' || result.status === 'provider-fault') return false
+  if (result.stage === 'worktree' || result.stage === 'worktree-write' || result.stage === 'auth' || result.stage === 'provider' || result.status === 'fatal-auth' || result.status === 'provider-fault') return false
   const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
   return !authFailureDetail(detail) && !providerFailureDetail(result.detail)
 }
@@ -1186,6 +1187,128 @@ async function attachAssessment(task, wt, result) {
 }
 
 // ---------------------------------------------------------------------------
+// Task-agent writable-root preflight — ODW launches every adapter with the
+// control checkout as its working directory, so a sandbox scoped to that
+// checkout silently rejects writes to sibling ...worktrees/roadmap-* paths.
+// Prompt text cannot fix that, so the workflow proves writability once per
+// run: each adapter that must write into task worktrees (planner and builder)
+// is asked to write a token file inside the first task worktree, and the HOST
+// verifies the bytes on disk. A failed probe is a launch/sandbox fault, so the
+// task fails fast at stage "worktree-write" instead of burning design rounds,
+// and that stage is excluded from partial-branch assessment.
+// ---------------------------------------------------------------------------
+const WRITE_PROBE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    ok: { type: 'boolean', description: 'true when the probe file was written with the exact token' },
+    detail: { type: 'string', description: 'the error encountered, empty when ok' },
+  },
+  required: ['ok'],
+}
+
+function writeProbeTargets() {
+  const targets = [
+    { role: 'plan', adapter: String(PLAN_ADAPTER).toLowerCase(), options: planAgentOptions },
+    { role: 'build', adapter: String(BUILD_ADAPTER).toLowerCase(), options: buildAgentOptions },
+  ]
+  const seen = new Set()
+  return targets.filter((target) => {
+    if (seen.has(target.adapter)) return false
+    seen.add(target.adapter)
+    return true
+  })
+}
+
+function writeProbePath(worktree, adapter) {
+  const path = process.getBuiltinModule('node:path')
+  return path.join(worktree, `.df12-write-probe-${String(adapter).replace(/[^0-9a-zA-Z._-]+/g, '-')}`)
+}
+
+function writeProbeToken(tag, adapter) {
+  return `df12-write-probe v1 task=${tag} adapter=${adapter}`
+}
+
+function writeProbePrompt(probeFile, token) {
+  return [
+    'You are a sub-agent in the df12-build roadmap workflow. Your final message IS your return value — return data, not chat.',
+    '',
+    'TASK: Writable-root probe. Write EXACTLY the token below (no trailing newline required) to the probe file path below, using your shell or file-edit tooling. Do not write anywhere else, do not commit, and do not delete the file afterwards — the workflow host verifies and removes it.',
+    '',
+    `PROBE_FILE: ${probeFile}`,
+    `PROBE_TOKEN: ${token}`,
+    '',
+    'Return ok=true only if the write succeeded. If the write is rejected (sandbox, permissions, missing directory), return ok=false with the exact error text in detail.',
+  ].join('\n')
+}
+
+async function verifyWriteProbe(probeFile, token) {
+  const fs = process.getBuiltinModule('node:fs/promises')
+  try {
+    const content = await fs.readFile(probeFile, 'utf8')
+    await fs.rm(probeFile, { force: true })
+    if (content.trim() === token) return { ok: true, detail: '' }
+    return { ok: false, detail: `probe file content mismatch (${content.trim().slice(0, 80) || '<empty>'})` }
+  } catch (error) {
+    return { ok: false, detail: `probe file missing or unreadable: ${(error && error.message) || String(error)}` }
+  }
+}
+
+async function hostWriteProbe(worktree) {
+  const fs = process.getBuiltinModule('node:fs/promises')
+  const path = process.getBuiltinModule('node:path')
+  const hostProbe = path.join(worktree, '.df12-write-probe-host')
+  try {
+    await fs.writeFile(hostProbe, 'df12-write-probe host', 'utf8')
+    await fs.rm(hostProbe, { force: true })
+    return { ok: true, detail: '' }
+  } catch (error) {
+    return { ok: false, detail: (error && error.message) || String(error) }
+  }
+}
+
+async function runTaskAgentWritePreflight(worktree, tag) {
+  const failures = []
+  const host = await hostWriteProbe(worktree)
+  if (!host.ok) {
+    return { ok: false, failures: [{ adapter: 'host', detail: host.detail }] }
+  }
+  for (const target of writeProbeTargets()) {
+    const probeFile = writeProbePath(worktree, target.adapter)
+    const token = writeProbeToken(tag, target.adapter)
+    let reply = null
+    let agentError = ''
+    try {
+      reply = await agent(writeProbePrompt(probeFile, token), target.options({
+        phase: 'Worktree',
+        label: `write-probe:${target.adapter}`,
+        schema: WRITE_PROBE_SCHEMA,
+      }))
+    } catch (error) {
+      agentError = (error && error.message) || String(error)
+    }
+    const verified = await verifyWriteProbe(probeFile, token)
+    if (!verified.ok) {
+      const detail = [verified.detail, reply && reply.ok === false ? reply.detail : '', agentError]
+        .filter(Boolean)
+        .join('; ')
+      failures.push({ adapter: target.adapter, detail })
+    }
+  }
+  return { ok: failures.length === 0, failures }
+}
+
+// One probe per run: sandbox scope does not vary between sibling worktrees,
+// so every task shares the first task's verdict (concurrent tasks await the
+// same promise and fail fast together when the environment is broken).
+let taskAgentWritePreflight = null
+function ensureTaskAgentWriteAccess(worktree, tag) {
+  if (!WORKTREE_WRITE_PREFLIGHT) return Promise.resolve({ ok: true, skipped: true, failures: [] })
+  if (!taskAgentWritePreflight) taskAgentWritePreflight = runTaskAgentWritePreflight(worktree, tag)
+  return taskAgentWritePreflight
+}
+
+// ---------------------------------------------------------------------------
 // Per-task pipeline
 // ---------------------------------------------------------------------------
 async function runTask(task, mergeLock) {
@@ -1202,6 +1325,18 @@ async function runTask(task, mergeLock) {
   log(`[task ${tag}] worktree ${wt.branch} @ ${worktree}`)
 
   try {
+  // --- Task-agent writable-root gate (host-verified, once per run) ---------
+  const writeAccess = await ensureTaskAgentWriteAccess(worktree, tag)
+  if (!writeAccess.ok) {
+    return {
+      id: tag,
+      status: 'failed',
+      stage: 'worktree-write',
+      detail: `task-agent writable-root preflight failed (launch/sandbox fault, not a task defect): ${writeAccess.failures.map((failure) => `${failure.adapter}: ${failure.detail}`).join('; ')}`,
+      worktree,
+      proposals: [],
+    }
+  }
   // --- Addendum pass: lightweight lane (no plan / design / dual review) ----
   // A completed task with open sub-tasks: implement the sub-tasks, gate, and
   // merge. No audit afterwards (the control loop skips it), which is what stops

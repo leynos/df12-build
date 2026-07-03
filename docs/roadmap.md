@@ -38,7 +38,7 @@ non-mutating.
     "Security and permissions".
   - Success: operators can distinguish assess-only recovery from review-mode
     resume before launching a run.
-- [ ] 1.1.3. Enforce writable task-agent roots for real git worktrees.
+- [x] 1.1.3. Enforce writable task-agent roots for real git worktrees.
   - Requires 1.1.1.
   - See `docs/architecture.md` sections "Workflow structure" and "Enforcement
     boundary".
