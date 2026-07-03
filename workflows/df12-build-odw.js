@@ -49,6 +49,16 @@ const DRY_RUN = cfg.dryRun === true // plan/review/audit only; skip implement, m
 const AUTH_PREFLIGHT = cfg.authPreflight !== false // false => skip local CLI auth checks before spawning agents
 const REQUIRE_CODERABBIT_AUTH = cfg.requireCoderabbitAuth !== false && !DRY_RUN // CodeRabbit is required once implementation/review can run
 const ASSESS_PARTIAL_BRANCHES = cfg.assessPartialBranches !== false // false => skip report-only assessment of failed task branches
+const RESUME_PARTIAL_BRANCHES = cfg.resumePartialBranches === true // opt-in: discover surviving roadmap-* branches on fresh launch before normal selection
+const RESUME_MODE = String(cfg.resumeMode || 'assess').toLowerCase() // maximum recovery action: "assess" reports only; "review" may route clean adopt-complete branches into review + integration
+if (!['assess', 'review'].includes(RESUME_MODE)) {
+  throw new Error(`Unsupported resumeMode: ${RESUME_MODE} (use "assess" or "review")`)
+}
+const RESUME_TASK_ID = cfg.resumeTaskId ? String(cfg.resumeTaskId) : null // limit recovery discovery to one roadmap id (separate from taskId, which selects normal roadmap work)
+const RESUME_MAX_CANDIDATES_RAW = Number(cfg.resumeMaxCandidates ?? 4)
+const RESUME_MAX_CANDIDATES = Number.isFinite(RESUME_MAX_CANDIDATES_RAW)
+  ? Math.max(1, Math.floor(RESUME_MAX_CANDIDATES_RAW))
+  : 4 // bound startup recovery fan-in so a messy repository does not consume the whole run
 const BUDGET_RESERVE = 80_000 // stop opening new tasks when remaining budget falls below this
 const SEARCH_BACKEND = String(cfg.searchBackend || cfg.codeSearchBackend || (cfg.memtraceRepoId ? 'memtrace' : 'grepai')).toLowerCase()
 const GREPAI_WORKSPACE = cfg.grepaiWorkspace || 'Projects'

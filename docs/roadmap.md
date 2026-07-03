@@ -26,7 +26,7 @@ This step answers which operator knobs are needed before discovery can run
 safely. It informs every later task because recovery defaults must remain
 non-mutating.
 
-- [ ] 1.1.1. Add `resumePartialBranches`, `resumeMode`, `resumeTaskId`, and
+- [x] 1.1.1. Add `resumePartialBranches`, `resumeMode`, `resumeTaskId`, and
   `resumeMaxCandidates` configuration to the ODW workflow.
   - See `docs/failure-resume-design.md` section "Runtime configuration".
   - Success: default workflow behaviour is unchanged unless
