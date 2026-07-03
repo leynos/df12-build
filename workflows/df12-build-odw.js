@@ -7,6 +7,7 @@ export const meta = {
   phases: [
     { title: 'Select' },
     { title: 'Auth Preflight' },
+    { title: 'Recovery' },
     { title: 'Worktree' },
     { title: 'Plan' },
     { title: 'Design Review' },
@@ -671,11 +672,11 @@ async function readFileText(path) {
   return await readFile(path, 'utf8')
 }
 
-async function readRoadmapForSelection() {
+async function readRoadmapForSelection(root = process.cwd()) {
   const canonicalRef = `origin/${BASE}:${ROADMAP}`
   try {
     return {
-      text: await execFileText('git', ['show', canonicalRef]),
+      text: await execFileText('git', ['-C', root, 'show', canonicalRef]),
       source: canonicalRef,
       fallbackReason: '',
     }
@@ -1373,6 +1374,104 @@ async function discoverRecoveryCandidates(roadmapText, gitRoot) {
   return { candidates, skipped, errors }
 }
 
+// Reasons a discovered branch is recorded in recovery.skipped instead of
+// proceeding to its mode's maximum action. Discovery emits the first five;
+// the assessment/decision stages emit the rest.
+const RECOVERY_SKIP_REASONS = [
+  'unmapped-branch',
+  'already-complete',
+  'unreadable-commit',
+  'missing-worktree',
+  'candidate-cap',
+  'assessment-error',
+]
+
+// Skip reasons whose branch still exists and still maps to a selectable
+// roadmap id — normal selection must not re-open these this run, because
+// `git worktree add -b` would collide with the surviving branch.
+const RECOVERY_HOLD_REASONS = new Set(['missing-worktree', 'candidate-cap', 'unreadable-commit', 'assessment-error'])
+
+// Fresh-run recovery pass: discover -> assess -> report (assess-only, phase 1
+// of the failure-resume design). Review-mode resume for eligible
+// adopt-complete candidates arrives with the phase 2 roadmap tasks. This pass
+// never mutates the target project: it reads Git state and spawns read-only
+// assessment agents.
+async function runRecovery(root) {
+  const summary = {
+    enabled: true,
+    mode: RESUME_MODE,
+    candidates: 0,
+    assessed: 0,
+    resumed: 0,
+    skipped: [],
+    results: [],
+    errors: [],
+  }
+  const held = { normal: new Set(), addendum: new Set() }
+  const taskResults = []
+  phase('Recovery')
+
+  const fetched = await execFileStatus('git', ['-C', root, 'fetch', 'origin', BASE])
+  if (!fetched.ok) {
+    summary.errors.push(`fetch origin ${BASE} failed (continuing with local refs): ${(fetched.message || fetched.stderr || '').trim()}`)
+  }
+  let roadmap
+  try {
+    roadmap = await readRoadmapForSelection(root)
+  } catch (error) {
+    summary.errors.push((error && error.message) || String(error))
+    log('[recovery] cannot read the canonical roadmap; skipping recovery discovery')
+    return { summary, taskResults, held, fatal: null }
+  }
+
+  const discovery = await discoverRecoveryCandidates(roadmap.text, root)
+  summary.candidates = discovery.candidates.length
+  summary.skipped.push(...discovery.skipped)
+  summary.errors.push(...discovery.errors)
+
+  const holdCandidate = (branchName, taskId) => {
+    const parsed = branchToRoadmapId(branchName)
+    if (!parsed) return
+    ;(parsed.isAddendum ? held.addendum : held.normal).add(taskId || parsed.id)
+  }
+  for (const entry of discovery.skipped) {
+    if (RECOVERY_HOLD_REASONS.has(entry.reason)) holdCandidate(entry.branchName, entry.id)
+  }
+
+  for (const candidate of discovery.candidates) {
+    holdCandidate(candidate.branchName, candidate.taskId)
+    log(`[recovery] assessing ${candidate.branchName} (task ${candidate.taskId})`)
+    const { assessment, assessmentError } = await assessRecoveryCandidate(candidate)
+    if (!assessment) {
+      summary.results.push({
+        id: candidate.taskId,
+        branchName: candidate.branchName,
+        classification: '',
+        action: 'assessment-error',
+        assessmentError,
+      })
+      summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: 'assessment-error' })
+      if (authFailureDetail(assessmentError) || providerFailureDetail(assessmentError)) {
+        // Infrastructure faults during recovery poison every later agent call
+        // too — halt the run instead of pretending branches were assessed.
+        return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessmentError) }
+      }
+      continue
+    }
+    summary.assessed += 1
+    summary.results.push({
+      id: candidate.taskId,
+      branchName: candidate.branchName,
+      classification: assessment.classification,
+      action: 'reported',
+      assessment,
+    })
+    log(`[recovery] ${candidate.branchName}: ${assessment.classification} (reported)`)
+  }
+
+  return { summary, taskResults, held, fatal: null }
+}
+
 // ---------------------------------------------------------------------------
 // Task-agent writable-root preflight — ODW launches every adapter with the
 // control checkout as its working directory, so a sandbox scoped to that
@@ -1864,6 +1963,18 @@ const manualMergeReadyNormal = new Set()
 const manualMergeReadyAddendum = new Set()
 const dryRunNormal = new Set()
 const dryRunAddendum = new Set()
+const recoveryHeldNormal = new Set() // ids with surviving branches recovery reported but did not integrate this run
+const recoveryHeldAddendum = new Set()
+let recovery = {
+  enabled: RESUME_PARTIAL_BRANCHES,
+  mode: RESUME_MODE,
+  candidates: 0,
+  assessed: 0,
+  resumed: 0,
+  skipped: [],
+  results: [],
+  errors: [],
+}
 const results = []
 const audits = []
 const triages = []
@@ -1935,8 +2046,8 @@ async function doSelect(taken) {
 
 function takenSnapshot() {
   return {
-    normal: [...processedNormal, ...manualMergeReadyNormal, ...dryRunNormal, ...inflightNormal],
-    addendum: [...processedAddendum, ...manualMergeReadyAddendum, ...dryRunAddendum, ...inflightAddendum],
+    normal: [...processedNormal, ...manualMergeReadyNormal, ...dryRunNormal, ...inflightNormal, ...recoveryHeldNormal],
+    addendum: [...processedAddendum, ...manualMergeReadyAddendum, ...dryRunAddendum, ...inflightAddendum, ...recoveryHeldAddendum],
   }
 }
 
@@ -1944,7 +2055,8 @@ function isAlreadyTaken(task) {
   const processedSet = task?.isAddendum ? processedAddendum : processedNormal
   const manualMergeReadySet = task?.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal
   const dryRunSet = task?.isAddendum ? dryRunAddendum : dryRunNormal
-  return processedSet.has(task.id) || manualMergeReadySet.has(task.id) || dryRunSet.has(task.id) || inflightNormal.has(task.id) || inflightAddendum.has(task.id)
+  const recoveryHeldSet = task?.isAddendum ? recoveryHeldAddendum : recoveryHeldNormal
+  return processedSet.has(task.id) || manualMergeReadySet.has(task.id) || dryRunSet.has(task.id) || recoveryHeldSet.has(task.id) || inflightNormal.has(task.id) || inflightAddendum.has(task.id)
 }
 
 function markInflight(task) {
@@ -2061,6 +2173,40 @@ if (authPreflight.length) {
 }
 let stop = Boolean(halted)
 let providerFaultHalt = false
+
+// --- Fresh-run recovery: runs before normal selection so surviving branches
+// are assessed (and, in review mode, resumed) ahead of new roadmap work. A
+// fatal auth preflight blocks recovery entirely: no assessment, no resume.
+if (RESUME_PARTIAL_BRANCHES && halted) {
+  recovery.blocked = 'auth-preflight-failed'
+}
+if (RESUME_PARTIAL_BRANCHES && !halted) {
+  try {
+    const outcome = await runRecovery(process.cwd())
+    recovery = outcome.summary
+    for (const id of outcome.held.normal) recoveryHeldNormal.add(id)
+    for (const id of outcome.held.addendum) recoveryHeldAddendum.add(id)
+    for (const entry of outcome.taskResults) {
+      results.push(entry.result)
+      if (entry.result.status === 'done' && entry.result.integration?.pushed) {
+        markProcessed(entry.task)
+      } else if (entry.result.status === 'manual-merge-ready') {
+        markManualMergeReady(entry.task)
+      }
+    }
+    if (outcome.fatal) {
+      results.push(outcome.fatal)
+      halted = `recovery ${outcome.fatal.status} at ${outcome.fatal.stage}: ${outcome.fatal.detail}`
+      if (outcome.fatal.status === 'provider-fault') providerFaultHalt = true
+      stop = true
+    }
+  } catch (error) {
+    const detail = (error && error.message) || String(error)
+    recovery.errors.push(`recovery pass failed: ${detail}`)
+    log(`[recovery] failed (${detail}); continuing with normal roadmap selection`)
+  }
+}
+
 while (true) {
   if (!stop && !halted) {
     try {
@@ -2154,6 +2300,9 @@ return {
   assessments,
   audits,
   authPreflight,
+  // Fresh-run recovery index (failure-resume design): per-task results[]
+  // entries remain the primary record for review/integration outcomes.
+  recovery,
   // Remediation GIST-triaged into addendum / step-task / reroute lanes when each
   // step quiesced (see remediationTriage). Anything in pendingProposals was left
   // unwritten because the run halted — triage it manually.
@@ -2163,6 +2312,7 @@ return {
   summary:
     `Processed ${processed.length} roadmap task(s) (pool width ${MAX_PARALLEL}): ` +
     results.map((r) => `${r.id}=${r.status}`).join(', ') +
+    (recovery.enabled ? ` | recovery(${recovery.mode}): ${recovery.assessed} assessed, ${recovery.resumed} resumed, ${recovery.skipped.length} skipped` : '') +
     (assessments.length ? ` | assessed ${assessments.length} failed/halted branch(es)` : '') +
     (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : '') +
     (halted ? ` | halted: ${halted}` : ' | clean stop (no more unblocked tasks).'),

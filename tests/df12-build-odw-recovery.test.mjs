@@ -105,12 +105,14 @@ return {
   RESUME_TASK_ID,
   RESUME_MAX_CANDIDATES,
   ASSESSMENT_SCHEMA,
+  RECOVERY_SKIP_REASONS,
   branchToRoadmapId,
   parseWorktreeList,
   discoverRecoveryCandidates,
   assessmentPrompt,
   recoveryAssessmentPrompt,
   assessRecoveryCandidate,
+  runRecovery,
 }
 `,
   )
@@ -384,4 +386,108 @@ test('discovery reports git failures as errors instead of throwing', async () =>
   assert.deepEqual(candidates, [])
   assert.equal(errors.length, 1)
   assert.match(errors[0], /for-each-ref failed/)
+})
+
+test('assess-only recovery returns a report-only summary and holds surviving ids', async () => {
+  const surface = await loadRecoverySurface({ resumePartialBranches: true }, async () => sampleAssessment())
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.fatal, null)
+  assert.deepEqual(outcome.taskResults, [], 'assess-only recovery must not produce task results')
+  const summary = outcome.summary
+  assert.equal(summary.enabled, true)
+  assert.equal(summary.mode, 'assess')
+  assert.equal(summary.candidates, 1)
+  assert.equal(summary.assessed, 1)
+  assert.equal(summary.resumed, 0)
+  assert.deepEqual(summary.errors, [])
+  assert.equal(summary.results.length, 1)
+  const [entry] = summary.results
+  assert.equal(entry.id, '1.2.3')
+  assert.equal(entry.branchName, 'roadmap-1-2-3')
+  assert.equal(entry.classification, 'adopt-complete')
+  assert.equal(entry.action, 'reported')
+  assert.equal(entry.assessment.hostEvidence.taskId, '1.2.3')
+  assert.deepEqual([...outcome.held.normal].sort(), ['1.2.3', '1.2.4'])
+  assert.deepEqual([...outcome.held.addendum], [])
+})
+
+test('recovery assessment errors are reported and non-fatal for ordinary faults', async () => {
+  const surface = await loadRecoverySurface({ resumePartialBranches: true }, async () => {
+    throw new Error('adapter exited with code 1: transient tool failure')
+  })
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.fatal, null)
+  assert.equal(outcome.summary.assessed, 0)
+  assert.equal(outcome.summary.results[0].action, 'assessment-error')
+  assert.match(outcome.summary.results[0].assessmentError, /transient tool failure/)
+  assert.ok(
+    outcome.summary.skipped.some(
+      (entry) => entry.branchName === 'roadmap-1-2-3' && entry.reason === 'assessment-error',
+    ),
+  )
+  assert.ok(outcome.held.normal.has('1.2.3'), 'unassessed surviving branches stay held')
+})
+
+test('auth-shaped recovery assessment failures halt the run as fatal', async () => {
+  const surface = await loadRecoverySurface({ resumePartialBranches: true }, async () => {
+    throw new Error('401 Unauthorized: run codex login')
+  })
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.ok(outcome.fatal, 'auth failures during recovery must be fatal')
+  assert.equal(outcome.fatal.status, 'fatal-auth')
+  assert.equal(outcome.fatal.stage, 'auth')
+})
+
+test('recovery survives an unreadable canonical roadmap', async () => {
+  const surface = await loadRecoverySurface({ resumePartialBranches: true }, async () => sampleAssessment())
+  const notARepo = mkdtempSync(path.join(tmpdir(), 'df12-recovery-empty-'))
+
+  const outcome = await surface.runRecovery(notARepo)
+
+  assert.equal(outcome.fatal, null)
+  assert.equal(outcome.summary.candidates, 0)
+  assert.ok(outcome.summary.errors.length >= 1)
+})
+
+test('skip reasons are a stable published contract', async () => {
+  const surface = await loadRecoverySurface({})
+  assert.deepEqual(surface.RECOVERY_SKIP_REASONS, [
+    'unmapped-branch',
+    'already-complete',
+    'unreadable-commit',
+    'missing-worktree',
+    'candidate-cap',
+    'assessment-error',
+  ])
+})
+
+test('control loop wires recovery ahead of normal selection', async () => {
+  const source = await readFile(WORKFLOW_PATH, 'utf8')
+
+  assert.match(source, /\{ title: 'Recovery' \},/, 'meta.phases should declare the Recovery lane')
+  assert.match(
+    source,
+    /if \(RESUME_PARTIAL_BRANCHES && halted\) \{\s*recovery\.blocked = 'auth-preflight-failed'/,
+    'fatal auth preflight must block recovery entirely',
+  )
+  assert.match(
+    source,
+    /if \(RESUME_PARTIAL_BRANCHES && !halted\) \{[\s\S]*?await runRecovery\(process\.cwd\(\)\)/,
+    'recovery must run only when enabled and not halted',
+  )
+  assert.match(
+    source,
+    /normal: \[\.\.\.processedNormal[\s\S]*?\.\.\.recoveryHeldNormal\]/,
+    'takenSnapshot must exclude recovery-held ids from normal selection',
+  )
+  assert.match(source, /\n  recovery,\n/, 'workflow result must expose the recovery summary')
 })

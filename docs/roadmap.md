@@ -61,7 +61,7 @@ later review-mode resume.
   - See `docs/failure-resume-design.md` section "Recovery candidate discovery".
   - Success: fixture tests map branch names to dotted roadmap ids, skip
     completed roadmap tasks, and preserve deterministic ordering.
-- [ ] 1.2.2. Return a top-level `recovery` summary in assess-only mode.
+- [x] 1.2.2. Return a top-level `recovery` summary in assess-only mode.
   - Requires 1.2.1.
   - See `docs/failure-resume-design.md` section "Returned result shape".
   - Success: an assess-only run reports candidates, skipped branches, and
