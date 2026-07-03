@@ -184,6 +184,18 @@ claimed df12-build side effects exist in the real repository state. The
 supervisor is responsible for catching workshop loops that are spending rounds
 on impossible environment or orchestration faults.
 
+Record every check-in in `operator-notes.md` with:
+
+- wall time and run id;
+- ODW state and dispatched count;
+- active task ids and phases;
+- root status;
+- active worktrees and their side effects;
+- gate and review evidence;
+- stale-process suspicion;
+- roadmap-grooming threshold result;
+- next wake-up.
+
 For every active `roadmap-*` worktree, check:
 
 - the worktree exists and is writable;
