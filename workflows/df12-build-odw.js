@@ -1376,7 +1376,7 @@ async function discoverRecoveryCandidates(roadmapText, gitRoot) {
 
 // Reasons a discovered branch is recorded in recovery.skipped instead of
 // proceeding to its mode's maximum action. Discovery emits the first five;
-// the assessment/decision stages emit the rest.
+// the assessment and resume-decision stages emit the rest.
 const RECOVERY_SKIP_REASONS = [
   'unmapped-branch',
   'already-complete',
@@ -1384,7 +1384,48 @@ const RECOVERY_SKIP_REASONS = [
   'missing-worktree',
   'candidate-cap',
   'assessment-error',
+  'addendum-branch',
+  'evidence-collection-error',
+  'dirty-worktree',
+  'no-committed-work',
+  'not-task-scoped',
+  'missing-validation-evidence',
+  'dry-run',
 ]
+
+// Review-mode resume eligibility: only a clean, committed, task-scoped
+// adopt-complete branch with validation evidence may spend review and
+// integration effort. Returns '' when eligible, else the disqualifying skip
+// reason. Host-collected evidence is decisive over agent-reported fields.
+function recoveryResumeEligibility(candidate, evidence, assessment) {
+  if (candidate?.isAddendum) return 'addendum-branch'
+  if ((evidence?.collectionErrors || []).length) return 'evidence-collection-error'
+  if (evidence?.dirtyState !== 'clean') return 'dirty-worktree'
+  if (!(evidence?.recentCommits || []).length) return 'no-committed-work'
+  if (assessment?.taskScoped !== true) return 'not-task-scoped'
+  if (!String(assessment?.validation || '').trim()) return 'missing-validation-evidence'
+  if ((assessment?.missingEvidence || []).length) return 'missing-validation-evidence'
+  return ''
+}
+
+// The failure-resume decision table. Every classification is report-only in
+// assess mode; in review mode only eligible adopt-complete candidates may
+// resume, and an adopt-complete verdict that fails an eligibility check is
+// DOWNGRADED to continue-manual in the summary (fail closed).
+function recoveryDecision(candidate, evidence, assessment, mode, flags = {}) {
+  const classification = assessment?.classification || ''
+  if (mode !== 'review' || classification !== 'adopt-complete') {
+    return { action: 'report', classification, reason: '', skip: false }
+  }
+  const reason = recoveryResumeEligibility(candidate, evidence, assessment)
+  if (reason) {
+    return { action: 'report', classification: 'continue-manual', reason, skip: true }
+  }
+  if (flags.dryRun) {
+    return { action: 'report', classification, reason: 'dry-run', skip: true }
+  }
+  return { action: 'resume', classification, reason: '', skip: false }
+}
 
 // Skip reasons whose branch still exists and still maps to a selectable
 // roadmap id — normal selection must not re-open these this run, because

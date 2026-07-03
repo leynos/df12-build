@@ -100,7 +100,7 @@ This step answers which recovered branches are safe enough to spend review and
 integration effort on. Its output prevents dirty or ambiguous branches from
 being treated as complete work.
 
-- [ ] 2.1.1. Implement the recovery decision table for `resumeMode`.
+- [x] 2.1.1. Implement the recovery decision table for `resumeMode`.
   - Requires phase 1.
   - See `docs/failure-resume-design.md` section "Resume decisions".
   - Success: only clean, committed, task-scoped `adopt-complete` candidates

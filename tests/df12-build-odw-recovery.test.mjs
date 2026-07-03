@@ -121,6 +121,8 @@ return {
   RESUME_MAX_CANDIDATES,
   ASSESSMENT_SCHEMA,
   RECOVERY_SKIP_REASONS,
+  recoveryResumeEligibility,
+  recoveryDecision,
   branchToRoadmapId,
   parseWorktreeList,
   discoverRecoveryCandidates,
@@ -482,7 +484,103 @@ test('skip reasons are a stable published contract', async () => {
     'missing-worktree',
     'candidate-cap',
     'assessment-error',
+    'addendum-branch',
+    'evidence-collection-error',
+    'dirty-worktree',
+    'no-committed-work',
+    'not-task-scoped',
+    'missing-validation-evidence',
+    'dry-run',
   ])
+})
+
+function eligibleCandidate() {
+  return { taskId: '1.2.3', branchName: 'roadmap-1-2-3', isAddendum: false }
+}
+
+function eligibleEvidence(overrides = {}) {
+  return {
+    collectionErrors: [],
+    dirtyState: 'clean',
+    recentCommits: ['abc1234 Work on roadmap-1-2-3'],
+    ...overrides,
+  }
+}
+
+test('resume eligibility admits only clean, committed, task-scoped, validated branches', async () => {
+  const surface = await loadRecoverySurface({})
+  const assessment = sampleAssessment()
+
+  assert.equal(surface.recoveryResumeEligibility(eligibleCandidate(), eligibleEvidence(), assessment), '')
+
+  const rows = [
+    [{ candidate: { ...eligibleCandidate(), isAddendum: true } }, 'addendum-branch'],
+    [{ evidence: eligibleEvidence({ collectionErrors: ['diff failed'] }) }, 'evidence-collection-error'],
+    [{ evidence: eligibleEvidence({ dirtyState: 'dirty' }) }, 'dirty-worktree'],
+    [{ evidence: eligibleEvidence({ dirtyState: 'unknown' }) }, 'dirty-worktree'],
+    [{ evidence: eligibleEvidence({ recentCommits: [] }) }, 'no-committed-work'],
+    [{ assessment: sampleAssessment({ taskScoped: false }) }, 'not-task-scoped'],
+    [{ assessment: sampleAssessment({ validation: '   ' }) }, 'missing-validation-evidence'],
+    [{ assessment: sampleAssessment({ missingEvidence: ['no gate log'] }) }, 'missing-validation-evidence'],
+  ]
+  for (const [overrides, expected] of rows) {
+    const verdict = surface.recoveryResumeEligibility(
+      overrides.candidate || eligibleCandidate(),
+      overrides.evidence || eligibleEvidence(),
+      overrides.assessment || assessment,
+    )
+    assert.equal(verdict, expected)
+  }
+})
+
+test('the resumeMode decision table reports everywhere except eligible review-mode adopt-complete', async () => {
+  const surface = await loadRecoverySurface({})
+  const candidate = eligibleCandidate()
+  const evidence = eligibleEvidence()
+
+  for (const classification of ['adopt-complete', 'adopt-partial', 'continue-manual', 'discard']) {
+    const assessed = sampleAssessment({ classification })
+    const inAssess = surface.recoveryDecision(candidate, evidence, assessed, 'assess')
+    assert.deepEqual(inAssess, { action: 'report', classification, reason: '', skip: false })
+    if (classification !== 'adopt-complete') {
+      const inReview = surface.recoveryDecision(candidate, evidence, assessed, 'review')
+      assert.deepEqual(inReview, { action: 'report', classification, reason: '', skip: false })
+    }
+  }
+
+  assert.deepEqual(surface.recoveryDecision(candidate, evidence, sampleAssessment(), 'review'), {
+    action: 'resume',
+    classification: 'adopt-complete',
+    reason: '',
+    skip: false,
+  })
+})
+
+test('review-mode resume fails closed: ineligible adopt-complete downgrades to continue-manual', async () => {
+  const surface = await loadRecoverySurface({})
+
+  const dirty = surface.recoveryDecision(
+    eligibleCandidate(),
+    eligibleEvidence({ dirtyState: 'dirty' }),
+    sampleAssessment(),
+    'review',
+  )
+  assert.deepEqual(dirty, {
+    action: 'report',
+    classification: 'continue-manual',
+    reason: 'dirty-worktree',
+    skip: true,
+  })
+
+  const dryRun = surface.recoveryDecision(eligibleCandidate(), eligibleEvidence(), sampleAssessment(), 'review', {
+    dryRun: true,
+  })
+  assert.deepEqual(dryRun, {
+    action: 'report',
+    classification: 'adopt-complete',
+    reason: 'dry-run',
+    skip: true,
+  })
 })
 
 test('assess-only recovery leaves every piece of durable git state untouched', async () => {
