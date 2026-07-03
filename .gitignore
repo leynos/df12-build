@@ -1,3 +1,5 @@
 .grepai/
 *.sw?
 .*.sw?
+__pycache__/
+*.pyc
