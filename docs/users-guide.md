@@ -1,6 +1,7 @@
 # df12-build user guide
 
-`df12-build` drives a df12-house GIST roadmap forward with a parallel ODW
+`df12-build` drives a df12-house GIST roadmap forward with a parallel [Open
+Dynamic Workflows (ODW)](https://github.com/xz1220/open-dynamic-workflows)
 workflow. It plans, reviews, implements, gates, integrates, audits, and files
 remediation work through isolated worker branches. Use it only for projects that
 already have a roadmap, design documentation, `AGENTS.md`, repository gates, and
