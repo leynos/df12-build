@@ -1,0 +1,297 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "cyclopts>=3.0",
+# ]
+# ///
+
+from __future__ import annotations
+
+import json
+import signal
+import sys
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Annotated, Any
+
+from cyclopts import App, Parameter
+
+
+app = App(help="Watch events for running ODW runs from a source directory.")
+
+
+@dataclass(frozen=True)
+class Run:
+    path: Path
+    run_id: str
+    source: str
+
+    @property
+    def events_path(self) -> Path:
+        return self.path / "events.jsonl"
+
+
+@dataclass(frozen=True)
+class Event:
+    ts: float
+    sequence: int
+    run: Run
+    data: dict[str, Any]
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    try:
+        with path.open(encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def normalized_path(path: Path) -> str:
+    return str(path.expanduser().resolve(strict=False))
+
+
+def normalize_source(source: str) -> str:
+    return normalized_path(Path(source))
+
+
+def is_matching_source(meta_source: Any, source: Path) -> bool:
+    if not isinstance(meta_source, str) or not meta_source:
+        return False
+    return normalize_source(meta_source) == normalized_path(source)
+
+
+def is_running(run_dir: Path) -> bool:
+    status_data = read_json(run_dir / "status.json")
+    return str(status_data.get("state") or status_data.get("status") or "").casefold() == (
+        "running"
+    )
+
+
+def discover_running_runs(runs_dir: Path, source: Path) -> list[Run]:
+    runs: list[Run] = []
+
+    for run_dir in sorted(path for path in runs_dir.glob("*/*") if path.is_dir()):
+        meta_data = read_json(run_dir / "meta.json")
+        if not is_matching_source(meta_data.get("source"), source):
+            continue
+        if not is_running(run_dir):
+            continue
+
+        run_id = str(meta_data.get("runId") or run_dir.name)
+        runs.append(
+            Run(
+                path=run_dir,
+                run_id=run_id,
+                source=str(meta_data.get("source") or ""),
+            )
+        )
+
+    return runs
+
+
+def parse_event(line: bytes, *, sequence: int, run: Run) -> Event | None:
+    try:
+        raw_data = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(raw_data, dict):
+        return None
+
+    raw_ts = raw_data.get("ts")
+    if isinstance(raw_ts, (int, float)):
+        ts = float(raw_ts)
+    else:
+        ts = 0.0
+
+    return Event(ts=ts, sequence=sequence, run=run, data=raw_data)
+
+
+def read_events(run: Run, *, start_offset: int = 0) -> tuple[list[Event], int]:
+    events: list[Event] = []
+    offset = start_offset
+
+    try:
+        with run.events_path.open("rb") as handle:
+            handle.seek(start_offset)
+            sequence = 0
+            while True:
+                line_start = handle.tell()
+                line = handle.readline()
+                if not line:
+                    offset = handle.tell()
+                    break
+                if not line.endswith(b"\n"):
+                    offset = line_start
+                    break
+
+                offset = handle.tell()
+                event = parse_event(line, sequence=sequence, run=run)
+                sequence += 1
+                if event is not None:
+                    events.append(event)
+    except FileNotFoundError:
+        return [], 0
+    except OSError:
+        return [], start_offset
+
+    return events, offset
+
+
+def event_file_size(run: Run) -> int:
+    try:
+        return run.events_path.stat().st_size
+    except OSError:
+        return 0
+
+
+def recent_events(runs: list[Run], limit: int) -> list[Event]:
+    if limit <= 0:
+        return []
+
+    events: list[Event] = []
+    for run in runs:
+        run_events, _ = read_events(run)
+        events.extend(run_events)
+
+    return sorted(events, key=lambda event: (event.ts, event.sequence))[-limit:]
+
+
+def display_time(ts: float) -> str:
+    if ts <= 0:
+        return ""
+    formatted = datetime.fromtimestamp(ts).strftime("%I:%M:%S %p")
+    return formatted[1:] if formatted.startswith("0") else formatted
+
+
+def stringify(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, sort_keys=True)
+
+
+def event_detail(event: dict[str, Any]) -> str:
+    event_type = stringify(event.get("type"))
+
+    if event_type == "log":
+        return stringify(event.get("message"))
+
+    if event_type == "phase_started":
+        phase = stringify(event.get("phase"))
+        return f"({phase}) phase: {phase}"
+
+    if event_type in {"agent_started", "agent_finished"}:
+        phase = stringify(event.get("phase"))
+        label = stringify(event.get("label"))
+        attempts = event.get("attempts") or event.get("attempt") or 1
+        return f"({phase}) {label} r{attempts}"
+
+    if event_type == "run_started":
+        return f"(run) run: {stringify(event.get('runId'))}"
+
+    if event_type == "run_finished":
+        return f"(run) run: {stringify(event.get('runId'))}"
+
+    if event_type == "run_failed":
+        error = stringify(event.get("error"))
+        return f"(run) run: {stringify(event.get('runId'))} failed: {error}"
+
+    payload = {
+        key: value
+        for key, value in event.items()
+        if key not in {"ts", "type"} and value is not None
+    }
+    if not payload:
+        return ""
+    return json.dumps(payload, sort_keys=True)
+
+
+def format_event(event: Event) -> str:
+    event_type = stringify(event.data.get("type"))
+    return f"[{display_time(event.ts)}] {event_type:<15} {event_detail(event.data)}"
+
+
+def emit(events: list[Event]) -> None:
+    for event in sorted(events, key=lambda item: (item.ts, item.sequence)):
+        print(format_event(event), flush=True)
+
+
+def watch(source: Path, *, runs_dir: Path, recent: int, poll: float) -> None:
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+    offsets: dict[Path, int] = {}
+    known_runs: set[Path] = set()
+
+    initial_runs = discover_running_runs(runs_dir, source)
+    emit(recent_events(initial_runs, recent))
+    for run in initial_runs:
+        offsets[run.path] = event_file_size(run)
+        known_runs.add(run.path)
+
+    while True:
+        loop_events: list[Event] = []
+        running_runs = discover_running_runs(runs_dir, source)
+        running_paths = {run.path for run in running_runs}
+
+        for run in running_runs:
+            if run.path not in known_runs:
+                events, offset = read_events(run)
+                loop_events.extend(events)
+                offsets[run.path] = offset
+                known_runs.add(run.path)
+                continue
+
+            events, offset = read_events(run, start_offset=offsets.get(run.path, 0))
+            loop_events.extend(events)
+            offsets[run.path] = offset
+
+        for stopped_path in set(offsets) - running_paths:
+            offsets.pop(stopped_path, None)
+
+        emit(loop_events)
+        time.sleep(poll)
+
+
+@app.default
+def main(
+    source: Annotated[
+        Path,
+        Parameter(help="Source directory recorded in ODW run metadata."),
+    ],
+    *,
+    runs_dir: Annotated[
+        Path,
+        Parameter(help="Root ODW runs directory."),
+    ] = Path.home() / ".odw" / "runs",
+    recent: Annotated[
+        int,
+        Parameter(name=("--recent", "-n"), help="Records to print before tailing."),
+    ] = 10,
+    poll: Annotated[
+        float,
+        Parameter(help="Seconds between run discovery and tail checks."),
+    ] = 1.0,
+) -> None:
+    """Print recent events, then follow new events for matching running runs."""
+    if recent < 0:
+        print("--recent must be non-negative", file=sys.stderr)
+        raise SystemExit(2)
+    if poll <= 0:
+        print("--poll must be positive", file=sys.stderr)
+        raise SystemExit(2)
+
+    watch(source.expanduser(), runs_dir=runs_dir.expanduser(), recent=recent, poll=poll)
+
+
+if __name__ == "__main__":
+    app()
