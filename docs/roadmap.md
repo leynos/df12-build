@@ -105,7 +105,7 @@ being treated as complete work.
   - See `docs/failure-resume-design.md` section "Resume decisions".
   - Success: only clean, committed, task-scoped `adopt-complete` candidates
     with validation evidence can enter review-mode resume.
-- [ ] 2.1.2. Return explicit skip reasons for candidates that cannot enter
+- [x] 2.1.2. Return explicit skip reasons for candidates that cannot enter
   review-mode resume.
   - Requires 2.1.1.
   - See `docs/failure-resume-design.md` sections "Returned result shape" and
@@ -125,7 +125,7 @@ ordinary and recovered work.
   - See `docs/failure-resume-design.md` section "Review-mode resume path".
   - Success: recovered branches can enter review without re-running the
     implementation agent.
-- [ ] 2.2.2. Route eligible recovered branches through existing review,
+- [x] 2.2.2. Route eligible recovered branches through existing review,
   CodeRabbit, expert review, and integration logic.
   - Requires 2.2.1.
   - See `docs/failure-resume-design.md` sections "Review-mode resume path" and

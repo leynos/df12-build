@@ -1453,12 +1453,12 @@ async function syntheticRecoveryImpl(candidate, evidence) {
   }
 }
 
-// Fresh-run recovery pass: discover -> assess -> report (assess-only, phase 1
-// of the failure-resume design). Review-mode resume for eligible
-// adopt-complete candidates arrives with the phase 2 roadmap tasks. This pass
-// never mutates the target project: it reads Git state and spawns read-only
-// assessment agents.
-async function runRecovery(root) {
+// Fresh-run recovery pass: discover -> assess -> decide -> report or resume.
+// Assess mode never mutates the target project: it reads Git state and spawns
+// read-only assessment agents. Review mode may route eligible adopt-complete
+// candidates through the SAME dual-review + merge-lock integration path as
+// ordinary tasks; nothing merges outside that path.
+async function runRecovery(root, mergeLock = null) {
   const summary = {
     enabled: true,
     mode: RESUME_MODE,
@@ -1521,14 +1521,86 @@ async function runRecovery(root) {
       continue
     }
     summary.assessed += 1
-    summary.results.push({
+    const evidence = assessment.hostEvidence
+    const decision = recoveryDecision(candidate, evidence, assessment, RESUME_MODE, { dryRun: DRY_RUN })
+    if (decision.action !== 'resume') {
+      if (decision.skip) {
+        summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: decision.reason })
+      }
+      summary.results.push({
+        id: candidate.taskId,
+        branchName: candidate.branchName,
+        classification: decision.classification,
+        action: 'reported',
+        ...(decision.reason ? { reason: decision.reason } : {}),
+        assessment,
+      })
+      log(`[recovery] ${candidate.branchName}: ${decision.classification} (reported${decision.reason ? `; ${decision.reason}` : ''})`)
+      continue
+    }
+
+    // --- Review-mode resume: re-enter the ordinary review + integration path.
+    // No re-implementation: a synthetic result bridges the recovered branch
+    // into dual review, and integration ticks the roadmap under the merge lock.
+    log(`[recovery] resuming ${candidate.branchName} through the ordinary review and integration path`)
+    const task = {
       id: candidate.taskId,
-      branchName: candidate.branchName,
-      classification: assessment.classification,
-      action: 'reported',
-      assessment,
-    })
-    log(`[recovery] ${candidate.branchName}: ${assessment.classification} (reported)`)
+      title: candidate.taskTitle,
+      requires: [],
+      rationale: 'review-mode recovery resume of a clean adopt-complete branch',
+      isAddendum: false,
+      subtasks: [],
+    }
+    const impl = await syntheticRecoveryImpl(candidate, evidence)
+    const plan = {
+      execplanPath: impl.execplanPath || `docs/execplans/${candidate.branchName}.md`,
+      workItems: [],
+      summary: impl.summary,
+    }
+    let outcome
+    try {
+      outcome = await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock, { kind: 'recovery-resume' })
+    } catch (error) {
+      const detail = `unhandled agent error: ${(error && error.message) || String(error)}`
+      outcome = resultFromUnhandledAgentError(candidate.taskId, detail, { worktree: candidate.worktreePath, kind: 'recovery-resume' })
+    }
+    if (outcome.status === 'fatal-auth' || outcome.status === 'provider-fault') {
+      summary.results.push({
+        id: candidate.taskId,
+        branchName: candidate.branchName,
+        classification: decision.classification,
+        action: 'resume-failed',
+        reason: outcome.detail || outcome.status,
+      })
+      return { summary, taskResults, held, fatal: outcome }
+    }
+    taskResults.push({ task, result: outcome.status === 'done' ? outcome : { ...outcome, assessment } })
+    if (outcome.status === 'done') {
+      summary.resumed += 1
+      summary.results.push({
+        id: candidate.taskId,
+        branchName: candidate.branchName,
+        classification: decision.classification,
+        action: 'resumed',
+      })
+      log(`[recovery] ${candidate.branchName}: resumed and integrated`)
+    } else if (outcome.status === 'manual-merge-ready') {
+      summary.results.push({
+        id: candidate.taskId,
+        branchName: candidate.branchName,
+        classification: decision.classification,
+        action: 'manual-merge-ready',
+      })
+    } else {
+      summary.results.push({
+        id: candidate.taskId,
+        branchName: candidate.branchName,
+        classification: decision.classification,
+        action: 'resume-failed',
+        reason: outcome.detail || outcome.status,
+      })
+      log(`[recovery] ${candidate.branchName}: resume ${outcome.status} at ${outcome.stage || 'unknown stage'}`)
+    }
   }
 
   return { summary, taskResults, held, fatal: null }
@@ -1654,6 +1726,80 @@ function ensureTaskAgentWriteAccess(worktree, tag) {
   if (!WORKTREE_WRITE_PREFLIGHT) return Promise.resolve({ ok: true, skipped: true, failures: [] })
   if (!taskAgentWritePreflight) taskAgentWritePreflight = runTaskAgentWritePreflight(worktree, tag)
   return taskAgentWritePreflight
+}
+
+// ---------------------------------------------------------------------------
+// Dual review + serialized integration — shared by the normal task pipeline
+// and review-mode recovery resume, so a recovered branch can only land
+// through exactly the same reviewers, fix rounds, merge lock, and roadmap
+// update path as ordinary work.
+// ---------------------------------------------------------------------------
+async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock, options = {}) {
+  const tag = task.id
+  const kindExtra = options.kind ? { kind: options.kind } : {}
+  const proposals = []
+  let reviewsPass = false
+  for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
+    const [codeReview, expertReview] = await parallel([
+      () => agent(codeReviewPrompt(task, worktree, plan), reviewAgentOptions({ phase: 'Code Review', label: `code-review:${tag} r${round}`, schema: REVIEW_SCHEMA })),
+      () => agent(expertReviewPrompt(task, worktree, plan), reviewAgentOptions({ phase: 'Expert Review', label: `expert-review:${tag} r${round}`, schema: REVIEW_SCHEMA })),
+    ])
+    for (const r of [codeReview, expertReview]) {
+      if (r?.proposedRoadmapItems?.length) proposals.push(...r.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
+    }
+    if (!codeReview || !expertReview) {
+      const missing = [
+        !codeReview ? 'code review' : null,
+        !expertReview ? 'expert review' : null,
+      ].filter(Boolean).join(' and ')
+      return {
+        id: tag,
+        status: 'failed',
+        stage: 'review',
+        detail: `dual review failed to return a structured verdict from ${missing}; branch left unmerged for the root agent`,
+        worktree,
+        proposals,
+        ...kindExtra,
+      }
+    }
+    const blocking = [
+      ...(codeReview.blocking || []),
+      ...(expertReview.blocking || []),
+    ]
+    if (blocking.length === 0 && codeReview?.verdict === 'pass' && expertReview?.verdict === 'pass') {
+      reviewsPass = true
+      log(`[task ${tag}] dual review passed in round ${round}`)
+      break
+    }
+    log(`[task ${tag}] review round ${round}: ${blocking.length} blocking item(s)`)
+    if (round === MAX_REVIEW_ROUNDS) break
+    phase('Implement')
+    await buildLock(() => agent(fixPrompt(task, worktree, plan, blocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}` })))
+  }
+
+  if (!reviewsPass) {
+    return { id: tag, status: 'halted', stage: 'review', detail: 'reviewers not satisfied within cap; branch left unmerged for the root agent', worktree, proposals, ...kindExtra }
+  }
+
+  // --- Integrate (serialized behind the merge queue) ----------------------
+  // Plan, design review, implement and the dual review all ran in parallel
+  // with sibling tasks; only the rebase + squash-merge + push is serialized,
+  // so at most one task touches origin/BASE at a time.
+  let integration = null
+  if (AUTO_MERGE) {
+    const doIntegrate = () => {
+      phase('Integrate')
+      return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
+    }
+    integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
+    if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
+      return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, ...kindExtra }
+    }
+  } else {
+    return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals, ...kindExtra }
+  }
+
+  return { id: tag, status: 'done', plan, impl, integration, worktree, proposals, ...kindExtra }
 }
 
 // ---------------------------------------------------------------------------
@@ -1853,69 +1999,12 @@ async function runTask(task, mergeLock) {
     })
   }
 
-  // --- Dual review (code-review + experts) with fix loop ------------------
-  const proposals = []
-  let reviewsPass = false
-  for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
-    const [codeReview, expertReview] = await parallel([
-      () => agent(codeReviewPrompt(task, worktree, plan), reviewAgentOptions({ phase: 'Code Review', label: `code-review:${tag} r${round}`, schema: REVIEW_SCHEMA })),
-      () => agent(expertReviewPrompt(task, worktree, plan), reviewAgentOptions({ phase: 'Expert Review', label: `expert-review:${tag} r${round}`, schema: REVIEW_SCHEMA })),
-    ])
-    for (const r of [codeReview, expertReview]) {
-      if (r?.proposedRoadmapItems?.length) proposals.push(...r.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
-    }
-    if (!codeReview || !expertReview) {
-      const missing = [
-        !codeReview ? 'code review' : null,
-        !expertReview ? 'expert review' : null,
-      ].filter(Boolean).join(' and ')
-      return await attachAssessment(task, wt, {
-        id: tag,
-        status: 'failed',
-        stage: 'review',
-        detail: `dual review failed to return a structured verdict from ${missing}; branch left unmerged for the root agent`,
-        worktree,
-        proposals,
-      })
-    }
-    const blocking = [
-      ...(codeReview.blocking || []),
-      ...(expertReview.blocking || []),
-    ]
-    if (blocking.length === 0 && codeReview?.verdict === 'pass' && expertReview?.verdict === 'pass') {
-      reviewsPass = true
-      log(`[task ${tag}] dual review passed in round ${round}`)
-      break
-    }
-    log(`[task ${tag}] review round ${round}: ${blocking.length} blocking item(s)`)
-    if (round === MAX_REVIEW_ROUNDS) break
-    phase('Implement')
-    await buildLock(() => agent(fixPrompt(task, worktree, plan, blocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}` })))
+  // --- Dual review + integration (shared with review-mode recovery resume) --
+  const outcome = await runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock)
+  if (outcome.status === 'failed' || outcome.status === 'halted') {
+    return await attachAssessment(task, wt, outcome)
   }
-
-  if (!reviewsPass) {
-    return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'review', detail: 'reviewers not satisfied within cap; branch left unmerged for the root agent', worktree, proposals })
-  }
-
-  // --- Integrate (serialized behind the merge queue) ----------------------
-  // Plan, design review, implement and the dual review all ran in parallel
-  // with sibling tasks; only the rebase + squash-merge + push is serialized,
-  // so at most one task touches origin/BASE at a time.
-  let integration = null
-  if (AUTO_MERGE) {
-    const doIntegrate = () => {
-      phase('Integrate')
-      return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
-    }
-    integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
-    if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
-      return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals })
-    }
-  } else {
-    return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals }
-  }
-
-  return { id: tag, status: 'done', plan, impl, integration, worktree, proposals }
+  return outcome
   } catch (error) {
     const detail = `unhandled agent error: ${(error && error.message) || String(error)}`
     const result = resultFromUnhandledAgentError(tag, detail, { worktree })
@@ -2244,7 +2333,7 @@ if (RESUME_PARTIAL_BRANCHES && halted) {
 }
 if (RESUME_PARTIAL_BRANCHES && !halted) {
   try {
-    const outcome = await runRecovery(process.cwd())
+    const outcome = await runRecovery(process.cwd(), mergeLock)
     recovery = outcome.summary
     for (const id of outcome.held.normal) recoveryHeldNormal.add(id)
     for (const id of outcome.held.addendum) recoveryHeldAddendum.add(id)

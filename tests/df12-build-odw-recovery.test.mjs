@@ -657,6 +657,173 @@ test('recovery marks processed only for pushed, integrated resume results', asyn
   )
 })
 
+// Scripted agent for review-mode resume runs: keyed on stable labels, never
+// prompt prose. Overrides let each scenario steer one role.
+function reviewModeAgent(calls, overrides = {}) {
+  return async (prompt, opts = {}) => {
+    const label = opts.label || ''
+    calls.push(label)
+    if (label.startsWith('recover-assess:')) {
+      return (overrides.assess || (async () => sampleAssessment()))(prompt, opts)
+    }
+    if (label.startsWith('code-review:') || label.startsWith('expert-review:')) {
+      return (overrides.review || (async () => ({ verdict: 'pass', blocking: [], summary: 'ship it' })))(prompt, opts)
+    }
+    if (label.startsWith('integrate:')) {
+      return (
+        overrides.integrate ||
+        (async () => ({
+          ok: true,
+          roadmapMarkedDone: true,
+          rebased: true,
+          squashMerged: true,
+          mergeSha: 'feedfeed',
+          pushed: true,
+          conflicts: '',
+          summary: 'squash merged and pushed',
+        }))
+      )(prompt, opts)
+    }
+    if (label.startsWith('fix:')) return 'applied fixes'
+    throw new Error(`unexpected agent label in recovery resume test: ${label}`)
+  }
+}
+
+test('review-mode resume routes an eligible branch through review and integration', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review' },
+    reviewModeAgent(calls),
+  )
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.fatal, null)
+  assert.equal(outcome.summary.resumed, 1)
+  assert.deepEqual(
+    outcome.summary.results.map((entry) => [entry.id, entry.action]),
+    [['1.2.3', 'resumed']],
+  )
+  assert.equal(outcome.taskResults.length, 1)
+  const { task, result } = outcome.taskResults[0]
+  assert.equal(task.id, '1.2.3')
+  assert.equal(result.status, 'done')
+  assert.equal(result.kind, 'recovery-resume')
+  assert.equal(result.integration.pushed, true)
+  assert.equal(result.impl.summary, 'Recovered adopt-complete branch from durable git state.')
+  assert.deepEqual(
+    calls,
+    ['recover-assess:1.2.3', 'code-review:1.2.3 r1', 'expert-review:1.2.3 r1', 'integrate:1.2.3'],
+    'resume must use the ordinary review labels and the integration agent',
+  )
+})
+
+test('review-mode resume skips a dirty branch with an explicit reason and no review spend', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review' },
+    reviewModeAgent(calls),
+  )
+  const repo = makeRecoveryRepo()
+  writeFileSync(path.join(repo.parserWorktree, 'dirty.txt'), 'uncommitted\n')
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  assert.deepEqual(outcome.taskResults, [])
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'reported')
+  assert.equal(entry.classification, 'continue-manual', 'ineligible adopt-complete must fail closed')
+  assert.equal(entry.reason, 'dirty-worktree')
+  assert.ok(
+    outcome.summary.skipped.some(
+      (skip) => skip.branchName === 'roadmap-1-2-3' && skip.reason === 'dirty-worktree',
+    ),
+  )
+  assert.deepEqual(calls, ['recover-assess:1.2.3'], 'no review or integration agents may run')
+})
+
+test('review-mode resume reports non-adopt-complete classifications without spending review effort', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review' },
+    reviewModeAgent(calls, {
+      assess: async () => sampleAssessment({ classification: 'adopt-partial' }),
+    }),
+  )
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  assert.deepEqual(outcome.taskResults, [])
+  assert.deepEqual(
+    outcome.summary.results.map((entry) => [entry.classification, entry.action]),
+    [['adopt-partial', 'reported']],
+  )
+  assert.deepEqual(calls, ['recover-assess:1.2.3'])
+})
+
+test('a failed resume review halts the branch without integration', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review', maxReviewRounds: 1 },
+    reviewModeAgent(calls, {
+      review: async () => ({ verdict: 'changes-requested', blocking: ['recovered slice misses the success criterion'], summary: 'not shippable' }),
+    }),
+  )
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'resume-failed')
+  assert.equal(outcome.taskResults[0].result.status, 'halted')
+  assert.equal(outcome.taskResults[0].result.stage, 'review')
+  assert.equal(
+    outcome.taskResults[0].result.assessment.classification,
+    'adopt-complete',
+    'failed resumes keep the recovery assessment attached for the operator',
+  )
+  assert.ok(!calls.some((label) => label.startsWith('integrate:')), 'no integration after a failed review')
+})
+
+test('autoMerge=false resume stops at manual-merge-ready instead of integrating', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review', autoMerge: false },
+    reviewModeAgent(calls),
+  )
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  assert.deepEqual(
+    outcome.summary.results.map((entry) => entry.action),
+    ['manual-merge-ready'],
+  )
+  assert.equal(outcome.taskResults[0].result.status, 'manual-merge-ready')
+  assert.ok(!calls.some((label) => label.startsWith('integrate:')))
+})
+
+test('normal tasks and recovery resume share one review and integration implementation', async () => {
+  const source = await readFile(WORKFLOW_PATH, 'utf8')
+
+  assert.match(
+    source,
+    /const outcome = await runDualReviewAndIntegration\(task, worktree, plan, impl, mergeLock\)/,
+    'runTask must delegate to the shared review/integration path',
+  )
+  assert.match(
+    source,
+    /runDualReviewAndIntegration\(task, candidate\.worktreePath, plan, impl, mergeLock, \{ kind: 'recovery-resume' \}\)/,
+    'recovery resume must delegate to the same shared path',
+  )
+})
+
 test('control loop wires recovery ahead of normal selection', async () => {
   const source = await readFile(WORKFLOW_PATH, 'utf8')
 
@@ -668,7 +835,7 @@ test('control loop wires recovery ahead of normal selection', async () => {
   )
   assert.match(
     source,
-    /if \(RESUME_PARTIAL_BRANCHES && !halted\) \{[\s\S]*?await runRecovery\(process\.cwd\(\)\)/,
+    /if \(RESUME_PARTIAL_BRANCHES && !halted\) \{[\s\S]*?await runRecovery\(process\.cwd\(\), mergeLock\)/,
     'recovery must run only when enabled and not halted',
   )
   assert.match(
