@@ -772,7 +772,7 @@ class RoboLightsApp(App[None]):
     def __init__(self, args: argparse.Namespace) -> None:
         super().__init__()
         self.args = args
-        self.parent: Path = args.parent
+        self.watched_parent: Path = args.parent
         self.notices: "queue.Queue[Notice]" = queue.Queue(maxsize=args.queue_size)
         self.stop_event = Event()
         self.force_rescan = Event()
@@ -806,7 +806,7 @@ class RoboLightsApp(App[None]):
     def watch_worktrees(self) -> None:
         worker = get_current_worker()
         watcher = InotifyWorktreeWatcher(
-            parent=self.parent,
+            parent=self.watched_parent,
             pattern=self.args.pattern,
             excludes=self.args.excludes,
             require_git_marker=not self.args.any_matching_dir,
@@ -949,7 +949,7 @@ class RoboLightsApp(App[None]):
 
         status.update(
             make_status_text(
-                parent=self.parent,
+                parent=self.watched_parent,
                 pattern=self.args.pattern,
                 roots=self.root_count,
                 watches=self.watch_count,
