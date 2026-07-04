@@ -6,9 +6,43 @@
 // tests/df12-build-odw-write-preflight.test.mjs.
 
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+
+// Canonical parser for the write-probe wire format (the PROBE_FILE /
+// PROBE_TOKEN lines in writeProbePrompt). Every harness that plays a
+// compliant sandbox parses through this one helper, so a future
+// marker-format change lands in exactly one place. Returns null when the
+// prompt carries no probe markers; call sites decide how strict to be.
+export function probeDetailsFromPrompt(prompt) {
+  const file = /^PROBE_FILE: (.+)$/m.exec(prompt)
+  const token = /^PROBE_TOKEN: (.+)$/m.exec(prompt)
+  if (!file || !token) return null
+  return { file: file[1], token: token[1] }
+}
+
+// Fixture roots are removed when the test process exits, so repeated runs
+// do not accumulate orphaned df12-recovery-* repositories under the OS
+// temp directory. Callers may also invoke the returned cleanup() earlier.
+const FIXTURE_ROOTS = []
+process.once('exit', () => {
+  for (const root of FIXTURE_ROOTS) {
+    try {
+      rmSync(root, { recursive: true, force: true })
+    } catch {
+      // exit-time best effort: a vanished root is already what we want
+    }
+  }
+})
+
+// A registered throwaway directory for tests that need scratch space outside
+// a full recovery repository; removed by the same exit hook.
+export function makeFixtureDir(prefix) {
+  const dir = mkdtempSync(path.join(tmpdir(), prefix))
+  FIXTURE_ROOTS.push(dir)
+  return dir
+}
 
 export function git(cwd, ...args) {
   return execFileSync('git', args, {
@@ -47,6 +81,7 @@ export const RECOVERY_ROADMAP = [
 // its plan.
 export function makeRecoveryRepo({ withAddendumWorktree = false, withParserExecplan = true } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'df12-recovery-'))
+  FIXTURE_ROOTS.push(root)
   const dir = path.join(root, 'project')
   const originDir = path.join(root, 'origin.git')
   mkdirSync(dir)
@@ -93,7 +128,8 @@ export function makeRecoveryRepo({ withAddendumWorktree = false, withParserExecp
     addendumWorktree = addBranch('roadmap-2-1-2-addendum', { worktree: true })
   }
 
-  return { root, dir, originDir, baseSha, parserWorktree, addendumWorktree }
+  const cleanup = () => rmSync(root, { recursive: true, force: true })
+  return { root, dir, originDir, baseSha, parserWorktree, addendumWorktree, cleanup }
 }
 
 // Every observable piece of durable state assess-only recovery must not touch:

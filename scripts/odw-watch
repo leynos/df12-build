@@ -125,8 +125,10 @@ def read_json(path: Path) -> dict[str, Any]:
             data = json.load(handle)
     except FileNotFoundError:
         return {}
-    except (json.JSONDecodeError, OSError) as error:
-        warn_once(f"warning: skipping unreadable {path}: {error}")
+    except (json.JSONDecodeError, OSError):
+        # Keyed on the path alone: exception text varies between reads of a
+        # live file, and a varying key would defeat warn_once's dedup.
+        warn_once(f"warning: skipping unreadable {path}")
         return {}
 
     if isinstance(data, dict):

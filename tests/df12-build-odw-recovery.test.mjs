@@ -5,16 +5,17 @@
 // from tests/fixtures/recovery-repo.mjs.
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
 import {
   git,
   RECOVERY_ROADMAP,
+  makeFixtureDir,
   makeRecoveryRepo,
+  probeDetailsFromPrompt,
   repoStateSnapshot,
   sampleAssessment,
 } from './fixtures/recovery-repo.mjs'
@@ -302,7 +303,7 @@ test('recovery assessment failures are reported, not thrown', async () => {
 
 test('discovery reports git failures as errors instead of throwing', async () => {
   const surface = await loadRecoverySurface({})
-  const notARepo = mkdtempSync(path.join(tmpdir(), 'df12-recovery-empty-'))
+  const notARepo = makeFixtureDir('df12-recovery-empty-')
 
   const { candidates, errors } = await surface.discoverRecoveryCandidates(RECOVERY_ROADMAP, notARepo)
   assert.deepEqual(candidates, [])
@@ -371,7 +372,7 @@ test('auth-shaped recovery assessment failures halt the run as fatal', async () 
 
 test('recovery survives an unreadable canonical roadmap', async () => {
   const surface = await loadRecoverySurface({ resumePartialBranches: true }, async () => sampleAssessment())
-  const notARepo = mkdtempSync(path.join(tmpdir(), 'df12-recovery-empty-'))
+  const notARepo = makeFixtureDir('df12-recovery-empty-')
 
   const outcome = await surface.runRecovery(notARepo)
 
@@ -641,10 +642,9 @@ function reviewModeAgent(calls, overrides = {}) {
     calls.push(label)
     if (label.startsWith('write-probe:')) {
       if (overrides.writeProbe === 'ignore') return { ok: true } // claims without writing
-      const file = /^PROBE_FILE: (.+)$/m.exec(prompt)
-      const token = /^PROBE_TOKEN: (.+)$/m.exec(prompt)
-      assert.ok(file && token, 'write-probe prompt should carry PROBE_FILE and PROBE_TOKEN')
-      writeFileSync(file[1], token[1], 'utf8')
+      const details = probeDetailsFromPrompt(prompt)
+      assert.ok(details, 'write-probe prompt should carry PROBE_FILE and PROBE_TOKEN')
+      writeFileSync(details.file, details.token, 'utf8')
       return { ok: true }
     }
     if (label.startsWith('recover-assess:') || label.startsWith('assess:')) {

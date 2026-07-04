@@ -15,6 +15,8 @@
 
 import { writeFileSync } from 'node:fs'
 
+import { probeDetailsFromPrompt } from './recovery-repo.mjs'
+
 let input = ''
 process.stdin.setEncoding('utf8')
 process.stdin.on('data', (chunk) => {
@@ -31,11 +33,10 @@ function replyFor(schema, prompt) {
   if (properties.ok && properties.detail && !properties.roadmapMarkedDone) {
     // Writable-root probe: behave as a compliant sandbox by honouring the
     // requested write, so the host verification finds the token on disk.
-    const file = /^PROBE_FILE: (.+)$/m.exec(prompt)
-    const token = /^PROBE_TOKEN: (.+)$/m.exec(prompt)
-    if (file && token) {
+    const details = probeDetailsFromPrompt(prompt)
+    if (details) {
       try {
-        writeFileSync(file[1], token[1], 'utf8')
+        writeFileSync(details.file, details.token, 'utf8')
         return { ok: true, detail: '' }
       } catch (error) {
         return { ok: false, detail: String(error) }

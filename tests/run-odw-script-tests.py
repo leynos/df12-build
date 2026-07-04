@@ -85,6 +85,18 @@ class ReadJsonTests(unittest.TestCase):
                 self.assertEqual(list_runs.read_json(broken), {})
             self.assertIn("warning: skipping unreadable", stderr.getvalue())
 
+    def test_watcher_read_json_warns_once_across_varying_parse_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            broken = Path(tmp) / "status.json"
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                broken.write_text('{"torn": ', encoding="utf-8")
+                self.assertEqual(odw_watch.read_json(broken), {})
+                broken.write_text("[unclosed", encoding="utf-8")  # different decode error text
+                self.assertEqual(odw_watch.read_json(broken), {})
+            warnings = [line for line in stderr.getvalue().splitlines() if str(broken) in line]
+            self.assertEqual(len(warnings), 1, "the dedup key must not vary with the exception text")
+
     def test_non_object_payload_returns_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             listy = Path(tmp) / "list.json"

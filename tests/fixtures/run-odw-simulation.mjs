@@ -18,6 +18,8 @@
 import { readFileSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 
+import { probeDetailsFromPrompt } from './recovery-repo.mjs'
+
 const scenarioPath = process.argv[2]
 if (!scenarioPath) {
   process.stderr.write('usage: run-odw-simulation.mjs <scenario.json>\n')
@@ -55,9 +57,8 @@ async function respond(label, prompt) {
   if (label.startsWith('write-probe:')) {
     // Behave as a compliant sandbox: honour the probe by writing the token,
     // so scenarios exercise flows beyond the write gate.
-    const file = /^PROBE_FILE: (.+)$/m.exec(prompt)
-    const token = /^PROBE_TOKEN: (.+)$/m.exec(prompt)
-    if (file && token) await writeFile(file[1], token[1], 'utf8')
+    const details = probeDetailsFromPrompt(prompt)
+    if (details) await writeFile(details.file, details.token, 'utf8')
     return { ok: true }
   }
   if (label.startsWith('code-review:') || label.startsWith('expert-review:')) {

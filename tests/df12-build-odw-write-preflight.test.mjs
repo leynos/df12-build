@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { makeRecoveryRepo } from './fixtures/recovery-repo.mjs'
+import { makeRecoveryRepo, probeDetailsFromPrompt as parseProbeDetails } from './fixtures/recovery-repo.mjs'
 
 const WORKFLOW_PATH = new URL('../workflows/df12-build-odw.js', import.meta.url)
 const CONTROL_LOOP_MARKER = '// --- Worker-pool control loop'
@@ -53,11 +53,12 @@ return {
   )
 }
 
+// Assertion wrapper over the shared wire-format parser: tests must fail
+// loudly when a probe prompt loses its machine-parsable markers.
 function probeDetailsFromPrompt(prompt) {
-  const file = /^PROBE_FILE: (.+)$/m.exec(prompt)
-  const token = /^PROBE_TOKEN: (.+)$/m.exec(prompt)
-  assert.ok(file && token, 'probe prompt should carry machine-parsable PROBE_FILE and PROBE_TOKEN lines')
-  return { file: file[1], token: token[1] }
+  const details = parseProbeDetails(prompt)
+  assert.ok(details, 'probe prompt should carry machine-parsable PROBE_FILE and PROBE_TOKEN lines')
+  return details
 }
 
 test('write preflight is on by default and disable is explicit', async () => {
