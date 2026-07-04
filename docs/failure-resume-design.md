@@ -326,6 +326,25 @@ prompts:
 An uncommitted plan is lost when a run dies; a stale `Status` resumes the task
 at an earlier stage than necessary, which costs effort but never correctness.
 
+Prose alone does not hold this contract — live runs showed planners returning
+uncommitted drafts and reviewers approving without committing — so the control
+loop enforces it host-side at every stage boundary, the same philosophy as the
+write probe:
+
+- after each planner round, the ExecPlan must exist at `HEAD` with no
+  uncommitted modifications; otherwise the round is bounced straight back to
+  the planner as an `EXECPLAN DURABILITY` blocking item without spending the
+  design reviewer;
+- when the design reviewer is satisfied, the control loop itself rewrites the
+  header to `Status: APPROVED` and commits only the plan path as a
+  deterministic machine commit, so the reviewer stays read-only and the
+  transition can never be skipped;
+- when an implementation returns `ok`, the worktree must be fully committed;
+  uncommitted state fails the stage with the exact paths, because uncommitted
+  work is unreviewable and would be lost at the squash merge. A committed
+  plan whose status is not `COMPLETE` is only logged: it costs a resumed run
+  one redundant stage, never correctness.
+
 ## Returned result shape
 
 Add a top-level `recovery` object to the workflow result:

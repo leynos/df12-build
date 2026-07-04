@@ -253,6 +253,11 @@ For every active `roadmap-*` worktree, check:
 - `git status --short --branch`;
 - `git log --oneline origin/BASE..HEAD`;
 - any returned `execplanPath` exists on disk;
+- after a stage boundary, the ExecPlan is committed at HEAD with an accurate
+  `Status` (the workflow now enforces this: uncommitted plans bounce back to
+  the planner, the `APPROVED` flip is a deterministic host commit, and a green
+  implementation that leaves uncommitted state fails at `implement`). Dirt is
+  normal only *mid*-agent-turn;
 - advertised gate logs exist;
 - claimed commits, dirty files, or clean branches match the agent output.
 

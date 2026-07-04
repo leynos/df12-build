@@ -970,7 +970,7 @@ function designReviewPrompt(task, worktree, plan, round) {
     '',
     'Set satisfied=true ONLY when you would stake your name on the plan being implementable and design-conformant as written. Otherwise list precise, addressable blocking defects (these go straight back to the planner).',
     '',
-    'STATUS TRANSITION: when (and only when) you set satisfied=true, update the ExecPlan header Status field from `DRAFT` to `APPROVED` and COMMIT that change (en-GB imperative subject) — the committed Status is what a resumed run dispatches on. If you are NOT satisfied, leave Status as `DRAFT`, and commit any review notes you chose to leave in the worktree so nothing is lost if the run dies.',
+    'STATUS TRANSITION: when you set satisfied=true, the workflow itself records the `APPROVED` status flip as a deterministic commit — you do not need to edit the plan header. If you are NOT satisfied, leave Status as `DRAFT`, and commit any review notes you chose to leave in the worktree so nothing is lost if the run dies.',
   ].join('\n')
 }
 
@@ -1980,6 +1980,85 @@ function ensureTaskAgentWriteAccess(worktree, tag) {
 // unassessed result object) or its stage product; callers decide whether to
 // attach an assessment.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Host-enforced ExecPlan durability — prose alone does not hold: live runs
+// showed planners returning uncommitted drafts and reviewers approving
+// without committing the status flip. The control loop therefore verifies
+// durable state at every stage boundary, the same philosophy as the
+// write-probe: prompts request, the host verifies.
+// ---------------------------------------------------------------------------
+function execplanRelPath(worktree, planPath) {
+  const path = process.getBuiltinModule('node:path')
+  return path.isAbsolute(String(planPath)) ? path.relative(worktree, String(planPath)) : String(planPath)
+}
+
+// A plan is durable only when it exists at HEAD with no uncommitted
+// modifications. Returns { ok, detail }.
+async function verifyExecplanCommitted(worktree, planPath) {
+  const relPath = execplanRelPath(worktree, planPath)
+  const inHead = await execFileStatus('git', ['-C', worktree, 'cat-file', '-e', `HEAD:${relPath}`])
+  if (!inHead.ok) return { ok: false, detail: `the plan file ${relPath} is not committed at HEAD` }
+  const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1', '--', relPath])
+  if (!status.ok) {
+    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || '').trim()}` }
+  }
+  if (String(status.stdout).trim()) return { ok: false, detail: `the plan file ${relPath} has uncommitted modifications` }
+  return { ok: true, detail: '' }
+}
+
+// The APPROVED flip is deterministic bookkeeping, so the control loop owns
+// it: the design reviewer stays read-only, and the committed Status
+// transition can never be skipped by an agent ignoring prose. Commits ONLY
+// the plan path; idempotent when the committed status is already APPROVED.
+async function commitExecplanApproval(worktree, planPath, tag) {
+  const fs = process.getBuiltinModule('node:fs/promises')
+  const path = process.getBuiltinModule('node:path')
+  const relPath = execplanRelPath(worktree, planPath)
+  const absPath = path.join(worktree, relPath)
+  try {
+    const text = await fs.readFile(absPath, 'utf8')
+    if (parseExecplanState(text).status !== 'approved') {
+      const updated = /^Status:.*$/m.test(text)
+        ? text.replace(/^Status:.*$/m, 'Status: APPROVED')
+        : `${text.trimEnd()}\n\nStatus: APPROVED\n`
+      await fs.writeFile(absPath, updated, 'utf8')
+    }
+  } catch (error) {
+    return { ok: false, detail: `could not update the plan status: ${(error && error.message) || String(error)}` }
+  }
+  const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1', '--', relPath])
+  if (!status.ok) {
+    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || '').trim()}` }
+  }
+  if (!String(status.stdout).trim()) return { ok: true, detail: 'already committed as APPROVED' }
+  const add = await execFileStatus('git', ['-C', worktree, 'add', '--', relPath])
+  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || '').trim()}` }
+  // Deterministic identity: this is a machine commit by the control loop, and
+  // it must succeed even on hosts with no global git identity configured.
+  const commit = await execFileStatus('git', [
+    '-C', worktree,
+    '-c', 'user.name=df12-build',
+    '-c', 'user.email=df12-build@workflow.invalid',
+    'commit', '-m', `Approve ExecPlan for task ${tag}`, '--', relPath,
+  ])
+  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || '').trim()}` }
+  return { ok: true, detail: '' }
+}
+
+// Every path a successful implementation leaves uncommitted is unreviewable
+// (the dual review judges committed work) and is silently lost at the squash
+// merge. Returns { ok, detail } with a bounded path sample.
+async function verifyWorktreeCommitted(worktree) {
+  const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1'])
+  if (!status.ok) {
+    return { ok: false, detail: `git status failed: ${(status.message || status.stderr || '').trim()}` }
+  }
+  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean)
+  if (!lines.length) return { ok: true, detail: '' }
+  const sample = lines.slice(0, 8).map((line) => line.trim()).join('; ')
+  return { ok: false, detail: `${lines.length} uncommitted path(s): ${sample}${lines.length > 8 ? '; …' : ''}` }
+}
+
 async function runPlanDesignLoop(task, worktree, opts = {}) {
   const tag = task.id
   const extra = opts.extra || {}
@@ -2007,6 +2086,19 @@ async function runPlanDesignLoop(task, worktree, opts = {}) {
         },
       }
     }
+    // Host-verified durability gate: an uncommitted plan is bounced straight
+    // back to the planner as a blocking item, without spending the reviewer.
+    const durability = await verifyExecplanCommitted(worktree, plan.execplanPath)
+    if (!durability.ok) {
+      log(`[task ${tag}] plan round ${round}: ExecPlan not durable (${durability.detail})`)
+      designVerdict = {
+        satisfied: false,
+        blocking: [
+          `EXECPLAN DURABILITY: ${durability.detail}. The committed ExecPlan is the durable source of truth — COMMIT the plan (and every file you changed) on the task branch with an en-GB imperative subject, then return the same plan.`,
+        ],
+      }
+      continue
+    }
 
     phase('Design Review')
     designVerdict = await planningLock(() => agent(designReviewPrompt(task, worktree, plan, round), reviewAgentOptions({
@@ -2016,6 +2108,23 @@ async function runPlanDesignLoop(task, worktree, opts = {}) {
     })))
     if (designVerdict?.satisfied) {
       log(`[task ${tag}] design approved in round ${round}`)
+      // Deterministic bookkeeping owned by the control loop: record the
+      // committed APPROVED transition the moment the reviewer is satisfied.
+      const approved = await commitExecplanApproval(worktree, plan.execplanPath, tag)
+      if (!approved.ok) {
+        return {
+          fail: {
+            id: tag,
+            status: 'failed',
+            stage: 'design-review',
+            detail: `failed to record the committed ExecPlan approval: ${approved.detail}`,
+            plan,
+            worktree,
+            proposals: [],
+            ...extra,
+          },
+        }
+      }
       return { plan }
     }
     log(`[task ${tag}] design round ${round}: ${(designVerdict?.blocking || []).length} blocking point(s)`)
@@ -2058,6 +2167,32 @@ async function runImplementationStage(task, worktree, plan, opts = {}) {
         proposals: [],
         ...extra,
       },
+    }
+  }
+  // Host-verified durability gate: ok=true with a dirty worktree is a
+  // contract violation — uncommitted work is unreviewable and would be lost
+  // at the squash merge, so fail fast with the exact paths.
+  const committed = await verifyWorktreeCommitted(worktree)
+  if (!committed.ok) {
+    return {
+      fail: {
+        id: tag,
+        status: 'failed',
+        stage: 'implement',
+        detail: `implementation returned ok but left uncommitted state in the worktree (${committed.detail}); every work item must be committed before returning`,
+        openIssues: impl?.openIssues || [],
+        worktree,
+        proposals: [],
+        ...extra,
+      },
+    }
+  }
+  // Stale plan status costs a resumed run one redundant stage, never
+  // correctness — log it rather than failing a green implementation.
+  if (plan?.execplanPath) {
+    const planState = await readExecplanState({ worktreePath: worktree, execplanPath: execplanRelPath(worktree, plan.execplanPath) })
+    if (planState.status !== 'complete') {
+      log(`[task ${tag}] implementation returned ok but the committed ExecPlan status is '${planState.status}' (expected COMPLETE)`)
     }
   }
   return { impl }
