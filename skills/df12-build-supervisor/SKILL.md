@@ -127,7 +127,67 @@ provides the doc skills):
    workflow's current Claude/Codex split. Make sure every adapter named in
    `args.json` exists in `odw.config.json` or in ODW's built-in adapter set;
    the current ODW workflow expects a `claude` adapter for default planning and
-   review judgement.
+   review judgement. **Do not rely on built-in adapters when the workflow will
+   create sibling task worktrees** unless you have already proved their
+   writable root covers those worktrees. Define explicit sidecar adapters whose
+   command lines grant the project worktree parent before launching. A minimal
+   trusted-workshop shape is:
+
+   ```json
+   {
+     "workspaceMode": "inplace",
+     "concurrency": 16,
+     "maxAgents": 1000,
+     "timeout": 21600,
+     "claudeJobsScope": "project",
+     "adapters": {
+       "claude": {
+         "label": "Claude Code",
+         "command": [
+           "claude",
+           "--print",
+           "--permission-mode",
+           "acceptEdits",
+           "--add-dir",
+           "/path/to/project.worktrees",
+           "--no-session-persistence"
+         ],
+         "stdin": "{prompt}",
+         "flags": {
+           "model": ["--model"]
+         }
+       },
+       "codex": {
+         "label": "Codex",
+         "command": [
+           "codex",
+           "--ask-for-approval",
+           "never",
+           "exec",
+           "--skip-git-repo-check",
+           "--sandbox",
+           "danger-full-access",
+           "-c",
+           "model_reasoning_effort=\"medium\"",
+           "--cd",
+           "{workspace}",
+           "-"
+         ],
+         "stdin": "{prompt}",
+         "flags": {
+           "model": ["--model"]
+         }
+       }
+     }
+   }
+   ```
+
+   Replace `/path/to/project.worktrees` with the actual sibling worktree
+   directory that `git donkey` / the workflow will use, for example
+   `/home/leynos/Projects/stilyagi.worktrees`. For Codex, `danger-full-access`
+   is the trusted-workshop profile that lets the assigned task worktree and
+   shared build caches work; for a narrower profile, use `--add-dir` only after
+   a host-verified probe proves it can write the task worktree.
 3. **Launch ODW from the sidecar, with the project as `--source`.** Prefer the
    checked-in ODW workflow when running the Codex build-side agents together
    with the Claude Code planning and review agents:
@@ -358,10 +418,14 @@ Known concrete failure:
 - Symptom: agents repeatedly return missing or unwritten plan or changed-file
   paths under sibling worktrees.
 - Cause: Codex was launched with `--cd` at the control checkout, so
-  `workspace-write` rejects writes to sibling worktrees.
+  `workspace-write` rejects writes to sibling worktrees. Claude can fail the
+  same way when it lacks `--add-dir <project>.worktrees`, usually reporting
+  that output redirection was blocked because only the control checkout is an
+  allowed working directory.
 - Fix: launch task agents with the assigned git worktree as their execution
   root, or configure the adapter to include the worktree parent as an allowed
-  writable root.
+  writable root. Prefer explicit sidecar adapter definitions before launch;
+  do not assume ODW built-in adapters carry the required writable roots.
 
 Treat design-review blockers as probably correct only after the reviewed
 artifact actually exists and is readable from the assigned worktree. If the
@@ -673,8 +737,13 @@ reviewer.
   or build adapter could not write a host-verified probe file inside the task
   worktree. This is a launch/sandbox fault — fix the adapter config (writable
   roots covering `...worktrees/roadmap-*`) and relaunch; do not burn design
-  rounds or reword roadmap tasks. The verdict is computed once per run, so
-  every task fails fast together.
+  rounds or reword roadmap tasks. If the failure mentions Claude output
+  redirection being blocked, add `--add-dir /path/to/project.worktrees` to the
+  sidecar `claude` adapter. If Codex reports `Read-only file system` or
+  `workspace-write rejected path`, switch that workshop adapter to
+  `--sandbox danger-full-access` or add the sibling worktree parent through the
+  Codex CLI's writable directory mechanism, then rerun the preflight. The
+  verdict is computed once per run, so every task fails fast together.
 
 ## Post-assessment recovery closure
 
