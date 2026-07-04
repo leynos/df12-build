@@ -102,6 +102,19 @@ def warn_once(message: str) -> None:
 def read_json(path: Path) -> dict[str, Any]:
     """Read a JSON object from ``path``, returning ``{}`` on any failure.
 
+    Parameters
+    ----------
+    path : Path
+        JSON file to read.
+
+    Returns
+    -------
+    dict[str, Any]
+        The decoded object, or ``{}`` when the file is missing, unreadable,
+        torn mid-write, or does not contain a JSON object.
+
+    Notes
+    -----
     Absence is silent (runs legitimately lack some files); malformed or
     unreadable content warns once on stderr so operators can spot corrupt
     run state without the watcher crashing or spamming.
@@ -121,24 +134,74 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def normalized_path(path: Path) -> str:
-    """Expand and resolve ``path`` into a comparable absolute string."""
+    """Expand and resolve ``path`` into a comparable absolute string.
+
+    Parameters
+    ----------
+    path : Path
+        Path to normalize; may contain ``~`` or be relative.
+
+    Returns
+    -------
+    str
+        Absolute string form (``resolve(strict=False)``, so the path does
+        not have to exist), suitable for equality comparison.
+    """
     return str(path.expanduser().resolve(strict=False))
 
 
 def normalize_source(source: str) -> str:
-    """Normalize a metadata source string for path comparison."""
+    """Normalize a metadata source string for path comparison.
+
+    Parameters
+    ----------
+    source : str
+        Source directory string recorded in a run's ``meta.json``.
+
+    Returns
+    -------
+    str
+        The normalized absolute path string from :func:`normalized_path`.
+    """
     return normalized_path(Path(source))
 
 
 def is_matching_source(meta_source: Any, source: Path) -> bool:
-    """Report whether a run's recorded source matches the watched source."""
+    """Report whether a run's recorded source matches the watched source.
+
+    Parameters
+    ----------
+    meta_source : Any
+        Raw ``source`` value from run metadata (untrusted; any type).
+    source : Path
+        Source directory the watcher was pointed at.
+
+    Returns
+    -------
+    bool
+        ``True`` only when ``meta_source`` is a non-empty string whose
+        normalized path equals the watched source's normalized path.
+    """
     if not isinstance(meta_source, str) or not meta_source:
         return False
     return normalize_source(meta_source) == normalized_path(source)
 
 
 def is_running(run_dir: Path) -> bool:
-    """Report whether the run's ``status.json`` records a running state."""
+    """Report whether the run's ``status.json`` records a running state.
+
+    Parameters
+    ----------
+    run_dir : Path
+        Run directory containing ``status.json``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the state (or legacy ``status``) field equals
+        ``running`` case-insensitively; ``False`` for every other state,
+        including missing or unreadable status files.
+    """
     status_data = read_json(run_dir / "status.json")
     return str(status_data.get("state") or status_data.get("status") or "").casefold() == (
         "running"
@@ -301,8 +364,43 @@ def recent_events(runs: list[Run], limit: int) -> tuple[list[Event], dict[Path, 
     return sorted(events, key=lambda event: (event.ts, event.sequence))[-limit:], offsets
 
 
+def prune_dead_offsets(offsets: dict[Path, int]) -> None:
+    """Evict resume offsets whose run directory no longer exists.
+
+    Parameters
+    ----------
+    offsets : dict[Path, int]
+        Per-run resume offsets, mutated in place.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Offsets for runs that merely stopped (paused, done) are kept so a
+    resumed run continues from where it left off instead of replaying its
+    history; only deleted run directories are evicted, which bounds the
+    cache to runs that still exist on disk.
+    """
+    for stale in [path for path in offsets if not path.exists()]:
+        offsets.pop(stale, None)
+
+
 def display_time(ts: float) -> str:
-    """Format an epoch timestamp as a local 12-hour clock reading."""
+    """Format an epoch timestamp as a local 12-hour clock reading.
+
+    Parameters
+    ----------
+    ts : float
+        Epoch seconds; non-positive values mean "no timestamp".
+
+    Returns
+    -------
+    str
+        ``H:MM:SS AM/PM`` in local time with any leading zero stripped,
+        or ``""`` for non-positive input.
+    """
     if ts <= 0:
         return ""
     formatted = datetime.fromtimestamp(ts).strftime("%I:%M:%S %p")
@@ -310,7 +408,19 @@ def display_time(ts: float) -> str:
 
 
 def stringify(value: Any) -> str:
-    """Render an event field as text; non-strings become compact JSON."""
+    """Render an event field as text.
+
+    Parameters
+    ----------
+    value : Any
+        Raw event field value.
+
+    Returns
+    -------
+    str
+        ``value`` unchanged when it is a string, ``""`` for ``None``, and
+        compact key-sorted JSON for anything else.
+    """
     if value is None:
         return ""
     if isinstance(value, str):
@@ -332,49 +442,65 @@ def event_detail(event: dict[str, Any]) -> str:
         A short ``(phase) detail`` string for known event types, otherwise
         the remaining payload as sorted JSON (or ``""`` when empty).
     """
-    event_type = stringify(event.get("type"))
-
-    if event_type == "log":
-        return stringify(event.get("message"))
-
-    if event_type == "phase_started":
-        phase = stringify(event.get("phase"))
-        return f"({phase}) phase started"
-
-    if event_type in {"agent_started", "agent_finished"}:
-        phase = stringify(event.get("phase"))
-        label = stringify(event.get("label"))
-        attempts = event.get("attempts") or event.get("attempt") or 1
-        return f"({phase}) {label} r{attempts}"
-
-    if event_type == "run_started":
-        return f"(run) run: {stringify(event.get('runId'))}"
-
-    if event_type == "run_finished":
-        return f"(run) run: {stringify(event.get('runId'))}"
-
-    if event_type == "run_failed":
-        error = stringify(event.get("error"))
-        return f"(run) run: {stringify(event.get('runId'))} failed: {error}"
-
-    payload = {
-        key: value
-        for key, value in event.items()
-        if key not in {"ts", "type"} and value is not None
-    }
-    if not payload:
-        return ""
-    return json.dumps(payload, sort_keys=True)
+    match stringify(event.get("type")):
+        case "log":
+            return stringify(event.get("message"))
+        case "phase_started":
+            phase = stringify(event.get("phase"))
+            return f"({phase}) phase started"
+        case "agent_started" | "agent_finished":
+            phase = stringify(event.get("phase"))
+            label = stringify(event.get("label"))
+            attempts = event.get("attempts") or event.get("attempt") or 1
+            return f"({phase}) {label} r{attempts}"
+        case "run_started" | "run_finished":
+            return f"(run) run: {stringify(event.get('runId'))}"
+        case "run_failed":
+            error = stringify(event.get("error"))
+            return f"(run) run: {stringify(event.get('runId'))} failed: {error}"
+        case _:
+            payload = {
+                key: value
+                for key, value in event.items()
+                if key not in {"ts", "type"} and value is not None
+            }
+            if not payload:
+                return ""
+            return json.dumps(payload, sort_keys=True)
 
 
 def format_event(event: Event) -> str:
-    """Format one event as a single ``[time] type detail`` output line."""
+    """Format one event as a single ``[time] type detail`` output line.
+
+    Parameters
+    ----------
+    event : Event
+        Decoded event to render.
+
+    Returns
+    -------
+    str
+        ``[H:MM:SS AM] <type padded to 15> <detail>`` with the detail
+        produced by :func:`event_detail`.
+    """
     event_type = stringify(event.data.get("type"))
     return f"[{display_time(event.ts)}] {event_type:<15} {event_detail(event.data)}"
 
 
 def emit(events: list[Event]) -> None:
-    """Print events in timestamp-then-sequence order, flushing each line."""
+    """Print events in timestamp-then-sequence order, flushing each line.
+
+    Parameters
+    ----------
+    events : list[Event]
+        Events from one read batch; sorted here so interleaved runs print
+        in a stable chronological order.
+
+    Returns
+    -------
+    None
+        Output goes to stdout; each line is flushed for live tailing.
+    """
     for event in sorted(events, key=lambda item: (item.ts, item.sequence)):
         print(format_event(event), flush=True)
 
@@ -397,10 +523,10 @@ def watch(source: Path, *, runs_dir: Path, recent: int, poll: float) -> None:
     -----
     The initial tail offsets are the exact resume offsets returned by
     :func:`recent_events`, so events appended between the initial read and
-    the first poll are never skipped. Offsets are retained for the whole
-    session — one integer per run ever seen — so a run that pauses and
-    resumes continues from where it left off instead of replaying its
-    history.
+    the first poll are never skipped. Offsets are retained while a run's
+    directory exists — so a run that pauses and resumes continues from
+    where it left off instead of replaying its history — and evicted once
+    the directory is deleted, keeping the cache bounded.
     """
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
@@ -417,6 +543,7 @@ def watch(source: Path, *, runs_dir: Path, recent: int, poll: float) -> None:
             loop_events.extend(events)
             offsets[run.path] = offset
 
+        prune_dead_offsets(offsets)
         emit(loop_events)
         time.sleep(poll)
 

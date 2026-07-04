@@ -110,16 +110,18 @@ def coerce_timestamp(value: Any) -> float | str | None:
         when it is not numeric, ``None`` when the value is ``None``, and
         ``str(value)`` for any other type.
     """
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
+    match value:
+        case None:
+            return None
+        case int() | float():
             return float(value)
-        except ValueError:
-            return value
-    return str(value)
+        case str():
+            try:
+                return float(value)
+            except ValueError:
+                return value
+        case _:
+            return str(value)
 
 
 def display_timestamp(value: float | str | None) -> str:
@@ -337,6 +339,9 @@ def main(
     ] = None,
 ) -> None:
     """Show ODW run status rows, defaulting to running runs."""
+    if limit is not None and limit < 0:
+        print("--limit must be non-negative", file=sys.stderr)
+        raise SystemExit(2)
     if runs_dir is None:
         runs_dir = Path.home() / ".odw" / "runs"
     rows = filter_rows(

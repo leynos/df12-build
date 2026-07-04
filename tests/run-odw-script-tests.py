@@ -217,6 +217,26 @@ class EventParsingTests(unittest.TestCase):
             self.assertEqual(offsets[run.path], len(payload))
 
 
+class LimitValidationTests(unittest.TestCase):
+    def test_negative_limit_is_rejected(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as caught:
+            list_runs.main(limit=-1)
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("--limit must be non-negative", stderr.getvalue())
+
+
+class OffsetPruningTests(unittest.TestCase):
+    def test_prunes_only_deleted_run_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            alive = Path(tmp) / "alive"
+            alive.mkdir()
+            deleted = Path(tmp) / "deleted"
+            offsets = {alive: 10, deleted: 20}
+            odw_watch.prune_dead_offsets(offsets)
+        self.assertEqual(offsets, {alive: 10})
+
+
 class EventRenderingTests(unittest.TestCase):
     def test_event_detail_snapshots(self) -> None:
         cases = [
