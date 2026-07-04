@@ -151,6 +151,7 @@ Add these ODW `args` fields:
 | `resumeMode` | `"assess"` | One of `"assess"` or `"review"`. `"assess"` reports only. `"review"` may route clean `adopt-complete` branches into review and integration. |
 | `resumeTaskId` | unset | Limit recovery discovery to one roadmap id. This is separate from `taskId`, which selects normal roadmap work. |
 | `resumeMaxCandidates` | `4` | Bound startup recovery fan-in so a messy repository does not consume the whole run. |
+| `salvageArtefacts` | `true` | After a failed/halted branch is assessed as `continue-manual` or `adopt-partial`, preserve verified task-scoped ExecPlan/review artefacts with a branch-local salvage commit. |
 | `reuseAcceptedExecPlans` | `false` | Enable accepted-plan adoption after normal roadmap selection. When disabled, every normal task still enters the existing plan/design loop. |
 | `acceptedPlanMode` | `"verify"` | One of `"verify"` or `"build"`. `"verify"` reports whether a matching plan is adoptable. `"build"` may enter implementation when the plan is fresh and accepted. |
 
@@ -200,6 +201,51 @@ contract.
 Assessment remains skipped for auth failures. A recovered branch is not an auth
 failure merely because the previous run halted under token exhaustion; it is an
 ordinary recovery candidate unless its durable evidence says otherwise.
+
+## Salvage of task-scoped artefacts
+
+Schema or adapter failures can still leave useful files in the failed task
+worktree. The workflow therefore runs a small host-side salvage step after
+ADR 002 assessment, gated by `salvageArtefacts` and eligible only for
+`continue-manual` and `adopt-partial` classifications.
+
+Salvage is branch-local. It never merges, pushes, marks roadmap checkboxes,
+updates `processed`, or mutates the base/control checkout. Its only permitted
+write is a commit on the failed task branch with this subject:
+
+```text
+df12 salvage v1 task=<id> kind=<continue-manual|adopt-partial>
+```
+
+The candidate set is intentionally narrow. The host considers dirty or staged
+entries whose paths match the canonical task-scoped convention:
+
+```text
+docs/execplans/roadmap-<id-with-dashes>*.md
+```
+
+This includes adjacent review files such as
+`docs/execplans/roadmap-2-2-1.review-r1.md`. Other files remain visible in the
+assessment evidence but are not committed by salvage.
+
+Every candidate is verified before `git add`: the resolved path must stay under
+the task worktree, `lstat` must report a regular file, and the host opens the
+file with `O_NOFOLLOW` before accepting it. Symlinks, missing paths, special
+files, absolute paths, and path-escape attempts are recorded as skipped
+candidates with reasons in the result instead of being silently dropped.
+
+The per-task result receives a `salvage` object containing the branch,
+worktree path, classification, candidates, committed paths, skipped paths,
+commit sha, and commit message. The top-level result also includes a salvage
+rollup, and the terminal summary names preserved artefacts.
+
+Raw adapter stdout/stderr capture and any truncation of adapter error detail in
+ODW `result.json` are external ODW-runtime concerns. This workflow can preserve
+the `detail` string it receives, attach durable Git postmortem facts, and
+commit task-scoped artefacts that exist on disk; it cannot recover stdout or
+stderr bytes the runtime did not pass to the workflow. Operators who need the
+full adapter stream must retain the ODW run directory, sidecar logs, or runtime
+worker logs until upstream ODW exposes bounded raw reply artefacts.
 
 ## Accepted ExecPlan reuse
 
@@ -354,6 +400,9 @@ accepted plan.
 | Candidate has dirty files | Assess, but do not review-resume automatically. |
 | Candidate lacks validation evidence | Assess, but do not review-resume automatically. |
 | Assessment agent fails | Return `assessmentError` and keep normal roadmap selection available. |
+| Salvage candidate is a symlink, special file, missing file, or path escape | Skip that candidate, record the reason in `result.salvage.skippedPaths`, and keep the task failure non-fatal. |
+| Salvage `git add` or `git commit` fails | Record the failure in `result.salvage.skippedPaths`; do not convert the original task failure into a workflow infrastructure halt. |
+| Adapter raw stdout/stderr is truncated before reaching workflow JavaScript | Preserve the received `detail` verbatim and attach Git evidence; diagnose the missing stream from ODW runtime logs or sidecar artefacts. |
 | Review or integration fails after resume | Halt through the existing failure path with the recovered branch left intact. |
 | Accepted plan is missing, draft, stale, or uncommitted | Report the reason when plan reuse is enabled, then fall back to the normal plan/design loop. |
 | Accepted plan metadata is prompt-injected or unparsable | Treat the plan as unavailable for automation and run the normal plan/design loop. |
@@ -388,6 +437,9 @@ The implementation should add focused tests for:
 - fallback from stale or ambiguous accepted plans to the normal plan/design
   loop;
 - top-level `planReuse` result shape;
+- salvage commits for eligible untracked or dirty ExecPlan/review artefacts;
+- spoof-resistance for salvage symlinks and path escapes;
+- no base, origin, roadmap, or stash mutation during branch-local salvage;
 - no mutation in assess-only mode.
 
 The routine repository gate remains `make all`. A live `odw run` smoke test

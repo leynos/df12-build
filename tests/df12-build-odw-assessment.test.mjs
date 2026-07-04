@@ -6,16 +6,18 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { makeRecoveryRepo, repoStateSnapshot, sampleAssessment } from './fixtures/recovery-repo.mjs'
+
 const WORKFLOW_PATH = new URL('../workflows/df12-build-odw.js', import.meta.url)
 const CONTROL_LOOP_MARKER = '// --- Worker-pool control loop'
 
-async function loadAssessmentSurface(args = {}) {
+async function loadAssessmentSurface(args = {}, agentImpl = async () => null) {
   let source = await readFile(WORKFLOW_PATH, 'utf8')
   source = source.replace(/^export const meta\s*=/m, 'const meta =')
   const markerIndex = source.indexOf(CONTROL_LOOP_MARKER)
@@ -34,6 +36,10 @@ return {
   ASSESSMENT_SCHEMA,
   AUTH_REQUIRED_ADAPTERS,
   collectAssessmentEvidence,
+  attachAssessment,
+  commitSalvageArtefacts,
+  salvageCandidateEntries,
+  verifySalvageCandidate,
   shouldAssessFailure,
   authFailureDetail,
   providerFailureDetail,
@@ -50,10 +56,34 @@ return {
     args,
     () => {},
     () => {},
-    async () => null,
+    agentImpl,
     async (thunks) => Promise.all(thunks.map((thunk) => thunk())),
     { total: null, remaining: () => Infinity, spent: () => 0 },
   )
+}
+
+async function withGitIdentity(fn) {
+  const previous = {
+    GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME,
+    GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL,
+    GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME,
+    GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL,
+  }
+  process.env.GIT_AUTHOR_NAME = 'df12-test'
+  process.env.GIT_AUTHOR_EMAIL = 'df12-test@example.invalid'
+  process.env.GIT_COMMITTER_NAME = 'df12-test'
+  process.env.GIT_COMMITTER_EMAIL = 'df12-test@example.invalid'
+  try {
+    return await fn()
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key]
+      } else {
+        process.env[key] = value
+      }
+    }
+  }
 }
 
 function git(cwd, ...args) {
@@ -332,5 +362,117 @@ test('assessment evidence handles branches without commits after base', async ()
   assert.deepEqual(evidence.stagedChanges, [])
   assert.deepEqual(evidence.recentCommits, [])
   assert.equal(evidence.collectionErrors.length, 0)
-}
-)
+})
+
+test('continue-manual assessment commits task-scoped ExecPlan salvage on the task branch only', async () => {
+  const repo = makeRecoveryRepo()
+  const before = repoStateSnapshot(repo)
+  const reviewPath = path.join(repo.parserWorktree, 'docs', 'execplans', 'roadmap-1-2-3.review-r1.md')
+  writeFileSync(reviewPath, '# Review\n\nUseful branch-local notes.\n')
+  const execplanPath = path.join(repo.parserWorktree, 'docs', 'execplans', 'roadmap-1-2-3.md')
+  writeFileSync(execplanPath, `${readFileSync(execplanPath, 'utf8')}\nRetrospective: preserve this note.\n`)
+
+  const assessment = sampleAssessment({
+    classification: 'continue-manual',
+    branchName: 'roadmap-1-2-3',
+    worktreePath: repo.parserWorktree,
+    dirtyState: 'dirty',
+  })
+  const surface = await loadAssessmentSurface({}, async () => assessment)
+
+  const result = await withGitIdentity(() => surface.attachAssessment(
+    { id: '1.2.3', title: 'Implement the parser state machine' },
+    { branch: 'roadmap-1-2-3', worktreePath: repo.parserWorktree, baseSha: repo.baseSha },
+    { id: '1.2.3', status: 'failed', stage: 'plan', detail: 'schema parsing failed', worktree: repo.parserWorktree, proposals: [] },
+  ))
+
+  assert.equal(result.assessment.classification, 'continue-manual')
+  assert.equal(result.salvage.enabled, true)
+  assert.equal(result.salvage.eligible, true)
+  assert.equal(result.salvage.branch, 'roadmap-1-2-3')
+  assert.deepEqual(result.salvage.committedPaths.sort(), [
+    'docs/execplans/roadmap-1-2-3.md',
+    'docs/execplans/roadmap-1-2-3.review-r1.md',
+  ])
+  assert.match(result.salvage.commitSha, /^[0-9a-f]{40}$/)
+  assert.equal(git(repo.parserWorktree, 'log', '-1', '--format=%s'), 'df12 salvage v1 task=1.2.3 kind=continue-manual')
+  assert.equal(git(repo.parserWorktree, 'status', '--porcelain=v1'), '')
+
+  const after = repoStateSnapshot(repo)
+  assert.equal(after.originRefs, before.originRefs, 'salvage must not push or mutate origin refs')
+  assert.equal(after.controlStatus, before.controlStatus, 'salvage must not dirty the control checkout')
+  assert.equal(after.canonicalRoadmap, before.canonicalRoadmap, 'salvage must not mark roadmap state')
+  assert.equal(after.stashes, before.stashes, 'salvage must not use stash state')
+})
+
+test('salvage records symlink rejection without committing the candidate', async () => {
+  const repo = makeRecoveryRepo()
+  const outside = mkdtempSync(path.join(tmpdir(), 'df12-salvage-target-'))
+  const target = path.join(outside, 'outside.md')
+  writeFileSync(target, '# Outside\n')
+  const linkPath = path.join(repo.parserWorktree, 'docs', 'execplans', 'roadmap-1-2-3.review-r2.md')
+  symlinkSync(target, linkPath)
+
+  const surface = await loadAssessmentSurface({}, async () => sampleAssessment({
+    classification: 'continue-manual',
+    branchName: 'roadmap-1-2-3',
+    worktreePath: repo.parserWorktree,
+  }))
+
+  const result = await withGitIdentity(() => surface.attachAssessment(
+    { id: '1.2.3', title: 'Implement the parser state machine' },
+    { branch: 'roadmap-1-2-3', worktreePath: repo.parserWorktree, baseSha: repo.baseSha },
+    { id: '1.2.3', status: 'failed', stage: 'plan', detail: 'schema parsing failed', worktree: repo.parserWorktree, proposals: [] },
+  ))
+
+  assert.deepEqual(result.salvage.committedPaths, [])
+  assert.equal(result.salvage.skippedPaths.length, 1)
+  assert.equal(result.salvage.skippedPaths[0].path, 'docs/execplans/roadmap-1-2-3.review-r2.md')
+  assert.match(result.salvage.skippedPaths[0].reason, /not a regular file/)
+  assert.equal(readFileSync(target, 'utf8'), '# Outside\n')
+})
+
+test('salvage verification rejects paths escaping the worktree root', async () => {
+  const repo = makeRecoveryRepo()
+  const { verifySalvageCandidate } = await loadAssessmentSurface()
+
+  const verdict = await verifySalvageCandidate(repo.parserWorktree, { path: '../outside.md', status: '??' })
+
+  assert.equal(verdict.ok, false)
+  assert.match(verdict.reason, /escapes the worktree root/)
+})
+
+test('salvage skips ineligible classifications and disabled runs', async () => {
+  const repo = makeRecoveryRepo()
+  mkdirSync(path.join(repo.parserWorktree, 'docs', 'execplans'), { recursive: true })
+  const reviewPath = path.join(repo.parserWorktree, 'docs', 'execplans', 'roadmap-1-2-3.review-r3.md')
+  writeFileSync(reviewPath, '# Review\n')
+
+  const completeSurface = await loadAssessmentSurface({}, async () => sampleAssessment({
+    classification: 'adopt-complete',
+    branchName: 'roadmap-1-2-3',
+    worktreePath: repo.parserWorktree,
+  }))
+  const complete = await withGitIdentity(() => completeSurface.attachAssessment(
+    { id: '1.2.3', title: 'Implement the parser state machine' },
+    { branch: 'roadmap-1-2-3', worktreePath: repo.parserWorktree, baseSha: repo.baseSha },
+    { id: '1.2.3', status: 'failed', stage: 'plan', detail: 'schema parsing failed', worktree: repo.parserWorktree, proposals: [] },
+  ))
+  assert.equal(complete.salvage.eligible, false)
+  assert.deepEqual(complete.salvage.committedPaths, [])
+  assert.match(git(repo.parserWorktree, 'status', '--porcelain=v1'), /\?\? docs\/execplans\/roadmap-1-2-3\.review-r3\.md/)
+
+  const disabledSurface = await loadAssessmentSurface({ salvageArtefacts: false }, async () => sampleAssessment({
+    classification: 'continue-manual',
+    branchName: 'roadmap-1-2-3',
+    worktreePath: repo.parserWorktree,
+  }))
+  const disabled = await withGitIdentity(() => disabledSurface.attachAssessment(
+    { id: '1.2.3', title: 'Implement the parser state machine' },
+    { branch: 'roadmap-1-2-3', worktreePath: repo.parserWorktree, baseSha: repo.baseSha },
+    { id: '1.2.3', status: 'failed', stage: 'plan', detail: 'schema parsing failed', worktree: repo.parserWorktree, proposals: [] },
+  ))
+  assert.equal(disabled.salvage.enabled, false)
+  assert.deepEqual(disabled.salvage.committedPaths, [])
+  assert.match(git(repo.parserWorktree, 'status', '--porcelain=v1'), /\?\? docs\/execplans\/roadmap-1-2-3\.review-r3\.md/)
+})

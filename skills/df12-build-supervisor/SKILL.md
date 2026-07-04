@@ -708,6 +708,32 @@ sweeper exists, run `git stash clear` outside the sandbox during a quiet
 moment; the convention makes a filtered `git stash list | grep 'kind=discard'`
 audit the safe precursor.
 
+## Salvage commits and cleanup refusal
+
+When a failed or halted task branch is assessed as `continue-manual` or
+`adopt-partial`, the ODW workflow may preserve task-scoped ExecPlan and review
+artefacts with a branch-local commit whose subject is:
+
+```text
+df12 salvage v1 task=<id> kind=<continue-manual|adopt-partial>
+```
+
+Treat this commit as operator evidence, not as task completion. It never means
+the branch is ready to merge, push, or mark done; it only means useful
+`docs/execplans/roadmap-*.md` artefacts were verified and committed before
+cleanup could lose them.
+
+The hoovering and sweeper rule is conservative: do not remove a worktree, reset
+a branch, drop an untracked task-scoped ExecPlan/review artefact, or discard a
+`df12 salvage v1` commit for a `continue-manual` or `adopt-partial` branch
+unless the operator has explicitly acknowledged that the salvage is no longer
+needed. This refusal rule takes precedence over ordinary cleanup convenience.
+
+When reporting a halted run, surface salvage commits alongside assessment
+classifications. The useful facts for postmortem are the task id,
+classification, branch, worktree path, salvage commit sha, committed paths, and
+skipped candidate paths with reasons.
+
 ## Environment safety-net constraints
 
 This sandbox blocks several destructive/irreversible git and shell operations.

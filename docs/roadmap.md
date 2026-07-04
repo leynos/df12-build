@@ -257,3 +257,19 @@ first recovery slice.
     "Deferred decisions".
   - Success: deletion, stash handling, and branch-retention policy are recorded
     before any automated cleanup lands.
+
+### 4.3. Preserve useful failed-agent artefacts
+
+This step answers whether schema/adapter failures can leave operators with
+durable task-scoped evidence instead of depending on live worktree dirt or
+truncated runtime error output.
+
+- [x] 4.3.1. Commit verified task-scoped salvage artefacts on failed task
+  branches.
+  - Requires phase 1.
+  - See `docs/failure-resume-design.md` section "Salvage of task-scoped
+    artefacts".
+  - Success: `continue-manual` and `adopt-partial` failed branches preserve
+    verified `docs/execplans/roadmap-*.md` artefacts through a branch-local
+    `df12 salvage v1` commit, expose the outcome in `result.json` and the
+    terminal summary, and never mutate base, origin, or roadmap state.

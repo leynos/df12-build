@@ -58,6 +58,7 @@ const DRY_RUN = cfg.dryRun === true // plan/review/audit only; skip implement, m
 const AUTH_PREFLIGHT = cfg.authPreflight !== false // false => skip local CLI auth checks before spawning agents
 const REQUIRE_CODERABBIT_AUTH = cfg.requireCoderabbitAuth !== false && !DRY_RUN // CodeRabbit is required once implementation/review can run
 const ASSESS_PARTIAL_BRANCHES = cfg.assessPartialBranches !== false // false => skip report-only assessment of failed task branches
+const SALVAGE_ARTEFACTS = cfg.salvageArtefacts !== false // false => skip branch-local commits of task-scoped untracked/dirty ExecPlan artefacts after assessment
 const RESUME_PARTIAL_BRANCHES = cfg.resumePartialBranches === true // opt-in: discover surviving roadmap-* branches on fresh launch before normal selection
 const RESUME_MODE = String(cfg.resumeMode || 'assess').toLowerCase() // maximum recovery action: "assess" reports only; "review" may route clean adopt-complete branches into review + integration
 if (!['assess', 'review'].includes(RESUME_MODE)) {
@@ -182,6 +183,7 @@ function preamble(worktree) {
     `- The integration branch is "${BASE}"; treat origin/${BASE} as canonical. The roadmap lives at ${ROADMAP}.`,
     '- Format ONLY the files you changed: run the markdown formatter on the specific paths you touched (`mdtablefix … <files>` then `markdownlint-cli2 --fix <files>`), then gate. Do NOT run a repo-global format such as `make fmt` / `mdformat-all` that reformats unrelated files — that churn only has to be parked and discarded.',
     '- Never `git stash` with a bare or default message. Name every stash so a deterministic sweeper can tie it to a task and clear it safely: `df12-stash v1 task=<this roadmap id> kind=<discard|park|keep> reason="<short>"`. Formatter or build churn you park is kind=discard; anything you must re-apply later is kind=keep.',
+    '- Recognise `df12 salvage v1 task=<id> kind=<continue-manual|adopt-partial>` commits as host-preserved recovery artefacts. Do not delete a task worktree, drop untracked task-scoped ExecPlan/review artefacts, or discard salvage commits from continue-manual/adopt-partial branches unless the operator explicitly acknowledges that salvage is no longer needed.',
     '- Signpost the documentation and skills you relied on in your output so the next agent can follow the same trail.',
     '',
   ].join('\n')
@@ -503,6 +505,144 @@ async function gitEvidence(worktreePath, commandArgs, parse = (text) => String(t
     value: parse(result.stdout),
     error: [result.message, result.stderr, result.stdout].filter(Boolean).join('\n').trim(),
   }
+}
+
+function taskExecplanLeaf(taskId) {
+  return `roadmap-${String(taskId || '').replace(/[^0-9a-zA-Z]+/g, '-')}`
+}
+
+function regexpEscape(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function taskScopedSalvagePath(taskId, candidatePath) {
+  const text = String(candidatePath || '').replace(/\\/g, '/')
+  const leaf = regexpEscape(taskExecplanLeaf(taskId))
+  return new RegExp(`^docs/execplans/${leaf}(?:[._-][0-9A-Za-z][0-9A-Za-z._-]*)?\\.md$`).test(text)
+}
+
+function salvageEligibleClassification(classification) {
+  return ['continue-manual', 'adopt-partial'].includes(String(classification || ''))
+}
+
+function salvageCandidateEntries(task, evidence) {
+  const seen = new Set()
+  const entries = [
+    ...(evidence?.dirtyChanges || []),
+    ...(evidence?.stagedChanges || []),
+  ]
+  return entries
+    .filter((entry) => {
+      const status = String(entry?.status || '')
+      return status === '??' || status.includes('M') || status.includes('A')
+    })
+    .filter((entry) => taskScopedSalvagePath(task?.id, entry?.path))
+    .filter((entry) => {
+      if (seen.has(entry.path)) return false
+      seen.add(entry.path)
+      return true
+    })
+    .map((entry) => ({ path: entry.path, status: entry.status }))
+}
+
+async function verifySalvageCandidate(worktreePath, candidate) {
+  const fs = process.getBuiltinModule('node:fs/promises')
+  const { constants } = process.getBuiltinModule('node:fs')
+  const path = process.getBuiltinModule('node:path')
+  const relativePath = String(candidate?.path || '')
+  if (!relativePath || path.isAbsolute(relativePath)) {
+    return { ok: false, path: relativePath, status: candidate?.status || '', reason: 'candidate path must be worktree-relative' }
+  }
+  const absolutePath = path.resolve(worktreePath, relativePath)
+  const relativeFromRoot = path.relative(worktreePath, absolutePath)
+  if (!relativeFromRoot || relativeFromRoot.startsWith('..') || path.isAbsolute(relativeFromRoot)) {
+    return { ok: false, path: relativePath, status: candidate?.status || '', reason: 'candidate path escapes the worktree root' }
+  }
+
+  let stat
+  try {
+    stat = await fs.lstat(absolutePath)
+  } catch (error) {
+    return { ok: false, path: relativePath, status: candidate?.status || '', reason: `candidate missing or unreadable: ${(error && error.message) || String(error)}` }
+  }
+  if (!stat.isFile()) {
+    return { ok: false, path: relativePath, status: candidate?.status || '', reason: 'candidate is not a regular file' }
+  }
+
+  let handle = null
+  try {
+    handle = await fs.open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const openedStat = await handle.stat()
+    if (!openedStat.isFile()) {
+      return { ok: false, path: relativePath, status: candidate?.status || '', reason: 'candidate is not a regular file' }
+    }
+  } catch (error) {
+    if (error && (error.code === 'ELOOP' || error.code === 'EMLINK')) {
+      return { ok: false, path: relativePath, status: candidate?.status || '', reason: 'candidate is not a regular file (symlink rejected)' }
+    }
+    return { ok: false, path: relativePath, status: candidate?.status || '', reason: `candidate missing or unreadable: ${(error && error.message) || String(error)}` }
+  } finally {
+    if (handle) await handle.close()
+  }
+  return { ok: true, path: relativePath, status: candidate?.status || '' }
+}
+
+async function commitSalvageArtefacts(task, wt, assessment, evidence) {
+  const classification = assessment?.classification || ''
+  const branch = wt?.branch || evidence?.branchName || ''
+  const worktreePath = wt?.worktreePath || evidence?.worktreePath || ''
+  const outcome = {
+    enabled: SALVAGE_ARTEFACTS,
+    classification,
+    eligible: salvageEligibleClassification(classification),
+    branch,
+    worktreePath,
+    candidates: [],
+    committedPaths: [],
+    skippedPaths: [],
+    commitSha: '',
+    message: '',
+  }
+  if (!SALVAGE_ARTEFACTS) {
+    outcome.skippedPaths.push({ path: '', reason: 'salvageArtefacts disabled' })
+    return outcome
+  }
+  if (!outcome.eligible) return outcome
+  if (!worktreePath || !branch) {
+    outcome.skippedPaths.push({ path: '', reason: 'missing worktree or branch handle' })
+    return outcome
+  }
+
+  outcome.candidates = salvageCandidateEntries(task, evidence)
+  if (!outcome.candidates.length) return outcome
+
+  const verified = []
+  for (const candidate of outcome.candidates) {
+    const verdict = await verifySalvageCandidate(worktreePath, candidate)
+    if (verdict.ok) {
+      verified.push({ path: verdict.path, status: verdict.status })
+    } else {
+      outcome.skippedPaths.push({ path: verdict.path, status: verdict.status, reason: verdict.reason })
+    }
+  }
+  if (!verified.length) return outcome
+
+  const paths = verified.map((entry) => entry.path)
+  const add = await execFileStatus('git', ['-C', worktreePath, 'add', '--', ...paths])
+  if (!add.ok) {
+    outcome.skippedPaths.push(...paths.map((entryPath) => ({ path: entryPath, reason: `git add failed: ${[add.message, add.stderr, add.stdout].filter(Boolean).join('\n').trim()}` })))
+    return outcome
+  }
+  outcome.message = `df12 salvage v1 task=${task?.id || ''} kind=${classification}`
+  const commit = await execFileStatus('git', ['-C', worktreePath, 'commit', '-m', outcome.message])
+  if (!commit.ok) {
+    outcome.skippedPaths.push(...paths.map((entryPath) => ({ path: entryPath, reason: `git commit failed: ${[commit.message, commit.stderr, commit.stdout].filter(Boolean).join('\n').trim()}` })))
+    return outcome
+  }
+  const sha = await gitEvidence(worktreePath, ['rev-parse', 'HEAD'])
+  outcome.committedPaths = paths
+  outcome.commitSha = sha.value || ''
+  return outcome
 }
 
 async function collectAssessmentEvidence(task, wt) {
@@ -1143,6 +1283,8 @@ function assessmentPromptLines(taskHeader, worktreePath, evidence, contextTitle,
     '- `continue-manual`: the branch is promising, but scope, roadmap state, validation, or review evidence needs operator judgement before any merge.',
     '- `discard`: the branch is stale, unsafe, incoherent, unrelated, or too incomplete to keep.',
     '',
+    'When you classify a branch as `continue-manual` or `adopt-partial`, assume task-scoped ExecPlan/review artefacts are salvageable operator evidence. Do not delete worktrees or drop untracked artefacts; the host may preserve matching docs/execplans/roadmap-*.md files with a `df12 salvage v1` branch-local commit.',
+    '',
     'Assess evidence first:',
     '- branch name, worktree path, base commit, and current commit;',
     '- dirty-state summary;',
@@ -1228,14 +1370,16 @@ async function attachAssessment(task, wt, result) {
       schema: ASSESSMENT_SCHEMA,
     }))
     if (!assessment) {
-      return { ...result, assessmentError: 'assessment agent returned no structured output', assessmentEvidence: evidence }
+      return { ...result, assessmentError: 'assessment agent returned no structured output', assessmentEvidence: evidence, postmortem: evidence }
     }
-    return { ...result, assessment: { ...assessment, hostEvidence: evidence } }
+    const salvage = await commitSalvageArtefacts(task, wt, assessment, evidence)
+    return { ...result, assessment: { ...assessment, hostEvidence: evidence }, postmortem: evidence, salvage }
   } catch (error) {
     return {
       ...result,
       assessmentError: (error && error.message) || String(error),
       assessmentEvidence: evidence,
+      postmortem: evidence,
     }
   }
 }
@@ -1903,6 +2047,7 @@ async function runTask(task, mergeLock) {
   if (!wt || !wt.ok || !wt.worktreePath) {
     return { id: tag, status: 'failed', stage: 'worktree', detail: wt?.notes || 'worktree creation failed', proposals: [] }
   }
+  taskWorktrees.set(tag, wt)
   const worktree = wt.worktreePath
   log(`[task ${tag}] worktree ${wt.branch} @ ${worktree}`)
 
@@ -2219,6 +2364,7 @@ const audits = []
 const triages = []
 const pendingByStep = new Map() // step prefix -> accrued review/audit proposals awaiting that step's flush
 const inflight = new Map() // task id -> Promise<{id, task, result}> for tasks currently being built
+const taskWorktrees = new Map() // task id -> branch/worktree handle for late unhandled-error assessment
 const inflightNormal = new Set()
 const inflightAddendum = new Set()
 let halted = null
@@ -2387,12 +2533,15 @@ async function fillPool() {
       // whole run — convert it to a failed result the control loop drains.
       runTask(task, mergeLock).then(
         (result) => ({ id: task.id, task, result }),
-        (err) => {
+        async (err) => {
           const detail = `unhandled agent error: ${(err && err.message) || String(err)}`
+          const wt = taskWorktrees.get(task.id)
+          const result = resultFromUnhandledAgentError(task.id, detail, wt?.worktreePath ? { worktree: wt.worktreePath } : {})
+          const assessed = wt ? await attachAssessment(task, wt, result) : result
           return {
             id: task.id,
             task,
-            result: resultFromUnhandledAgentError(task.id, detail),
+            result: assessed,
           }
         },
       ),
@@ -2519,7 +2668,20 @@ const assessments = results
     classification: result.assessment?.classification || '',
     recommendation: result.assessment?.recommendation || '',
     assessmentError: result.assessmentError || '',
+    salvage: result.salvage || null,
   }))
+const salvageRollup = results
+  .filter((result) => result.salvage)
+  .map((result) => ({
+    id: result.id,
+    branch: result.salvage.branch || '',
+    worktreePath: result.salvage.worktreePath || '',
+    classification: result.salvage.classification || '',
+    commitSha: result.salvage.commitSha || '',
+    committedPaths: result.salvage.committedPaths || [],
+    skippedPaths: result.salvage.skippedPaths || [],
+  }))
+const salvagedPaths = salvageRollup.flatMap((entry) => entry.committedPaths.map((filePath) => `${entry.id}:${filePath}`))
 
 return {
   base: BASE,
@@ -2537,6 +2699,7 @@ return {
   processed,
   results,
   assessments,
+  salvage: salvageRollup,
   audits,
   authPreflight,
   // Fresh-run recovery index (failure-resume design): per-task results[]
@@ -2553,6 +2716,7 @@ return {
     results.map((r) => `${r.id}=${r.status}`).join(', ') +
     (recovery.enabled ? ` | recovery(${recovery.mode}): ${recovery.assessed} assessed, ${recovery.resumed} resumed, ${recovery.skipped.length} skipped` : '') +
     (assessments.length ? ` | assessed ${assessments.length} failed/halted branch(es)` : '') +
+    (salvagedPaths.length ? ` | salvaged ${salvagedPaths.length} artefact(s): ${salvagedPaths.join(', ')}` : '') +
     (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : '') +
     (halted ? ` | halted: ${halted}` : ' | clean stop (no more unblocked tasks).'),
 }
