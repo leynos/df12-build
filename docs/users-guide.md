@@ -76,6 +76,8 @@ Minimal sidecar `odw.config.json` shape for the Claude/Codex split:
         "--print",
         "--permission-mode",
         "acceptEdits",
+        "--add-dir",
+        "/absolute/path/to/project.worktrees",
         "--no-session-persistence"
       ],
       "stdin": "{prompt}",
@@ -128,6 +130,13 @@ Minimal sidecar `odw.config.json` shape for the Claude/Codex split:
   }
 }
 ```
+
+The `--add-dir` value is the absolute sibling `...worktrees` directory for the
+target project. Define explicit adapters instead of relying on ODW built-ins:
+the built-ins omit the worktree-covering writable roots needed by the
+`worktreeWritePreflight` probe. The Codex examples above already use
+`--sandbox danger-full-access` and `--cd {workspace}` so each task agent runs in
+its assigned worktree.
 
 Patch the sidecar copy only to recover or tune a live workshop. Record the patch
 in `operator-notes.md`, validate it there, then promote the proven change back

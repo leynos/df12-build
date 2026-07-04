@@ -156,6 +156,10 @@ Manual-merge profile:
   package-manager caches.
 - Ensure the adapter's writable root is the active task worktree, or explicitly
   includes the sibling `...worktrees/roadmap-*` directory.
+- Configure Claude Code with `claude --add-dir <worktrees-parent>`, where the
+  path is the absolute sibling `...worktrees` parent for this project.
+- Configure Codex with `codex --sandbox danger-full-access --cd {workspace}` so
+  each task agent starts inside its assigned `roadmap-*` worktree.
 - Deny pushes to the integration branch.
 - Use `autoMerge=false`.
 - Use this when agents may implement but a human must inspect branches before

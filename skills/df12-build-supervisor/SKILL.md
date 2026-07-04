@@ -120,7 +120,50 @@ provides the doc skills):
    workflow's current Claude/Codex split. Make sure every adapter named in
    `args.json` exists in `odw.config.json` or in ODW's built-in adapter set;
    the current ODW workflow expects a `claude` adapter for default planning and
-   review judgement.
+   review judgement. Do not rely on ODW's built-in `claude` or `codex`
+   adapters for live df12-build workshops: they are rooted at the control
+   checkout, so task agents can pass auth preflight and create sibling
+   `...worktrees/roadmap-*` worktrees, then fail the host-verified
+   writable-root preflight when they try to write into those task worktrees.
+
+   Define explicit adapters in `odw.config.json` before launch. Give `claude`
+   an `--add-dir` argument that points at the absolute, per-project sibling
+   `...worktrees` parent directory, and run `codex` with
+   `--sandbox danger-full-access` and `--cd {workspace}`. Set the `--add-dir`
+   value per project; do not copy another project's absolute path verbatim.
+
+   ```json
+   {
+     "adapters": {
+       "claude": {
+         "command": [
+           "claude",
+           "--print",
+           "--permission-mode",
+           "acceptEdits",
+           "--add-dir",
+           "/absolute/path/to/project.worktrees",
+           "--no-session-persistence"
+         ]
+       },
+       "codex": {
+         "command": [
+           "codex",
+           "--ask-for-approval",
+           "never",
+           "exec",
+           "--skip-git-repo-check",
+           "--sandbox",
+           "danger-full-access",
+           "--cd",
+           "{workspace}",
+           "-"
+         ]
+       }
+     }
+   }
+   ```
+
 3. **Launch ODW from the sidecar, with the project as `--source`.** Prefer the
    checked-in ODW workflow when running the Codex build-side agents together
    with the Claude Code planning and review agents:
@@ -161,7 +204,9 @@ provides the doc skills):
    the ordinary review + integration path), `resumeTaskId` (narrow discovery
    to one id; separate from `taskId`), `resumeMaxCandidates` (default 4), and
    `worktreeWritePreflight` (host-verified probe that the plan and build
-   adapters can write into sibling task worktrees; on by default).
+   adapters can write into sibling task worktrees; on by default). Configure
+   adapter writable roots in step 2 before launch so this probe exercises the
+   intended task worktree scope.
 
    The checked-in defaults split execution from judgement. Build-side work
    uses Codex defaults, while planning and review judgement use Claude Code
@@ -254,9 +299,9 @@ Known concrete failure:
   paths under sibling worktrees.
 - Cause: Codex was launched with `--cd` at the control checkout, so
   `workspace-write` rejects writes to sibling worktrees.
-- Fix: launch task agents with the assigned git worktree as their execution
-  root, or configure the adapter to include the worktree parent as an allowed
-  writable root.
+- Fix: use the explicit pre-launch adapter configuration in "Launching a run"
+  step 2 so task agents run from the assigned git worktree and have writable
+  roots covering the sibling worktree parent.
 
 Treat design-review blockers as probably correct only after the reviewed
 artifact actually exists and is readable from the assigned worktree. If the
@@ -546,10 +591,10 @@ reviewer.
   tasks.
 - **`worktree-write` failure (task-agent writable-root preflight):** the plan
   or build adapter could not write a host-verified probe file inside the task
-  worktree. This is a launch/sandbox fault — fix the adapter config (writable
-  roots covering `...worktrees/roadmap-*`) and relaunch; do not burn design
-  rounds or reword roadmap tasks. The verdict is computed once per run, so
-  every task fails fast together.
+  worktree. This is a launch/sandbox fault — apply the explicit pre-launch
+  adapter configuration from "Launching a run" step 2 and relaunch; do not burn
+  design rounds or reword roadmap tasks. The verdict is computed once per run,
+  so every task fails fast together.
 
 ## Editing or restructuring the roadmap safely
 
