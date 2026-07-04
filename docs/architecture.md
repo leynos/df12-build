@@ -43,8 +43,16 @@ handoff mechanism.
 
 The workflow follows this high-level sequence:
 
+- Run fresh-run recovery when `resumePartialBranches=true`: discover surviving
+  `roadmap-*` branches from durable Git state, assess them through the ADR 002
+  contract, and either report them (assess mode) or route eligible clean
+  `adopt-complete` branches into the ordinary review and integration path
+  (review mode). Discovered ids are held out of normal selection for the rest
+  of the run.
 - Select the next unblocked roadmap task or addendum pass.
-- Create a task worktree rooted on the current integration branch.
+- Create a task worktree rooted on the current integration branch, then prove
+  once per run that the planning and build adapters can actually write inside
+  a sibling task worktree (the host verifies a probe file on disk).
 - Plan the task and run adversarial design review.
 - Implement, gate, and review the task.
 - Assess failed or halted task branches that still have a surviving worktree.
@@ -64,6 +72,16 @@ worktree or grant the adapter an explicit writable scope covering the sibling
 `execplanPath` values that reviewers cannot read from disk, and the design loop
 burns rounds on a workflow-environment fault rather than a task defect.
 
+The workflow enforces this boundary with a host-verified writable-root
+preflight (`worktreeWritePreflight`, enabled by default). After the first task
+worktree is created, each adapter that must write into task worktrees is asked
+to write an exact token file inside the worktree, and the workflow host checks
+the bytes on disk before deleting the probe. A failed probe fails the task at
+stage `worktree-write` — excluded from partial-branch assessment because it is
+a launch or sandbox fault — and every concurrent task shares the memoized
+verdict, so a broken environment drains the pool quickly instead of burning
+design rounds task by task.
+
 ## Enforcement boundary
 
 `df12-build` mixes host-enforced workflow logic with prompt-enforced agent
@@ -82,9 +100,11 @@ GitHub permissions, and operator gates make violating it impossible or visible.
 | Implementation scope | The control loop only advances statuses that satisfy schema and status checks. | Build agents are told to follow the ExecPlan, use skills, keep scope narrow, update the execplan, run gates, and commit atomically. | Sandbox file scope, Git permissions, `make all`, `scrutineer`, and review gates are the real containment for bad edits. |
 | Tests and deterministic gates | The workflow consumes `impl.gatesGreen` and review verdicts before integration. | Implementers and fix agents are told to summon `scrutineer` for `make all`, markdown gates, and CodeRabbit. | The adapter must allow command execution, and `scrutineer` must run in the task worktree with the same repository state the commit uses. |
 | Code review | Review schemas require verdict and blocker fields; blocker arrays are checked regardless of verdict. | Code-review, expert-review, fallback review, and CodeRabbit instructions define what reviewers should inspect. | Model quality, CodeRabbit availability, and explicit fallback criteria determine whether the review is useful. |
-| Partial branch assessment | Failed or halted task results with a surviving branch and worktree pass through an assessment guard. The host gathers branch name, worktree path, base/current commits, changed files, dirty state, recent commits, and command errors, then consumes a schema-bound classification. Assessment output is report-only and cannot update `processed`, merge branches, push, or mark roadmap checkboxes. | The assessment agent is instructed to inspect durable Git and on-disk evidence, read ExecPlans and roadmap state, and classify as `adopt-complete`, `adopt-partial`, `continue-manual`, or `discard`. | Assessment requires readable surviving worktrees and adapter access. It is skipped for auth failures, dry runs, manual-merge-ready branches, successful tasks, and failures before worktree creation. |
-| Integration | A JavaScript merge lock serializes integration, and success requires `ok`, `pushed`, `squashMerged`, and roadmap evidence. | The integration agent is told to rebase, gate, squash, push, and avoid the root worktree. | GitHub branch permissions, non-fast-forward push handling, and sandbox write access to the task worktree are decisive. |
-| Audit and triage | Audits run only after pushed integrations; triage only deletes pending proposals when `ok` and `pushed` land. | Audit and triage prompts classify debt into addendum, step-task, reroute, editorial, or dropped lanes. | `documentAudit=false` and `autoMerge=false` change write behaviour; roadmap edits still need operator review. |
+| Task-agent write preflight | The host verifies the probe token on disk and fails the task at stage `worktree-write` when any probed adapter cannot write into the worktree; the stage is excluded from partial-branch assessment. | Probe agents are asked to write one exact token file and nothing else. | Adapter sandbox scope is what the probe measures; disabling `worktreeWritePreflight` removes the enforcement, not the requirement. |
+| Fresh-run recovery | Discovery, roadmap-id mapping, completed-task skipping, the candidate cap, resume eligibility, and the fail-closed downgrade to `continue-manual` are host JavaScript. Resume can only land through the shared dual-review + merge-lock integration path, `processed` gains an id only from a pushed integration, and held ids are excluded from selection deterministically. | The recovery assessment agent classifies durable branch evidence; reviewers and the integration agent handle a resumed branch exactly like ordinary work. | `resumePartialBranches` and `resumeMode` gate the pass; auth preflight failure blocks it entirely; review-mode resume needs the same write and push permissions as ordinary integration. |
+| Partial branch assessment | Failed or halted task results with a surviving branch and worktree pass through an assessment guard. The host gathers branch name, worktree path, base/current commits, changed files, dirty state, recent commits, and command errors, then consumes a schema-bound classification. Assessment output is report-only and cannot update `processed`, merge branches, push, or mark roadmap checkboxes. | The assessment agent is instructed to inspect durable Git and on-disk evidence, read ExecPlans and roadmap state, and classify as `adopt-complete`, `adopt-partial`, `continue-manual`, or `discard`. | Assessment requires readable surviving worktrees and adapter access. It is skipped for auth failures, provider faults, dry runs, manual-merge-ready branches, successful tasks, and failures before worktree creation. |
+| Integration | A JavaScript merge lock serializes integration, and success requires `ok`, `pushed`, `squashMerged`, and roadmap evidence. Addenda whose implementation evidence is complete but whose `ok` field is false become `manual-merge-ready`, never auto-merged. | The integration agent is told to rebase, gate, squash, push, and avoid the root worktree. | GitHub branch permissions, non-fast-forward push handling, and sandbox write access to the task worktree are decisive. |
+| Audit and triage | Audits run only after pushed integrations; triage only deletes pending proposals when `ok` and `pushed` land. | Audit and triage prompts classify debt into addendum, step-task, reroute, editorial, or dropped lanes. | `documentAudit=false` and `autoMerge=false` change write behaviour; provider-fault halts leave pending proposals unwritten; roadmap edits still need operator review. |
 | Fresh restart | Returned `processed`, `results`, `halted`, `audits`, `remediationTriage`, and `pendingProposals` describe the run outcome. | Operator notes and prompts describe how to recover. | `origin/<base>`, durable sidecar files, and clean worktree hoovering are the only recovery source of truth. |
 
 Any change that moves a contract from host enforcement into prompt text weakens
@@ -105,10 +125,37 @@ The key argument groups are:
 - Run bounds: `taskId`, `maxTasks`, `maxParallel`, `maxPlanningParallel`,
   `maxBuildParallel`, `maxDesignRounds`, `maxReviewRounds`, `dryRun`,
   `autoMerge`, `documentAudit`, and `assessPartialBranches`.
+- Recovery controls: `resumePartialBranches` (opt-in fresh-run discovery),
+  `resumeMode` (`assess` reports only; `review` may resume eligible
+  `adopt-complete` branches through ordinary integration), `resumeTaskId`,
+  `resumeMaxCandidates`, and `worktreeWritePreflight` (the host-verified
+  task-agent write probe).
 - Agent routing: `buildAdapter`/`buildModel`, `planAdapter`/`planModel`, and
   `reviewAdapter`/`reviewModel`.
 - Assessment routing: `assessmentAdapter`/`assessmentModel`, defaulting to the
   review adapter and model.
+
+The default routing separates execution from judgement. Build-side stages
+default to Codex: worktree creation, implementation, fix rounds, integration,
+remediation, and triage use the build or triage adapter/model defaults.
+Planning and review judgement default to Claude Code with
+`claude-opus-4-8`: the plan stage uses `planAdapter`/`planModel`, while design
+review, code review, expert review, addendum fallback review, and audit use
+`reviewAdapter`/`reviewModel`. Partial-branch assessment inherits the review
+route unless `assessmentAdapter`/`assessmentModel` are set explicitly, so a
+sidecar that wants Codex assessment must say so in `args.json`.
+
+Auth preflight is adapter-aware. The workflow always checks Codex auth because
+build-side stages depend on it, checks CodeRabbit auth when implementation can
+run, and checks Claude auth whenever any configured stage uses the `claude`
+adapter. Auth failures are terminal workflow failures rather than ordinary
+task failures or partial-branch recovery candidates.
+
+ODW adapter timeout is also part of the runtime contract. The implementation
+prompt can legitimately ask agents to wait through CodeRabbit rate-limit
+backoff with `vsleep`, including three retries of up to 90 minutes each. A
+sidecar `odw.config.json` that keeps the default one-hour timeout is therefore
+misconfigured for a full workshop run.
 
 `searchBackend` selects the canonical code-search guidance passed to task
 agents. It defaults to `grepai`, or to `memtrace` when `memtraceRepoId` is set.
@@ -128,7 +175,7 @@ The sidecar contract is documented at three levels:
 - `docs/developers-guide.md` explains how contributors change the workflow and
   keep documentation synchronized.
 - `docs/adr-001-adopt-odw-sidecar-launches.md` records the architectural
-  decision to use ODW sidecar launches for Codex-oriented runs.
+  decision to use ODW sidecar launches for Codex- and Claude-oriented runs.
 - `docs/adr-002-assess-partial-task-branches.md` records the accepted
   assessment stage for preserving useful partial task branches without resuming
   transient agent transcripts.

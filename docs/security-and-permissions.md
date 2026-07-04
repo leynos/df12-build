@@ -3,8 +3,8 @@
 `df12-build` is not a passive documentation tool. A normal ODW/Codex workshop
 can create branches, create worktrees, edit source, run commands, commit,
 push, request CodeRabbit review, write audit files, and update roadmap state in
-another repository. Do not run it with credentials or filesystem access you
-would not give to an autonomous engineer working on that target project.
+another repository. Do not run it with credentials or filesystem access that
+would not be granted to an autonomous engineer working on that target project.
 
 The workflow's prompts are part of the control system, but they are not a
 sandbox. Runtime permissions, GitHub rights, branch protection, repository
@@ -83,6 +83,9 @@ Workshops may contact:
 Partial branch assessment may also send branch names, worktree paths, commit
 ids, changed-file lists, dirty-state summaries, ExecPlan text, roadmap text,
 validation evidence, and failure details to the selected assessment adapter.
+Fresh-run recovery (`resumePartialBranches=true`) sends the same evidence for
+every discovered surviving branch, so enabling recovery on a repository shares
+the content of abandoned task branches with the assessment adapter.
 
 Treat prompts, code snippets, logs, roadmap text, design documents, audit
 findings, review comments, and assessment evidence as data that may be sent to
@@ -119,6 +122,14 @@ Controls that matter:
   accepting roadmap churn.
 - Treat `assessment` recommendations as advisory. They are designed to guide
   operator judgement, not to bypass review, gates, or branch protection.
+- Treat recovered branch content as prompt-injection input. A surviving branch
+  may contain commits, ExecPlans, or notes written by an earlier compromised or
+  confused agent; recovery assessment reads them, and review-mode resume asks
+  reviewers to judge them. The resume path fails closed (only clean, committed,
+  task-scoped `adopt-complete` branches with validation evidence enter review),
+  and everything still passes the ordinary review and integration gates, but
+  `resumeMode="review"` should only be enabled for branches an operator would
+  willingly hand to a reviewer.
 - Treat sidecar-local patches as untrusted until promoted through the normal
   `df12-build` review path.
 
@@ -133,6 +144,11 @@ Read-only planning profile:
 - Deny Git push and target-project writes.
 - Use `dryRun=true`, `autoMerge=false`, and `documentAudit=false`.
 - Use this for first contact with an unfamiliar roadmap or design corpus.
+- Assess-only recovery (`resumePartialBranches=true` with the default
+  `resumeMode="assess"`) fits this profile: it reads branches, worktrees,
+  roadmap text, ExecPlans, and validation evidence, and writes nothing.
+  Review-mode resume does not fit here — it needs the trusted workshop profile
+  because it can merge and push through the ordinary integration path.
 
 Manual-merge profile:
 

@@ -1,0 +1,887 @@
+// Tests for fresh-run recovery (failure-resume phases 1-2): configuration,
+// candidate discovery, ADR 002 assessment reuse, the resumeMode decision
+// table (including an exhaustive domain sweep), review-mode resume wiring,
+// and the assess-only no-mutation guarantee, against throwaway git fixtures
+// from tests/fixtures/recovery-repo.mjs.
+
+import assert from 'node:assert/strict'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
+import path from 'node:path'
+import test from 'node:test'
+
+import {
+  git,
+  RECOVERY_ROADMAP,
+  makeFixtureDir,
+  makeRecoveryRepo,
+  probeDetailsFromPrompt,
+  repoStateSnapshot,
+  sampleAssessment,
+} from './fixtures/recovery-repo.mjs'
+
+const WORKFLOW_PATH = new URL('../workflows/df12-build-odw.js', import.meta.url)
+const CONTROL_LOOP_MARKER = '// --- Worker-pool control loop'
+
+async function loadRecoverySurface(args = {}, agentImpl = async () => null) {
+  let source = await readFile(WORKFLOW_PATH, 'utf8')
+  source = source.replace(/^export const meta\s*=/m, 'const meta =')
+  const markerIndex = source.indexOf(CONTROL_LOOP_MARKER)
+  assert.notEqual(markerIndex, -1, 'workflow control-loop marker should exist')
+  const helperSource = source.slice(0, markerIndex)
+  const factory = new Function(
+    'args',
+    'phase',
+    'log',
+    'agent',
+    'parallel',
+    'budget',
+    `${helperSource}
+return {
+  RESUME_PARTIAL_BRANCHES,
+  RESUME_MODE,
+  RESUME_TASK_ID,
+  RESUME_MAX_CANDIDATES,
+  ASSESSMENT_SCHEMA,
+  IMPL_SCHEMA,
+  RECOVERY_SKIP_REASONS,
+  recoveryResumeEligibility,
+  recoveryDecision,
+  syntheticRecoveryImpl,
+  branchToRoadmapId,
+  parseWorktreeList,
+  discoverRecoveryCandidates,
+  assessmentPrompt,
+  recoveryAssessmentPrompt,
+  assessRecoveryCandidate,
+  runRecovery,
+}
+`,
+  )
+  return factory(
+    args,
+    () => {},
+    () => {},
+    agentImpl,
+    async (thunks) => Promise.all(thunks.map((thunk) => thunk())),
+    { total: null, remaining: () => Infinity, spent: () => 0 },
+  )
+}
+
+test('recovery configuration defaults are non-mutating', async () => {
+  const surface = await loadRecoverySurface({})
+
+  assert.equal(surface.RESUME_PARTIAL_BRANCHES, false)
+  assert.equal(surface.RESUME_MODE, 'assess')
+  assert.equal(surface.RESUME_TASK_ID, null)
+  assert.equal(surface.RESUME_MAX_CANDIDATES, 4)
+})
+
+test('recovery configuration accepts explicit operator overrides', async () => {
+  const surface = await loadRecoverySurface({
+    resumePartialBranches: true,
+    resumeMode: 'Review',
+    resumeTaskId: '1.2.3',
+    resumeMaxCandidates: 2,
+  })
+
+  assert.equal(surface.RESUME_PARTIAL_BRANCHES, true)
+  assert.equal(surface.RESUME_MODE, 'review')
+  assert.equal(surface.RESUME_TASK_ID, '1.2.3')
+  assert.equal(surface.RESUME_MAX_CANDIDATES, 2)
+})
+
+test('recovery discovery is opt-in: truthy but non-true values stay disabled', async () => {
+  const surface = await loadRecoverySurface({ resumePartialBranches: 'yes' })
+
+  assert.equal(surface.RESUME_PARTIAL_BRANCHES, false)
+})
+
+test('unsupported resumeMode values fail fast', async () => {
+  await assert.rejects(
+    loadRecoverySurface({ resumeMode: 'merge' }),
+    /Unsupported resumeMode: merge/,
+  )
+})
+
+test('resumeMaxCandidates is clamped to a sane positive bound', async () => {
+  assert.equal((await loadRecoverySurface({ resumeMaxCandidates: 0 })).RESUME_MAX_CANDIDATES, 1)
+  assert.equal((await loadRecoverySurface({ resumeMaxCandidates: -3 })).RESUME_MAX_CANDIDATES, 1)
+  assert.equal((await loadRecoverySurface({ resumeMaxCandidates: 2.9 })).RESUME_MAX_CANDIDATES, 2)
+  assert.equal((await loadRecoverySurface({ resumeMaxCandidates: 'many' })).RESUME_MAX_CANDIDATES, 4)
+})
+
+test('task branch names map back to dotted roadmap ids', async () => {
+  const surface = await loadRecoverySurface({})
+
+  assert.deepEqual(surface.branchToRoadmapId('roadmap-1-2-3'), { id: '1.2.3', isAddendum: false })
+  assert.deepEqual(surface.branchToRoadmapId('roadmap-2-1-2-addendum'), { id: '2.1.2', isAddendum: true })
+  assert.equal(surface.branchToRoadmapId('roadmap-x'), null)
+  assert.equal(surface.branchToRoadmapId('roadmap-1-2-3-extra'), null)
+  assert.equal(surface.branchToRoadmapId('feature/parser'), null)
+  assert.equal(surface.branchToRoadmapId(''), null)
+})
+
+test('worktree porcelain output parses into branch-to-path entries', async () => {
+  const surface = await loadRecoverySurface({})
+  const fixture = [
+    'worktree /repo',
+    'HEAD 1111111111111111111111111111111111111111',
+    'branch refs/heads/main',
+    '',
+    'worktree /repo.worktrees/roadmap-1-2-3',
+    'HEAD 2222222222222222222222222222222222222222',
+    'branch refs/heads/roadmap-1-2-3',
+    '',
+    'worktree /repo.worktrees/detached',
+    'HEAD 3333333333333333333333333333333333333333',
+    'detached',
+    '',
+  ].join('\n')
+
+  assert.deepEqual(surface.parseWorktreeList(fixture), [
+    { worktreePath: '/repo', branch: 'main', head: '1111111111111111111111111111111111111111' },
+    {
+      worktreePath: '/repo.worktrees/roadmap-1-2-3',
+      branch: 'roadmap-1-2-3',
+      head: '2222222222222222222222222222222222222222',
+    },
+    { worktreePath: '/repo.worktrees/detached', branch: '', head: '3333333333333333333333333333333333333333' },
+  ])
+})
+
+test('discovery maps branches, skips completed and unmapped work, and keeps order deterministic', async () => {
+  const surface = await loadRecoverySurface({})
+  const repo = makeRecoveryRepo()
+
+  const { candidates, skipped, errors } = await surface.discoverRecoveryCandidates(RECOVERY_ROADMAP, repo.dir)
+
+  assert.deepEqual(errors, [])
+  assert.equal(candidates.length, 1)
+  const [candidate] = candidates
+  assert.equal(candidate.taskId, '1.2.3')
+  assert.equal(candidate.taskTitle, 'Implement the parser state machine.')
+  assert.equal(candidate.branchName, 'roadmap-1-2-3')
+  assert.equal(candidate.worktreePath, repo.parserWorktree)
+  assert.equal(candidate.baseCommit, repo.baseSha)
+  assert.match(candidate.currentCommit, /^[0-9a-f]{40}$/)
+  assert.notEqual(candidate.currentCommit, repo.baseSha, 'candidate should carry its branch commit')
+  assert.equal(candidate.roadmapComplete, false)
+  assert.equal(candidate.isAddendum, false)
+
+  const reasonByBranch = new Map(skipped.map((entry) => [entry.branchName, entry.reason]))
+  assert.equal(reasonByBranch.get('roadmap-1-2-4'), 'missing-worktree')
+  assert.equal(reasonByBranch.get('roadmap-2-1-1'), 'already-complete')
+  assert.equal(reasonByBranch.get('roadmap-9-9-9'), 'unmapped-branch')
+  assert.equal(reasonByBranch.get('roadmap-x'), 'unmapped-branch')
+})
+
+test('discovery keeps addendum branches for parents with open sub-tasks', async () => {
+  const surface = await loadRecoverySurface({})
+  const repo = makeRecoveryRepo({ withAddendumWorktree: true })
+
+  const { candidates } = await surface.discoverRecoveryCandidates(RECOVERY_ROADMAP, repo.dir)
+
+  const addendum = candidates.find((candidate) => candidate.isAddendum)
+  assert.ok(addendum, 'addendum candidate should be discovered')
+  assert.equal(addendum.taskId, '2.1.2')
+  assert.equal(addendum.branchName, 'roadmap-2-1-2-addendum')
+  assert.equal(addendum.worktreePath, repo.addendumWorktree)
+  assert.deepEqual(
+    candidates.map((candidate) => candidate.branchName),
+    ['roadmap-1-2-3', 'roadmap-2-1-2-addendum'],
+    'candidates should sort by roadmap line order',
+  )
+})
+
+test('discovery honours resumeTaskId and the candidate cap', async () => {
+  const repo = makeRecoveryRepo({ withAddendumWorktree: true })
+
+  const filtered = await (await loadRecoverySurface({ resumeTaskId: '2.1.2' }))
+    .discoverRecoveryCandidates(RECOVERY_ROADMAP, repo.dir)
+  assert.deepEqual(filtered.candidates.map((candidate) => candidate.taskId), ['2.1.2'])
+  assert.ok(
+    !filtered.skipped.some((entry) => entry.branchName === 'roadmap-1-2-3'),
+    'resumeTaskId narrowing is silent, not a skip diagnostic',
+  )
+
+  const capped = await (await loadRecoverySurface({ resumeMaxCandidates: 1 }))
+    .discoverRecoveryCandidates(RECOVERY_ROADMAP, repo.dir)
+  assert.deepEqual(capped.candidates.map((candidate) => candidate.branchName), ['roadmap-1-2-3'])
+  assert.deepEqual(
+    capped.skipped.filter((entry) => entry.reason === 'candidate-cap').map((entry) => entry.branchName),
+    ['roadmap-2-1-2-addendum'],
+  )
+})
+
+function sampleCandidate(repo) {
+  return {
+    taskId: '1.2.3',
+    taskTitle: 'Implement the parser state machine.',
+    branchName: 'roadmap-1-2-3',
+    worktreePath: repo.parserWorktree,
+    baseCommit: repo.baseSha,
+    currentCommit: git(repo.parserWorktree, 'rev-parse', 'HEAD'),
+    roadmapComplete: false,
+    isAddendum: false,
+    line: 5,
+  }
+}
+
+test('recovery and failure assessments share one ADR 002 prompt contract', async () => {
+  const surface = await loadRecoverySurface({})
+  const task = { id: '1.2.3', title: 'Implement the parser state machine.' }
+  const evidence = { taskId: '1.2.3' }
+  const failurePrompt = surface.assessmentPrompt(
+    task,
+    { worktreePath: '/tmp/wt' },
+    { status: 'failed' },
+    evidence,
+  )
+  const recoveryPrompt = surface.recoveryAssessmentPrompt(
+    task,
+    { worktreePath: '/tmp/wt', taskId: '1.2.3' },
+    evidence,
+  )
+
+  const contractOf = (prompt) => {
+    const start = prompt.indexOf('Use ADR 002')
+    const end = prompt.indexOf('Host-collected git evidence:')
+    assert.ok(start !== -1 && end > start, 'prompt should carry the ADR 002 contract block')
+    return prompt.slice(start, end)
+  }
+  assert.equal(contractOf(recoveryPrompt), contractOf(failurePrompt))
+  assert.match(recoveryPrompt, /discovered during fresh-run recovery/)
+  assert.match(recoveryPrompt, /READ-ONLY recovery assessment/)
+})
+
+test('recovered candidates reuse the assessment evidence collector and schema', async () => {
+  const calls = []
+  const stubAgent = async (prompt, opts = {}) => {
+    calls.push({ prompt, opts })
+    return sampleAssessment()
+  }
+  const surface = await loadRecoverySurface({}, stubAgent)
+  const repo = makeRecoveryRepo()
+  const candidate = sampleCandidate(repo)
+
+  const outcome = await surface.assessRecoveryCandidate(candidate)
+
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].opts.schema, surface.ASSESSMENT_SCHEMA, 'recovery must reuse the ADR 002 schema object')
+  assert.equal(calls[0].opts.label, 'recover-assess:1.2.3')
+  assert.equal(calls[0].opts.phase, 'Recovery')
+  assert.equal(outcome.assessmentError, '')
+  assert.equal(outcome.assessment.classification, 'adopt-complete')
+  assert.equal(outcome.evidence.taskId, '1.2.3')
+  assert.equal(outcome.evidence.branchName, 'roadmap-1-2-3')
+  assert.equal(outcome.evidence.baseCommit, repo.baseSha)
+  assert.deepEqual(outcome.evidence.committedChanges, [
+    { status: 'A', path: 'docs/execplans/roadmap-1-2-3.md' },
+    { status: 'A', path: 'roadmap-1-2-3.txt' },
+  ])
+  assert.deepEqual(outcome.assessment.hostEvidence, outcome.evidence)
+})
+
+test('recovery assessment failures are reported, not thrown', async () => {
+  const repo = makeRecoveryRepo()
+  const candidate = sampleCandidate(repo)
+
+  const silent = await (await loadRecoverySurface({}, async () => null)).assessRecoveryCandidate(candidate)
+  assert.equal(silent.assessment, null)
+  assert.match(silent.assessmentError, /no structured output/)
+  assert.equal(silent.evidence.taskId, '1.2.3', 'evidence should survive an assessment failure')
+
+  const thrown = await (
+    await loadRecoverySurface({}, async () => {
+      throw new Error('adapter exited with code 1')
+    })
+  ).assessRecoveryCandidate(candidate)
+  assert.equal(thrown.assessment, null)
+  assert.match(thrown.assessmentError, /adapter exited with code 1/)
+})
+
+test('discovery reports git failures as errors instead of throwing', async () => {
+  const surface = await loadRecoverySurface({})
+  const notARepo = makeFixtureDir('df12-recovery-empty-')
+
+  const { candidates, errors } = await surface.discoverRecoveryCandidates(RECOVERY_ROADMAP, notARepo)
+  assert.deepEqual(candidates, [])
+  assert.equal(errors.length, 1)
+  assert.match(errors[0], /for-each-ref failed/)
+})
+
+test('assess-only recovery returns a report-only summary and holds surviving ids', async () => {
+  const surface = await loadRecoverySurface({ resumePartialBranches: true }, async () => sampleAssessment())
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.fatal, null)
+  assert.deepEqual(outcome.taskResults, [], 'assess-only recovery must not produce task results')
+  const summary = outcome.summary
+  assert.equal(summary.enabled, true)
+  assert.equal(summary.mode, 'assess')
+  assert.equal(summary.candidates, 1)
+  assert.equal(summary.assessed, 1)
+  assert.equal(summary.resumed, 0)
+  assert.deepEqual(summary.errors, [])
+  assert.equal(summary.results.length, 1)
+  const [entry] = summary.results
+  assert.equal(entry.id, '1.2.3')
+  assert.equal(entry.branchName, 'roadmap-1-2-3')
+  assert.equal(entry.classification, 'adopt-complete')
+  assert.equal(entry.action, 'reported')
+  assert.equal(entry.assessment.hostEvidence.taskId, '1.2.3')
+  assert.deepEqual([...outcome.held.normal].sort(), ['1.2.3', '1.2.4'])
+  assert.deepEqual([...outcome.held.addendum], [])
+})
+
+test('recovery assessment errors are reported and non-fatal for ordinary faults', async () => {
+  const surface = await loadRecoverySurface({ resumePartialBranches: true }, async () => {
+    throw new Error('adapter exited with code 1: transient tool failure')
+  })
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.fatal, null)
+  assert.equal(outcome.summary.assessed, 0)
+  assert.equal(outcome.summary.results[0].action, 'assessment-error')
+  assert.match(outcome.summary.results[0].assessmentError, /transient tool failure/)
+  assert.ok(
+    outcome.summary.skipped.some(
+      (entry) => entry.branchName === 'roadmap-1-2-3' && entry.reason === 'assessment-error',
+    ),
+  )
+  assert.ok(outcome.held.normal.has('1.2.3'), 'unassessed surviving branches stay held')
+})
+
+test('auth-shaped recovery assessment failures halt the run as fatal', async () => {
+  const surface = await loadRecoverySurface({ resumePartialBranches: true }, async () => {
+    throw new Error('401 Unauthorized: run codex login')
+  })
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.ok(outcome.fatal, 'auth failures during recovery must be fatal')
+  assert.equal(outcome.fatal.status, 'fatal-auth')
+  assert.equal(outcome.fatal.stage, 'auth')
+})
+
+test('recovery survives an unreadable canonical roadmap', async () => {
+  const surface = await loadRecoverySurface({ resumePartialBranches: true }, async () => sampleAssessment())
+  const notARepo = makeFixtureDir('df12-recovery-empty-')
+
+  const outcome = await surface.runRecovery(notARepo)
+
+  assert.equal(outcome.fatal, null)
+  assert.equal(outcome.summary.candidates, 0)
+  assert.ok(outcome.summary.errors.length >= 1)
+})
+
+test('skip reasons are a stable published contract', async () => {
+  const surface = await loadRecoverySurface({})
+  assert.deepEqual(surface.RECOVERY_SKIP_REASONS, [
+    'unmapped-branch',
+    'already-complete',
+    'unreadable-commit',
+    'missing-worktree',
+    'candidate-cap',
+    'assessment-error',
+    'addendum-branch',
+    'evidence-collection-error',
+    'dirty-worktree',
+    'no-committed-work',
+    'not-task-scoped',
+    'missing-validation-evidence',
+    'missing-execplan',
+    'dry-run',
+  ])
+})
+
+function eligibleCandidate() {
+  return {
+    taskId: '1.2.3',
+    branchName: 'roadmap-1-2-3',
+    isAddendum: false,
+    execplanPath: 'docs/execplans/roadmap-1-2-3.md',
+  }
+}
+
+function eligibleEvidence(overrides = {}) {
+  return {
+    collectionErrors: [],
+    dirtyState: 'clean',
+    recentCommits: ['abc1234 Work on roadmap-1-2-3'],
+    ...overrides,
+  }
+}
+
+test('resume eligibility admits only clean, committed, task-scoped, validated branches', async () => {
+  const surface = await loadRecoverySurface({})
+  const assessment = sampleAssessment()
+
+  assert.equal(surface.recoveryResumeEligibility(eligibleCandidate(), eligibleEvidence(), assessment), '')
+
+  const rows = [
+    [{ candidate: { ...eligibleCandidate(), isAddendum: true } }, 'addendum-branch'],
+    [{ evidence: eligibleEvidence({ collectionErrors: ['diff failed'] }) }, 'evidence-collection-error'],
+    [{ evidence: eligibleEvidence({ dirtyState: 'dirty' }) }, 'dirty-worktree'],
+    [{ evidence: eligibleEvidence({ dirtyState: 'unknown' }) }, 'dirty-worktree'],
+    [{ evidence: eligibleEvidence({ recentCommits: [] }) }, 'no-committed-work'],
+    [{ assessment: sampleAssessment({ taskScoped: false }) }, 'not-task-scoped'],
+    [{ assessment: sampleAssessment({ validation: '   ' }) }, 'missing-validation-evidence'],
+    [{ assessment: sampleAssessment({ missingEvidence: ['no gate log'] }) }, 'missing-validation-evidence'],
+    [{ candidate: { ...eligibleCandidate(), execplanPath: '' } }, 'missing-execplan'],
+  ]
+  for (const [overrides, expected] of rows) {
+    const verdict = surface.recoveryResumeEligibility(
+      overrides.candidate || eligibleCandidate(),
+      overrides.evidence || eligibleEvidence(),
+      overrides.assessment || assessment,
+    )
+    assert.equal(verdict, expected)
+  }
+})
+
+test('the resumeMode decision table reports everywhere except eligible review-mode adopt-complete', async () => {
+  const surface = await loadRecoverySurface({})
+  const candidate = eligibleCandidate()
+  const evidence = eligibleEvidence()
+
+  for (const classification of ['adopt-complete', 'adopt-partial', 'continue-manual', 'discard']) {
+    const assessed = sampleAssessment({ classification })
+    const inAssess = surface.recoveryDecision(candidate, evidence, assessed, 'assess')
+    assert.deepEqual(inAssess, { action: 'report', classification, reason: '', skip: false })
+    if (classification !== 'adopt-complete') {
+      const inReview = surface.recoveryDecision(candidate, evidence, assessed, 'review')
+      assert.deepEqual(inReview, { action: 'report', classification, reason: '', skip: false })
+    }
+  }
+
+  assert.deepEqual(surface.recoveryDecision(candidate, evidence, sampleAssessment(), 'review'), {
+    action: 'resume',
+    classification: 'adopt-complete',
+    reason: '',
+    skip: false,
+  })
+})
+
+// Property-style guarantee by exhaustion: the eligibility/decision domain is
+// finite, so instead of sampling it (fast-check would also add a package
+// dependency this repository does not have), enumerate EVERY combination and
+// assert the fail-closed invariant holds at each point.
+test('decision-table sweep: resume happens only when every eligibility fact holds in review mode', async () => {
+  const surface = await loadRecoverySurface({})
+  const dims = {
+    isAddendum: [false, true],
+    collectionErrors: [[], ['diff failed']],
+    dirtyState: ['clean', 'dirty', 'unknown'],
+    recentCommits: [['abc Work'], []],
+    taskScoped: [true, false],
+    validation: ['make all green', '   '],
+    missingEvidence: [[], ['no gate log']],
+    execplanPath: ['docs/execplans/roadmap-1-2-3.md', ''],
+    classification: ['adopt-complete', 'adopt-partial', 'continue-manual', 'discard'],
+    mode: ['assess', 'review'],
+    dryRun: [false, true],
+  }
+  const combos = Object.entries(dims).reduce(
+    (acc, [key, values]) => acc.flatMap((combo) => values.map((value) => ({ ...combo, [key]: value }))),
+    [{}],
+  )
+
+  let resumes = 0
+  for (const combo of combos) {
+    const candidate = { taskId: '1.2.3', branchName: 'roadmap-1-2-3', isAddendum: combo.isAddendum, execplanPath: combo.execplanPath }
+    const evidence = {
+      collectionErrors: combo.collectionErrors,
+      dirtyState: combo.dirtyState,
+      recentCommits: combo.recentCommits,
+    }
+    const assessment = sampleAssessment({
+      classification: combo.classification,
+      taskScoped: combo.taskScoped,
+      validation: combo.validation,
+      missingEvidence: combo.missingEvidence,
+    })
+    const eligible =
+      !combo.isAddendum &&
+      combo.collectionErrors.length === 0 &&
+      combo.dirtyState === 'clean' &&
+      combo.recentCommits.length > 0 &&
+      combo.taskScoped === true &&
+      combo.validation.trim() !== '' &&
+      combo.missingEvidence.length === 0 &&
+      combo.execplanPath !== ''
+
+    const decision = surface.recoveryDecision(candidate, evidence, assessment, combo.mode, { dryRun: combo.dryRun })
+    const gated = combo.mode === 'review' && combo.classification === 'adopt-complete'
+    const shouldResume = gated && eligible && !combo.dryRun
+
+    assert.equal(decision.action, shouldResume ? 'resume' : 'report', JSON.stringify(combo))
+    assert.equal(decision.skip, gated && !shouldResume, JSON.stringify(combo))
+    assert.equal(
+      decision.classification,
+      gated && !eligible ? 'continue-manual' : combo.classification,
+      JSON.stringify(combo),
+    )
+    assert.equal(decision.reason !== '', decision.skip, JSON.stringify(combo))
+    if (shouldResume) resumes += 1
+  }
+  assert.ok(resumes > 0, 'the sweep must include the fully eligible corner')
+  assert.equal(combos.length, 2 * 2 * 3 * 2 * 2 * 2 * 2 * 2 * 4 * 2 * 2, 'the sweep must cover the whole domain')
+})
+
+test('review-mode resume fails closed: ineligible adopt-complete downgrades to continue-manual', async () => {
+  const surface = await loadRecoverySurface({})
+
+  const dirty = surface.recoveryDecision(
+    eligibleCandidate(),
+    eligibleEvidence({ dirtyState: 'dirty' }),
+    sampleAssessment(),
+    'review',
+  )
+  assert.deepEqual(dirty, {
+    action: 'report',
+    classification: 'continue-manual',
+    reason: 'dirty-worktree',
+    skip: true,
+  })
+
+  const dryRun = surface.recoveryDecision(eligibleCandidate(), eligibleEvidence(), sampleAssessment(), 'review', {
+    dryRun: true,
+  })
+  assert.deepEqual(dryRun, {
+    action: 'report',
+    classification: 'adopt-complete',
+    reason: 'dry-run',
+    skip: true,
+  })
+})
+
+test('synthetic recovery implementation bridges into review without faking evidence', async () => {
+  const surface = await loadRecoverySurface({})
+  const repo = makeRecoveryRepo({ withParserExecplan: false })
+  const candidate = sampleCandidate(repo)
+  const evidence = { recentCommits: ['abc1234 Work on roadmap-1-2-3'] }
+
+  const missingPlan = await surface.syntheticRecoveryImpl(candidate, evidence)
+  assert.equal(missingPlan.ok, true)
+  assert.equal(missingPlan.gatesGreen, true)
+  assert.equal(missingPlan.execplanPath, '', 'absent canonical plan must not be claimed')
+  assert.equal(missingPlan.workItemsCompleted, 0)
+  assert.equal(missingPlan.workItemsTotal, 0)
+  assert.deepEqual(missingPlan.commits, ['abc1234 Work on roadmap-1-2-3'])
+  assert.equal(missingPlan.coderabbitRuns, 0)
+  assert.deepEqual(missingPlan.openIssues, ['recovered branch requires fresh review'])
+  assert.match(missingPlan.summary, /Recovered adopt-complete branch from durable git state/)
+
+  mkdirSync(path.join(repo.parserWorktree, 'docs', 'execplans'), { recursive: true })
+  writeFileSync(
+    path.join(repo.parserWorktree, 'docs', 'execplans', 'roadmap-1-2-3.md'),
+    '# ExecPlan\n',
+  )
+  const withPlan = await surface.syntheticRecoveryImpl(candidate, evidence)
+  assert.equal(withPlan.execplanPath, 'docs/execplans/roadmap-1-2-3.md')
+
+  const allowed = new Set(Object.keys(surface.IMPL_SCHEMA.properties))
+  for (const key of Object.keys(withPlan)) {
+    assert.ok(allowed.has(key), `synthetic field ${key} must exist in IMPL_SCHEMA`)
+  }
+})
+
+test('assess-only recovery leaves every piece of durable git state untouched', async () => {
+  const repo = makeRecoveryRepo({ withAddendumWorktree: true })
+  writeFileSync(path.join(repo.parserWorktree, 'dirty.txt'), 'uncommitted operator work\n')
+  const before = repoStateSnapshot(repo)
+
+  for (const classification of ['adopt-complete', 'adopt-partial', 'continue-manual', 'discard']) {
+    const surface = await loadRecoverySurface(
+      { resumePartialBranches: true },
+      async () => sampleAssessment({ classification }),
+    )
+    const outcome = await surface.runRecovery(repo.dir)
+
+    assert.equal(outcome.summary.assessed, 2, `both candidates assessed for ${classification}`)
+    assert.equal(outcome.summary.resumed, 0, 'assess-only mode never resumes')
+    assert.deepEqual(outcome.taskResults, [], 'assess-only mode never produces task results')
+    assert.ok(
+      outcome.summary.results.every((entry) => entry.action === 'reported'),
+      'assess-only mode only reports',
+    )
+  }
+
+  assert.deepEqual(
+    repoStateSnapshot(repo),
+    before,
+    'no branch tip, origin ref, roadmap text, stash, worktree, or dirty file may change',
+  )
+})
+
+test('recovery marks processed only for pushed, integrated resume results', async () => {
+  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  assert.match(
+    source,
+    new RegExp(
+      String.raw`for \(const entry of outcome\.taskResults\) \{` +
+        String.raw`[\s\S]*?status === 'done' && entry\.result\.integration\?\.pushed` +
+        String.raw`[\s\S]*?markProcessed\(entry\.task\)`,
+    ),
+    'processed ids may only come from pushed integrations, never from reported assessments',
+  )
+})
+
+// Scripted agent for review-mode resume runs: keyed on stable labels, never
+// prompt prose. Overrides let each scenario steer one role.
+function reviewModeAgent(calls, overrides = {}) {
+  return async (prompt, opts = {}) => {
+    const label = opts.label || ''
+    calls.push(label)
+    if (label.startsWith('write-probe:')) {
+      if (overrides.writeProbe === 'ignore') return { ok: true } // claims without writing
+      const details = probeDetailsFromPrompt(prompt)
+      assert.ok(details, 'write-probe prompt should carry PROBE_FILE and PROBE_TOKEN')
+      writeFileSync(details.file, details.token, 'utf8')
+      return { ok: true }
+    }
+    if (label.startsWith('recover-assess:') || label.startsWith('assess:')) {
+      return (overrides.assess || (async () => sampleAssessment()))(prompt, opts)
+    }
+    if (label.startsWith('code-review:') || label.startsWith('expert-review:')) {
+      return (overrides.review || (async () => ({ verdict: 'pass', blocking: [], summary: 'ship it' })))(prompt, opts)
+    }
+    if (label.startsWith('integrate:')) {
+      return (
+        overrides.integrate ||
+        (async () => ({
+          ok: true,
+          roadmapMarkedDone: true,
+          rebased: true,
+          squashMerged: true,
+          mergeSha: 'feedfeed',
+          pushed: true,
+          conflicts: '',
+          summary: 'squash merged and pushed',
+        }))
+      )(prompt, opts)
+    }
+    if (label.startsWith('fix:')) return 'applied fixes'
+    throw new Error(`unexpected agent label in recovery resume test: ${label}`)
+  }
+}
+
+test('review-mode resume routes an eligible branch through review and integration', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review' },
+    reviewModeAgent(calls),
+  )
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.fatal, null)
+  assert.equal(outcome.summary.resumed, 1)
+  assert.deepEqual(
+    outcome.summary.results.map((entry) => [entry.id, entry.action]),
+    [['1.2.3', 'resumed']],
+  )
+  assert.equal(outcome.taskResults.length, 1)
+  const { task, result } = outcome.taskResults[0]
+  assert.equal(task.id, '1.2.3')
+  assert.equal(result.status, 'done')
+  assert.equal(result.kind, 'recovery-resume')
+  assert.equal(result.integration.pushed, true)
+  assert.equal(result.impl.summary, 'Recovered adopt-complete branch from durable git state.')
+  assert.deepEqual(
+    calls,
+    [
+      'recover-assess:1.2.3',
+      'write-probe:claude',
+      'write-probe:codex-medium',
+      'code-review:1.2.3 r1',
+      'expert-review:1.2.3 r1',
+      'integrate:1.2.3',
+    ],
+    'resume must pass the write preflight, then use the ordinary review labels and the integration agent',
+  )
+})
+
+test('review-mode resume enforces the write preflight before any review agent', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review' },
+    reviewModeAgent(calls, { writeProbe: 'ignore' }),
+  )
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'resume-failed')
+  assert.match(entry.reason, /writable-root preflight failed/)
+  assert.equal(outcome.taskResults[0].result.status, 'failed')
+  assert.equal(outcome.taskResults[0].result.stage, 'worktree-write')
+  assert.ok(
+    !calls.some((label) => label.startsWith('code-review:') || label.startsWith('integrate:')),
+    'no review or integration agent may run when the write probe fails',
+  )
+})
+
+test('review-mode resume requires a durable ExecPlan and never fabricates one', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review' },
+    reviewModeAgent(calls),
+  )
+  const repo = makeRecoveryRepo({ withParserExecplan: false })
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  assert.deepEqual(outcome.taskResults, [])
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'reported')
+  assert.equal(entry.classification, 'continue-manual')
+  assert.equal(entry.reason, 'missing-execplan')
+  assert.deepEqual(calls, ['recover-assess:1.2.3'], 'no probe, review, or integration spend without a plan')
+})
+
+test('review-mode resume skips a dirty branch with an explicit reason and no review spend', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review' },
+    reviewModeAgent(calls),
+  )
+  const repo = makeRecoveryRepo()
+  writeFileSync(path.join(repo.parserWorktree, 'dirty.txt'), 'uncommitted\n')
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  assert.deepEqual(outcome.taskResults, [])
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'reported')
+  assert.equal(entry.classification, 'continue-manual', 'ineligible adopt-complete must fail closed')
+  assert.equal(entry.reason, 'dirty-worktree')
+  assert.ok(
+    outcome.summary.skipped.some(
+      (skip) => skip.branchName === 'roadmap-1-2-3' && skip.reason === 'dirty-worktree',
+    ),
+  )
+  assert.deepEqual(calls, ['recover-assess:1.2.3'], 'no review or integration agents may run')
+})
+
+test('review-mode resume reports non-adopt-complete classifications without spending review effort', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review' },
+    reviewModeAgent(calls, {
+      assess: async () => sampleAssessment({ classification: 'adopt-partial' }),
+    }),
+  )
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  assert.deepEqual(outcome.taskResults, [])
+  assert.deepEqual(
+    outcome.summary.results.map((entry) => [entry.classification, entry.action]),
+    [['adopt-partial', 'reported']],
+  )
+  assert.deepEqual(calls, ['recover-assess:1.2.3'])
+})
+
+test('a failed resume review halts the branch without integration', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review', maxReviewRounds: 1 },
+    reviewModeAgent(calls, {
+      review: async () => ({ verdict: 'changes-requested', blocking: ['recovered slice misses the success criterion'], summary: 'not shippable' }),
+    }),
+  )
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'resume-failed')
+  assert.equal(outcome.taskResults[0].result.status, 'halted')
+  assert.equal(outcome.taskResults[0].result.stage, 'review')
+  assert.ok(
+    calls.includes('assess:1.2.3'),
+    'a failed resume must be re-assessed with current branch evidence, not the stale pre-resume assessment',
+  )
+  assert.equal(outcome.taskResults[0].result.assessment.classification, 'adopt-complete')
+  assert.ok(
+    outcome.taskResults[0].result.assessment.hostEvidence,
+    'the refreshed assessment carries newly collected host evidence',
+  )
+  assert.ok(!calls.some((label) => label.startsWith('integrate:')), 'no integration after a failed review')
+})
+
+test('autoMerge=false resume stops at manual-merge-ready instead of integrating', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review', autoMerge: false },
+    reviewModeAgent(calls),
+  )
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  assert.deepEqual(
+    outcome.summary.results.map((entry) => entry.action),
+    ['manual-merge-ready'],
+  )
+  assert.equal(outcome.taskResults[0].result.status, 'manual-merge-ready')
+  assert.ok(!calls.some((label) => label.startsWith('integrate:')))
+})
+
+test('normal tasks and recovery resume share one review and integration implementation', async () => {
+  const source = await readFile(WORKFLOW_PATH, 'utf8')
+
+  assert.match(
+    source,
+    /const outcome = await runDualReviewAndIntegration\(task, worktree, plan, impl, mergeLock\)/,
+    'runTask must delegate to the shared review/integration path',
+  )
+  assert.match(
+    source,
+    /runDualReviewAndIntegration\(task, candidate\.worktreePath, plan, impl, mergeLock, \{ kind: 'recovery-resume' \}\)/,
+    'recovery resume must delegate to the same shared path',
+  )
+})
+
+test('control loop wires recovery ahead of normal selection', async () => {
+  const source = await readFile(WORKFLOW_PATH, 'utf8')
+
+  assert.match(source, /\{ title: 'Recovery' \},/, 'meta.phases should declare the Recovery lane')
+  assert.match(
+    source,
+    /if \(RESUME_PARTIAL_BRANCHES && halted\) \{\s*recovery\.blocked = 'auth-preflight-failed'/,
+    'fatal auth preflight must block recovery entirely',
+  )
+  assert.match(
+    source,
+    /if \(RESUME_PARTIAL_BRANCHES && !halted\) \{[\s\S]*?await runRecovery\(process\.cwd\(\), mergeLock\)/,
+    'recovery must run only when enabled and not halted',
+  )
+  assert.match(
+    source,
+    /normal: \[\.\.\.processedNormal[\s\S]*?\.\.\.recoveryHeldNormal\]/,
+    'takenSnapshot must exclude recovery-held ids from normal selection',
+  )
+  assert.match(
+    source,
+    /return \{[\s\S]*?\brecovery\b[\s\S]*?\bsummary:/,
+    'workflow result must expose the recovery summary',
+  )
+})

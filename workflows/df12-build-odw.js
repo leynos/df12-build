@@ -1,12 +1,21 @@
+// df12-build-odw — ODW/Codex workflow that drives a df12-house GIST roadmap
+// to completion: deterministic selection, real git-worktree task isolation,
+// adversarial plan/design review, implementation with deterministic gates,
+// dual review, merge-lock integration, post-merge audit, remediation triage,
+// fresh-run recovery of surviving task branches (failure-resume design), and
+// a host-verified task-agent write preflight. Helpers live above the
+// worker-pool control-loop marker so the test suites in tests/ can compile
+// them in isolation; see docs/architecture.md for the enforcement boundary.
 export const meta = {
   name: 'df12-build-odw',
   description:
-    'ODW/Codex variant of df12-build: drive a roadmap to completion with a parallel worker pool, Codex GPT 5.5 routing, branch-local verification guidance, serialized integration, and post-merge audit.',
+    'ODW/Codex variant of df12-build: drive a roadmap to completion with a parallel worker pool, Claude Opus planning/review routing, branch-local verification guidance, serialized integration, and post-merge audit.',
   whenToUse:
     'When you want to autonomously advance docs/roadmap.md across MULTIPLE independent unblocked tasks at once, each fully planned, reviewed, implemented, gated, merged, and audited. Opt-in only (heavy, many agents in parallel, performs commits/merges). Recovery model is fresh-restart against git state, not cache-resume.',
   phases: [
     { title: 'Select' },
     { title: 'Auth Preflight' },
+    { title: 'Recovery' },
     { title: 'Worktree' },
     { title: 'Plan' },
     { title: 'Design Review' },
@@ -38,9 +47,9 @@ const DESIGN_DOCS = cfg.designDocs || 'the design document(s) and the ADRs (docs
 const RESEARCH_NOTE = cfg.researchNote || null // optional project-specific external-library research note (e.g. a vendored lib source path to verify against)
 const ONLY_TASK = cfg.taskId || null // process exactly one named roadmap id (e.g. "1.2.1")
 const MAX_TASKS = ONLY_TASK ? 1 : cfg.maxTasks || 12 // hard ceiling on roadmap steps per run
-const MAX_PARALLEL = ONLY_TASK ? 1 : Math.max(1, cfg.maxParallel || 8) // worker-pool width: tasks in flight. Defaults to 8 so planning/review and build can overlap.
-const MAX_PLANNING_PARALLEL = Math.max(1, cfg.maxPlanningParallel || cfg.maxPlanParallel || 4) // concurrent planning-stage agents.
-const MAX_BUILD_PARALLEL = Math.max(1, cfg.maxBuildParallel || 4) // concurrent build-stage agents.
+const MAX_PARALLEL = ONLY_TASK ? 1 : Math.max(1, cfg.maxParallel || 16) // worker-pool width: tasks in flight. Defaults to 16 to match the normal ODW/Codex runtime concurrency cap.
+const MAX_PLANNING_PARALLEL = Math.max(1, cfg.maxPlanningParallel || cfg.maxPlanParallel || 8) // concurrent planning-stage agents.
+const MAX_BUILD_PARALLEL = Math.max(1, cfg.maxBuildParallel || 8) // concurrent build-stage agents.
 const MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4 // plan <-> design-review exchanges before halting
 const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review cycles
 const AUTO_MERGE = cfg.autoMerge !== false // false => stop after review, leave branch for manual merge
@@ -49,26 +58,44 @@ const DRY_RUN = cfg.dryRun === true // plan/review/audit only; skip implement, m
 const AUTH_PREFLIGHT = cfg.authPreflight !== false // false => skip local CLI auth checks before spawning agents
 const REQUIRE_CODERABBIT_AUTH = cfg.requireCoderabbitAuth !== false && !DRY_RUN // CodeRabbit is required once implementation/review can run
 const ASSESS_PARTIAL_BRANCHES = cfg.assessPartialBranches !== false // false => skip report-only assessment of failed task branches
+const RESUME_PARTIAL_BRANCHES = cfg.resumePartialBranches === true // opt-in: discover surviving roadmap-* branches on fresh launch before normal selection
+const RESUME_MODE = String(cfg.resumeMode || 'assess').toLowerCase() // maximum recovery action: "assess" reports only; "review" may route clean adopt-complete branches into review + integration
+if (!['assess', 'review'].includes(RESUME_MODE)) {
+  throw new Error(`Unsupported resumeMode: ${RESUME_MODE} (use "assess" or "review")`)
+}
+const RESUME_TASK_ID = cfg.resumeTaskId ? String(cfg.resumeTaskId) : null // limit recovery discovery to one roadmap id (separate from taskId, which selects normal roadmap work)
+const RESUME_MAX_CANDIDATES_RAW = Number(cfg.resumeMaxCandidates ?? 4)
+const RESUME_MAX_CANDIDATES = Number.isFinite(RESUME_MAX_CANDIDATES_RAW)
+  ? Math.max(1, Math.floor(RESUME_MAX_CANDIDATES_RAW))
+  : 4 // bound startup recovery fan-in so a messy repository does not consume the whole run
+const WORKTREE_WRITE_PREFLIGHT = cfg.worktreeWritePreflight !== false // false => skip the once-per-run probe that proves task agents can write into sibling roadmap-* worktrees
 const BUDGET_RESERVE = 80_000 // stop opening new tasks when remaining budget falls below this
 const SEARCH_BACKEND = String(cfg.searchBackend || cfg.codeSearchBackend || (cfg.memtraceRepoId ? 'memtrace' : 'grepai')).toLowerCase()
 const GREPAI_WORKSPACE = cfg.grepaiWorkspace || 'Projects'
 const GREPAI_PROJECT = cfg.grepaiProject || (SEARCH_BACKEND === 'grepai' ? cfg.project : null) || null // canonical main-branch GrepAI project; set this when source is a worktree
 const MEMTRACE_REPO_ID = cfg.memtraceRepoId || (SEARCH_BACKEND === 'memtrace' ? cfg.project : null) || null // canonical Memtrace repo id; discover with list_indexed_repositories when unset
 const BUILD_ADAPTER = cfg.buildAdapter || 'codex-medium'
-const PLAN_ADAPTER = cfg.planAdapter || 'codex'
-const REVIEW_ADAPTER = cfg.reviewAdapter || 'codex-high'
+const PLAN_ADAPTER = cfg.planAdapter || 'claude'
+const REVIEW_ADAPTER = cfg.reviewAdapter || 'claude'
 const TRIAGE_ADAPTER = cfg.triageAdapter || 'codex'
 const ASSESSMENT_ADAPTER = cfg.assessmentAdapter || REVIEW_ADAPTER
 const BUILD_MODEL = cfg.buildModel || 'gpt-5.5'
-const PLAN_MODEL = cfg.planModel || 'gpt-5.5@high'
-const REVIEW_MODEL = cfg.reviewModel || 'gpt-5.5'
+const PLAN_MODEL = cfg.planModel || 'claude-opus-4-8'
+const REVIEW_MODEL = cfg.reviewModel || 'claude-opus-4-8'
 const TRIAGE_MODEL = cfg.triageModel || 'gpt-5.5@high'
 const ASSESSMENT_MODEL = cfg.assessmentModel || REVIEW_MODEL
+const AUTH_REQUIRED_ADAPTERS = new Set([
+  BUILD_ADAPTER,
+  PLAN_ADAPTER,
+  REVIEW_ADAPTER,
+  TRIAGE_ADAPTER,
+  ASSESSMENT_ADAPTER,
+].map((adapter) => String(adapter || '').toLowerCase()))
 const CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || 'coderabbit review --agent'
 const CODERABBIT_REVIEW_GUIDANCE =
-  'Use `coderabbit review --agent` to validate your work after each major milestone, and clear all concerns prior to moving onto the next. It is important that all applicable code quality and correctness gates succeed **before** each CodeRabbit review is requested, as CodeRabbit should not be used for errors that can be caught deterministically. If the CodeRabbit rate limit is exceeded, sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt.'
+  'Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that `make all`, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.'
 const SPARK_DELEGATION_GUIDANCE =
-  "You are free to delegate to the `wyvern` 5.3 codex spark subagent for bounded read-only tasks on known surfaces as needed. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
+  "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
 const SCRUTINEER_DELEGATION_GUIDANCE =
   `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`
 
@@ -94,6 +121,21 @@ function assessmentAgentOptions(options = {}) {
 
 function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`
+}
+
+async function fileExists(pathValue, baseDir = process.cwd()) {
+  if (!pathValue) return false
+  const path = process.getBuiltinModule('node:path')
+  const candidate = path.isAbsolute(String(pathValue))
+    ? String(pathValue)
+    : path.join(baseDir, String(pathValue))
+  const fs = process.getBuiltinModule('node:fs/promises')
+  try {
+    const stat = await fs.stat(candidate)
+    return stat.isFile()
+  } catch {
+    return false
+  }
 }
 
 function grepaiSearchCommand() {
@@ -372,10 +414,55 @@ function authFailureDetail(value) {
     /\btoken missing\b/i,
     /\bmissing token\b/i,
     /\btoken expired\b/i,
+    /\bnot authenticated\b/i,
+    /"loggedIn"\s*:\s*false/i,
     /Run `?coderabbit auth login`?/i,
     /Run codex login/i,
   ]
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
+}
+
+function providerFailureDetail(value) {
+  const text = String(value || '')
+  const patterns = [
+    /\bAPI Error:\s*(?:429|500|502|503|504|529)\b/i,
+    /\b(?:429|500|502|503|504|529)\b.*\b(?:gateway|overload|rate limit|server-side|temporar|timeout|unavailable)\b/i,
+    /\b(?:gateway timeout|model overloaded|overloaded|rate limited|server-side issue|service unavailable|temporarily unavailable|try again in a moment)\b/i,
+  ]
+  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
+}
+
+function resultFromUnhandledAgentError(id, detail, extra = {}) {
+  const authDetail = authFailureDetail(detail)
+  if (authDetail) {
+    return {
+      id,
+      status: 'fatal-auth',
+      stage: 'auth',
+      detail,
+      proposals: [],
+      ...extra,
+    }
+  }
+  const providerDetail = providerFailureDetail(detail)
+  if (providerDetail) {
+    return {
+      id,
+      status: 'provider-fault',
+      stage: 'provider',
+      detail,
+      proposals: [],
+      ...extra,
+    }
+  }
+  return {
+    id,
+    status: 'failed',
+    stage: 'error',
+    detail,
+    proposals: [],
+    ...extra,
+  }
 }
 
 function parseNameStatus(output) {
@@ -494,6 +581,18 @@ async function runAuthPreflight() {
     })
   }
 
+  if (AUTH_REQUIRED_ADAPTERS.has('claude')) {
+    const claude = await execFileStatus('claude', ['auth', 'status'])
+    const claudeOutput = [claude.stdout, claude.stderr, claude.message].filter(Boolean).join('\n')
+    if (!claude.ok || authFailureDetail(claudeOutput)) {
+      failures.push({
+        tool: 'claude',
+        command: 'claude auth status',
+        detail: authFailureDetail(claudeOutput) || claudeOutput.trim() || 'Claude auth status check failed',
+      })
+    }
+  }
+
   if (REQUIRE_CODERABBIT_AUTH) {
     const coderabbit = await execFileStatus('coderabbit', ['auth', 'status'])
     const coderabbitOutput = [coderabbit.stdout, coderabbit.stderr, coderabbit.message].filter(Boolean).join('\n')
@@ -509,7 +608,10 @@ async function runAuthPreflight() {
   if (failures.length) {
     log(`[auth] fatal preflight failure: ${failures.map((failure) => `${failure.tool}: ${failure.detail.split(/\r?\n/)[0]}`).join('; ')}`)
   } else {
-    log(`[auth] preflight passed${REQUIRE_CODERABBIT_AUTH ? ' for Codex and CodeRabbit' : ' for Codex'}`)
+    const passed = ['Codex']
+    if (AUTH_REQUIRED_ADAPTERS.has('claude')) passed.push('Claude')
+    if (REQUIRE_CODERABBIT_AUTH) passed.push('CodeRabbit')
+    log(`[auth] preflight passed for ${passed.join(', ')}`)
   }
 
   return failures
@@ -578,11 +680,11 @@ async function readFileText(path) {
   return await readFile(path, 'utf8')
 }
 
-async function readRoadmapForSelection() {
+async function readRoadmapForSelection(root = process.cwd()) {
   const canonicalRef = `origin/${BASE}:${ROADMAP}`
   try {
     return {
-      text: await execFileText('git', ['show', canonicalRef]),
+      text: await execFileText('git', ['-C', root, 'show', canonicalRef]),
       source: canonicalRef,
       fallbackReason: '',
     }
@@ -681,6 +783,9 @@ function completedIds(tasks) {
 
   for (const task of tasks) {
     if (isTaskFullyComplete(task)) completed.add(task.id)
+    for (const subtask of task.subtasks || []) {
+      if (isComplete(subtask)) completed.add(subtask.id)
+    }
     const parts = task.id.split('.')
     for (let length = 1; length < parts.length; length += 1) {
       const prefix = parts.slice(0, length).join('.')
@@ -974,6 +1079,14 @@ function implementationAuthFailureDetail(impl) {
   return authFailureDetail(detail)
 }
 
+function addendumImplementationNeedsManualMerge(impl) {
+  if (!impl || impl.ok || !impl.gatesGreen) return false
+  if ((impl.openIssues || []).length > 0) return false
+  const completed = Number(impl.workItemsCompleted)
+  const total = Number(impl.workItemsTotal)
+  return Number.isFinite(completed) && Number.isFinite(total) && total > 0 && completed >= total
+}
+
 function integratePrompt(task, worktree) {
   const markStep = task.isAddendum
     ? `Tick each completed sub-task in ${ROADMAP}: for every id in [${(task.subtasks || []).join(', ')}], change its nested \`- [ ] ${task.id}.<n>.\` to \`- [x] …\`. LEAVE the parent ${task.id} as \`[x]\` (it was already done). Run \`make markdownlint\` and \`make nixie\`; commit the roadmap update (en-GB).`
@@ -1013,10 +1126,14 @@ function auditPrompt(task, worktree) {
   ].join('\n')
 }
 
-function assessmentPrompt(task, wt, result, evidence) {
+// Shared ADR 002 assessment prompt body — the classification contract is ONE
+// contract: in-run failure assessment and fresh-run recovery assessment feed
+// the same schema, enum, and evidence expectations. Only the task header and
+// the context block differ between the two entry points.
+function assessmentPromptLines(taskHeader, worktreePath, evidence, contextTitle, contextValue) {
   return [
-    preamble(wt.worktreePath),
-    `TASK: Assess the surviving task branch for roadmap task ${task.id} ("${task.title}") after a workflow failure.`,
+    preamble(worktreePath),
+    taskHeader,
     '',
     'This is a READ-ONLY recovery assessment. Do not edit files, commit, stash, merge, cherry-pick, push, delete worktrees, mark roadmap checkboxes, or run any command that mutates repository state. Do not resume or rely on the failed agent transcript. Inspect only durable state that exists on disk or in Git.',
     '',
@@ -1041,22 +1158,63 @@ function assessmentPrompt(task, wt, result, evidence) {
     JSON.stringify(evidence, null, 2),
     '```',
     '',
-    'Original workflow failure result:',
+    contextTitle,
     '```json',
-    JSON.stringify(result, null, 2),
+    JSON.stringify(contextValue, null, 2),
     '```',
     '',
     'Return only the schema-bound assessment object. Free-text recommendations do not drive integration; make the enum classification and evidence fields precise.',
   ].join('\n')
 }
 
+function assessmentPrompt(task, wt, result, evidence) {
+  return assessmentPromptLines(
+    `TASK: Assess the surviving task branch for roadmap task ${task.id} ("${task.title}") after a workflow failure.`,
+    wt.worktreePath,
+    evidence,
+    'Original workflow failure result:',
+    result,
+  )
+}
+
+function recoveryAssessmentPrompt(task, candidate, evidence) {
+  return assessmentPromptLines(
+    `TASK: Assess the surviving task branch for roadmap task ${task.id} ("${task.title}") discovered during fresh-run recovery.`,
+    candidate.worktreePath,
+    evidence,
+    "Recovery discovery context (fresh launch; the failed run's transcript and result are unavailable by design):",
+    candidate,
+  )
+}
+
+// Route a discovered candidate through the SAME ADR 002 assessment contract as
+// in-run failures: same evidence collector, same schema, same adapter routing.
+async function assessRecoveryCandidate(candidate) {
+  const task = { id: candidate.taskId, title: candidate.taskTitle }
+  const wt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit }
+  const evidence = await collectAssessmentEvidence(task, wt)
+  try {
+    const assessment = await agent(recoveryAssessmentPrompt(task, candidate, evidence), assessmentAgentOptions({
+      phase: 'Recovery',
+      label: `recover-assess:${candidate.taskId}${candidate.isAddendum ? '-addendum' : ''}`,
+      schema: ASSESSMENT_SCHEMA,
+    }))
+    if (!assessment) {
+      return { evidence, assessment: null, assessmentError: 'assessment agent returned no structured output' }
+    }
+    return { evidence, assessment: { ...assessment, hostEvidence: evidence }, assessmentError: '' }
+  } catch (error) {
+    return { evidence, assessment: null, assessmentError: (error && error.message) || String(error) }
+  }
+}
+
 function shouldAssessFailure(result, wt) {
   if (!ASSESS_PARTIAL_BRANCHES) return false
   if (!wt?.branch || !wt?.worktreePath) return false
   if (!result || !['failed', 'halted'].includes(result.status)) return false
-  if (result.stage === 'worktree' || result.stage === 'auth' || result.status === 'fatal-auth') return false
+  if (result.stage === 'worktree' || result.stage === 'worktree-write' || result.stage === 'auth' || result.stage === 'provider' || result.status === 'fatal-auth' || result.status === 'provider-fault') return false
   const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
-  return !authFailureDetail(detail)
+  return !authFailureDetail(detail) && !providerFailureDetail(detail)
 }
 
 async function attachAssessment(task, wt, result) {
@@ -1083,6 +1241,656 @@ async function attachAssessment(task, wt, result) {
 }
 
 // ---------------------------------------------------------------------------
+// Fresh-run recovery discovery (failure resume, phase 1) — reconstruct
+// recovery candidates from durable Git state alone: local roadmap-* branches,
+// live worktrees, and the canonical roadmap. Discovery never mutates the
+// target project; it only reads refs, worktree metadata, and commit ids.
+// ---------------------------------------------------------------------------
+const TASK_BRANCH_RE = /^roadmap-((?:\d+-)*\d+)(-addendum)?$/
+
+function branchToRoadmapId(branch) {
+  const match = TASK_BRANCH_RE.exec(String(branch || ''))
+  if (!match) return null
+  return { id: match[1].replace(/-/g, '.'), isAddendum: Boolean(match[2]) }
+}
+
+function parseWorktreeList(output) {
+  const entries = []
+  let current = null
+  for (const line of String(output || '').split(/\r?\n/)) {
+    if (!line.trim()) {
+      if (current) entries.push(current)
+      current = null
+      continue
+    }
+    const spaceIndex = line.indexOf(' ')
+    const key = spaceIndex === -1 ? line : line.slice(0, spaceIndex)
+    const value = spaceIndex === -1 ? '' : line.slice(spaceIndex + 1)
+    if (key === 'worktree') {
+      current = { worktreePath: value, branch: '', head: '' }
+    } else if (current && key === 'HEAD') {
+      current.head = value
+    } else if (current && key === 'branch') {
+      current.branch = value.replace(/^refs\/heads\//, '')
+    }
+  }
+  if (current) entries.push(current)
+  return entries
+}
+
+async function directoryExists(pathValue) {
+  if (!pathValue) return false
+  const fs = process.getBuiltinModule('node:fs/promises')
+  try {
+    const stat = await fs.stat(String(pathValue))
+    return stat.isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function roadmapTaskIndex(roadmapText) {
+  const { tasks } = parseRoadmap(roadmapText)
+  const byId = new Map()
+  for (const task of tasks) {
+    byId.set(task.id, task)
+    for (const subtask of task.subtasks || []) byId.set(subtask.id, subtask)
+  }
+  return byId
+}
+
+// A normal branch is stale once its task checkbox is ticked; an addendum
+// branch is stale once the parent AND every addendum sub-task are ticked.
+function candidateRoadmapComplete(task, isAddendum) {
+  if (!isAddendum) return isComplete(task)
+  return isTaskFullyComplete(task)
+}
+
+async function discoverRecoveryCandidates(roadmapText, gitRoot) {
+  const root = gitRoot || process.cwd()
+  const skipped = []
+  const errors = []
+
+  const branchList = await execFileStatus('git', ['-C', root, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/roadmap-*'])
+  if (!branchList.ok) {
+    errors.push(`for-each-ref failed: ${[branchList.message, branchList.stderr].filter(Boolean).join('; ')}`)
+    return { candidates: [], skipped, errors }
+  }
+  const branches = branchList.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+
+  const worktreeList = await execFileStatus('git', ['-C', root, 'worktree', 'list', '--porcelain'])
+  if (!worktreeList.ok) {
+    errors.push(`worktree list failed: ${[worktreeList.message, worktreeList.stderr].filter(Boolean).join('; ')}`)
+  }
+  const worktreeByBranch = new Map(
+    parseWorktreeList(worktreeList.stdout)
+      .filter((entry) => entry.branch)
+      .map((entry) => [entry.branch, entry.worktreePath]),
+  )
+
+  const byId = roadmapTaskIndex(roadmapText)
+  const mapped = []
+  for (const branch of branches) {
+    const parsed = branchToRoadmapId(branch)
+    const task = parsed ? byId.get(parsed.id) : null
+    if (!parsed || !task) {
+      skipped.push({ id: parsed?.id || '', branchName: branch, reason: 'unmapped-branch' })
+      continue
+    }
+    if (candidateRoadmapComplete(task, parsed.isAddendum)) {
+      skipped.push({ id: parsed.id, branchName: branch, reason: 'already-complete' })
+      continue
+    }
+
+    const commit = await execFileStatus('git', ['-C', root, 'rev-parse', '--verify', `${branch}^{commit}`])
+    if (!commit.ok) {
+      skipped.push({ id: parsed.id, branchName: branch, reason: 'unreadable-commit' })
+      continue
+    }
+    const mergeBase = await execFileStatus('git', ['-C', root, 'merge-base', `origin/${BASE}`, branch])
+
+    const worktreePath = worktreeByBranch.get(branch) || ''
+    mapped.push({
+      taskId: parsed.id,
+      taskTitle: task.title || '',
+      branchName: branch,
+      worktreePath: (await directoryExists(worktreePath)) ? worktreePath : '',
+      baseCommit: mergeBase.ok ? mergeBase.stdout.trim() : '',
+      currentCommit: commit.stdout.trim(),
+      roadmapComplete: false,
+      isAddendum: parsed.isAddendum,
+      line: task.line || Number.MAX_SAFE_INTEGER,
+    })
+  }
+
+  mapped.sort((left, right) => (left.line - right.line) || left.branchName.localeCompare(right.branchName))
+
+  const candidates = []
+  for (const candidate of mapped) {
+    if (RESUME_TASK_ID && candidate.taskId !== RESUME_TASK_ID) continue
+    if (!candidate.worktreePath) {
+      skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: 'missing-worktree' })
+      continue
+    }
+    if (candidates.length >= RESUME_MAX_CANDIDATES) {
+      skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: 'candidate-cap' })
+      continue
+    }
+    candidates.push(candidate)
+  }
+
+  return { candidates, skipped, errors }
+}
+
+// Reasons a discovered branch is recorded in recovery.skipped instead of
+// proceeding to its mode's maximum action. Discovery emits the first five;
+// the assessment and resume-decision stages emit the rest.
+const RECOVERY_SKIP_REASONS = [
+  'unmapped-branch',
+  'already-complete',
+  'unreadable-commit',
+  'missing-worktree',
+  'candidate-cap',
+  'assessment-error',
+  'addendum-branch',
+  'evidence-collection-error',
+  'dirty-worktree',
+  'no-committed-work',
+  'not-task-scoped',
+  'missing-validation-evidence',
+  'missing-execplan',
+  'dry-run',
+]
+
+// Review-mode resume eligibility: only a clean, committed, task-scoped
+// adopt-complete branch with validation evidence may spend review and
+// integration effort. Returns '' when eligible, else the disqualifying skip
+// reason. Host-collected evidence is decisive over agent-reported fields.
+function recoveryResumeEligibility(candidate, evidence, assessment) {
+  if (candidate?.isAddendum) return 'addendum-branch'
+  if ((evidence?.collectionErrors || []).length) return 'evidence-collection-error'
+  if (evidence?.dirtyState !== 'clean') return 'dirty-worktree'
+  if (!(evidence?.recentCommits || []).length) return 'no-committed-work'
+  if (assessment?.taskScoped !== true) return 'not-task-scoped'
+  if (!String(assessment?.validation || '').trim()) return 'missing-validation-evidence'
+  if ((assessment?.missingEvidence || []).length) return 'missing-validation-evidence'
+  if (!candidate?.execplanPath) return 'missing-execplan'
+  return ''
+}
+
+// The failure-resume decision table. Every classification is report-only in
+// assess mode; in review mode only eligible adopt-complete candidates may
+// resume, and an adopt-complete verdict that fails an eligibility check is
+// DOWNGRADED to continue-manual in the summary (fail closed).
+function recoveryDecision(candidate, evidence, assessment, mode, flags = {}) {
+  const classification = assessment?.classification || ''
+  if (mode !== 'review' || classification !== 'adopt-complete') {
+    return { action: 'report', classification, reason: '', skip: false }
+  }
+  const reason = recoveryResumeEligibility(candidate, evidence, assessment)
+  if (reason) {
+    return { action: 'report', classification: 'continue-manual', reason, skip: true }
+  }
+  if (flags.dryRun) {
+    return { action: 'report', classification, reason: 'dry-run', skip: true }
+  }
+  return { action: 'resume', classification, reason: '', skip: false }
+}
+
+// Skip reasons whose branch still exists and still maps to a selectable
+// roadmap id — normal selection must not re-open these this run, because
+// `git worktree add -b` would collide with the surviving branch.
+const RECOVERY_HOLD_REASONS = new Set(['missing-worktree', 'candidate-cap', 'unreadable-commit', 'assessment-error'])
+
+// Bridge an eligible recovered branch into the ordinary review path without
+// re-running implementation. The synthetic result mirrors IMPL_SCHEMA but is
+// NOT proof the branch is shippable: code review, expert review, gates, and
+// integration remain decisive, and the open issue makes that explicit to
+// reviewers reading the implementation summary.
+// The canonical durable plan for a task branch, or '' when it does not exist
+// on disk in the worktree. An absent plan stays absent: nothing downstream may
+// substitute the canonical path back in after this check has failed.
+async function recoveryExecplanPath(candidate) {
+  const canonicalPlan = `docs/execplans/${candidate.branchName}.md`
+  return (await fileExists(canonicalPlan, candidate.worktreePath)) ? canonicalPlan : ''
+}
+
+async function syntheticRecoveryImpl(candidate, evidence) {
+  const execplanPath =
+    typeof candidate.execplanPath === 'string'
+      ? candidate.execplanPath
+      : await recoveryExecplanPath(candidate)
+  return {
+    ok: true,
+    gatesGreen: true,
+    execplanPath,
+    workItemsCompleted: 0,
+    workItemsTotal: 0,
+    commits: evidence?.recentCommits || [],
+    coderabbitRuns: 0,
+    openIssues: ['recovered branch requires fresh review'],
+    summary: 'Recovered adopt-complete branch from durable git state.',
+  }
+}
+
+// Fresh-run recovery pass: discover -> assess -> decide -> report or resume.
+// Assess mode never mutates the target project: it reads Git state and spawns
+// read-only assessment agents. Review mode may route eligible adopt-complete
+// candidates through the SAME dual-review + merge-lock integration path as
+// ordinary tasks; nothing merges outside that path.
+async function runRecovery(root, mergeLock = null) {
+  const summary = {
+    enabled: true,
+    mode: RESUME_MODE,
+    candidates: 0,
+    assessed: 0,
+    resumed: 0,
+    skipped: [],
+    results: [],
+    errors: [],
+  }
+  const held = { normal: new Set(), addendum: new Set() }
+  const taskResults = []
+  phase('Recovery')
+
+  const fetched = await execFileStatus('git', ['-C', root, 'fetch', 'origin', BASE])
+  if (!fetched.ok) {
+    summary.errors.push(`fetch origin ${BASE} failed (continuing with local refs): ${(fetched.message || fetched.stderr || '').trim()}`)
+  }
+  let roadmap
+  try {
+    roadmap = await readRoadmapForSelection(root)
+  } catch (error) {
+    summary.errors.push((error && error.message) || String(error))
+    log('[recovery] cannot read the canonical roadmap; skipping recovery discovery')
+    return { summary, taskResults, held, fatal: null }
+  }
+
+  const discovery = await discoverRecoveryCandidates(roadmap.text, root)
+  summary.candidates = discovery.candidates.length
+  summary.skipped.push(...discovery.skipped)
+  summary.errors.push(...discovery.errors)
+
+  const holdCandidate = (branchName, taskId) => {
+    const parsed = branchToRoadmapId(branchName)
+    if (!parsed) return
+    ;(parsed.isAddendum ? held.addendum : held.normal).add(taskId || parsed.id)
+  }
+  for (const entry of discovery.skipped) {
+    if (RECOVERY_HOLD_REASONS.has(entry.reason)) holdCandidate(entry.branchName, entry.id)
+  }
+
+  for (const candidate of discovery.candidates) {
+    holdCandidate(candidate.branchName, candidate.taskId)
+    log(`[recovery] assessing ${candidate.branchName} (task ${candidate.taskId})`)
+    const { assessment, assessmentError } = await assessRecoveryCandidate(candidate)
+    if (!assessment) {
+      summary.results.push({
+        id: candidate.taskId,
+        branchName: candidate.branchName,
+        classification: '',
+        action: 'assessment-error',
+        assessmentError,
+      })
+      summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: 'assessment-error' })
+      if (authFailureDetail(assessmentError) || providerFailureDetail(assessmentError)) {
+        // Infrastructure faults during recovery poison every later agent call
+        // too — halt the run instead of pretending branches were assessed.
+        return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessmentError) }
+      }
+      continue
+    }
+    summary.assessed += 1
+    const evidence = assessment.hostEvidence
+    // Resolve the durable ExecPlan before deciding: resume eligibility
+    // requires it, and its absence must stay visible as missing-execplan.
+    const enriched = { ...candidate, execplanPath: await recoveryExecplanPath(candidate) }
+    const decision = recoveryDecision(enriched, evidence, assessment, RESUME_MODE, { dryRun: DRY_RUN })
+    if (decision.action !== 'resume') {
+      if (decision.skip) {
+        summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: decision.reason })
+      }
+      summary.results.push({
+        id: candidate.taskId,
+        branchName: candidate.branchName,
+        classification: decision.classification,
+        action: 'reported',
+        ...(decision.reason ? { reason: decision.reason } : {}),
+        assessment,
+      })
+      log(`[recovery] ${candidate.branchName}: ${decision.classification} (reported${decision.reason ? `; ${decision.reason}` : ''})`)
+      continue
+    }
+
+    // --- Review-mode resume: re-enter the ordinary review + integration path.
+    // No re-implementation: a synthetic result bridges the recovered branch
+    // into dual review, and integration ticks the roadmap under the merge lock.
+    log(`[recovery] resuming ${candidate.branchName} through the ordinary review and integration path`)
+    const task = {
+      id: candidate.taskId,
+      title: candidate.taskTitle,
+      requires: [],
+      rationale: 'review-mode recovery resume of a clean adopt-complete branch',
+      isAddendum: false,
+      subtasks: [],
+    }
+    const resumeWt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit }
+    // Same host-verified write gate as ordinary tasks: review fix rounds and
+    // integration write into the recovered worktree, so the sandbox boundary
+    // must be proven before any agent can touch it.
+    const writeAccess = await ensureTaskAgentWriteAccess(candidate.worktreePath, candidate.taskId)
+    if (!writeAccess.ok) {
+      const detail = `task-agent writable-root preflight failed (launch/sandbox fault, not a task defect): ${writeAccess.failures.map((failure) => `${failure.adapter}: ${failure.detail}`).join('; ')}`
+      taskResults.push({
+        task,
+        result: { id: candidate.taskId, status: 'failed', stage: 'worktree-write', detail, worktree: candidate.worktreePath, proposals: [], kind: 'recovery-resume' },
+      })
+      summary.results.push({
+        id: candidate.taskId,
+        branchName: candidate.branchName,
+        classification: decision.classification,
+        action: 'resume-failed',
+        reason: detail,
+      })
+      continue
+    }
+    const impl = await syntheticRecoveryImpl(enriched, evidence)
+    const plan = {
+      execplanPath: impl.execplanPath,
+      workItems: [],
+      summary: impl.summary,
+    }
+    let outcome
+    try {
+      outcome = await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock, { kind: 'recovery-resume' })
+    } catch (error) {
+      const detail = `unhandled agent error: ${(error && error.message) || String(error)}`
+      outcome = resultFromUnhandledAgentError(candidate.taskId, detail, { worktree: candidate.worktreePath, kind: 'recovery-resume' })
+    }
+    if (outcome.status === 'fatal-auth' || outcome.status === 'provider-fault') {
+      summary.results.push({
+        id: candidate.taskId,
+        branchName: candidate.branchName,
+        classification: decision.classification,
+        action: 'resume-failed',
+        reason: outcome.detail || outcome.status,
+      })
+      return { summary, taskResults, held, fatal: outcome }
+    }
+    // A failed or halted resume gets a FRESH assessment through the same
+    // guard as ordinary task failures — the pre-resume assessment is stale
+    // once review rounds and fix agents have touched the branch.
+    taskResults.push({ task, result: outcome.status === 'done' ? outcome : await attachAssessment(task, resumeWt, outcome) })
+    if (outcome.status === 'done') {
+      summary.resumed += 1
+      summary.results.push({
+        id: candidate.taskId,
+        branchName: candidate.branchName,
+        classification: decision.classification,
+        action: 'resumed',
+      })
+      log(`[recovery] ${candidate.branchName}: resumed and integrated`)
+    } else if (outcome.status === 'manual-merge-ready') {
+      summary.results.push({
+        id: candidate.taskId,
+        branchName: candidate.branchName,
+        classification: decision.classification,
+        action: 'manual-merge-ready',
+      })
+    } else {
+      summary.results.push({
+        id: candidate.taskId,
+        branchName: candidate.branchName,
+        classification: decision.classification,
+        action: 'resume-failed',
+        reason: outcome.detail || outcome.status,
+      })
+      log(`[recovery] ${candidate.branchName}: resume ${outcome.status} at ${outcome.stage || 'unknown stage'}`)
+    }
+  }
+
+  return { summary, taskResults, held, fatal: null }
+}
+
+// ---------------------------------------------------------------------------
+// Task-agent writable-root preflight — ODW launches every adapter with the
+// control checkout as its working directory, so a sandbox scoped to that
+// checkout silently rejects writes to sibling ...worktrees/roadmap-* paths.
+// Prompt text cannot fix that, so the workflow proves writability once per
+// run: each adapter that must write into task worktrees (planner and builder)
+// is asked to write a token file inside the first task worktree, and the HOST
+// verifies the bytes on disk. A failed probe is a launch/sandbox fault, so the
+// task fails fast at stage "worktree-write" instead of burning design rounds,
+// and that stage is excluded from partial-branch assessment.
+// ---------------------------------------------------------------------------
+const WRITE_PROBE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    ok: { type: 'boolean', description: 'true when the probe file was written with the exact token' },
+    detail: { type: 'string', description: 'the error encountered, empty when ok' },
+  },
+  required: ['ok'],
+}
+
+function writeProbeTargets() {
+  const targets = [
+    { role: 'plan', adapter: String(PLAN_ADAPTER).toLowerCase(), options: planAgentOptions },
+    { role: 'build', adapter: String(BUILD_ADAPTER).toLowerCase(), options: buildAgentOptions },
+  ]
+  const seen = new Set()
+  return targets.filter((target) => {
+    if (seen.has(target.adapter)) return false
+    seen.add(target.adapter)
+    return true
+  })
+}
+
+function writeProbePath(worktree, adapter) {
+  const path = process.getBuiltinModule('node:path')
+  return path.join(worktree, `.df12-write-probe-${String(adapter).replace(/[^0-9a-zA-Z._-]+/g, '-')}`)
+}
+
+function writeProbeToken(tag, adapter) {
+  return `df12-write-probe v1 task=${tag} adapter=${adapter}`
+}
+
+function writeProbePrompt(probeFile, token) {
+  return [
+    'You are a sub-agent in the df12-build roadmap workflow. Your final message IS your return value — return data, not chat.',
+    '',
+    'TASK: Writable-root probe. Write EXACTLY the token below (no trailing newline required) to the probe file path below, using your shell or file-edit tooling. Do not write anywhere else, do not commit, and do not delete the file afterwards — the workflow host verifies and removes it.',
+    '',
+    `PROBE_FILE: ${probeFile}`,
+    `PROBE_TOKEN: ${token}`,
+    '',
+    'Return ok=true only if the write succeeded. If the write is rejected (sandbox, permissions, missing directory), return ok=false with the exact error text in detail.',
+  ].join('\n')
+}
+
+// The worktree is untrusted content: a branch can commit a symlink or a decoy
+// file at a probe path. `fs.rm` removes the link itself (never its target),
+// so clearing before writing or dispatching keeps the host from writing
+// through, reading through, or trusting anything it did not create.
+async function clearProbeArtifact(probeFile) {
+  const fs = process.getBuiltinModule('node:fs/promises')
+  try {
+    await fs.lstat(probeFile)
+  } catch {
+    return // nothing at the path
+  }
+  await fs.rm(probeFile, { force: true, recursive: true })
+}
+
+async function verifyWriteProbe(probeFile, token) {
+  const fs = process.getBuiltinModule('node:fs/promises')
+  const { constants } = process.getBuiltinModule('node:fs')
+  // Open once with O_NOFOLLOW and verify/read through the handle: the check
+  // and the read then target the same inode, so a symlink (or a swap between
+  // a check and a separate path-based read) can never redirect the read.
+  let handle = null
+  let content = null
+  try {
+    handle = await fs.open(probeFile, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const stat = await handle.stat()
+    if (stat.isFile()) {
+      content = await handle.readFile({ encoding: 'utf8' })
+    }
+  } catch (error) {
+    // Linux reports ELOOP for O_NOFOLLOW on a symlink; FreeBSD uses EMLINK.
+    if (error && (error.code === 'ELOOP' || error.code === 'EMLINK')) {
+      await fs.rm(probeFile, { force: true, recursive: true })
+      return { ok: false, detail: 'probe path is not a regular file (symlink or special file rejected)' }
+    }
+    return { ok: false, detail: `probe file missing or unreadable: ${(error && error.message) || String(error)}` }
+  } finally {
+    if (handle) await handle.close()
+  }
+  await fs.rm(probeFile, { force: true, recursive: true })
+  if (content === null) {
+    return { ok: false, detail: 'probe path is not a regular file (symlink or special file rejected)' }
+  }
+  if (content.trim() === token) return { ok: true, detail: '' }
+  return { ok: false, detail: `probe file content mismatch (${content.trim().slice(0, 80) || '<empty>'})` }
+}
+
+async function hostWriteProbe(worktree) {
+  const fs = process.getBuiltinModule('node:fs/promises')
+  const path = process.getBuiltinModule('node:path')
+  const hostProbe = path.join(worktree, '.df12-write-probe-host')
+  try {
+    // Clear any committed artefact first, then create exclusively ('wx'
+    // fails on any pre-existing path), so the write can never follow a
+    // symlink out of the worktree.
+    await clearProbeArtifact(hostProbe)
+    await fs.writeFile(hostProbe, 'df12-write-probe host', { encoding: 'utf8', flag: 'wx' })
+    await fs.rm(hostProbe, { force: true })
+    return { ok: true, detail: '' }
+  } catch (error) {
+    return { ok: false, detail: (error && error.message) || String(error) }
+  }
+}
+
+async function runTaskAgentWritePreflight(worktree, tag) {
+  const failures = []
+  const host = await hostWriteProbe(worktree)
+  if (!host.ok) {
+    return { ok: false, failures: [{ adapter: 'host', detail: host.detail }] }
+  }
+  for (const target of writeProbeTargets()) {
+    const probeFile = writeProbePath(worktree, target.adapter)
+    const token = writeProbeToken(tag, target.adapter)
+    // Clear committed decoys before dispatch: the token is predictable, so a
+    // pre-existing file (or symlink) at the probe path must never be able to
+    // satisfy — or redirect — the verification that follows.
+    await clearProbeArtifact(probeFile)
+    let reply = null
+    let agentError = ''
+    try {
+      reply = await agent(writeProbePrompt(probeFile, token), target.options({
+        phase: 'Worktree',
+        label: `write-probe:${target.adapter}`,
+        schema: WRITE_PROBE_SCHEMA,
+      }))
+    } catch (error) {
+      agentError = (error && error.message) || String(error)
+    }
+    const verified = await verifyWriteProbe(probeFile, token)
+    if (!verified.ok) {
+      const detail = [verified.detail, reply && reply.ok === false ? reply.detail : '', agentError]
+        .filter(Boolean)
+        .join('; ')
+      failures.push({ adapter: target.adapter, detail })
+    }
+  }
+  return { ok: failures.length === 0, failures }
+}
+
+// One probe per run: sandbox scope does not vary between sibling worktrees,
+// so every task shares the first task's verdict (concurrent tasks await the
+// same promise and fail fast together when the environment is broken).
+let taskAgentWritePreflight = null
+function ensureTaskAgentWriteAccess(worktree, tag) {
+  if (!WORKTREE_WRITE_PREFLIGHT) return Promise.resolve({ ok: true, skipped: true, failures: [] })
+  if (!taskAgentWritePreflight) taskAgentWritePreflight = runTaskAgentWritePreflight(worktree, tag)
+  return taskAgentWritePreflight
+}
+
+// ---------------------------------------------------------------------------
+// Dual review + serialized integration — shared by the normal task pipeline
+// and review-mode recovery resume, so a recovered branch can only land
+// through exactly the same reviewers, fix rounds, merge lock, and roadmap
+// update path as ordinary work.
+// ---------------------------------------------------------------------------
+async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock, options = {}) {
+  const tag = task.id
+  const kindExtra = options.kind ? { kind: options.kind } : {}
+  const proposals = []
+  let reviewsPass = false
+  for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
+    const [codeReview, expertReview] = await parallel([
+      () => agent(codeReviewPrompt(task, worktree, plan), reviewAgentOptions({ phase: 'Code Review', label: `code-review:${tag} r${round}`, schema: REVIEW_SCHEMA })),
+      () => agent(expertReviewPrompt(task, worktree, plan), reviewAgentOptions({ phase: 'Expert Review', label: `expert-review:${tag} r${round}`, schema: REVIEW_SCHEMA })),
+    ])
+    for (const r of [codeReview, expertReview]) {
+      if (r?.proposedRoadmapItems?.length) proposals.push(...r.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
+    }
+    if (!codeReview || !expertReview) {
+      const missing = [
+        !codeReview ? 'code review' : null,
+        !expertReview ? 'expert review' : null,
+      ].filter(Boolean).join(' and ')
+      return {
+        id: tag,
+        status: 'failed',
+        stage: 'review',
+        detail: `dual review failed to return a structured verdict from ${missing}; branch left unmerged for the root agent`,
+        worktree,
+        proposals,
+        ...kindExtra,
+      }
+    }
+    const blocking = [
+      ...(codeReview.blocking || []),
+      ...(expertReview.blocking || []),
+    ]
+    if (blocking.length === 0 && codeReview?.verdict === 'pass' && expertReview?.verdict === 'pass') {
+      reviewsPass = true
+      log(`[task ${tag}] dual review passed in round ${round}`)
+      break
+    }
+    log(`[task ${tag}] review round ${round}: ${blocking.length} blocking item(s)`)
+    if (round === MAX_REVIEW_ROUNDS) break
+    phase('Implement')
+    await buildLock(() => agent(fixPrompt(task, worktree, plan, blocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}` })))
+  }
+
+  if (!reviewsPass) {
+    return { id: tag, status: 'halted', stage: 'review', detail: 'reviewers not satisfied within cap; branch left unmerged for the root agent', worktree, proposals, ...kindExtra }
+  }
+
+  // --- Integrate (serialized behind the merge queue) ----------------------
+  // Plan, design review, implement and the dual review all ran in parallel
+  // with sibling tasks; only the rebase + squash-merge + push is serialized,
+  // so at most one task touches origin/BASE at a time.
+  let integration = null
+  if (AUTO_MERGE) {
+    const doIntegrate = () => {
+      phase('Integrate')
+      return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
+    }
+    integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
+    if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
+      return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, ...kindExtra }
+    }
+  } else {
+    return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals, ...kindExtra }
+  }
+
+  return { id: tag, status: 'done', plan, impl, integration, worktree, proposals, ...kindExtra }
+}
+
+// ---------------------------------------------------------------------------
 // Per-task pipeline
 // ---------------------------------------------------------------------------
 async function runTask(task, mergeLock) {
@@ -1099,6 +1907,18 @@ async function runTask(task, mergeLock) {
   log(`[task ${tag}] worktree ${wt.branch} @ ${worktree}`)
 
   try {
+  // --- Task-agent writable-root gate (host-verified, once per run) ---------
+  const writeAccess = await ensureTaskAgentWriteAccess(worktree, tag)
+  if (!writeAccess.ok) {
+    return {
+      id: tag,
+      status: 'failed',
+      stage: 'worktree-write',
+      detail: `task-agent writable-root preflight failed (launch/sandbox fault, not a task defect): ${writeAccess.failures.map((failure) => `${failure.adapter}: ${failure.detail}`).join('; ')}`,
+      worktree,
+      proposals: [],
+    }
+  }
   // --- Addendum pass: lightweight lane (no plan / design / dual review) ----
   // A completed task with open sub-tasks: implement the sub-tasks, gate, and
   // merge. No audit afterwards (the control loop skips it), which is what stops
@@ -1133,6 +1953,18 @@ async function runTask(task, mergeLock) {
     }
     const openIssues = impl?.openIssues || []
     const onlyDeferredReviewIssues = hasOnlyDeferredReviewIssues(openIssues)
+    if (addendumImplementationNeedsManualMerge(impl)) {
+      return {
+        id: tag,
+        status: 'manual-merge-ready',
+        stage: 'addendum',
+        detail: 'addendum implementation reported completed work, green gates, and no open issues, but did not set ok=true; branch left for operator verification before integration',
+        impl,
+        worktree,
+        proposals: [],
+        kind: 'addendum',
+      }
+    }
     if (!impl || !impl.ok || !impl.gatesGreen || (openIssues.length > 0 && !onlyDeferredReviewIssues)) {
       return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: impl?.summary || 'addendum did not reach a green state or left open issues', openIssues: impl?.openIssues || [], worktree, proposals: [], kind: 'addendum' })
     }
@@ -1177,6 +2009,17 @@ async function runTask(task, mergeLock) {
       schema: PLAN_SCHEMA,
     })))
     if (!plan) return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'plan', detail: 'planner returned nothing', worktree, proposals: [] })
+    if (!await fileExists(plan.execplanPath, worktree)) {
+      return await attachAssessment(task, wt, {
+        id: tag,
+        status: 'failed',
+        stage: 'plan',
+        detail: `planner returned missing ExecPlan path: ${plan.execplanPath || '<empty>'}`,
+        plan,
+        worktree,
+        proposals: [],
+      })
+    }
 
     phase('Design Review')
     designVerdict = await planningLock(() => agent(designReviewPrompt(task, worktree, plan, round), reviewAgentOptions({
@@ -1244,80 +2087,15 @@ async function runTask(task, mergeLock) {
     })
   }
 
-  // --- Dual review (code-review + experts) with fix loop ------------------
-  const proposals = []
-  let reviewsPass = false
-  for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
-    const [codeReview, expertReview] = await parallel([
-      () => agent(codeReviewPrompt(task, worktree, plan), reviewAgentOptions({ phase: 'Code Review', label: `code-review:${tag} r${round}`, schema: REVIEW_SCHEMA })),
-      () => agent(expertReviewPrompt(task, worktree, plan), reviewAgentOptions({ phase: 'Expert Review', label: `expert-review:${tag} r${round}`, schema: REVIEW_SCHEMA })),
-    ])
-    for (const r of [codeReview, expertReview]) {
-      if (r?.proposedRoadmapItems?.length) proposals.push(...r.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
-    }
-    if (!codeReview || !expertReview) {
-      const missing = [
-        !codeReview ? 'code review' : null,
-        !expertReview ? 'expert review' : null,
-      ].filter(Boolean).join(' and ')
-      return await attachAssessment(task, wt, {
-        id: tag,
-        status: 'failed',
-        stage: 'review',
-        detail: `dual review failed to return a structured verdict from ${missing}; branch left unmerged for the root agent`,
-        worktree,
-        proposals,
-      })
-    }
-    const blocking = [
-      ...(codeReview.blocking || []),
-      ...(expertReview.blocking || []),
-    ]
-    if (blocking.length === 0 && codeReview?.verdict === 'pass' && expertReview?.verdict === 'pass') {
-      reviewsPass = true
-      log(`[task ${tag}] dual review passed in round ${round}`)
-      break
-    }
-    log(`[task ${tag}] review round ${round}: ${blocking.length} blocking item(s)`)
-    if (round === MAX_REVIEW_ROUNDS) break
-    phase('Implement')
-    await buildLock(() => agent(fixPrompt(task, worktree, plan, blocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}` })))
+  // --- Dual review + integration (shared with review-mode recovery resume) --
+  const outcome = await runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock)
+  if (outcome.status === 'failed' || outcome.status === 'halted') {
+    return await attachAssessment(task, wt, outcome)
   }
-
-  if (!reviewsPass) {
-    return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'review', detail: 'reviewers not satisfied within cap; branch left unmerged for the root agent', worktree, proposals })
-  }
-
-  // --- Integrate (serialized behind the merge queue) ----------------------
-  // Plan, design review, implement and the dual review all ran in parallel
-  // with sibling tasks; only the rebase + squash-merge + push is serialized,
-  // so at most one task touches origin/BASE at a time.
-  let integration = null
-  if (AUTO_MERGE) {
-    const doIntegrate = () => {
-      phase('Integrate')
-      return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
-    }
-    integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
-    if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
-      return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals })
-    }
-  } else {
-    return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals }
-  }
-
-  return { id: tag, status: 'done', plan, impl, integration, worktree, proposals }
+  return outcome
   } catch (error) {
     const detail = `unhandled agent error: ${(error && error.message) || String(error)}`
-    const authDetail = authFailureDetail(detail)
-    const result = {
-      id: tag,
-      status: authDetail ? 'fatal-auth' : 'failed',
-      stage: authDetail ? 'auth' : 'error',
-      detail,
-      worktree,
-      proposals: [],
-    }
+    const result = resultFromUnhandledAgentError(tag, detail, { worktree })
     return await attachAssessment(task, wt, result)
   }
 }
@@ -1424,6 +2202,18 @@ const manualMergeReadyNormal = new Set()
 const manualMergeReadyAddendum = new Set()
 const dryRunNormal = new Set()
 const dryRunAddendum = new Set()
+const recoveryHeldNormal = new Set() // ids with surviving branches recovery reported but did not integrate this run
+const recoveryHeldAddendum = new Set()
+let recovery = {
+  enabled: RESUME_PARTIAL_BRANCHES,
+  mode: RESUME_MODE,
+  candidates: 0,
+  assessed: 0,
+  resumed: 0,
+  skipped: [],
+  results: [],
+  errors: [],
+}
 const results = []
 const audits = []
 const triages = []
@@ -1495,8 +2285,8 @@ async function doSelect(taken) {
 
 function takenSnapshot() {
   return {
-    normal: [...processedNormal, ...manualMergeReadyNormal, ...dryRunNormal, ...inflightNormal],
-    addendum: [...processedAddendum, ...manualMergeReadyAddendum, ...dryRunAddendum, ...inflightAddendum],
+    normal: [...processedNormal, ...manualMergeReadyNormal, ...dryRunNormal, ...inflightNormal, ...recoveryHeldNormal],
+    addendum: [...processedAddendum, ...manualMergeReadyAddendum, ...dryRunAddendum, ...inflightAddendum, ...recoveryHeldAddendum],
   }
 }
 
@@ -1504,7 +2294,8 @@ function isAlreadyTaken(task) {
   const processedSet = task?.isAddendum ? processedAddendum : processedNormal
   const manualMergeReadySet = task?.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal
   const dryRunSet = task?.isAddendum ? dryRunAddendum : dryRunNormal
-  return processedSet.has(task.id) || manualMergeReadySet.has(task.id) || dryRunSet.has(task.id) || inflightNormal.has(task.id) || inflightAddendum.has(task.id)
+  const recoveryHeldSet = task?.isAddendum ? recoveryHeldAddendum : recoveryHeldNormal
+  return processedSet.has(task.id) || manualMergeReadySet.has(task.id) || dryRunSet.has(task.id) || recoveryHeldSet.has(task.id) || inflightNormal.has(task.id) || inflightAddendum.has(task.id)
 }
 
 function markInflight(task) {
@@ -1598,17 +2389,10 @@ async function fillPool() {
         (result) => ({ id: task.id, task, result }),
         (err) => {
           const detail = `unhandled agent error: ${(err && err.message) || String(err)}`
-          const authDetail = authFailureDetail(detail)
           return {
             id: task.id,
             task,
-            result: {
-              id: task.id,
-              status: authDetail ? 'fatal-auth' : 'failed',
-              stage: authDetail ? 'auth' : 'error',
-              detail,
-              proposals: [],
-            },
+            result: resultFromUnhandledAgentError(task.id, detail),
           }
         },
       ),
@@ -1627,6 +2411,41 @@ if (authPreflight.length) {
   halted = `fatal auth preflight failed: ${authPreflight.map((failure) => `${failure.tool} (${failure.command})`).join(', ')}`
 }
 let stop = Boolean(halted)
+let providerFaultHalt = false
+
+// --- Fresh-run recovery: runs before normal selection so surviving branches
+// are assessed (and, in review mode, resumed) ahead of new roadmap work. A
+// fatal auth preflight blocks recovery entirely: no assessment, no resume.
+if (RESUME_PARTIAL_BRANCHES && halted) {
+  recovery.blocked = 'auth-preflight-failed'
+}
+if (RESUME_PARTIAL_BRANCHES && !halted) {
+  try {
+    const outcome = await runRecovery(process.cwd(), mergeLock)
+    recovery = outcome.summary
+    for (const id of outcome.held.normal) recoveryHeldNormal.add(id)
+    for (const id of outcome.held.addendum) recoveryHeldAddendum.add(id)
+    for (const entry of outcome.taskResults) {
+      results.push(entry.result)
+      if (entry.result.status === 'done' && entry.result.integration?.pushed) {
+        markProcessed(entry.task)
+      } else if (entry.result.status === 'manual-merge-ready') {
+        markManualMergeReady(entry.task)
+      }
+    }
+    if (outcome.fatal) {
+      results.push(outcome.fatal)
+      halted = `recovery ${outcome.fatal.status} at ${outcome.fatal.stage}: ${outcome.fatal.detail}`
+      if (outcome.fatal.status === 'provider-fault') providerFaultHalt = true
+      stop = true
+    }
+  } catch (error) {
+    const detail = (error && error.message) || String(error)
+    recovery.errors.push(`recovery pass failed: ${detail}`)
+    log(`[recovery] failed (${detail}); continuing with normal roadmap selection`)
+  }
+}
+
 while (true) {
   if (!stop && !halted) {
     try {
@@ -1668,6 +2487,10 @@ while (true) {
   } else if (result.status === 'fatal-auth') {
     halted = `task ${done.id} fatal auth failure at ${result.stage}: ${result.detail}`
     stop = true
+  } else if (result.status === 'provider-fault') {
+    halted = `task ${done.id} provider fault at ${result.stage}: ${result.detail}`
+    providerFaultHalt = true
+    stop = true
   } else if (!halted) {
     // Record the failure, stop opening new work, and let in-flight siblings
     // finish rather than abandoning their (possibly mergeable) branches.
@@ -1677,10 +2500,9 @@ while (true) {
 }
 
 // End-of-run: the pool is drained, so every step has quiesced. Fold any
-// remaining remediation into the roadmap — even on a halt, since triage only
-// RECORDS proposals (it never implements), so accrued audit findings are not
-// lost to a single task's failure.
-if (canFlush) {
+// remaining remediation into the roadmap after product failures; skip that
+// write on provider faults so an outage does not look like task evidence.
+if (canFlush && !providerFaultHalt) {
   try {
     await flushSettledSteps()
   } catch (err) {
@@ -1717,6 +2539,9 @@ return {
   assessments,
   audits,
   authPreflight,
+  // Fresh-run recovery index (failure-resume design): per-task results[]
+  // entries remain the primary record for review/integration outcomes.
+  recovery,
   // Remediation GIST-triaged into addendum / step-task / reroute lanes when each
   // step quiesced (see remediationTriage). Anything in pendingProposals was left
   // unwritten because the run halted — triage it manually.
@@ -1726,6 +2551,7 @@ return {
   summary:
     `Processed ${processed.length} roadmap task(s) (pool width ${MAX_PARALLEL}): ` +
     results.map((r) => `${r.id}=${r.status}`).join(', ') +
+    (recovery.enabled ? ` | recovery(${recovery.mode}): ${recovery.assessed} assessed, ${recovery.resumed} resumed, ${recovery.skipped.length} skipped` : '') +
     (assessments.length ? ` | assessed ${assessments.length} failed/halted branch(es)` : '') +
     (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : '') +
     (halted ? ` | halted: ${halted}` : ' | clean stop (no more unblocked tasks).'),

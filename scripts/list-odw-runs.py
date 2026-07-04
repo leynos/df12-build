@@ -1,0 +1,361 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "cyclopts>=3.0",
+# ]
+# ///
+"""Tabulate Open Dynamic Workflows (ODW) runs as an aligned status table.
+
+Reads run metadata (``status.json`` and ``meta.json``) from an ODW runs
+directory (``~/.odw/runs`` by default), then prints one row per run with the
+source project, status, last update time, run id, and workflow name. Rows
+default to running runs only; ``--all`` or repeated ``--status`` widen the
+view, and ``--source``/``--workflow`` apply substring filters.
+
+Example
+-------
+List the running runs for one project::
+
+    scripts/list-odw-runs.py --source my-project
+
+List every failed or stopped run::
+
+    scripts/list-odw-runs.py -s failed -s stopped
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Annotated, Any
+
+from cyclopts import App, Parameter
+
+
+app = App(help="Tabulate ODW runs from ~/.odw/runs.")
+
+
+@dataclass(frozen=True)
+class RunRow:
+    """One printable table row summarizing a single ODW run.
+
+    Attributes
+    ----------
+    source : str
+        Source directory recorded in the run's metadata.
+    status : str
+        Run state such as ``running``, ``done``, ``failed``, or ``stopped``.
+    updated_at : float | str | None
+        Last update marker: an epoch timestamp when numeric, the raw string
+        when unparseable, or ``None`` when absent.
+    run_id : str
+        Run identifier (directory name when metadata omits it).
+    workflow_name : str
+        Workflow name from metadata, falling back to the parent directory.
+    """
+
+    source: str
+    status: str
+    updated_at: float | str | None
+    run_id: str
+    workflow_name: str
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    """Read a JSON object from ``path``, tolerating live or missing files.
+
+    Parameters
+    ----------
+    path : Path
+        JSON file to read.
+
+    Returns
+    -------
+    dict[str, Any]
+        The decoded object, or ``{}`` when the file is missing, unreadable,
+        torn mid-write, or does not contain a JSON object. Absence is
+        silent; malformed or unreadable content warns on stderr so corrupt
+        run state is visible without failing the listing.
+    """
+    try:
+        with path.open(encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, OSError) as error:
+        print(f"warning: skipping unreadable {path}: {error}", file=sys.stderr)
+        return {}
+
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def coerce_timestamp(value: Any) -> float | str | None:
+    """Normalize a metadata timestamp into a sortable representation.
+
+    Parameters
+    ----------
+    value : Any
+        Raw ``updatedAt``/``createdAt`` value from run metadata.
+
+    Returns
+    -------
+    float | str | None
+        ``float`` for numeric (or numeric-string) values, the original string
+        when it is not numeric, ``None`` when the value is ``None``, and
+        ``str(value)`` for any other type.
+    """
+    match value:
+        case None:
+            return None
+        case int() | float():
+            return float(value)
+        case str():
+            try:
+                return float(value)
+            except ValueError:
+                return value
+        case _:
+            return str(value)
+
+
+def display_timestamp(value: float | str | None) -> str:
+    """Render a coerced timestamp for table output.
+
+    Parameters
+    ----------
+    value : float | str | None
+        Value produced by :func:`coerce_timestamp`.
+
+    Returns
+    -------
+    str
+        An ISO-8601 UTC string (``...Z``) for floats, the string unchanged,
+        or ``""`` for ``None``.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return datetime.fromtimestamp(value, tz=UTC).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        )
+    return value
+
+
+def sort_key(row: RunRow) -> tuple[int, float | str]:
+    """Build a sort key that orders numeric timestamps after raw strings.
+
+    Parameters
+    ----------
+    row : RunRow
+        Row to derive the key from.
+
+    Returns
+    -------
+    tuple[int, float | str]
+        ``(1, timestamp)`` for numeric timestamps, ``(0, text)`` otherwise,
+        so a reverse sort lists the most recently updated runs first.
+    """
+    if isinstance(row.updated_at, float):
+        return (1, row.updated_at)
+    if isinstance(row.updated_at, str):
+        return (0, row.updated_at)
+    return (0, "")
+
+
+def collect_runs(runs_dir: Path) -> list[RunRow]:
+    """Scan an ODW runs root and build one row per run directory.
+
+    Parameters
+    ----------
+    runs_dir : Path
+        ODW runs root laid out as ``<runs_dir>/<workflow>/<run-id>/``.
+
+    Returns
+    -------
+    list[RunRow]
+        Rows in directory order; missing metadata fields degrade to ``""``.
+    """
+    rows: list[RunRow] = []
+
+    for run_dir in sorted(path for path in runs_dir.glob("*/*") if path.is_dir()):
+        status_data = read_json(run_dir / "status.json")
+        meta_data = read_json(run_dir / "meta.json")
+
+        status = str(
+            status_data.get("state")
+            or status_data.get("status")
+            or meta_data.get("status")
+            or ""
+        )
+        updated_at = coerce_timestamp(
+            status_data.get("updatedAt")
+            or status_data.get("updated_at")
+            or meta_data.get("updatedAt")
+            or meta_data.get("createdAt")
+            or meta_data.get("created_at")
+        )
+        run_id = str(status_data.get("runId") or meta_data.get("runId") or run_dir.name)
+        workflow_name = str(
+            meta_data.get("workflowName")
+            or status_data.get("name")
+            or meta_data.get("name")
+            or run_dir.parent.name
+        )
+        source = str(meta_data.get("source") or "")
+
+        rows.append(
+            RunRow(
+                source=source,
+                status=status,
+                updated_at=updated_at,
+                run_id=run_id,
+                workflow_name=workflow_name,
+            )
+        )
+
+    return rows
+
+
+def filter_rows(
+    rows: list[RunRow],
+    *,
+    show_all: bool,
+    statuses: list[str] | None,
+    source: str | None,
+    workflow: str | None,
+) -> list[RunRow]:
+    """Filter and sort run rows for display.
+
+    Parameters
+    ----------
+    rows : list[RunRow]
+        Rows collected from the runs root.
+    show_all : bool
+        When ``True``, keep every status unless ``statuses`` narrows it.
+    statuses : list[str] | None
+        Case-insensitive status names to keep. When empty and ``show_all``
+        is ``False``, only ``running`` rows are kept.
+    source : str | None
+        Case-insensitive substring filter for the source path.
+    workflow : str | None
+        Case-insensitive substring filter for the workflow name.
+
+    Returns
+    -------
+    list[RunRow]
+        Matching rows, most recently updated first.
+    """
+    status_filter = {status.casefold() for status in statuses or []}
+    if not show_all and not status_filter:
+        status_filter = {"running"}
+
+    filtered = rows
+    if status_filter:
+        filtered = [row for row in filtered if row.status.casefold() in status_filter]
+    if source:
+        source_query = source.casefold()
+        filtered = [row for row in filtered if source_query in row.source.casefold()]
+    if workflow:
+        workflow_query = workflow.casefold()
+        filtered = [
+            row for row in filtered if workflow_query in row.workflow_name.casefold()
+        ]
+
+    return sorted(filtered, key=sort_key, reverse=True)
+
+
+def table(rows: list[RunRow]) -> str:
+    """Render rows as an aligned, two-space-separated text table.
+
+    Parameters
+    ----------
+    rows : list[RunRow]
+        Rows to render, already filtered and sorted.
+
+    Returns
+    -------
+    str
+        Header, divider, and body lines joined with newlines.
+    """
+    headers = ["source", "status", "updatedat", "run id", "workflow name"]
+    body = [
+        [
+            row.source,
+            row.status,
+            display_timestamp(row.updated_at),
+            row.run_id,
+            row.workflow_name,
+        ]
+        for row in rows
+    ]
+
+    widths = [
+        max(len(str(row[column])) for row in [headers, *body])
+        for column in range(len(headers))
+    ]
+
+    def render(row: list[str]) -> str:
+        return "  ".join(
+            value.ljust(width) for value, width in zip(row, widths, strict=True)
+        )
+
+    lines = [render(headers), render(["-" * width for width in widths])]
+    lines.extend(render(row) for row in body)
+    return "\n".join(lines)
+
+
+@app.default
+def main(
+    *,
+    runs_dir: Annotated[
+        Path | None,
+        Parameter(help="Root ODW runs directory. Defaults to ~/.odw/runs."),
+    ] = None,
+    show_all: Annotated[
+        bool,
+        Parameter(name="--all", negative=(), help="Show all run statuses."),
+    ] = False,
+    statuses: Annotated[
+        list[str] | None,
+        Parameter(name=("--status", "-s"), help="Status to show. Repeatable."),
+    ] = None,
+    source: Annotated[
+        str | None,
+        Parameter(help="Case-insensitive substring filter for source."),
+    ] = None,
+    workflow: Annotated[
+        str | None,
+        Parameter(help="Case-insensitive substring filter for workflow name."),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        Parameter(help="Maximum number of rows to print."),
+    ] = None,
+) -> None:
+    """Show ODW run status rows, defaulting to running runs."""
+    if limit is not None and limit < 0:
+        print("--limit must be non-negative", file=sys.stderr)
+        raise SystemExit(2)
+    if runs_dir is None:
+        runs_dir = Path.home() / ".odw" / "runs"
+    rows = filter_rows(
+        collect_runs(runs_dir),
+        show_all=show_all,
+        statuses=statuses,
+        source=source,
+        workflow=workflow,
+    )
+    if limit is not None:
+        rows = rows[:limit]
+
+    print(table(rows))
+
+
+if __name__ == "__main__":
+    app()

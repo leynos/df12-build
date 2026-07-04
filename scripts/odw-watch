@@ -1,0 +1,597 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "cyclopts>=3.0",
+# ]
+# ///
+"""Tail Open Dynamic Workflows (ODW) events for one source project.
+
+Operator companion to ``odw logs``: given a source directory, this script
+finds every *running* ODW run whose metadata records that source, prints the
+most recent events across those runs, then follows their ``events.jsonl``
+files, discovering newly started runs on each poll. Torn trailing lines are
+tolerated and re-read on the next poll, matching the run-directory contract.
+
+Example
+-------
+Follow the runs building a project, starting with the last 20 events::
+
+    scripts/odw-watch ~/Projects/my-project -n 20
+"""
+
+from __future__ import annotations
+
+import json
+import signal
+import sys
+import time
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Annotated, Any
+
+from cyclopts import App, Parameter
+
+
+app = App(help="Watch events for running ODW runs from a source directory.")
+
+
+@dataclass(frozen=True)
+class Run:
+    """A discovered ODW run directory matched to the watched source.
+
+    Attributes
+    ----------
+    path : Path
+        Run directory (``<runs_dir>/<workflow>/<run-id>``).
+    run_id : str
+        Run identifier from metadata, or the directory name.
+    source : str
+        Source directory recorded in the run's metadata.
+    """
+
+    path: Path
+    run_id: str
+    source: str
+
+    @property
+    def events_path(self) -> Path:
+        """Path of the run's append-only ``events.jsonl`` stream."""
+        return self.path / "events.jsonl"
+
+
+@dataclass(frozen=True)
+class Event:
+    """One decoded event line, ordered by timestamp then file sequence.
+
+    Attributes
+    ----------
+    ts : float
+        Event timestamp (epoch seconds), ``0.0`` when absent.
+    sequence : int
+        Line index within the batch that read it; tie-breaker for sorting.
+    run : Run
+        Run the event belongs to.
+    data : dict[str, Any]
+        Raw decoded event payload.
+    """
+
+    ts: float
+    sequence: int
+    run: Run
+    data: dict[str, Any]
+
+
+_warned: set[str] = set()
+
+
+def warn_once(message: str) -> None:
+    """Print ``message`` to stderr once per process, deduplicated by text.
+
+    The poll loop re-reads mutable state files every cycle, and a torn
+    ``status.json`` mid-write is an expected transient, so repeating the same
+    warning every poll would drown the event stream.
+    """
+    if message in _warned:
+        return
+    _warned.add(message)
+    print(message, file=sys.stderr, flush=True)
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    """Read a JSON object from ``path``, returning ``{}`` on any failure.
+
+    Parameters
+    ----------
+    path : Path
+        JSON file to read.
+
+    Returns
+    -------
+    dict[str, Any]
+        The decoded object, or ``{}`` when the file is missing, unreadable,
+        torn mid-write, or does not contain a JSON object.
+
+    Notes
+    -----
+    Absence is silent (runs legitimately lack some files); malformed or
+    unreadable content warns once on stderr so operators can spot corrupt
+    run state without the watcher crashing or spamming.
+    """
+    try:
+        with path.open(encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, OSError):
+        # Keyed on the path alone: exception text varies between reads of a
+        # live file, and a varying key would defeat warn_once's dedup.
+        warn_once(f"warning: skipping unreadable {path}")
+        return {}
+
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def normalized_path(path: Path) -> str:
+    """Expand and resolve ``path`` into a comparable absolute string.
+
+    Parameters
+    ----------
+    path : Path
+        Path to normalize; may contain ``~`` or be relative.
+
+    Returns
+    -------
+    str
+        Absolute string form (``resolve(strict=False)``, so the path does
+        not have to exist), suitable for equality comparison.
+    """
+    return str(path.expanduser().resolve(strict=False))
+
+
+def normalize_source(source: str) -> str:
+    """Normalize a metadata source string for path comparison.
+
+    Parameters
+    ----------
+    source : str
+        Source directory string recorded in a run's ``meta.json``.
+
+    Returns
+    -------
+    str
+        The normalized absolute path string from :func:`normalized_path`.
+    """
+    return normalized_path(Path(source))
+
+
+def is_matching_source(meta_source: Any, source: Path) -> bool:
+    """Report whether a run's recorded source matches the watched source.
+
+    Parameters
+    ----------
+    meta_source : Any
+        Raw ``source`` value from run metadata (untrusted; any type).
+    source : Path
+        Source directory the watcher was pointed at.
+
+    Returns
+    -------
+    bool
+        ``True`` only when ``meta_source`` is a non-empty string whose
+        normalized path equals the watched source's normalized path.
+    """
+    if not isinstance(meta_source, str) or not meta_source:
+        return False
+    return normalize_source(meta_source) == normalized_path(source)
+
+
+def is_running(run_dir: Path) -> bool:
+    """Report whether the run's ``status.json`` records a running state.
+
+    Parameters
+    ----------
+    run_dir : Path
+        Run directory containing ``status.json``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the state (or legacy ``status``) field equals
+        ``running`` case-insensitively; ``False`` for every other state,
+        including missing or unreadable status files.
+    """
+    status_data = read_json(run_dir / "status.json")
+    return str(status_data.get("state") or status_data.get("status") or "").casefold() == (
+        "running"
+    )
+
+
+def discover_running_runs(runs_dir: Path, source: Path) -> list[Run]:
+    """Find running runs under ``runs_dir`` whose metadata matches ``source``.
+
+    Parameters
+    ----------
+    runs_dir : Path
+        ODW runs root laid out as ``<runs_dir>/<workflow>/<run-id>/``.
+    source : Path
+        Source directory to match against each run's metadata.
+
+    Returns
+    -------
+    list[Run]
+        Matching running runs, in sorted directory order.
+    """
+    runs: list[Run] = []
+
+    for run_dir in sorted(path for path in runs_dir.glob("*/*") if path.is_dir()):
+        meta_data = read_json(run_dir / "meta.json")
+        if not is_matching_source(meta_data.get("source"), source):
+            continue
+        if not is_running(run_dir):
+            continue
+
+        run_id = str(meta_data.get("runId") or run_dir.name)
+        runs.append(
+            Run(
+                path=run_dir,
+                run_id=run_id,
+                source=str(meta_data.get("source") or ""),
+            )
+        )
+
+    return runs
+
+
+def parse_event(line: bytes, *, sequence: int, run: Run) -> Event | None:
+    """Decode one ``events.jsonl`` line into an :class:`Event`.
+
+    Parameters
+    ----------
+    line : bytes
+        Raw line, including its trailing newline.
+    sequence : int
+        Line index within the current read batch.
+    run : Run
+        Run the line belongs to.
+
+    Returns
+    -------
+    Event | None
+        The decoded event, or ``None`` for undecodable or non-object lines.
+    """
+    try:
+        raw_data = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(raw_data, dict):
+        return None
+
+    raw_ts = raw_data.get("ts")
+    if isinstance(raw_ts, (int, float)):
+        ts = float(raw_ts)
+    else:
+        ts = 0.0
+
+    return Event(ts=ts, sequence=sequence, run=run, data=raw_data)
+
+
+def read_events(
+    run: Run, *, start_offset: int = 0, max_events: int | None = None
+) -> tuple[list[Event], int]:
+    """Read complete event lines from ``start_offset`` onwards.
+
+    Parameters
+    ----------
+    run : Run
+        Run whose ``events.jsonl`` should be read.
+    start_offset : int
+        Byte offset to resume from.
+    max_events : int | None
+        When set, retain only the trailing ``max_events`` events in a
+        bounded buffer while still scanning to the end of the file, so a
+        large backlog costs bounded memory rather than one list entry per
+        historical line.
+
+    Returns
+    -------
+    tuple[list[Event], int]
+        Decoded events and the next resume offset. A torn (unterminated)
+        final line is not consumed: the offset points at its start so the
+        next poll re-reads it once complete.
+    """
+    events: deque[Event] | list[Event] = deque(maxlen=max_events) if max_events is not None else []
+    offset = start_offset
+
+    try:
+        with run.events_path.open("rb") as handle:
+            handle.seek(start_offset)
+            sequence = 0
+            while True:
+                line_start = handle.tell()
+                line = handle.readline()
+                if not line:
+                    offset = handle.tell()
+                    break
+                if not line.endswith(b"\n"):
+                    offset = line_start
+                    break
+
+                offset = handle.tell()
+                event = parse_event(line, sequence=sequence, run=run)
+                sequence += 1
+                if event is not None:
+                    events.append(event)
+                else:
+                    # Complete but undecodable lines are abnormal (torn lines
+                    # never reach here); surface them instead of hiding them.
+                    # The message is keyed on the path alone so warn_once can
+                    # deduplicate a file full of corrupt lines.
+                    warn_once(
+                        f"warning: skipping undecodable event line(s) in {run.events_path}"
+                    )
+    except FileNotFoundError:
+        return [], 0
+    except OSError:
+        return [], start_offset
+
+    return list(events), offset
+
+
+def recent_events(runs: list[Run], limit: int) -> tuple[list[Event], dict[Path, int]]:
+    """Scan each run's event stream, retaining only the most recent events.
+
+    Parameters
+    ----------
+    runs : list[Run]
+        Runs to read.
+    limit : int
+        Number of trailing events to keep across all runs; ``0`` or a
+        negative value keeps none (offsets are still collected).
+
+    Returns
+    -------
+    tuple[list[Event], dict[Path, int]]
+        The most recent events in display order, and each run's resume
+        offset so the caller can continue tailing exactly where these
+        reads stopped without re-reading or skipping lines.
+    """
+    events: list[Event] = []
+    offsets: dict[Path, int] = {}
+    for run in runs:
+        # The global most-recent `limit` is a subset of each run's trailing
+        # `limit`, so a bounded read keeps startup memory at runs x limit
+        # events regardless of how deep each run's event backlog is.
+        run_events, offset = read_events(run, max_events=max(limit, 0))
+        offsets[run.path] = offset
+        events.extend(run_events)
+
+    if limit <= 0:
+        return [], offsets
+    return sorted(events, key=lambda event: (event.ts, event.sequence))[-limit:], offsets
+
+
+def prune_dead_offsets(offsets: dict[Path, int]) -> None:
+    """Evict resume offsets whose run directory no longer exists.
+
+    Parameters
+    ----------
+    offsets : dict[Path, int]
+        Per-run resume offsets, mutated in place.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Offsets for runs that merely stopped (paused, done) are kept so a
+    resumed run continues from where it left off instead of replaying its
+    history; only deleted run directories are evicted, which bounds the
+    cache to runs that still exist on disk.
+    """
+    for stale in [path for path in offsets if not path.exists()]:
+        offsets.pop(stale, None)
+
+
+def display_time(ts: float) -> str:
+    """Format an epoch timestamp as a local 12-hour clock reading.
+
+    Parameters
+    ----------
+    ts : float
+        Epoch seconds; non-positive values mean "no timestamp".
+
+    Returns
+    -------
+    str
+        ``H:MM:SS AM/PM`` in local time with any leading zero stripped,
+        or ``""`` for non-positive input.
+    """
+    if ts <= 0:
+        return ""
+    formatted = datetime.fromtimestamp(ts).strftime("%I:%M:%S %p")
+    return formatted[1:] if formatted.startswith("0") else formatted
+
+
+def stringify(value: Any) -> str:
+    """Render an event field as text.
+
+    Parameters
+    ----------
+    value : Any
+        Raw event field value.
+
+    Returns
+    -------
+    str
+        ``value`` unchanged when it is a string, ``""`` for ``None``, and
+        compact key-sorted JSON for anything else.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, sort_keys=True)
+
+
+def event_detail(event: dict[str, Any]) -> str:
+    """Build the human-readable detail column for one event payload.
+
+    Parameters
+    ----------
+    event : dict[str, Any]
+        Raw event payload.
+
+    Returns
+    -------
+    str
+        A short ``(phase) detail`` string for known event types, otherwise
+        the remaining payload as sorted JSON (or ``""`` when empty).
+    """
+    match stringify(event.get("type")):
+        case "log":
+            return stringify(event.get("message"))
+        case "phase_started":
+            phase = stringify(event.get("phase"))
+            return f"({phase}) phase started"
+        case "agent_started" | "agent_finished":
+            phase = stringify(event.get("phase"))
+            label = stringify(event.get("label"))
+            attempts = event.get("attempts") or event.get("attempt") or 1
+            return f"({phase}) {label} r{attempts}"
+        case "run_started" | "run_finished":
+            return f"(run) run: {stringify(event.get('runId'))}"
+        case "run_failed":
+            error = stringify(event.get("error"))
+            return f"(run) run: {stringify(event.get('runId'))} failed: {error}"
+        case _:
+            payload = {
+                key: value
+                for key, value in event.items()
+                if key not in {"ts", "type"} and value is not None
+            }
+            if not payload:
+                return ""
+            return json.dumps(payload, sort_keys=True)
+
+
+def format_event(event: Event) -> str:
+    """Format one event as a single ``[time] type detail`` output line.
+
+    Parameters
+    ----------
+    event : Event
+        Decoded event to render.
+
+    Returns
+    -------
+    str
+        ``[H:MM:SS AM] <type padded to 15> <detail>`` with the detail
+        produced by :func:`event_detail`.
+    """
+    event_type = stringify(event.data.get("type"))
+    return f"[{display_time(event.ts)}] {event_type:<15} {event_detail(event.data)}"
+
+
+def emit(events: list[Event]) -> None:
+    """Print events in timestamp-then-sequence order, flushing each line.
+
+    Parameters
+    ----------
+    events : list[Event]
+        Events from one read batch; sorted here so interleaved runs print
+        in a stable chronological order.
+
+    Returns
+    -------
+    None
+        Output goes to stdout; each line is flushed for live tailing.
+    """
+    for event in sorted(events, key=lambda item: (item.ts, item.sequence)):
+        print(format_event(event), flush=True)
+
+
+def watch(source: Path, *, runs_dir: Path, recent: int, poll: float) -> None:
+    """Print recent events, then poll matching running runs forever.
+
+    Parameters
+    ----------
+    source : Path
+        Source directory recorded in the target runs' metadata.
+    runs_dir : Path
+        ODW runs root to discover runs under.
+    recent : int
+        Number of historical events to print before tailing.
+    poll : float
+        Seconds to sleep between discovery/tail iterations.
+
+    Notes
+    -----
+    The initial tail offsets are the exact resume offsets returned by
+    :func:`recent_events`, so events appended between the initial read and
+    the first poll are never skipped. Offsets are retained while a run's
+    directory exists — so a run that pauses and resumes continues from
+    where it left off instead of replaying its history — and evicted once
+    the directory is deleted, keeping the cache bounded.
+    """
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+    initial_runs = discover_running_runs(runs_dir, source)
+    initial_events, offsets = recent_events(initial_runs, recent)
+    emit(initial_events)
+
+    while True:
+        loop_events: list[Event] = []
+        for run in discover_running_runs(runs_dir, source):
+            # A run first seen mid-session starts from offset 0, printing its
+            # short history; a known run resumes from its recorded offset.
+            events, offset = read_events(run, start_offset=offsets.get(run.path, 0))
+            loop_events.extend(events)
+            offsets[run.path] = offset
+
+        prune_dead_offsets(offsets)
+        emit(loop_events)
+        time.sleep(poll)
+
+
+@app.default
+def main(
+    source: Annotated[
+        Path,
+        Parameter(help="Source directory recorded in ODW run metadata."),
+    ],
+    *,
+    runs_dir: Annotated[
+        Path | None,
+        Parameter(help="Root ODW runs directory. Defaults to ~/.odw/runs."),
+    ] = None,
+    recent: Annotated[
+        int,
+        Parameter(name=("--recent", "-n"), help="Records to print before tailing."),
+    ] = 10,
+    poll: Annotated[
+        float,
+        Parameter(help="Seconds between run discovery and tail checks."),
+    ] = 1.0,
+) -> None:
+    """Print recent events, then follow new events for matching running runs."""
+    if recent < 0:
+        print("--recent must be non-negative", file=sys.stderr)
+        raise SystemExit(2)
+    if poll <= 0:
+        print("--poll must be positive", file=sys.stderr)
+        raise SystemExit(2)
+    if runs_dir is None:
+        runs_dir = Path.home() / ".odw" / "runs"
+
+    watch(source.expanduser(), runs_dir=runs_dir.expanduser(), recent=recent, poll=poll)
+
+
+if __name__ == "__main__":
+    app()

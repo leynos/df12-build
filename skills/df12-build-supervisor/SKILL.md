@@ -106,11 +106,24 @@ provides the doc skills):
    truth. Patch the sidecar script during a live workshop when needed, validate
    it there, record the change in `operator-notes.md`, and later promote the
    proven change back to the `df12-build` repository as an ordinary branch.
-   For normal Codex workshops, set ODW `concurrency` to `16`; keep `maxAgents`
-   high (for example `1000`) because it is the per-run dispatch guard, not the
-   live process-pool size.
+   For normal Codex and Claude Code workshops, set ODW `concurrency` to `16`;
+   keep `maxAgents` high (for example `1000`) because it is the per-run
+   dispatch guard, not the live process-pool size. Set the adapter `timeout`
+   high enough for CodeRabbit's expected rate-limit backoff: agents may
+   legitimately sleep for three 45-90 minute retries, so a one-hour timeout can
+   kill healthy work. Use `21600` seconds for ordinary long-running workshops
+   unless you deliberately want a shorter cap.
+
+   When copying a newer workflow into an existing sidecar, audit `args.json`
+   before relaunch. Stale `planAdapter`, `reviewAdapter`, or
+   `assessmentAdapter` overrides from a Codex-only run will override the
+   workflow's current Claude/Codex split. Make sure every adapter named in
+   `args.json` exists in `odw.config.json` or in ODW's built-in adapter set;
+   the current ODW workflow expects a `claude` adapter for default planning and
+   review judgement.
 3. **Launch ODW from the sidecar, with the project as `--source`.** Prefer the
-   checked-in ODW/Codex workflow when running Codex agents:
+   checked-in ODW workflow when running the Codex build-side agents together
+   with the Claude Code planning and review agents:
 
    ```bash
    odw run "$SIDECAR/df12-build-odw.js" \
@@ -118,6 +131,10 @@ provides the doc skills):
      --config "$SIDECAR/odw.config.json" \
      --args @"$SIDECAR/args.json"
    ```
+
+   Use the absolute sidecar workflow path. With `--source`, ODW resolves
+   relative workflow paths under the source project, not under the shell's
+   current working directory.
 
    Start the run in the background and supervise it through `odw status`,
    `odw logs`, `odw result`, and the dashboard. Keep periodic health notes in
@@ -136,6 +153,21 @@ provides the doc skills):
    `assessPartialBranches`, `buildAdapter`/`buildModel`,
    `planAdapter`/`planModel`, `reviewAdapter`/`reviewModel`, and
    `assessmentAdapter`/`assessmentModel`.
+
+   Recovery and enforcement knobs: `resumePartialBranches` (opt-in fresh-run
+   discovery of surviving `roadmap-*` branches, default off), `resumeMode`
+   (`assess` reports only — the default; `review` may route clean, committed,
+   task-scoped `adopt-complete` branches with validation evidence back through
+   the ordinary review + integration path), `resumeTaskId` (narrow discovery
+   to one id; separate from `taskId`), `resumeMaxCandidates` (default 4), and
+   `worktreeWritePreflight` (host-verified probe that the plan and build
+   adapters can write into sibling task worktrees; on by default).
+
+   The checked-in defaults split execution from judgement. Build-side work
+   uses Codex defaults, while planning and review judgement use Claude Code
+   with `claude-opus-4-8`. Partial-branch assessment inherits the review route
+   unless the sidecar `args.json` sets `assessmentAdapter` and
+   `assessmentModel` explicitly.
 5. **For legacy Claude `Workflow({ scriptPath: ... })` launches, use the same
    sidecar rule.** `scriptPath` launches may not receive `args`; if you use
    that harness, retune by editing the copied sidecar script itself and record
@@ -147,8 +179,12 @@ Every time a run completes you do the same loop:
 
 1. **Parse the result JSON.** Key fields: `processed` (ids merged this run),
    `results[]` (per-task `{id, status, stage, detail}` plus any
-   `assessment`), `assessments[]` (summaries for failed or halted branches that
-   were assessed), `halted` (null on a clean stop), `audits[]`,
+   `assessment`; recovery-resumed branches carry `kind: "recovery-resume"`),
+   `assessments[]` (summaries for failed or halted branches that
+   were assessed), `recovery` (the fresh-run recovery index when
+   `resumePartialBranches=true`: `candidates`, `assessed`, `resumed`,
+   per-candidate `results` with classification/action/reason, and `skipped`
+   with machine-readable reasons), `halted` (null on a clean stop), `audits[]`,
    `remediationTriage[]`, `pendingProposals` (proposals left unwritten because
    the run halted — triage them manually later).
 2. **Hoover orphan worktrees.** For each non-root worktree under
@@ -173,7 +209,8 @@ Every time a run completes you do the same loop:
    produced `remediationTriage`, `pendingProposals`, audit findings, addenda, or
    any roadmap restructure work, load `roadmap-grooming` together with
    `roadmap-doc` before changing `docs/roadmap.md`. This is a supervisor
-   requirement, not an optional clean-up pass.
+   requirement, not an optional clean-up pass. Do not groom merely because a
+   normal run is in progress; use the trigger thresholds below.
 6. **Relaunch** from the durable script path. The run re-selects from the
    current `origin/BASE` roadmap — no resume needed.
 
@@ -452,6 +489,13 @@ reviewer.
   inspect the conflict; resolve it preserving the intent of both sides (favour
   the design docs/contracts), or re-file the task. The branch is left unmerged
   for you.
+- **Addendum manual-merge-ready** (the addendum agent reported completed work,
+  green gates, and no open issues, but did not satisfy the strict `ok=true`
+  schema contract): preserve the branch and verify it manually before any merge.
+  Rerun `make all` plus `make markdownlint`/`make nixie` when Markdown changed,
+  confirm CodeRabbit or equivalent review evidence, reconcile the roadmap
+  sub-task checkbox, then integrate or discard. Do not relaunch before deciding,
+  or the same open addendum can be selected again from `origin/BASE`.
 - **Review halt** (dual review unsatisfied within the cap): the branch is left
   unmerged with the blocking items. Check `result.assessment` first. If it says
   `adopt-complete`, verify gates and continue through the ordinary review and
@@ -469,18 +513,43 @@ reviewer.
   the operator** and tick the item. Watch for it specifically when a contract
   was documented in two places (e.g. the roadmap *and* `SKILL.md`) and only one
   was corrected — fix the stale copy to match the authoritative one.
-- **Recoverable API faults (500 / 429):** wait and retry. coderabbit 429
-  backoffs are **expected and fine** — never shorten them. For a broad outage,
-  schedule a long wake-up (≈1h) and relaunch; the fresh-restart model means
-  nothing is lost.
+- **Recoverable API faults (500 / 429 / 529):** wait and retry. The ODW
+  variant reports these as `provider-fault` halts, skips partial-branch
+  assessment, and leaves pending remediation unwritten, so an outage is not
+  mistaken for task evidence. CodeRabbit 429 backoffs are **expected and
+  fine** — never shorten them. For a broad outage, schedule a long wake-up
+  (≈1h) and relaunch; the fresh-restart model means nothing is lost.
 - **Worktree base-skew:** git-donkey can root a worktree on a stale local `BASE`
   (its pull-rebase prompt defaults to "no" non-interactively). The workflow's
   worktree step already mitigates this (no-param `git donkey` + an in-worktree
-  `git reset --hard origin/BASE` + a base-sha verify). If you see "based on a
-  stale commit" failures, that mitigation is the place to look.
-- **A run that dies mid-flight:** do not try to resume. Hoover, then relaunch
-  fresh. Worker interleaving is non-deterministic, so prefix-resume is
-  unreliable by design.
+  `git reset --hard origin/BASE` + a base-sha verify). When "based on a
+  stale commit" failures appear, that mitigation is the place to look.
+- **A run that dies mid-flight:** do not try to resume transcripts or cached
+  scheduler state. Worker interleaving is non-deterministic, so prefix-resume
+  is unreliable by design. Two recovery options exist, in order of
+  preference:
+  1. **Assess-first relaunch:** relaunch with `resumePartialBranches=true`
+     (default `resumeMode="assess"`). The fresh run discovers surviving
+     `roadmap-*` branches, assesses each against ADR 002, and reports them in
+     the top-level `recovery` object without mutating anything. Read the
+     classifications, then decide per branch: enable `resumeMode="review"` on
+     a follow-up run to let clean `adopt-complete` branches re-enter review
+     and integration, finish `continue-manual` branches by hand, or hoover
+     `discard` branches.
+  2. **Hoover and rebuild:** the pre-recovery behaviour — stash-park, remove
+     worktrees, reset branches, and let selection rebuild the task from
+     `origin/BASE`. Still correct when the surviving work is worthless.
+  While recovery is enabled, every id with a surviving branch is held out of
+  normal selection for that run (a fresh `git worktree add -b` would collide
+  with the surviving branch), so reported-but-unresolved branches must be
+  resumed, finished manually, or hoovered before the pool will rebuild those
+  tasks.
+- **`worktree-write` failure (task-agent writable-root preflight):** the plan
+  or build adapter could not write a host-verified probe file inside the task
+  worktree. This is a launch/sandbox fault — fix the adapter config (writable
+  roots covering `...worktrees/roadmap-*`) and relaunch; do not burn design
+  rounds or reword roadmap tasks. The verdict is computed once per run, so
+  every task fails fast together.
 
 ## Editing or restructuring the roadmap safely
 
@@ -496,13 +565,49 @@ restructuring). While a run may be live:
 - **Land it concurrency-safely.** If no run is live: ff-merge to `BASE` and
   push. If a run is live: push with a fetch-rebase-retry loop (the roadmap has
   a merge driver that weaves concurrent edits; rebases are usually clean).
+- **Use `mapsplice` for structural roadmap edits.** The `mapsplice` CLI (load
+  its skill for usage) appends, inserts, deletes, and replaces numbered
+  phases, steps, tasks, and addendum sub-tasks while preserving renumbering
+  and `Requires` references. Prefer it over hand-editing whenever the change
+  is structural rather than prose-only.
 - **Large restructures deserve a deterministic transform.** For a big renumber
-  (e.g. collapsing bucket-steps), write a script that preserves task bodies
-  byte-for-byte and remaps ids + cross-references via an explicit map, then
-  **validate hard before merging**: task-count in == out, every `Requires`
-  resolves, gates green, and the unrelated phases are untouched. Measure twice.
+  (e.g. collapsing bucket-steps), drive it with `mapsplice` where its
+  operations fit; otherwise write a script that preserves task bodies
+  byte-for-byte and remaps ids + cross-references via an explicit map. Either
+  way, **validate hard before merging**: task-count in == out, every
+  `Requires` resolves, gates green, and the unrelated phases are untouched.
+  Measure twice.
 - **Place new work at step boundaries** (`phase.step.task`), live and
   fix-debt-first, so the pool picks it up on the next refill.
+
+## Roadmap grooming thresholds
+
+Grooming is trigger-based, not time-based. A healthy roadmap should be left
+alone during ordinary supervision. Hourly check-ins should stay lightweight:
+sample roadmap health every few check-ins, or after a run reaches a terminal
+state, but do not run a broad grooming pass unless the roadmap has actually
+accreted new material or structural debt.
+
+Trigger a full grooming pass when any of these are true:
+
+- A run emits `remediationTriage`, `pendingProposals`, audit findings, addenda,
+  or explicit roadmap restructure work.
+- A phase grows past roughly five or six open steps.
+- Two or more single-task steps accrue in the same phase.
+- Two or more same-theme refactor, hardening, or reconciliation fragments sit
+  unconsolidated.
+- Capability work appears inside a refactor, hardening, or reconciliation
+  phase.
+
+Do not groom merely because there is one active task, one partial ExecPlan, a
+normal dependency chain, or a roadmap that still looks structurally coherent.
+Those are ordinary workshop states, not grooming signals.
+
+Trigger local task repair immediately when a workflow blocker is caused by
+ambiguous roadmap wording. Keep that repair narrow: clarify the task's expected
+fixture updates, success criterion, or contract text, then relaunch. A
+design-review-discarded task whose fixture expectations were implicit is a
+targeted task clarification, not a broad roadmap grooming pass.
 
 ## Feeding back remediation, and the bucket-inflation trap
 

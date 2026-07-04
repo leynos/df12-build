@@ -1,6 +1,7 @@
 # df12-build user guide
 
-`df12-build` drives a df12-house GIST roadmap forward with a parallel ODW
+`df12-build` drives a df12-house GIST roadmap forward with a parallel [Open
+Dynamic Workflows (ODW)](https://github.com/xz1220/open-dynamic-workflows)
 workflow. It plans, reviews, implements, gates, integrates, audits, and files
 remediation work through isolated worker branches. Use it only for projects that
 already have a roadmap, design documentation, `AGENTS.md`, repository gates, and
@@ -36,11 +37,97 @@ Keep these files together in the sidecar:
 - `operator-notes.md`: the run id, launch command, local sidecar patches,
   validation notes, health checks, failures, and operator decisions.
 
-Set `concurrency` to `16` in `odw.config.json` for normal Codex workshops. That
-leaves room for an eight-task worker pool, four planning-stage agents, four
-build-stage agents, and review, triage, audit, or assessment slack. Keep
-`maxAgents` high, such as the ODW default of `1000`, because it is the
-per-run dispatch guard rather than the live process-pool size.
+Set `concurrency` to `16` in `odw.config.json` for normal Codex and Claude Code
+workshops. That leaves room for an eight-task worker pool, four planning-stage
+agents, four build-stage agents, and review, triage, audit, or assessment
+slack. Keep `maxAgents` high (such as the ODW default of `1000`) because it is
+the per-run dispatch guard rather than the live process-pool size.
+
+Set the adapter `timeout` high enough for the workflow's CodeRabbit policy.
+Implementation agents may legitimately wait through three 45-90 minute
+CodeRabbit rate-limit backoffs using `vsleep`, so a one-hour adapter timeout can
+kill a healthy task. A normal long-running workshop should use a timeout of at
+least `21600` seconds unless the operator deliberately wants a shorter cap.
+
+Make sure every adapter named by `args.json` exists in `odw.config.json` or in
+ODW's built-in adapter set. The checked-in ODW workflow now defaults planning
+and review judgement to the `claude` adapter, so a Codex-only sidecar config
+must either add a `claude` adapter or explicitly route those stages back to
+Codex.
+
+Minimal sidecar `odw.config.json` shape for the Claude/Codex split:
+
+```json
+{
+  "defaultAdapter": "codex-medium",
+  "concurrency": 16,
+  "maxAgents": 1000,
+  "workspaceMode": "inplace",
+  "timeout": 21600,
+  "schemaRetries": 2,
+  "runsRoot": "~/.odw/runs",
+  "workflowsRoot": "~/.odw/workflows",
+  "claudeJobsScope": "project",
+  "adapters": {
+    "claude": {
+      "label": "Claude Code",
+      "command": [
+        "claude",
+        "--print",
+        "--permission-mode",
+        "acceptEdits",
+        "--no-session-persistence"
+      ],
+      "stdin": "{prompt}",
+      "flags": {
+        "model": ["--model"]
+      }
+    },
+    "codex-medium": {
+      "label": "Codex GPT 5.5 medium",
+      "command": [
+        "codex",
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "danger-full-access",
+        "-c",
+        "model_reasoning_effort=\"medium\"",
+        "--cd",
+        "{workspace}",
+        "-"
+      ],
+      "stdin": "{prompt}",
+      "flags": {
+        "model": ["--model"]
+      }
+    },
+    "codex-high": {
+      "label": "Codex GPT 5.5 high",
+      "command": [
+        "codex",
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "danger-full-access",
+        "-c",
+        "model_reasoning_effort=\"high\"",
+        "--cd",
+        "{workspace}",
+        "-"
+      ],
+      "stdin": "{prompt}",
+      "flags": {
+        "model": ["--model"]
+      }
+    }
+  }
+}
+```
 
 Patch the sidecar copy only to recover or tune a live workshop. Record the patch
 in `operator-notes.md`, validate it there, then promote the proven change back
@@ -61,9 +148,49 @@ odw run "$SIDECAR/df12-build-odw.js" \
   --args @"$SIDECAR/args.json"
 ```
 
+Use an absolute or fully expanded sidecar path for the workflow script. When
+`--source` is present, ODW anchors relative workflow paths under the source
+project, not under the shell's current working directory.
+
 Start normal workshop runs in the background. Supervise them with `odw status`,
 `odw logs`, `odw result`, and the ODW dashboard. Keep `operator-notes.md` current
 enough that another operator can continue after context compaction.
+
+When adopting a newer checked-in workflow into an existing sidecar, audit
+`args.json` before relaunching. Older sidecars may still carry Codex-only
+`planAdapter`, `reviewAdapter`, or `assessmentAdapter` overrides, and those
+overrides deliberately win over the workflow defaults.
+
+## Monitoring runs
+
+`odw status`, `odw logs`, and the dashboard remain the primary supervision
+surface. Two operator scripts in `scripts/` add workshop-oriented views over
+the same run directories; both tolerate live writes (a torn `status.json` or
+event line is re-read on the next pass) and warn on stderr when run state is
+genuinely malformed.
+
+`scripts/list-odw-runs.py` tabulates runs from the ODW runs root, showing the
+source project, status, last update, run id, and workflow name. It defaults
+to running runs; filters widen or narrow the view:
+
+```bash
+scripts/list-odw-runs.py                        # running runs only
+scripts/list-odw-runs.py --all --limit 20       # every status, newest first
+scripts/list-odw-runs.py -s failed -s stopped   # explicit statuses
+scripts/list-odw-runs.py --source my-project    # substring match on source
+```
+
+`scripts/odw-watch` tails events for every *running* run whose metadata
+records a given source directory, printing recent history and then following
+new events, discovering newly started runs as it polls:
+
+```bash
+scripts/odw-watch "$PROJECT" -n 20        # last 20 events, then follow
+scripts/odw-watch "$PROJECT" --poll 2.0   # slower discovery/tail cadence
+```
+
+Both scripts read `--runs-dir` (defaulting to `~/.odw/runs`), so point them at
+a sidecar-local `runsRoot` when a workshop overrides it.
 
 ## Roadmap format
 
@@ -199,13 +326,41 @@ Common arguments:
   files.
 - `assessPartialBranches`: when `false`, skip the report-only assessment of
   failed or halted task branches. Defaults to enabled.
+- `resumePartialBranches`: when `true`, discover surviving `roadmap-*` branches
+  on launch and assess them before normal roadmap selection. Defaults to
+  `false`; the default workflow behaviour is unchanged unless an operator opts
+  in.
+- `resumeMode`: the maximum recovery action for discovered branches. `assess`
+  (the default) reports only. `review` may additionally route clean, committed,
+  task-scoped `adopt-complete` branches with validation evidence into the
+  ordinary review and integration path. Any other value fails fast at launch.
+- `resumeTaskId`: limit recovery discovery to one roadmap id. This is separate
+  from `taskId`, which selects normal roadmap work.
+- `resumeMaxCandidates`: bound on recovery candidates per run. Defaults to `4`;
+  excess candidates are reported as skipped with reason `candidate-cap`.
+- `worktreeWritePreflight`: when `false`, skip the once-per-run probe that
+  proves the planning and build adapters can write into sibling task
+  worktrees. Defaults to enabled; a failed probe fails the task at stage
+  `worktree-write` as an environment fault.
 - `buildAdapter` and `buildModel`: adapter and model for worktree creation,
   implementation, integration, and remediation agents.
 - `planAdapter` and `planModel`: adapter and model for planning agents.
 - `reviewAdapter` and `reviewModel`: adapter and model for design review, code
   review, expert review, and audit agents.
+- `triageAdapter` and `triageModel`: adapter and model for remediation triage
+  (routing review and audit proposals onto roadmap lanes). Defaults are
+  `codex` and `gpt-5.5@high`.
 - `assessmentAdapter` and `assessmentModel`: adapter and model for partial
   branch assessment. Defaults to the review adapter and model.
+
+Current defaults deliberately split execution and judgement. Build,
+implementation, integration, remediation, and triage stay on the Codex adapter
+defaults, while planning and review judgement default to Claude Code with
+`claude-opus-4-8`. That means the plan stage, design review, code review,
+expert review, addendum fallback review, and post-merge audit all use the
+`reviewAdapter` or `planAdapter` Claude routing unless `args.json` overrides
+them. Set `assessmentAdapter` explicitly when partial-branch assessment should
+stay on Codex instead of inheriting the review adapter.
 
 Example `args.json`:
 
@@ -224,14 +379,14 @@ Example `args.json`:
   "maxTasks": 12,
   "buildAdapter": "codex-medium",
   "buildModel": "gpt-5.5",
-  "planAdapter": "codex-high",
-  "planModel": "gpt-5.5",
+  "planAdapter": "claude",
+  "planModel": "claude-opus-4-8",
   "assessmentAdapter": "codex-high",
   "assessmentModel": "gpt-5.5",
   "triageAdapter": "codex-high",
   "triageModel": "gpt-5.5",
-  "reviewAdapter": "codex-high",
-  "reviewModel": "gpt-5.5"
+  "reviewAdapter": "claude",
+  "reviewModel": "claude-opus-4-8"
 }
 ```
 
@@ -258,8 +413,53 @@ classification is one of:
 Assessment is report-only. It never marks roadmap checkboxes, pushes, merges,
 or cherry-picks. Use it to decide whether to preserve, manually finish, park, or
 discard the branch before relaunching from `origin/<base>`. Auth failures,
-worktree-creation failures, dry runs, successful tasks, and
-manual-merge-ready branches are not assessed.
+provider outages such as `429`, `500`, or `529`, worktree-creation failures,
+dry runs, successful tasks, and manual-merge-ready branches are not assessed.
+Provider outages also suppress the final remediation flush, so transient
+adapter failures do not create roadmap work.
+
+Addendum implementations have one extra recovery state. If an addendum agent
+reports all work items complete, green gates, and no open issues, but fails to
+set the strict `ok=true` schema field, the workflow returns
+`manual-merge-ready` instead of treating the branch as ordinary failed work.
+That preserves throughput without auto-merging ambiguous output: an operator
+must rerun gates, confirm review evidence, reconcile the roadmap checkbox, and
+then integrate or discard the branch.
+
+### Fresh-run recovery
+
+A fresh launch can also discover branches that survived an earlier failed run.
+Set `resumePartialBranches=true` and choose the maximum action with
+`resumeMode` before launching:
+
+- **Assess-only** (`resumeMode="assess"`, the default): the workflow maps
+  surviving `roadmap-*` branches back to roadmap ids, assesses each candidate
+  with the same ADR 002 contract used for in-run failures, and reports the
+  outcome in a top-level `recovery` object. Nothing is merged, pushed, ticked,
+  or deleted, and `processed` is unchanged. Use this mode first: it guarantees
+  the target project is not written to, though recovered branch content still
+  flows to the assessment adapter (see the security guide's data-flow and
+  prompt-injection notes).
+- **Review-mode resume** (`resumeMode="review"`): in addition to assessment,
+  a candidate classified `adopt-complete` that is clean, committed,
+  task-scoped, and carries validation evidence re-enters the ordinary dual
+  review and merge-lock integration path without re-running implementation.
+  Everything else is still report-only, and an `adopt-complete` verdict with
+  incomplete evidence is downgraded to `continue-manual` with an explicit skip
+  reason (`dirty-worktree`, `no-committed-work`, `not-task-scoped`,
+  `missing-validation-evidence`, `evidence-collection-error`, or
+  `addendum-branch`). Review-mode resume mutates the target project exactly as
+  ordinary integration does, so grant it the same permissions and trust.
+
+The `recovery` result object indexes the pass for operators: `candidates`,
+`assessed`, `resumed`, per-candidate `results` (classification and action), and
+`skipped` entries with machine-readable reasons (including `unmapped-branch`,
+`already-complete`, `missing-worktree`, and `candidate-cap` from discovery).
+Ids with surviving branches are held out of normal selection for the rest of
+the run, so the pool cannot collide with an existing branch; hoover the branch
+or resume it before expecting normal selection to rebuild that task. A fatal
+auth preflight blocks recovery entirely (`recovery.blocked =
+"auth-preflight-failed"`), and dry runs never resume.
 
 Use the `df12-build-supervisor` skill for the detailed operator playbook:
 failure-mode diagnosis, orphan worktree cleanup, remediation triage, stash

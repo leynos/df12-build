@@ -26,19 +26,19 @@ This step answers which operator knobs are needed before discovery can run
 safely. It informs every later task because recovery defaults must remain
 non-mutating.
 
-- [ ] 1.1.1. Add `resumePartialBranches`, `resumeMode`, `resumeTaskId`, and
+- [x] 1.1.1. Add `resumePartialBranches`, `resumeMode`, `resumeTaskId`, and
   `resumeMaxCandidates` configuration to the ODW workflow.
   - See `docs/failure-resume-design.md` section "Runtime configuration".
   - Success: default workflow behaviour is unchanged unless
     `resumePartialBranches=true`.
-- [ ] 1.1.2. Document the recovery arguments in the user guide, architecture
+- [x] 1.1.2. Document the recovery arguments in the user guide, architecture
   guide, security guide, developer guide, and supervisor skill.
   - Requires 1.1.1.
   - See `docs/failure-resume-design.md` sections "Runtime configuration" and
     "Security and permissions".
   - Success: operators can distinguish assess-only recovery from review-mode
     resume before launching a run.
-- [ ] 1.1.3. Enforce writable task-agent roots for real git worktrees.
+- [x] 1.1.3. Enforce writable task-agent roots for real git worktrees.
   - Requires 1.1.1.
   - See `docs/architecture.md` sections "Workflow structure" and "Enforcement
     boundary".
@@ -55,13 +55,13 @@ This step answers whether the workflow can reconstruct useful recovery
 candidates from Git and roadmap state alone. Its output feeds assessment and
 later review-mode resume.
 
-- [ ] 1.2.1. Implement candidate discovery for `roadmap-*` branches and live
+- [x] 1.2.1. Implement candidate discovery for `roadmap-*` branches and live
   worktrees.
   - Requires 1.1.1.
   - See `docs/failure-resume-design.md` section "Recovery candidate discovery".
   - Success: fixture tests map branch names to dotted roadmap ids, skip
     completed roadmap tasks, and preserve deterministic ordering.
-- [ ] 1.2.2. Return a top-level `recovery` summary in assess-only mode.
+- [x] 1.2.2. Return a top-level `recovery` summary in assess-only mode.
   - Requires 1.2.1.
   - See `docs/failure-resume-design.md` section "Returned result shape".
   - Success: an assess-only run reports candidates, skipped branches, and
@@ -72,14 +72,14 @@ later review-mode resume.
 This step answers whether fresh-run discovery can share the existing
 assessment contract instead of creating a second recovery classifier.
 
-- [ ] 1.3.1. Route discovered candidates through the existing assessment
+- [x] 1.3.1. Route discovered candidates through the existing assessment
   evidence collector and schema.
   - Requires 1.2.1.
   - See `docs/failure-resume-design.md` section "Assessment reuse" and
     `docs/adr-002-assess-partial-task-branches.md`.
   - Success: recovered candidates produce the same classification enum and
     evidence fields as in-run failed task assessments.
-- [ ] 1.3.2. Add no-mutation regression coverage for assess-only recovery.
+- [x] 1.3.2. Add no-mutation regression coverage for assess-only recovery.
   - Requires 1.3.1.
   - See `docs/failure-resume-design.md` section "Verification".
   - Success: tests prove assess-only recovery does not mark roadmap tasks,
@@ -100,12 +100,12 @@ This step answers which recovered branches are safe enough to spend review and
 integration effort on. Its output prevents dirty or ambiguous branches from
 being treated as complete work.
 
-- [ ] 2.1.1. Implement the recovery decision table for `resumeMode`.
+- [x] 2.1.1. Implement the recovery decision table for `resumeMode`.
   - Requires phase 1.
   - See `docs/failure-resume-design.md` section "Resume decisions".
   - Success: only clean, committed, task-scoped `adopt-complete` candidates
     with validation evidence can enter review-mode resume.
-- [ ] 2.1.2. Return explicit skip reasons for candidates that cannot enter
+- [x] 2.1.2. Return explicit skip reasons for candidates that cannot enter
   review-mode resume.
   - Requires 2.1.1.
   - See `docs/failure-resume-design.md` sections "Returned result shape" and
@@ -119,13 +119,13 @@ This step answers whether resume can finish a recovered branch without a custom
 merge path. Reuse is the safety property: the same gates should apply to
 ordinary and recovered work.
 
-- [ ] 2.2.1. Build a synthetic implementation result for eligible recovered
+- [x] 2.2.1. Build a synthetic implementation result for eligible recovered
   branches.
   - Requires 2.1.1.
   - See `docs/failure-resume-design.md` section "Review-mode resume path".
   - Success: recovered branches can enter review without re-running the
     implementation agent.
-- [ ] 2.2.2. Route eligible recovered branches through existing review,
+- [x] 2.2.2. Route eligible recovered branches through existing review,
   CodeRabbit, expert review, and integration logic.
   - Requires 2.2.1.
   - See `docs/failure-resume-design.md` sections "Review-mode resume path" and
@@ -138,7 +138,7 @@ ordinary and recovered work.
 This step answers whether the recovery controls interact safely with ordinary
 workflow modes. It covers the small combination surface that matters for v1.
 
-- [ ] 2.3.1. Add fixture-driven combination tests for recovery modes.
+- [x] 2.3.1. Add fixture-driven combination tests for recovery modes.
   - Requires 2.2.2.
   - Cover `resumePartialBranches=false`, assess-only, review-mode clean
     `adopt-complete`, dirty branch, completed roadmap task, and auth preflight
@@ -146,7 +146,7 @@ workflow modes. It covers the small combination surface that matters for v1.
   - See `docs/failure-resume-design.md` section "Verification".
   - Success: the same fixture suite proves both non-mutating assess-only and
     opt-in review-mode behaviour.
-- [ ] 2.3.2. Run a bounded operator-approved ODW smoke test against a throwaway
+- [x] 2.3.2. Run a bounded operator-approved ODW smoke test against a throwaway
   target repository.
   - Requires 2.3.1.
   - See `docs/failure-resume-design.md` section "Verification".
