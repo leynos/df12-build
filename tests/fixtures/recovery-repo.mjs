@@ -1,3 +1,10 @@
+// Shared git fixtures for the recovery test suites: a throwaway repository
+// with an `origin` remote, surviving roadmap-* branches, live worktrees with
+// committed canonical ExecPlans, a durable-state snapshot helper for the
+// no-mutation assertions, and a complete eligible ADR 002 assessment reply.
+// Consumed by tests/df12-build-odw-recovery*.test.mjs and
+// tests/df12-build-odw-write-preflight.test.mjs.
+
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'

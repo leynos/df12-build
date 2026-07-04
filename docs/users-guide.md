@@ -436,8 +436,10 @@ Set `resumePartialBranches=true` and choose the maximum action with
   surviving `roadmap-*` branches back to roadmap ids, assesses each candidate
   with the same ADR 002 contract used for in-run failures, and reports the
   outcome in a top-level `recovery` object. Nothing is merged, pushed, ticked,
-  or deleted, and `processed` is unchanged. Use this mode first: it is safe on
-  any repository the workflow can read.
+  or deleted, and `processed` is unchanged. Use this mode first: it guarantees
+  the target project is not written to, though recovered branch content still
+  flows to the assessment adapter (see the security guide's data-flow and
+  prompt-injection notes).
 - **Review-mode resume** (`resumeMode="review"`): in addition to assessment,
   a candidate classified `adopt-complete` that is clean, committed,
   task-scoped, and carries validation evidence re-enters the ordinary dual

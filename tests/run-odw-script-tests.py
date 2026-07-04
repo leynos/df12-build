@@ -28,8 +28,10 @@ import json
 import sys
 import tempfile
 import unittest
+from collections.abc import Mapping
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
+from typing import Any
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 
@@ -50,7 +52,14 @@ list_runs = load_script("list_odw_runs", "list-odw-runs.py")
 odw_watch = load_script("odw_watch", "odw-watch")
 
 
-def make_run_dir(root: Path, workflow: str, run_id: str, *, status: dict, meta: dict) -> Path:
+def make_run_dir(
+    root: Path,
+    workflow: str,
+    run_id: str,
+    *,
+    status: Mapping[str, Any],
+    meta: Mapping[str, Any],
+) -> Path:
     run_dir = root / workflow / run_id
     run_dir.mkdir(parents=True)
     (run_dir / "status.json").write_text(json.dumps(status), encoding="utf-8")
@@ -97,7 +106,7 @@ class TimestampTests(unittest.TestCase):
 
 
 class FilterAndTableTests(unittest.TestCase):
-    def rows(self):
+    def rows(self) -> list[Any]:
         make = list_runs.RunRow
         return [
             make(source="/p/a", status="running", updated_at=200.0, run_id="r1", workflow_name="build"),
@@ -206,6 +215,18 @@ class EventParsingTests(unittest.TestCase):
                 handle.write(b'{"ts": 3, "type": "log", "message": "appended"}\n')
             events, _ = odw_watch.read_events(run, start_offset=offsets[run.path])
             self.assertEqual([event.data["message"] for event in events], ["appended"])
+
+    def test_read_events_bounded_buffer_keeps_the_tail_and_the_offset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self.run_fixture(Path(tmp))
+            payload = b"".join(
+                json.dumps({"ts": index, "type": "log", "message": f"m{index}"}).encode() + b"\n"
+                for index in range(1, 6)
+            )
+            run.events_path.write_bytes(payload)
+            events, offset = odw_watch.read_events(run, max_events=2)
+            self.assertEqual([event.data["message"] for event in events], ["m4", "m5"])
+            self.assertEqual(offset, len(payload), "the offset must reflect the full scan, not the buffer")
 
     def test_recent_events_zero_limit_still_returns_offsets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

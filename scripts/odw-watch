@@ -26,6 +26,7 @@ import json
 import signal
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -278,7 +279,9 @@ def parse_event(line: bytes, *, sequence: int, run: Run) -> Event | None:
     return Event(ts=ts, sequence=sequence, run=run, data=raw_data)
 
 
-def read_events(run: Run, *, start_offset: int = 0) -> tuple[list[Event], int]:
+def read_events(
+    run: Run, *, start_offset: int = 0, max_events: int | None = None
+) -> tuple[list[Event], int]:
     """Read complete event lines from ``start_offset`` onwards.
 
     Parameters
@@ -287,6 +290,11 @@ def read_events(run: Run, *, start_offset: int = 0) -> tuple[list[Event], int]:
         Run whose ``events.jsonl`` should be read.
     start_offset : int
         Byte offset to resume from.
+    max_events : int | None
+        When set, retain only the trailing ``max_events`` events in a
+        bounded buffer while still scanning to the end of the file, so a
+        large backlog costs bounded memory rather than one list entry per
+        historical line.
 
     Returns
     -------
@@ -295,7 +303,7 @@ def read_events(run: Run, *, start_offset: int = 0) -> tuple[list[Event], int]:
         final line is not consumed: the offset points at its start so the
         next poll re-reads it once complete.
     """
-    events: list[Event] = []
+    events: deque[Event] | list[Event] = deque(maxlen=max_events) if max_events is not None else []
     offset = start_offset
 
     try:
@@ -320,19 +328,21 @@ def read_events(run: Run, *, start_offset: int = 0) -> tuple[list[Event], int]:
                 else:
                     # Complete but undecodable lines are abnormal (torn lines
                     # never reach here); surface them instead of hiding them.
+                    # The message is keyed on the path alone so warn_once can
+                    # deduplicate a file full of corrupt lines.
                     warn_once(
-                        f"warning: skipping undecodable event line at byte {line_start} in {run.events_path}"
+                        f"warning: skipping undecodable event line(s) in {run.events_path}"
                     )
     except FileNotFoundError:
         return [], 0
     except OSError:
         return [], start_offset
 
-    return events, offset
+    return list(events), offset
 
 
 def recent_events(runs: list[Run], limit: int) -> tuple[list[Event], dict[Path, int]]:
-    """Read each run's full event history and keep the most recent events.
+    """Scan each run's event stream, retaining only the most recent events.
 
     Parameters
     ----------
@@ -352,12 +362,12 @@ def recent_events(runs: list[Run], limit: int) -> tuple[list[Event], dict[Path, 
     events: list[Event] = []
     offsets: dict[Path, int] = {}
     for run in runs:
-        run_events, offset = read_events(run)
-        offsets[run.path] = offset
         # The global most-recent `limit` is a subset of each run's trailing
-        # `limit`, so retained memory stays bounded at runs x limit events.
-        if limit > 0:
-            events.extend(run_events[-limit:])
+        # `limit`, so a bounded read keeps startup memory at runs x limit
+        # events regardless of how deep each run's event backlog is.
+        run_events, offset = read_events(run, max_events=max(limit, 0))
+        offsets[run.path] = offset
+        events.extend(run_events)
 
     if limit <= 0:
         return [], offsets
