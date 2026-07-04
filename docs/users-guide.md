@@ -164,10 +164,8 @@ overrides deliberately win over the workflow defaults.
 ## Monitoring runs
 
 `odw status`, `odw logs`, and the dashboard remain the primary supervision
-surface. Two operator scripts in `scripts/` add workshop-oriented views over
-the same run directories; both tolerate live writes (a torn `status.json` or
-event line is re-read on the next pass) and warn on stderr when run state is
-genuinely malformed.
+surface. Operator scripts in `scripts/` add workshop-oriented views over ODW
+run directories, Git branch movement, and sibling worktree filesystem activity.
 
 `scripts/odw-list-runs` tabulates runs from the ODW runs root, showing the
 source project, status, last update, run id, and workflow name. It defaults
@@ -189,8 +187,28 @@ scripts/odw-watch "$PROJECT" -n 20        # last 20 events, then follow
 scripts/odw-watch "$PROJECT" --poll 2.0   # slower discovery/tail cadence
 ```
 
-Both scripts read `--runs-dir` (defaulting to `~/.odw/runs`), so point them at
-a sidecar-local `runsRoot` when a workshop overrides it.
+Both ODW scripts tolerate live writes (a torn `status.json` or event line is
+re-read on the next pass) and warn on stderr when run state is genuinely
+malformed. Both read `--runs-dir` (defaulting to `~/.odw/runs`), so point them
+at a sidecar-local `runsRoot` when a workshop overrides it.
+
+`scripts/git-commit-feed` prints a live commit feed for local branches in a Git
+repository. It prints an initial backlog, then follows branch-tip changes:
+
+```bash
+scripts/git-commit-feed "$PROJECT"              # latest 10 commits, then follow
+scripts/git-commit-feed "$PROJECT" --remotes    # include remote-tracking refs
+scripts/git-commit-feed "$PROJECT" -n 0         # follow-only
+```
+
+`scripts/blinkentrees` opens a Textual dashboard over sibling Git worktrees,
+using Linux inotify to show file activity per worktree. Run it from the parent
+directory that contains the worktrees, or pass that directory explicitly:
+
+```bash
+scripts/blinkentrees --pattern 'roadmap-*' .
+scripts/blinkentrees --any-matching-dir /path/to/worktrees
+```
 
 ## Roadmap format
 
