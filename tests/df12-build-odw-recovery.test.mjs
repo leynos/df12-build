@@ -799,10 +799,15 @@ test('review-mode resume reports non-adopt-complete classifications without spen
 
 test('a failed resume review halts the branch without integration', async () => {
   const calls = []
+  const assessPrompts = []
   const surface = await loadRecoverySurface(
-    { resumePartialBranches: true, resumeMode: 'review', maxReviewRounds: 1 },
+    { resumePartialBranches: true, resumeMode: 'review', maxReviewRounds: 2 },
     reviewModeAgent(calls, {
       review: async () => ({ verdict: 'changes-requested', blocking: ['recovered slice misses the success criterion'], summary: 'not shippable' }),
+      assess: async (prompt) => {
+        assessPrompts.push(prompt)
+        return sampleAssessment()
+      },
     }),
   )
   const repo = makeRecoveryRepo()
@@ -812,17 +817,30 @@ test('a failed resume review halts the branch without integration', async () => 
   assert.equal(outcome.summary.resumed, 0)
   const [entry] = outcome.summary.results
   assert.equal(entry.action, 'resume-failed')
-  assert.equal(outcome.taskResults[0].result.status, 'halted')
-  assert.equal(outcome.taskResults[0].result.stage, 'review')
+  const haltedResult = outcome.taskResults[0].result
+  assert.equal(haltedResult.status, 'halted')
+  assert.equal(haltedResult.stage, 'review')
+  assert.match(haltedResult.detail, /Final blocking items: recovered slice misses the success criterion/)
   assert.ok(
     calls.includes('assess:1.2.3'),
     'a failed resume must be re-assessed with current branch evidence, not the stale pre-resume assessment',
   )
-  assert.equal(outcome.taskResults[0].result.assessment.classification, 'adopt-complete')
+  assert.equal(haltedResult.assessment.classification, 'adopt-complete')
   assert.ok(
-    outcome.taskResults[0].result.assessment.hostEvidence,
+    haltedResult.assessment.hostEvidence,
     'the refreshed assessment carries newly collected host evidence',
   )
+  // The halted outcome records each review round and the fix agent's
+  // structured report, and that evidence reaches the fresh assessment prompt
+  // together with the freshness rules (issue #24).
+  assert.equal(haltedResult.reviewRounds.length, 2)
+  assert.equal(haltedResult.reviewRounds[0].codeReview.verdict, 'changes-requested')
+  assert.deepEqual(haltedResult.reviewRounds[0].fix, { summary: 'applied fixes' })
+  assert.equal(haltedResult.reviewRounds[1].fix, null, 'no fix round after the final review round')
+  const finalAssessPrompt = assessPrompts.filter((prompt) => prompt.includes('after a workflow failure')).pop()
+  assert.ok(finalAssessPrompt, 'the fresh post-resume assessment prompt must exist')
+  assert.match(finalAssessPrompt, /"reviewRounds"/)
+  assert.match(finalAssessPrompt, /Evidence freshness rules:/)
   assert.ok(!calls.some((label) => label.startsWith('integrate:')), 'no integration after a failed review')
 })
 

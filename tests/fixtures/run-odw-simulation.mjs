@@ -11,7 +11,9 @@
  * Scenario: {
  *   args: {...workflow args...},
  *   pathPrefix?: "<dir prepended to PATH before the body runs>",
- *   assessment?: {...overrides for the scripted ADR 002 assessment reply...}
+ *   assessment?: {...overrides for the scripted ADR 002 assessment reply...},
+ *   review?: {...full scripted reply for code-review/expert-review labels...},
+ *   fix?: {...full scripted reply for fix: labels...}
  * }
  * Prints JSON: { result, error, calls, phases }
  */
@@ -62,7 +64,7 @@ async function respond(label, prompt) {
     return { ok: true }
   }
   if (label.startsWith('code-review:') || label.startsWith('expert-review:')) {
-    return { verdict: 'pass', blocking: [], summary: 'ship it' }
+    return scenario.review || { verdict: 'pass', blocking: [], summary: 'ship it' }
   }
   if (label.startsWith('integrate:')) {
     return {
@@ -76,7 +78,9 @@ async function respond(label, prompt) {
       summary: 'squash merged and pushed',
     }
   }
-  if (label.startsWith('fix:')) return 'applied fixes'
+  if (label.startsWith('fix:')) {
+    return scenario.fix || { gatesGreen: true, commits: [], coderabbitRuns: 0, resolved: [], openIssues: [], summary: 'applied fixes' }
+  }
   throw new Error(`unexpected agent label in simulation: ${label}`)
 }
 

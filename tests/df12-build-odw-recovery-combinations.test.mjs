@@ -21,7 +21,7 @@ const DRIVER = fileURLToPath(new URL('./fixtures/run-odw-simulation.mjs', import
 // fixture repository; only agent() replies are scripted, keyed on labels.
 // `taskId: '9.9.9'` pins normal selection to a non-existent task so the pool
 // never opens ordinary work, keeping each combination focused on recovery.
-async function runSimulation({ repo, args = {}, pathPrefix = '', assessment = null }) {
+async function runSimulation({ repo, args = {}, pathPrefix = '', assessment = null, review = null, fix = null }) {
   const scenarioDir = mkdtempSync(path.join(tmpdir(), 'df12-scenario-'))
   const scenarioPath = path.join(scenarioDir, 'scenario.json')
   writeFileSync(
@@ -35,6 +35,8 @@ async function runSimulation({ repo, args = {}, pathPrefix = '', assessment = nu
       },
       ...(pathPrefix ? { pathPrefix } : {}),
       ...(assessment ? { assessment } : {}),
+      ...(review ? { review } : {}),
+      ...(fix ? { fix } : {}),
     }),
   )
   const { stdout } = await execFileAsync(process.execPath, [DRIVER, scenarioPath], {
@@ -104,6 +106,17 @@ test('combination: assess-only recovery reports candidates and mutates nothing',
   assert.deepEqual(calls, ['recover-assess:1.2.3'])
   assert.ok(phases.includes('Recovery'))
   assert.match(result.summary, /recovery\(assess\): 1 assessed, 0 resumed/)
+  // Unintegrated survivors block the roadmap frontier, so an assess-only run
+  // that leaves them in place must end needs-operator-recovery, not as a
+  // clean stop indistinguishable from a dry frontier (issue #25).
+  assert.match(result.halted, /needs-operator-recovery: 2 recovery survivor branch\(es\)/)
+  assert.deepEqual(
+    result.recovery.unresolved.map((entry) => [entry.id, entry.action]),
+    [
+      ['1.2.3', 'reported'],
+      ['1.2.4', 'held'],
+    ],
+  )
   assert.deepEqual(repoStateSnapshot(repo), before)
 })
 
@@ -132,7 +145,62 @@ test('combination: review-mode resume integrates the clean adopt-complete branch
     'expert-review:1.2.3 r1',
     'integrate:1.2.3',
   ])
-  assert.equal(result.halted, null)
+  // 1.2.3 integrated, but roadmap-1-2-4 (missing worktree) is still an
+  // unresolved survivor holding its id out of selection.
+  assert.match(result.halted, /needs-operator-recovery: 1 recovery survivor branch\(es\).*1\.2\.4/)
+  assert.deepEqual(
+    result.recovery.unresolved.map((entry) => [entry.id, entry.action]),
+    [['1.2.4', 'held']],
+  )
+})
+
+test('combination: a failed review-mode resume halts the run with the blocking evidence', async () => {
+  const repo = makeRecoveryRepo()
+
+  const { result, calls } = await runSimulation({
+    repo,
+    args: { resumePartialBranches: true, resumeMode: 'review', maxReviewRounds: 2 },
+    review: {
+      verdict: 'changes-requested',
+      blocking: ['recovered slice misses the success criterion'],
+      summary: 'not shippable',
+    },
+    fix: {
+      gatesGreen: true,
+      commits: ['Fix review blockers'],
+      coderabbitRuns: 1,
+      resolved: ['tightened the success criterion coverage'],
+      openIssues: [],
+      summary: 'gates green at HEAD after fixes',
+    },
+  })
+
+  assert.equal(result.recovery.resumed, 0)
+  assert.deepEqual(
+    result.recovery.results.map((entry) => [entry.id, entry.action]),
+    [['1.2.3', 'resume-failed']],
+  )
+  // The resume failure is the run's terminal state, not a silent footnote.
+  assert.match(result.halted, /recovery resume of task 1\.2\.3 halted at review/)
+  assert.match(result.halted, /Final blocking items: recovered slice misses the success criterion/)
+  // The halted result carries the per-round review verdicts and the
+  // structured fix-round report as durable validation evidence (issue #24).
+  const haltedResult = result.results.find((entry) => entry.status === 'halted')
+  assert.ok(haltedResult, 'the halted resume result must be recorded')
+  assert.equal(haltedResult.reviewRounds.length, 2)
+  assert.equal(haltedResult.reviewRounds[0].codeReview.verdict, 'changes-requested')
+  assert.deepEqual(haltedResult.reviewRounds[0].fix, {
+    commits: ['Fix review blockers'],
+    gatesGreen: true,
+    coderabbitRuns: 1,
+    resolved: ['tightened the success criterion coverage'],
+    openIssues: [],
+    summary: 'gates green at HEAD after fixes',
+  })
+  assert.equal(haltedResult.reviewRounds[1].fix, null, 'no fix round after the final review round')
+  // The failed resume is re-assessed fresh, after the fix rounds ran.
+  assert.ok(calls.includes('assess:1.2.3'), 'a failed resume must get a fresh assessment')
+  assert.ok(!calls.some((label) => label.startsWith('integrate:')), 'no integration after a failed review')
 })
 
 test('combination: review-mode resume skips a dirty branch fail-closed', async () => {

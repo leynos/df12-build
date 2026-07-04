@@ -313,6 +313,15 @@ Add a top-level `recovery` object to the workflow result:
       classification: "adopt-complete",
       action: "reported"
     }
+  ],
+  unresolved: [
+    {
+      id: "1.2.3",
+      isAddendum: false,
+      branchName: "roadmap-1-2-3",
+      classification: "adopt-complete",
+      action: "reported"
+    }
   ]
 }
 ```
@@ -320,6 +329,21 @@ Add a top-level `recovery` object to the workflow result:
 Per-task `results[]` entries should remain the primary place for review and
 integration outcomes. The recovery summary is an index for operators and
 supervision tools.
+
+`unresolved` lists every survivor branch the run reported but did not
+integrate (reported classifications, `resume-failed` branches, and discovery
+holds such as `missing-worktree`). These ids stay held out of normal selection
+while their branches survive, so the frontier remains blocked until an
+operator closes, resumes, splits, or hoovers each one. The run's terminal
+state makes this explicit rather than ending indistinguishably from a dry
+frontier:
+
+- A failed or halted review-mode resume sets `halted` to
+  `recovery resume of task <id> <status> at <stage>: <detail>` (the same
+  first-failure semantics as the worker pool), with the per-round reviewer
+  verdicts and structured fix-round reports in the result's `reviewRounds`.
+- A run that would otherwise stop cleanly while `unresolved` is non-empty sets
+  `halted` to `needs-operator-recovery: …` naming the surviving ids.
 
 When accepted-plan reuse is enabled, add a top-level `planReuse` object:
 

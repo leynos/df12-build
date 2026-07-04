@@ -92,8 +92,18 @@ const AUTH_REQUIRED_ADAPTERS = new Set([
   ASSESSMENT_ADAPTER,
 ].map((adapter) => String(adapter || '').toLowerCase()))
 const CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || 'coderabbit review --agent'
+// The deterministic commit-gate command set for the target project. `make all`
+// is the df12 house default, but it is NOT universal: some projects alias
+// `all` to a release build, so operators must be able to name the authoritative
+// gate targets (e.g. sequential check-fmt/typecheck/lint/test) via args.
+const COMMIT_GATES = (Array.isArray(cfg.commitGates) && cfg.commitGates.length
+  ? cfg.commitGates
+  : ['make all']).map((command) => String(command))
+const COMMIT_GATE_TEXT = COMMIT_GATES.map((command) => `\`${command}\``).join(' then ')
+const COMMIT_GATE_GUIDANCE =
+  `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well — NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.`
 const CODERABBIT_REVIEW_GUIDANCE =
-  'Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that `make all`, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.'
+  'Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.'
 const SPARK_DELEGATION_GUIDANCE =
   "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
 const SCRUTINEER_DELEGATION_GUIDANCE =
@@ -179,6 +189,7 @@ function preamble(worktree) {
     '- Use `sem` for codebase history navigation (semantic, entity-level diffs and blame) instead of raw git log/blame.',
     '- Load the appropriate language router skill for any code you touch: python-router for Python, rust-router for Rust, and the matching router for other languages. Follow the smaller skills it routes you to.',
     `- Treat docs/ as the source of truth: ${DESIGN_DOCS}, the developers guide, any users guide present, the coding/scripting standards, and AGENTS.md. Obey AGENTS.md quality gates and the en-GB Oxford-spelling ("-ize"/"-yse"/"-our") convention in all prose, comments, and commits.`,
+    `- ${COMMIT_GATE_GUIDANCE}`,
     `- The integration branch is "${BASE}"; treat origin/${BASE} as canonical. The roadmap lives at ${ROADMAP}.`,
     '- Format ONLY the files you changed: run the markdown formatter on the specific paths you touched (`mdtablefix … <files>` then `markdownlint-cli2 --fix <files>`), then gate. Do NOT run a repo-global format such as `make fmt` / `mdformat-all` that reformats unrelated files — that churn only has to be parked and discarded.',
     '- Never `git stash` with a bare or default message. Name every stash so a deterministic sweeper can tie it to a task and clear it safely: `df12-stash v1 task=<this roadmap id> kind=<discard|park|keep> reason="<short>"`. Formatter or build churn you park is kind=discard; anything you must re-apply later is kind=keep.',
@@ -220,12 +231,12 @@ const IMPL_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    ok: { type: 'boolean', description: 'true when every work item is implemented, committed, and make all is green' },
+    ok: { type: 'boolean', description: 'true when every work item is implemented, committed, and every project commit gate is green' },
     execplanPath: { type: 'string' },
     workItemsCompleted: { type: 'integer' },
     workItemsTotal: { type: 'integer' },
     commits: { type: 'array', items: { type: 'string' } },
-    gatesGreen: { type: 'boolean', description: 'make all (plus markdownlint/nixie where markdown changed) passes at HEAD' },
+    gatesGreen: { type: 'boolean', description: 'every project commit gate (plus markdownlint/nixie where markdown changed) passes at HEAD' },
     coderabbitRuns: { type: 'integer' },
     openIssues: { type: 'array', items: { type: 'string' }, description: 'anything left unresolved, with reason' },
     summary: { type: 'string' },
@@ -263,6 +274,24 @@ const REVIEW_SCHEMA = {
     summary: { type: 'string' },
   },
   required: ['verdict', 'blocking', 'summary'],
+}
+
+// Structured return contract for review-fix rounds. Without it, the gate and
+// CodeRabbit evidence a fix agent produces evaporates with its transcript, and
+// a later assessment of the branch cannot see that the workflow already
+// re-validated the current tip (issue #24).
+const FIX_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    commits: { type: 'array', items: { type: 'string' }, description: 'commit subjects added in this fix round' },
+    gatesGreen: { type: 'boolean', description: 'every project commit gate (plus markdownlint/nixie where markdown changed) passes at HEAD after the fixes' },
+    coderabbitRuns: { type: 'integer' },
+    resolved: { type: 'array', items: { type: 'string' }, description: 'how each blocking item was resolved' },
+    openIssues: { type: 'array', items: { type: 'string' }, description: 'anything left unresolved, with reason' },
+    summary: { type: 'string' },
+  },
+  required: ['gatesGreen', 'summary'],
 }
 
 const INTEGRATE_SCHEMA = {
@@ -906,8 +935,8 @@ function planPrompt(task, worktree, priorVerdict, round) {
     '- Signpost, per work item, the documentation to read and the skills to load (router skills, hypothesis/crosshair/mutmut for verification, etc.).',
     '- Specify the tests (unit, behavioural, property, snapshot, e2e) each work item must add or update, per the AGENTS.md testing rules.',
     '- The ExecPlan must be implementable as written. Do NOT set Status: BLOCKED merely because Memtrace, GrepAI, Leta, Firecrawl, sem, or another advisory tool is unavailable in your agent session. Record the failed command and use bounded local docs/source/tests as fallback evidence. Only mark blocked for a true product/design ambiguity or missing requirement that cannot be resolved from the repository.',
-    '- State the validation commands (`make all`; plus `make markdownlint` and `make nixie` for markdown changes). `make all` includes the `typecheck` target on current `origin/main`.',
-    '- VALIDATION COMMANDS MUST BE PATH-SAFE: prefer repository gates such as `make all`, `make markdownlint`, and `make nixie` over hand-written file lists. If a work item lists direct formatter/linter commands, every listed path must definitely exist at that point in the work item. Do not include a file that the same work item may delete, an optional file such as an optional snapshot, or a file that the work item does not edit. If a path is conditional, make the command conditional (`test -e path && …`) or omit that path and rely on the repository gate. This is a blocking design-review requirement.',
+    `- State the validation commands (${COMMIT_GATE_TEXT}; plus \`make markdownlint\` and \`make nixie\` for markdown changes). ${COMMIT_GATE_GUIDANCE}`,
+    `- VALIDATION COMMANDS MUST BE PATH-SAFE: prefer repository gates such as ${COMMIT_GATE_TEXT}, \`make markdownlint\`, and \`make nixie\` over hand-written file lists. If a work item lists direct formatter/linter commands, every listed path must definitely exist at that point in the work item. Do not include a file that the same work item may delete, an optional file such as an optional snapshot, or a file that the work item does not edit. If a path is conditional, make the command conditional (\`test -e path && …\`) or omit that path and rely on the repository gate. This is a blocking design-review requirement.`,
     '',
     'RESEARCH before you commit to any mechanism — do not leave the implementer a menu of unverified workarounds:',
     '- For every external or locked library the plan leans on, verify its REAL behaviour before relying on it: read the actual source (a vendored or sibling checkout if the project has one) and the official docs (use the `firecrawl` skill / firecrawl_* tools). Pin every load-bearing API to what the LOCKED version genuinely supports and cite the file/symbol or doc you verified against. If the library cannot express what a work item needs, say so explicitly and specify the justified, scoped alternative rather than hedging.',
@@ -926,7 +955,7 @@ function designReviewPrompt(task, worktree, plan, round) {
     `TASK: Conduct an ADVERSARIAL Logisphere DESIGN review of the ExecPlan for roadmap task ${task.id} at ${plan.execplanPath}. Round ${round}.`,
     '',
     'Invoke the `logisphere-design-review` skill and run the plan past the full crew (Pandalump structural integrity, Wafflecat alternatives, Buzzy Bee scaling, Telefono contracts, Doggylump failure modes, Dinolump long-term viability), plus the pre-mortem and alternatives checkpoint.',
-    'Be genuinely adversarial: assume the plan is flawed until proven otherwise. Check it against the design documents, ADRs, developers guide, and AGENTS.md. Verify the work items are atomic, ordered, testable, and complete; that validation includes `make all` (which includes `typecheck` on current `origin/main`) plus markdown gates when markdown changes; that direct formatter/linter file lists only name files guaranteed to exist and changed by that work item; that no standalone red-test commit is required; and that nothing contradicts the deterministic/judgemental boundary or the established contracts.',
+    `Be genuinely adversarial: assume the plan is flawed until proven otherwise. Check it against the design documents, ADRs, developers guide, and AGENTS.md. Verify the work items are atomic, ordered, testable, and complete; that validation includes the project commit gates (${COMMIT_GATE_TEXT}, cross-checked against the gate targets AGENTS.md actually names) plus markdown gates when markdown changes; that direct formatter/linter file lists only name files guaranteed to exist and changed by that work item; that no standalone red-test commit is required; and that nothing contradicts the deterministic/judgemental boundary or the established contracts.`,
     '',
     'Read the execplan from disk yourself — do not trust the planner\'s summary. You may leave review notes in the execplan or an adjacent review file, but do NOT implement anything and do NOT relax the design to make it pass.',
     'Where the plan asserts any external or locked-library behaviour, verify it against the REAL source (a vendored or sibling checkout if the project has one) and the official docs. Treat any uncited memory-based claim about library behaviour as a blocking defect: the plan must verify and cite official docs when tools permit, or pin the behaviour with a test. Do not reject an otherwise implementable plan solely because Memtrace, GrepAI, Leta, Firecrawl, or sem was unavailable in the planner session; reject it if that unavailability was turned into a hard blocker instead of a documented fallback.',
@@ -946,8 +975,8 @@ function implementPrompt(task, worktree, plan) {
     '',
     'For EACH execplan work item, in this exact order:',
     '  1. Implement the work item (code + tests + docs) per the plan and AGENTS.md.',
-    '  2. DETERMINISTIC GATE FIRST: summon `scrutineer` to run `make all` (which includes typecheck on current `origin/main`). If it reports failures, fix them yourself (format, lint, typecheck, tests, audit) and summon `scrutineer` again until green. For any markdown you touched, also have `scrutineer` run `make markdownlint` and `make nixie` and fix failures. Do not proceed to coderabbit until the deterministic gates are green.',
-    `  3. THEN summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. Address actionable feedback yourself (highest severity first). After applying fixes, summon \`scrutineer\` again to re-run \`make all\` and confirm the deterministic gates are still green.`,
+    `  2. DETERMINISTIC GATE FIRST: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT}, plus any further gate targets AGENTS.md names). If it reports failures, fix them yourself (format, lint, typecheck, tests, audit) and summon \`scrutineer\` again until green. For any markdown you touched, also have \`scrutineer\` run \`make markdownlint\` and \`make nixie\` and fix failures. Do not proceed to coderabbit until the deterministic gates are green.`,
+    `  3. THEN summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. Address actionable feedback yourself (highest severity first). After applying fixes, summon \`scrutineer\` again to re-run the commit gates and confirm they are still green.`,
     `     - ${CODERABBIT_REVIEW_GUIDANCE}`,
     '  4. Update the execplan IN PLACE with findings, progress (tick the work item), and any decisions or deviations, with rationale.',
     '  5. Commit the work item and the execplan update together as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).',
@@ -955,7 +984,7 @@ function implementPrompt(task, worktree, plan) {
     'Use leta for navigation, sem for history, and the language router skill for the languages you touch. Follow the per-work-item skill and documentation signposts in the plan.',
     '',
     `${DRY_RUN ? 'DRY RUN: do not run this step — it is skipped by the orchestrator.' : ''}`,
-    'When all work items are done, ensure `make all` is green at HEAD. Return the completion counts, commit subjects, whether gates are green, the number of coderabbit runs, and any open issues.',
+    `When all work items are done, ensure the project commit gates (${COMMIT_GATE_TEXT}) are green at HEAD. Return the completion counts, commit subjects, whether gates are green, the number of coderabbit runs, and any open issues.`,
   ].join('\n')
 }
 
@@ -971,7 +1000,9 @@ function fixPrompt(task, worktree, plan, blocking, round) {
     'The dual review returned the following BLOCKING items. Resolve every one:',
     ...blocking.map((b, i) => `  ${i + 1}. ${b}`),
     '',
-    `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gate (\`make all\`, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND}\`, then an atomic commit, then update the execplan with what changed and why. ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
+    `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT}, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND}\`, then an atomic commit, then update the execplan with what changed and why. ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
+    '',
+    'Return the commit subjects you added, whether every deterministic gate is green at HEAD after your fixes, the number of CodeRabbit runs you completed, how each blocking item was resolved, any open issues with reasons, and a short summary. This structured report is durable validation evidence for the branch — be precise about which gates ran and at which commit.',
   ].join('\n')
 }
 
@@ -986,7 +1017,7 @@ function codeReviewPrompt(task, worktree, plan) {
     '- documentation coverage (docstrings, developers/users guide, ADR/design updates per AGENTS.md),',
     '- validation coverage (unit, behavioural, property, snapshot, e2e per AGENTS.md; do the gates actually exercise the new behaviour?).',
     '',
-    'Use leta to inspect the code and sem to inspect the change history. Use `make all` output as evidence but do not rely on it alone.',
+    `Use leta to inspect the code and sem to inspect the change history. Use the commit-gate output (${COMMIT_GATE_TEXT}) as evidence but do not rely on it alone.`,
     'Return verdict=pass only if you would ship it. List precise blocking items otherwise. Any follow-up ideas go in proposedRoadmapItems (PROPOSAL ONLY — do not touch the roadmap).',
   ].join('\n')
 }
@@ -1045,12 +1076,12 @@ function implementAddendumPrompt(task, worktree) {
     '',
     'For EACH open sub-task, in id order:',
     '  1. Make ONLY the change the Addenda item describes. Do not expand scope.',
-    '  2. DETERMINISTIC GATE: summon `scrutineer` to run `make all` (which includes typecheck on current `origin/main`). For any Markdown you touched, also have it run `make markdownlint` and `make nixie`. Fix until green.',
-    `  3. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to re-run \`make all\` and confirm green. ${CODERABBIT_REVIEW_GUIDANCE}`,
+    `  2. DETERMINISTIC GATE: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT}, plus any further gate targets AGENTS.md names). For any Markdown you touched, also have it run \`make markdownlint\` and \`make nixie\`. Fix until green.`,
+    `  3. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to re-run the commit gates and confirm green. ${CODERABBIT_REVIEW_GUIDANCE}`,
     `  4. Tick the sub-task in the Addenda checklist of its execplan (\`- [ ] ${task.id}.<n>\` → \`- [x] …\`).`,
     '  5. Commit the sub-task and Addenda tick together as one atomic commit (en-GB imperative subject).',
     '',
-    'Use leta for navigation, sem for history, and the language router skill for the languages you touch. Do NOT edit the roadmap — integration ticks the roadmap sub-tasks. When all listed sub-tasks are done, ensure `make all` is green at HEAD. Return using the IMPL schema (execplanPath = the parent execplan): completion counts, commit subjects, gatesGreen, coderabbit run count, and any open issues.',
+    `Use leta for navigation, sem for history, and the language router skill for the languages you touch. Do NOT edit the roadmap — integration ticks the roadmap sub-tasks. When all listed sub-tasks are done, ensure the project commit gates (${COMMIT_GATE_TEXT}) are green at HEAD. Return using the IMPL schema (execplanPath = the parent execplan): completion counts, commit subjects, gatesGreen, coderabbit run count, and any open issues.`,
   ].join('\n')
 }
 
@@ -1058,6 +1089,10 @@ function isDeferredReviewIssue(issue) {
   const text = String(issue || '').toLowerCase()
   const deferredReviewMarkers = [
     'rate limit',
+    'rate_limit',
+    'rate-limit',
+    'ratelimit',
+    '429',
     'retry after',
     'waittime',
     'wait time',
@@ -1079,9 +1114,16 @@ function implementationAuthFailureDetail(impl) {
   return authFailureDetail(detail)
 }
 
+// A complete, gate-green addendum whose builder did not set ok=true is an
+// operator handoff, not an assessment case. Open issues are tolerated only
+// when every one is a deferred/recoverable review fault (e.g. a CodeRabbit
+// 429): that exact missing evidence is bounded and mechanical — retry the
+// review, verify, integrate — so spending an unbounded judgement agent on it
+// burns tokens without adding operator information (issue #27).
 function addendumImplementationNeedsManualMerge(impl) {
   if (!impl || impl.ok || !impl.gatesGreen) return false
-  if ((impl.openIssues || []).length > 0) return false
+  const openIssues = impl.openIssues || []
+  if (openIssues.length > 0 && !hasOnlyDeferredReviewIssues(openIssues)) return false
   const completed = Number(impl.workItemsCompleted)
   const total = Number(impl.workItemsTotal)
   return Number.isFinite(completed) && Number.isFinite(total) && total > 0 && completed >= total
@@ -1100,7 +1142,7 @@ function integratePrompt(task, worktree) {
     `Steps, in order, from inside the worktree:`,
     `  1. ${markStep}`,
     `  2. Fetch and rebase the branch onto the current origin/${BASE} (\`git fetch origin ${BASE}\` then rebase). Use the \`rebase\` skill for functionality-aware conflict resolution: resolve each conflict by preserving the INTENT of both sides (favour the design docs and existing contracts), not by blindly taking one side. If a conflict genuinely cannot be resolved safely, set ok=false, describe it in conflicts, and STOP without merging.`,
-    `  3. Re-run \`make all\` after the rebase to confirm the branch is still green.`,
+    `  3. Re-run the project commit gates (${COMMIT_GATE_TEXT}) after the rebase to confirm the branch is still green.`,
     `  4. Land the squash ENTIRELY inside this worktree. NEVER \`git switch ${BASE}\` and never touch the control/root worktree or its checked-out ${BASE}: that switch fails when ${BASE} is checked out elsewhere, and it pollutes the control worktree (the root of recurring detritus). Step 2 left the task branch rebased on the current origin/${BASE}; from here, create a fresh temp branch there (\`git switch -c integrate-${task.id.replace(/[^0-9a-zA-Z]+/g, '-')} origin/${BASE}\`), squash-merge the task branch onto it (\`git merge --squash <task-branch>\` then \`git commit\` with a clear squash message summarising the task), and push it straight to the integration branch with \`git push origin HEAD:${BASE}\`. If the push is rejected non-fast-forward (a sibling advanced origin/${BASE} since step 2), go back to step 2 — re-fetch and re-rebase the task branch onto the new origin/${BASE} — then redo this step. Retry until it lands.`,
     '',
     'Return what you actually did (roadmapMarkedDone, rebased, squashMerged, mergeSha, pushed) and any conflict notes. Do not delete the worktree unless git donkey expects you to; leave the repo in a clean state.',
@@ -1152,6 +1194,11 @@ function assessmentPromptLines(taskHeader, worktreePath, evidence, contextTitle,
     '- available validation evidence;',
     '- missing validation or review evidence;',
     '- safety risks and recommended operator next actions.',
+    '',
+    'Evidence freshness rules:',
+    '- Judge the branch at the CURRENT commit recorded in the host-collected evidence below. ExecPlan prose, earlier assessments, and logs that predate later commits are historical context, not the current validation state.',
+    '- When the failure context includes `reviewRounds`, those review verdicts and structured fix-round reports were produced by this workflow AFTER any earlier snapshot: treat the latest fix round\'s gate and CodeRabbit report, together with the host-collected git evidence, as the branch\'s current validation state. Do not list evidence as missing when the latest fix round reports the named gates green at the current tip — cite that report instead.',
+    '- Gate logs under /tmp are not durable; their absence is not, by itself, missing evidence when a structured fix-round or implementation report records the gates that ran and their outcomes.',
     '',
     'Host-collected git evidence:',
     '```json',
@@ -1822,10 +1869,37 @@ function ensureTaskAgentWriteAccess(worktree, tag) {
 // through exactly the same reviewers, fix rounds, merge lock, and roadmap
 // update path as ordinary work.
 // ---------------------------------------------------------------------------
+// Bounded per-round records of what the reviewers and fix agents actually
+// reported, so a failed/halted outcome carries fresh validation evidence into
+// its assessment instead of leaving the assessor with only stale ExecPlan
+// text and non-durable /tmp gate logs (issue #24).
+function summarizeReviewVerdict(review) {
+  if (!review) return null
+  return {
+    verdict: review.verdict || '',
+    blocking: review.blocking || [],
+    summary: review.summary || '',
+  }
+}
+
+function summarizeFixReport(fix) {
+  if (!fix) return null
+  if (typeof fix === 'string') return { summary: fix }
+  return {
+    commits: fix.commits || [],
+    gatesGreen: fix.gatesGreen === true,
+    coderabbitRuns: Number(fix.coderabbitRuns) || 0,
+    resolved: fix.resolved || [],
+    openIssues: fix.openIssues || [],
+    summary: fix.summary || '',
+  }
+}
+
 async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock, options = {}) {
   const tag = task.id
   const kindExtra = options.kind ? { kind: options.kind } : {}
   const proposals = []
+  const reviewRounds = []
   let reviewsPass = false
   for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
     const [codeReview, expertReview] = await parallel([
@@ -1840,11 +1914,13 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
         !codeReview ? 'code review' : null,
         !expertReview ? 'expert review' : null,
       ].filter(Boolean).join(' and ')
+      reviewRounds.push({ round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking: [], fix: null })
       return {
         id: tag,
         status: 'failed',
         stage: 'review',
         detail: `dual review failed to return a structured verdict from ${missing}; branch left unmerged for the root agent`,
+        reviewRounds,
         worktree,
         proposals,
         ...kindExtra,
@@ -1854,6 +1930,8 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
       ...(codeReview.blocking || []),
       ...(expertReview.blocking || []),
     ]
+    const roundRecord = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, fix: null }
+    reviewRounds.push(roundRecord)
     if (blocking.length === 0 && codeReview?.verdict === 'pass' && expertReview?.verdict === 'pass') {
       reviewsPass = true
       log(`[task ${tag}] dual review passed in round ${round}`)
@@ -1862,11 +1940,23 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
     log(`[task ${tag}] review round ${round}: ${blocking.length} blocking item(s)`)
     if (round === MAX_REVIEW_ROUNDS) break
     phase('Implement')
-    await buildLock(() => agent(fixPrompt(task, worktree, plan, blocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}` })))
+    const fix = await buildLock(() => agent(fixPrompt(task, worktree, plan, blocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })))
+    roundRecord.fix = summarizeFixReport(fix)
   }
 
   if (!reviewsPass) {
-    return { id: tag, status: 'halted', stage: 'review', detail: 'reviewers not satisfied within cap; branch left unmerged for the root agent', worktree, proposals, ...kindExtra }
+    const lastRound = reviewRounds[reviewRounds.length - 1]
+    const finalBlocking = (lastRound?.blocking || []).slice(0, 6).join('; ')
+    return {
+      id: tag,
+      status: 'halted',
+      stage: 'review',
+      detail: `reviewers not satisfied within cap; branch left unmerged for the root agent${finalBlocking ? `. Final blocking items: ${finalBlocking}` : ''}`,
+      reviewRounds,
+      worktree,
+      proposals,
+      ...kindExtra,
+    }
   }
 
   // --- Integrate (serialized behind the merge queue) ----------------------
@@ -1954,11 +2044,18 @@ async function runTask(task, mergeLock) {
     const openIssues = impl?.openIssues || []
     const onlyDeferredReviewIssues = hasOnlyDeferredReviewIssues(openIssues)
     if (addendumImplementationNeedsManualMerge(impl)) {
+      const deferredEvidence = openIssues.length
+        ? ` Outstanding deferred review evidence: ${openIssues.join('; ')}`
+        : ''
       return {
         id: tag,
         status: 'manual-merge-ready',
         stage: 'addendum',
-        detail: 'addendum implementation reported completed work, green gates, and no open issues, but did not set ok=true; branch left for operator verification before integration',
+        detail:
+          `addendum implementation reported completed work and green gates but did not set ok=true` +
+          `${openIssues.length ? ' and left only deferred/recoverable review issues open' : ' and no open issues'}; ` +
+          `branch left for operator verification before integration.${deferredEvidence}`,
+        openIssues,
         impl,
         worktree,
         proposals: [],
@@ -2431,6 +2528,13 @@ if (RESUME_PARTIAL_BRANCHES && !halted) {
         markProcessed(entry.task)
       } else if (entry.result.status === 'manual-merge-ready') {
         markManualMergeReady(entry.task)
+      } else if (['failed', 'halted'].includes(entry.result.status) && !halted) {
+        // A failed recovery resume is a task failure, not a footnote: halt the
+        // run (same first-failure semantics as the worker pool) so the
+        // terminal state is machine-actionable instead of a clean stop that
+        // is indistinguishable from a dry frontier (issue #25).
+        halted = `recovery resume of task ${entry.result.id} ${entry.result.status} at ${entry.result.stage}: ${entry.result.detail}`
+        stop = true
       }
     }
     if (outcome.fatal) {
@@ -2509,6 +2613,39 @@ if (canFlush && !providerFaultHalt) {
     log(`[triage:end] failed (${(err && err.message) || String(err)}); ${[...pendingByStep.values()].flat().length} proposal(s) left pending`)
   }
 }
+// Recovery survivors the run reported but did not integrate still hold their
+// roadmap ids out of selection, so the frontier stays blocked until the
+// operator closes, resumes, splits, or hoovers each branch. A run that ends
+// with such survivors has NOT stopped cleanly, even when the selector reports
+// no unblocked tasks — surface it as an explicit operator-recovery terminal
+// state instead of `halted: null` (issue #25).
+const unresolvedRecovery = [
+  ...[...recoveryHeldNormal]
+    .filter((id) => !processedNormal.has(id) && !manualMergeReadyNormal.has(id))
+    .map((id) => ({ id, isAddendum: false })),
+  ...[...recoveryHeldAddendum]
+    .filter((id) => !processedAddendum.has(id) && !manualMergeReadyAddendum.has(id))
+    .map((id) => ({ id, isAddendum: true })),
+].sort((left, right) => left.id.localeCompare(right.id, 'en', { numeric: true }) || Number(left.isAddendum) - Number(right.isAddendum))
+recovery.unresolved = unresolvedRecovery.map((entry) => {
+  const reported = (recovery.results || []).filter((result) => result.id === entry.id)
+  const last = reported[reported.length - 1]
+  return {
+    id: entry.id,
+    isAddendum: entry.isAddendum,
+    branchName: last?.branchName || '',
+    classification: last?.classification || '',
+    action: last?.action || 'held',
+    ...(last?.reason ? { reason: last.reason } : {}),
+  }
+})
+if (!halted && unresolvedRecovery.length) {
+  halted =
+    `needs-operator-recovery: ${unresolvedRecovery.length} recovery survivor branch(es) still block the roadmap frontier ` +
+    `(${unresolvedRecovery.map((entry) => entry.id + (entry.isAddendum ? ' (addendum)' : '')).join(', ')}); ` +
+    'use recovery.results/recovery.unresolved to close, resume, split, or hoover each branch, then relaunch'
+}
+
 const pendingProposals = [...pendingByStep.values()].flat()
 const assessments = results
   .filter((result) => result.assessment || result.assessmentError)
@@ -2534,6 +2671,9 @@ return {
   maxParallel: MAX_PARALLEL,
   maxPlanningParallel: MAX_PLANNING_PARALLEL,
   maxBuildParallel: MAX_BUILD_PARALLEL,
+  // The exact deterministic gate set every branch agent was instructed to run
+  // (issue #28): operators can audit reported gate greenness against it.
+  commitGates: COMMIT_GATES,
   processed,
   results,
   assessments,

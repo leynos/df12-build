@@ -33,6 +33,11 @@ return {
   ASSESSMENT_CLASSIFICATIONS,
   ASSESSMENT_SCHEMA,
   AUTH_REQUIRED_ADAPTERS,
+  COMMIT_GATES,
+  FIX_SCHEMA,
+  summarizeReviewVerdict,
+  summarizeFixReport,
+  implementAddendumPrompt,
   collectAssessmentEvidence,
   shouldAssessFailure,
   authFailureDetail,
@@ -148,6 +153,24 @@ test('provider-shaped agent failures are retry-later infrastructure faults', asy
   })
 })
 
+test('recoverable review faults classify as deferred review issues', async () => {
+  const surface = await loadAssessmentSurface()
+
+  // The live-run shape from issue #27: a CodeRabbit 429 recorded with the
+  // machine form "rate_limit" (and the log path carrying "coderabbit").
+  const rows = [
+    ['Second CodeRabbit review pass deferred: /tmp/coderabbit-x.out reported errorType: rate_limit, waitTime: 26 seconds, recoverable: true', true],
+    ['coderabbit review returned HTTP 429; retry later', true],
+    ['CodeRabbit rate-limit backoff in progress', true],
+    ['CodeRabbit temporarily unavailable', true],
+    ['coderabbit found 3 blocking issues', false],
+    ['make test failed: rate_limit spec regression', false],
+  ]
+  for (const [issue, expected] of rows) {
+    assert.equal(surface.isDeferredReviewIssue(issue), expected, issue)
+  }
+})
+
 test('green addendum implementation contract drift is manual merge ready', async () => {
   const surface = await loadAssessmentSurface()
 
@@ -184,6 +207,84 @@ test('green addendum implementation contract drift is manual merge ready', async
     }),
     false,
   )
+  // A complete, gate-green addendum blocked ONLY by a deferred/recoverable
+  // review fault is a bounded operator handoff, not an assessment case
+  // (issue #27).
+  assert.equal(
+    surface.addendumImplementationNeedsManualMerge({
+      ok: false,
+      gatesGreen: true,
+      workItemsCompleted: 4,
+      workItemsTotal: 4,
+      openIssues: ['Second CodeRabbit review deferred: errorType: rate_limit, waitTime: 26 seconds'],
+      summary: 'All addendum work items complete; second review pass rate limited',
+    }),
+    true,
+  )
+  assert.equal(
+    surface.addendumImplementationNeedsManualMerge({
+      ok: false,
+      gatesGreen: false,
+      workItemsCompleted: 4,
+      workItemsTotal: 4,
+      openIssues: ['CodeRabbit rate limit'],
+      summary: 'Gates not green',
+    }),
+    false,
+    'deferred review issues never excuse red gates',
+  )
+})
+
+test('addendum deferred-review manual handoff bypasses the assessment agent', async () => {
+  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  // The manual-merge-ready return must be checked BEFORE the failure branch
+  // that calls attachAssessment, so a bounded deferred-review handoff can
+  // never fall through into an unbounded Assess agent (issue #27).
+  assert.match(
+    source,
+    /if \(addendumImplementationNeedsManualMerge\(impl\)\) \{[\s\S]*?status: 'manual-merge-ready'[\s\S]*?\}\s*if \(!impl \|\| !impl\.ok \|\| !impl\.gatesGreen \|\| \(openIssues\.length > 0 && !onlyDeferredReviewIssues\)\) \{\s*return await attachAssessment/,
+  )
+})
+
+test('fix rounds carry a structured, mock-satisfiable evidence contract', async () => {
+  const surface = await loadAssessmentSurface()
+
+  assert.equal(surface.FIX_SCHEMA.additionalProperties, false)
+  assert.deepEqual(surface.FIX_SCHEMA.required, ['gatesGreen', 'summary'])
+
+  assert.equal(surface.summarizeReviewVerdict(null), null)
+  assert.deepEqual(
+    surface.summarizeReviewVerdict({ verdict: 'changes-requested', blocking: ['missing tests'], summary: 'not yet', coverage: { correctness: 'ok' } }),
+    { verdict: 'changes-requested', blocking: ['missing tests'], summary: 'not yet' },
+  )
+
+  assert.equal(surface.summarizeFixReport(null), null)
+  assert.deepEqual(surface.summarizeFixReport('applied fixes'), { summary: 'applied fixes' })
+  assert.deepEqual(
+    surface.summarizeFixReport({ gatesGreen: true, commits: ['Fix lint'], coderabbitRuns: 2, summary: 'green' }),
+    { commits: ['Fix lint'], gatesGreen: true, coderabbitRuns: 2, resolved: [], openIssues: [], summary: 'green' },
+  )
+})
+
+test('commit gates default to make all and honour operator overrides', async () => {
+  const defaults = await loadAssessmentSurface()
+  assert.deepEqual(defaults.COMMIT_GATES, ['make all'])
+
+  const stilyagiGates = ['make check-fmt', 'make typecheck', 'make lint', 'make test']
+  const surface = await loadAssessmentSurface({ commitGates: stilyagiGates })
+  assert.deepEqual(surface.COMMIT_GATES, stilyagiGates)
+
+  // The configured gate set must reach the branch agents' instructions: an
+  // addendum executor on a Stilyagi-style repo is told to run the named
+  // sequential gates, not to assume `make all` aggregates them (issue #28).
+  const prompt = surface.implementAddendumPrompt(
+    { id: '3.1.2', title: 'Doc-comment ownership', subtasks: ['3.1.2.1'], isAddendum: true },
+    '/tmp/project.worktrees/roadmap-3-1-2-addendum',
+  )
+  for (const gate of stilyagiGates) {
+    assert.ok(prompt.includes(`\`${gate}\``), `addendum prompt must name ${gate}`)
+  }
+  assert.match(prompt, /AGENTS\.md is authoritative for the gate set/)
 })
 
 // Runtime auth-preflight coverage: fake auth CLIs on PATH record every
