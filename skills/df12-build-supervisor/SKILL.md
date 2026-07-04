@@ -179,14 +179,21 @@ Every time a run completes you do the same loop:
 
 1. **Parse the result JSON.** Key fields: `processed` (ids merged this run),
    `results[]` (per-task `{id, status, stage, detail}` plus any
-   `assessment`; recovery-resumed branches carry `kind: "recovery-resume"`),
-   `assessments[]` (summaries for failed or halted branches that
-   were assessed), `recovery` (the fresh-run recovery index when
-   `resumePartialBranches=true`: `candidates`, `assessed`, `resumed`,
-   per-candidate `results` with classification/action/reason, and `skipped`
-   with machine-readable reasons), `halted` (null on a clean stop), `audits[]`,
-   `remediationTriage[]`, `pendingProposals` (proposals left unwritten because
-   the run halted — triage them manually later).
+   `assessment`; recovery-resumed branches carry `kind: "recovery-resume"`;
+   review-stage failures carry `reviewRounds[]` — the per-round reviewer
+   verdicts and structured fix-agent gate/CodeRabbit reports, which are the
+   freshest validation evidence for the branch), `assessments[]` (summaries
+   for failed or halted branches that were assessed), `recovery` (the
+   fresh-run recovery index when `resumePartialBranches=true`: `candidates`,
+   `assessed`, `resumed`, per-candidate `results` with
+   classification/action/reason, `skipped` with machine-readable reasons, and
+   `unresolved` — survivor branches the run reported but did not integrate),
+   `commitGates` (the deterministic gate set every branch agent was told to
+   run — audit reported gate greenness against it), `halted` (null on a clean
+   stop; `needs-operator-recovery: …` when unresolved recovery survivors still
+   block the frontier), `audits[]`, `remediationTriage[]`, `pendingProposals`
+   (proposals left unwritten because the run halted — triage them manually
+   later).
 2. **Hoover orphan worktrees.** For each non-root worktree under
    `…worktrees/roadmap-*`: stash any dirt with a **named** stash (see "Stash
    hygiene" below —
@@ -203,8 +210,12 @@ Every time a run completes you do the same loop:
    - **Clean stop** (`halted` null): the frontier is dry or the task ceiling was
      hit. Check how much roadmap remains; decide whether to relaunch (more
      unblocked work) or stop (see "Knowing when to stop").
-   - **Halted:** diagnose with the failure-mode playbook, apply the fix to the
-     roadmap (or environment), then relaunch.
+   - **`halted: needs-operator-recovery: …`**: the run finished its work, but
+     `recovery.unresolved` survivor branches still hold their roadmap ids out
+     of selection. This is operator work, not completion — follow
+     "Post-assessment recovery closure" below, then relaunch.
+   - **Halted (anything else):** diagnose with the failure-mode playbook, apply
+     the fix to the roadmap (or environment), then relaunch.
 5. **Run mandatory roadmap maintenance before editing the roadmap.** If the run
    produced `remediationTriage`, `pendingProposals`, audit findings, addenda, or
    any roadmap restructure work, load `roadmap-grooming` together with
@@ -489,13 +500,19 @@ reviewer.
   inspect the conflict; resolve it preserving the intent of both sides (favour
   the design docs/contracts), or re-file the task. The branch is left unmerged
   for you.
-- **Addendum manual-merge-ready** (the addendum agent reported completed work,
-  green gates, and no open issues, but did not satisfy the strict `ok=true`
-  schema contract): preserve the branch and verify it manually before any merge.
-  Rerun `make all` plus `make markdownlint`/`make nixie` when Markdown changed,
-  confirm CodeRabbit or equivalent review evidence, reconcile the roadmap
-  sub-task checkbox, then integrate or discard. Do not relaunch before deciding,
-  or the same open addendum can be selected again from `origin/BASE`.
+- **Addendum manual-merge-ready** (the addendum agent reported completed work
+  and green gates, but did not satisfy the strict `ok=true` schema contract —
+  either with no open issues at all, or with open issues that are ALL
+  deferred/recoverable review faults such as a CodeRabbit 429): preserve the
+  branch and verify it manually before any merge. The result's `openIssues`
+  and `detail` carry the exact missing evidence. Rerun the project commit
+  gates (the result's `commitGates` list; `make all` only where that IS the
+  gate aggregate) plus `make markdownlint`/`make nixie` when Markdown changed,
+  retry or supersede the deferred CodeRabbit review, reconcile the roadmap
+  sub-task checkbox, then integrate or discard. Do not relaunch before
+  deciding, or the same open addendum can be selected again from
+  `origin/BASE`. The workflow deliberately does NOT spend an assessment agent
+  on this state: the remaining work is bounded and mechanical.
 - **Review halt** (dual review unsatisfied within the cap): the branch is left
   unmerged with the blocking items. Check `result.assessment` first. If it says
   `adopt-complete`, verify gates and continue through the ordinary review and
@@ -543,13 +560,65 @@ reviewer.
   normal selection for that run (a fresh `git worktree add -b` would collide
   with the surviving branch), so reported-but-unresolved branches must be
   resumed, finished manually, or hoovered before the pool will rebuild those
-  tasks.
+  tasks — the run ends `halted: needs-operator-recovery` while any remain (see
+  "Post-assessment recovery closure").
 - **`worktree-write` failure (task-agent writable-root preflight):** the plan
   or build adapter could not write a host-verified probe file inside the task
   worktree. This is a launch/sandbox fault — fix the adapter config (writable
   roots covering `...worktrees/roadmap-*`) and relaunch; do not burn design
   rounds or reword roadmap tasks. The verdict is computed once per run, so
   every task fails fast together.
+
+## Post-assessment recovery closure
+
+Recovery assessments are **work inputs, not status reports**. Once a recovery
+run has assessed survivor branches, the supervisor must use those assessments
+to close, resume, or re-file each branch and keep the roadmap moving. A run
+that ends with `processed: []`, no unblocked tasks, and survivor branches
+still in place has NOT finished the build — the frontier is blocked behind the
+survivors, and every held id stays out of selection on relaunch too. The
+workflow surfaces this as `halted: needs-operator-recovery: …` with the ids in
+`recovery.unresolved`; treat that terminal state as your queue.
+
+For **every** survivor branch (from `recovery.results[]`, `recovery.skipped[]`
+holds, `results[]`, and `assessments[]`), choose exactly one disposition:
+
+1. **Close/integrate** — for `adopt-complete` and `resume-failed` branches
+   whose remaining blockers are mechanical: retry or supersede any deferred
+   CodeRabbit review, run the project's named commit gates at the branch tip,
+   route residual review proposals into roadmap tasks/addenda (load
+   `roadmap-grooming` first), then merge through the protected integration
+   path and tick the roadmap task.
+2. **Resume** — for clean `adopt-complete` branches with validation evidence:
+   relaunch with `resumeMode="review"` (optionally `resumeTaskId`) so the
+   branch re-enters the ordinary dual review and integration path. Note that a
+   `resume-failed` outcome now halts the run with the blocking review items in
+   `halted` and the per-round evidence in the result's `reviewRounds` — do not
+   simply relaunch the same resume; act on the blockers first.
+3. **Split / add addenda** — for `adopt-partial` branches: preserve the
+   coherent slice, convert the remaining work into a completion task or
+   addendum sub-tasks (via `roadmap-grooming` + `mapsplice`), and leave the
+   original task unchecked.
+4. **Preserve-for-manual** — for `continue-manual` branches (typically
+   planning-stage survivors): record an explicit operator decision in
+   `operator-notes.md`. Do not let them block dependents indefinitely — decide
+   within the current supervision cycle whether to finish them by hand,
+   re-file them, or discard.
+5. **Discard** — for `discard` classifications (and stale holds like
+   `missing-worktree` you choose not to revive): hoover the branch with a
+   named stash (`kind=discard`) so selection can rebuild the task fresh.
+
+Rules that make this safe:
+
+- Route review/audit proposals into the roadmap **before** marking an original
+  task complete; never tick a task whose success criterion rests on
+  unintegrated survivor work.
+- If the selector reports no unblocked tasks while assessed survivors remain,
+  that is operator recovery work, not completion. Do not report the build as
+  stopped cleanly.
+- Record each disposition (branch, classification, action taken, evidence) in
+  `operator-notes.md`, then relaunch from the sidecar. The next run's selector
+  only reopens an id once its surviving branch is gone or integrated.
 
 ## Editing or restructuring the roadmap safely
 
