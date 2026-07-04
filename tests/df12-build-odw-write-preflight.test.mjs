@@ -1,3 +1,7 @@
+// Tests for the task-agent writable-root preflight: probe targets, host
+// verification (including symlink and decoy hardening), memoization, and a
+// runtime check that runTask fails at worktree-write before any planner runs.
+
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, chmodSync, symlinkSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
@@ -5,12 +9,14 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { makeRecoveryRepo } from './fixtures/recovery-repo.mjs'
+
 const WORKFLOW_PATH = new URL('../workflows/df12-build-odw.js', import.meta.url)
 const CONTROL_LOOP_MARKER = '// --- Worker-pool control loop'
 
 async function loadPreflightSurface(args = {}, agentImpl = async () => null) {
   let source = await readFile(WORKFLOW_PATH, 'utf8')
-  source = source.replace(/^export const meta\s*=/, 'const meta =')
+  source = source.replace(/^export const meta\s*=/m, 'const meta =')
   const markerIndex = source.indexOf(CONTROL_LOOP_MARKER)
   assert.notEqual(markerIndex, -1, 'workflow control-loop marker should exist')
   const helperSource = source.slice(0, markerIndex)
@@ -33,6 +39,7 @@ return {
   runTaskAgentWritePreflight,
   ensureTaskAgentWriteAccess,
   shouldAssessFailure,
+  runTask,
 }
 `,
   )
@@ -256,4 +263,34 @@ test('runTask gates on the write preflight before any planning or addendum work'
         String.raw`[\s\S]*?if \(task\.isAddendum\)`,
     ),
   )
+})
+
+// Runtime companion to the source invariant above: drive the real runTask
+// (real worktree creation against a fixture origin) through a failing probe
+// and prove no planning agent ever runs.
+test('runTask fails at worktree-write before spawning any planning agent', async () => {
+  const labels = []
+  const claimsWithoutWriting = async (prompt, opts = {}) => {
+    labels.push(opts.label || '')
+    return { ok: true }
+  }
+  const surface = await loadPreflightSurface({}, claimsWithoutWriting)
+  const repo = makeRecoveryRepo()
+  const previousCwd = process.cwd()
+  process.chdir(repo.dir)
+  try {
+    const result = await surface.runTask(
+      { id: '3.1.1', title: 'Runtime write-gate ordering probe', requires: [], isAddendum: false, subtasks: [] },
+      null,
+    )
+    assert.equal(result.status, 'failed')
+    assert.equal(result.stage, 'worktree-write')
+    assert.ok(labels.length > 0, 'the probe agents themselves must have been dispatched')
+    assert.ok(
+      labels.every((label) => label.startsWith('write-probe:')),
+      `only write probes may run before the gate: ${labels.join(', ')}`,
+    )
+  } finally {
+    process.chdir(previousCwd)
+  }
 })

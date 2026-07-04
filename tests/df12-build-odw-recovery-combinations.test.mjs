@@ -1,3 +1,7 @@
+// Whole-workflow combination tests for recovery modes: the entire control
+// loop executes in a subprocess (tests/fixtures/run-odw-simulation.mjs)
+// against fixture repositories, with only agent replies scripted by label.
+
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs'
@@ -122,6 +126,8 @@ test('combination: review-mode resume integrates the clean adopt-complete branch
   assert.equal(result.results[0].kind, 'recovery-resume')
   assert.deepEqual(calls, [
     'recover-assess:1.2.3',
+    'write-probe:claude',
+    'write-probe:codex-medium',
     'code-review:1.2.3 r1',
     'expert-review:1.2.3 r1',
     'integrate:1.2.3',

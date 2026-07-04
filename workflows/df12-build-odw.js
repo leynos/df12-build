@@ -1,3 +1,11 @@
+// df12-build-odw — ODW/Codex workflow that drives a df12-house GIST roadmap
+// to completion: deterministic selection, real git-worktree task isolation,
+// adversarial plan/design review, implementation with deterministic gates,
+// dual review, merge-lock integration, post-merge audit, remediation triage,
+// fresh-run recovery of surviving task branches (failure-resume design), and
+// a host-verified task-agent write preflight. Helpers live above the
+// worker-pool control-loop marker so the test suites in tests/ can compile
+// them in isolation; see docs/architecture.md for the enforcement boundary.
 export const meta = {
   name: 'df12-build-odw',
   description:
@@ -1390,6 +1398,7 @@ const RECOVERY_SKIP_REASONS = [
   'no-committed-work',
   'not-task-scoped',
   'missing-validation-evidence',
+  'missing-execplan',
   'dry-run',
 ]
 
@@ -1405,6 +1414,7 @@ function recoveryResumeEligibility(candidate, evidence, assessment) {
   if (assessment?.taskScoped !== true) return 'not-task-scoped'
   if (!String(assessment?.validation || '').trim()) return 'missing-validation-evidence'
   if ((assessment?.missingEvidence || []).length) return 'missing-validation-evidence'
+  if (!candidate?.execplanPath) return 'missing-execplan'
   return ''
 }
 
@@ -1437,9 +1447,19 @@ const RECOVERY_HOLD_REASONS = new Set(['missing-worktree', 'candidate-cap', 'unr
 // NOT proof the branch is shippable: code review, expert review, gates, and
 // integration remain decisive, and the open issue makes that explicit to
 // reviewers reading the implementation summary.
-async function syntheticRecoveryImpl(candidate, evidence) {
+// The canonical durable plan for a task branch, or '' when it does not exist
+// on disk in the worktree. An absent plan stays absent: nothing downstream may
+// substitute the canonical path back in after this check has failed.
+async function recoveryExecplanPath(candidate) {
   const canonicalPlan = `docs/execplans/${candidate.branchName}.md`
-  const execplanPath = (await fileExists(canonicalPlan, candidate.worktreePath)) ? canonicalPlan : ''
+  return (await fileExists(canonicalPlan, candidate.worktreePath)) ? canonicalPlan : ''
+}
+
+async function syntheticRecoveryImpl(candidate, evidence) {
+  const execplanPath =
+    typeof candidate.execplanPath === 'string'
+      ? candidate.execplanPath
+      : await recoveryExecplanPath(candidate)
   return {
     ok: true,
     gatesGreen: true,
@@ -1522,7 +1542,10 @@ async function runRecovery(root, mergeLock = null) {
     }
     summary.assessed += 1
     const evidence = assessment.hostEvidence
-    const decision = recoveryDecision(candidate, evidence, assessment, RESUME_MODE, { dryRun: DRY_RUN })
+    // Resolve the durable ExecPlan before deciding: resume eligibility
+    // requires it, and its absence must stay visible as missing-execplan.
+    const enriched = { ...candidate, execplanPath: await recoveryExecplanPath(candidate) }
+    const decision = recoveryDecision(enriched, evidence, assessment, RESUME_MODE, { dryRun: DRY_RUN })
     if (decision.action !== 'resume') {
       if (decision.skip) {
         summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: decision.reason })
@@ -1551,9 +1574,29 @@ async function runRecovery(root, mergeLock = null) {
       isAddendum: false,
       subtasks: [],
     }
-    const impl = await syntheticRecoveryImpl(candidate, evidence)
+    const resumeWt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit }
+    // Same host-verified write gate as ordinary tasks: review fix rounds and
+    // integration write into the recovered worktree, so the sandbox boundary
+    // must be proven before any agent can touch it.
+    const writeAccess = await ensureTaskAgentWriteAccess(candidate.worktreePath, candidate.taskId)
+    if (!writeAccess.ok) {
+      const detail = `task-agent writable-root preflight failed (launch/sandbox fault, not a task defect): ${writeAccess.failures.map((failure) => `${failure.adapter}: ${failure.detail}`).join('; ')}`
+      taskResults.push({
+        task,
+        result: { id: candidate.taskId, status: 'failed', stage: 'worktree-write', detail, worktree: candidate.worktreePath, proposals: [], kind: 'recovery-resume' },
+      })
+      summary.results.push({
+        id: candidate.taskId,
+        branchName: candidate.branchName,
+        classification: decision.classification,
+        action: 'resume-failed',
+        reason: detail,
+      })
+      continue
+    }
+    const impl = await syntheticRecoveryImpl(enriched, evidence)
     const plan = {
-      execplanPath: impl.execplanPath || `docs/execplans/${candidate.branchName}.md`,
+      execplanPath: impl.execplanPath,
       workItems: [],
       summary: impl.summary,
     }
@@ -1574,7 +1617,10 @@ async function runRecovery(root, mergeLock = null) {
       })
       return { summary, taskResults, held, fatal: outcome }
     }
-    taskResults.push({ task, result: outcome.status === 'done' ? outcome : { ...outcome, assessment } })
+    // A failed or halted resume gets a FRESH assessment through the same
+    // guard as ordinary task failures — the pre-resume assessment is stale
+    // once review rounds and fix agents have touched the branch.
+    taskResults.push({ task, result: outcome.status === 'done' ? outcome : await attachAssessment(task, resumeWt, outcome) })
     if (outcome.status === 'done') {
       summary.resumed += 1
       summary.results.push({

@@ -13,6 +13,8 @@
  * agents were ATTEMPTED (events.jsonl), not on real pushes.
  */
 
+import { writeFileSync } from 'node:fs'
+
 let input = ''
 process.stdin.setEncoding('utf8')
 process.stdin.on('data', (chunk) => {
@@ -20,12 +22,27 @@ process.stdin.on('data', (chunk) => {
 })
 process.stdin.on('end', () => {
   const schema = extractSchema(input)
-  const value = schema ? replyFor(schema) : 'mock reply'
+  const value = schema ? replyFor(schema, input) : 'mock reply'
   process.stdout.write(typeof value === 'string' ? value : JSON.stringify(value))
 })
 
-function replyFor(schema) {
+function replyFor(schema, prompt) {
   const properties = schema.properties || {}
+  if (properties.ok && properties.detail && !properties.roadmapMarkedDone) {
+    // Writable-root probe: behave as a compliant sandbox by honouring the
+    // requested write, so the host verification finds the token on disk.
+    const file = /^PROBE_FILE: (.+)$/m.exec(prompt)
+    const token = /^PROBE_TOKEN: (.+)$/m.exec(prompt)
+    if (file && token) {
+      try {
+        writeFileSync(file[1], token[1], 'utf8')
+        return { ok: true, detail: '' }
+      } catch (error) {
+        return { ok: false, detail: String(error) }
+      }
+    }
+    return { ok: false, detail: 'probe prompt carried no PROBE_FILE/PROBE_TOKEN lines' }
+  }
   if (properties.classification) {
     return {
       classification: 'adopt-complete',

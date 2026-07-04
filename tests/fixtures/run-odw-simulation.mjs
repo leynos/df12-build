@@ -16,7 +16,7 @@
  * Prints JSON: { result, error, calls, phases }
  */
 import { readFileSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 
 const scenarioPath = process.argv[2]
 if (!scenarioPath) {
@@ -50,8 +50,16 @@ function scriptedAssessment(overrides = {}) {
   }
 }
 
-function respond(label) {
-  if (label.startsWith('recover-assess:')) return scriptedAssessment(scenario.assessment)
+async function respond(label, prompt) {
+  if (label.startsWith('recover-assess:') || label.startsWith('assess:')) return scriptedAssessment(scenario.assessment)
+  if (label.startsWith('write-probe:')) {
+    // Behave as a compliant sandbox: honour the probe by writing the token,
+    // so scenarios exercise flows beyond the write gate.
+    const file = /^PROBE_FILE: (.+)$/m.exec(prompt)
+    const token = /^PROBE_TOKEN: (.+)$/m.exec(prompt)
+    if (file && token) await writeFile(file[1], token[1], 'utf8')
+    return { ok: true }
+  }
   if (label.startsWith('code-review:') || label.startsWith('expert-review:')) {
     return { verdict: 'pass', blocking: [], summary: 'ship it' }
   }
@@ -68,12 +76,11 @@ function respond(label) {
     }
   }
   if (label.startsWith('fix:')) return 'applied fixes'
-  if (label.startsWith('write-probe:')) return { ok: false, detail: 'write probe not scripted in simulation' }
   throw new Error(`unexpected agent label in simulation: ${label}`)
 }
 
 let source = await readFile(new URL('../../workflows/df12-build-odw.js', import.meta.url), 'utf8')
-source = source.replace(/^export const meta\s*=/, 'const meta =')
+source = source.replace(/^export const meta\s*=/m, 'const meta =')
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor
 const body = new AsyncFunction(
   'agent',
@@ -92,7 +99,7 @@ const calls = []
 const phases = []
 const agent = async (prompt, opts = {}) => {
   calls.push(opts.label || opts.adapter || '')
-  return respond(opts.label || '')
+  return respond(opts.label || '', prompt)
 }
 const parallel = (thunks) => Promise.all(thunks.map((thunk) => Promise.resolve().then(thunk).catch(() => null)))
 const pipeline = async (items, ...stages) =>

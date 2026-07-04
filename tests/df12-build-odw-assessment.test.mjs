@@ -1,6 +1,12 @@
+// Tests for the ODW workflow's partial-branch assessment contract: the ADR
+// 002 schema, failure classifiers, the assessment guard, git evidence
+// collection, and runtime auth-preflight behaviour with fake CLIs on PATH.
+// Helpers compile from the workflow's pre-control-loop slice (odw-testing
+// skill, layer 1).
+
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -9,9 +15,9 @@ import test from 'node:test'
 const WORKFLOW_PATH = new URL('../workflows/df12-build-odw.js', import.meta.url)
 const CONTROL_LOOP_MARKER = '// --- Worker-pool control loop'
 
-async function loadAssessmentSurface() {
+async function loadAssessmentSurface(args = {}) {
   let source = await readFile(WORKFLOW_PATH, 'utf8')
-  source = source.replace(/^export const meta\s*=/, 'const meta =')
+  source = source.replace(/^export const meta\s*=/m, 'const meta =')
   const markerIndex = source.indexOf(CONTROL_LOOP_MARKER)
   assert.notEqual(markerIndex, -1, 'workflow control-loop marker should exist')
   const helperSource = source.slice(0, markerIndex)
@@ -36,11 +42,12 @@ return {
   hasOnlyDeferredReviewIssues,
   implementationAuthFailureDetail,
   addendumImplementationNeedsManualMerge,
+  runAuthPreflight,
 }
 `,
   )
   return factory(
-    {},
+    args,
     () => {},
     () => {},
     async () => null,
@@ -179,14 +186,70 @@ test('green addendum implementation contract drift is manual merge ready', async
   )
 })
 
-test('auth preflight checks Claude when routing uses the Claude adapter', async () => {
-  const source = await readFile(WORKFLOW_PATH, 'utf8')
+// Runtime auth-preflight coverage: fake auth CLIs on PATH record every
+// invocation, so the tests fail for reordered, inverted, or dead preflight
+// code — not merely for edited source text.
+function makeAuthBin({ codexOk = true, claudeOk = true, coderabbitOk = true } = {}) {
+  const bin = mkdtempSync(path.join(tmpdir(), 'df12-auth-bin-'))
+  const logFile = path.join(bin, 'calls.log')
+  writeFileSync(logFile, '')
+  const fake = (name, ok) => {
+    const file = path.join(bin, name)
+    const body = ok
+      ? `#!/bin/sh\necho "${name} $@" >> "${logFile}"\necho "Session healthy"\nexit 0\n`
+      : `#!/bin/sh\necho "${name} $@" >> "${logFile}"\necho "Not logged in"\nexit 1\n`
+    writeFileSync(file, body)
+    chmodSync(file, 0o755)
+  }
+  fake('codex', codexOk)
+  fake('claude', claudeOk)
+  fake('coderabbit', coderabbitOk)
+  return { bin, calls: () => readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean) }
+}
 
-  assert.match(
-    source,
-    /if \(AUTH_REQUIRED_ADAPTERS\.has\('claude'\)\)[\s\S]*?execFileStatus\('claude', \['auth', 'status'\]\)/,
+async function runPreflightWithFakes(args, fakes) {
+  const surface = await loadAssessmentSurface(args)
+  const previousPath = process.env.PATH
+  process.env.PATH = `${fakes.bin}:${previousPath}`
+  try {
+    return await surface.runAuthPreflight()
+  } finally {
+    process.env.PATH = previousPath
+  }
+}
+
+test('auth preflight consults Claude only when a stage routes to the claude adapter', async () => {
+  const withClaude = makeAuthBin()
+  const failures = await runPreflightWithFakes({}, withClaude)
+  assert.deepEqual(failures, [])
+  assert.deepEqual(withClaude.calls(), [
+    'codex login status',
+    'claude auth status',
+    'coderabbit auth status',
+  ])
+
+  const codexOnly = makeAuthBin()
+  const codexOnlyArgs = {
+    planAdapter: 'codex',
+    reviewAdapter: 'codex',
+    triageAdapter: 'codex',
+    assessmentAdapter: 'codex',
+  }
+  const codexFailures = await runPreflightWithFakes(codexOnlyArgs, codexOnly)
+  assert.deepEqual(codexFailures, [])
+  assert.ok(
+    !codexOnly.calls().some((line) => line.startsWith('claude ')),
+    'claude must not be consulted when no stage routes to it',
   )
-  assert.match(source, /preflight passed for \$\{passed\.join\(', '\)\}/)
+})
+
+test('auth preflight reports a signed-out Claude as a failure', async () => {
+  const fakes = makeAuthBin({ claudeOk: false })
+  const failures = await runPreflightWithFakes({}, fakes)
+  assert.equal(failures.length, 1)
+  assert.equal(failures[0].tool, 'claude')
+  assert.equal(failures[0].command, 'claude auth status')
+  assert.match(failures[0].detail, /Not logged in/)
 })
 
 test('normal and addendum implementations gate auth before integration', async () => {

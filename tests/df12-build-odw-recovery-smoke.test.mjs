@@ -1,3 +1,7 @@
+// Bounded end-to-end smoke of recovery through the real odw runtime with
+// deterministic mock adapters (roadmap task 2.3.2); skips when the odw CLI
+// is not installed.
+
 import assert from 'node:assert/strict'
 import { execFile, execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
@@ -66,7 +70,10 @@ async function runSmoke(resumeMode) {
   await execFileAsync(
     'odw',
     ['run', WORKFLOW, '--source', repo.dir, '--config', configPath, '--args', `@${argsPath}`, '--wait', '--timeout', '180'],
-    { encoding: 'utf8', timeout: 200_000, maxBuffer: 16 * 1024 * 1024 },
+    // Generous headroom over ODW's own --timeout 180: when ODW times out
+    // internally it still needs time to write result.json before this outer
+    // guard fires, so keep the two limits far apart.
+    { encoding: 'utf8', timeout: 360_000, maxBuffer: 16 * 1024 * 1024 },
   )
 
   const runDirs = readdirSync(runsRoot, { recursive: true, withFileTypes: true })

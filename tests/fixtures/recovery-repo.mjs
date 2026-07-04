@@ -34,8 +34,11 @@ export const RECOVERY_ROADMAP = [
 ].join('\n')
 
 // A repo with an `origin` remote, surviving roadmap-* branches, and a live
-// worktree for 1.2.3 — the durable state fresh-run discovery reads.
-export function makeRecoveryRepo({ withAddendumWorktree = false } = {}) {
+// worktree for 1.2.3 — the durable state fresh-run discovery reads. Worktree
+// branches also carry a committed canonical ExecPlan (resume eligibility
+// requires one); pass withParserExecplan: false to model a branch that lost
+// its plan.
+export function makeRecoveryRepo({ withAddendumWorktree = false, withParserExecplan = true } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'df12-recovery-'))
   const dir = path.join(root, 'project')
   const originDir = path.join(root, 'origin.git')
@@ -51,7 +54,7 @@ export function makeRecoveryRepo({ withAddendumWorktree = false } = {}) {
   git(dir, 'push', 'origin', 'main')
   const baseSha = git(dir, 'rev-parse', 'HEAD')
 
-  const addBranch = (branch, { commit = true, worktree = false } = {}) => {
+  const addBranch = (branch, { commit = true, worktree = false, execplan = true } = {}) => {
     git(dir, 'branch', branch, 'main')
     let worktreePath = ''
     if (worktree) {
@@ -59,6 +62,13 @@ export function makeRecoveryRepo({ withAddendumWorktree = false } = {}) {
       git(dir, 'worktree', 'add', worktreePath, branch)
       if (commit) {
         writeFileSync(path.join(worktreePath, `${branch}.txt`), 'work\n')
+        if (execplan) {
+          mkdirSync(path.join(worktreePath, 'docs', 'execplans'), { recursive: true })
+          writeFileSync(
+            path.join(worktreePath, 'docs', 'execplans', `${branch}.md`),
+            `# ExecPlan for ${branch}\n\nStatus: COMPLETE\n`,
+          )
+        }
         git(worktreePath, 'add', '.')
         git(worktreePath, 'commit', '-m', `Work on ${branch}`)
       }
@@ -66,7 +76,7 @@ export function makeRecoveryRepo({ withAddendumWorktree = false } = {}) {
     return worktreePath
   }
 
-  const parserWorktree = addBranch('roadmap-1-2-3', { worktree: true })
+  const parserWorktree = addBranch('roadmap-1-2-3', { worktree: true, execplan: withParserExecplan })
   addBranch('roadmap-1-2-4')
   addBranch('roadmap-2-1-1')
   addBranch('roadmap-9-9-9')
