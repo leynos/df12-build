@@ -169,15 +169,15 @@ the same run directories; both tolerate live writes (a torn `status.json` or
 event line is re-read on the next pass) and warn on stderr when run state is
 genuinely malformed.
 
-`scripts/list-odw-runs.py` tabulates runs from the ODW runs root, showing the
+`scripts/odw-list-runs` tabulates runs from the ODW runs root, showing the
 source project, status, last update, run id, and workflow name. It defaults
 to running runs; filters widen or narrow the view:
 
 ```bash
-scripts/list-odw-runs.py                        # running runs only
-scripts/list-odw-runs.py --all --limit 20       # every status, newest first
-scripts/list-odw-runs.py -s failed -s stopped   # explicit statuses
-scripts/list-odw-runs.py --source my-project    # substring match on source
+scripts/odw-list-runs                        # running runs only
+scripts/odw-list-runs --all --limit 20       # every status, newest first
+scripts/odw-list-runs -s failed -s stopped   # explicit statuses
+scripts/odw-list-runs --source my-project    # substring match on source
 ```
 
 `scripts/odw-watch` tails events for every *running* run whose metadata
