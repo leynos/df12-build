@@ -40,7 +40,7 @@ Keep these files together in the sidecar:
 Set `concurrency` to `16` in `odw.config.json` for normal Codex and Claude Code
 workshops. That leaves room for an eight-task worker pool, four planning-stage
 agents, four build-stage agents, and review, triage, audit, or assessment
-slack. Keep `maxAgents` high, such as the ODW default of `1000`, because it is
+slack. Keep `maxAgents` high (such as the ODW default of `1000`) because it is
 the per-run dispatch guard rather than the live process-pool size.
 
 Set the adapter `timeout` high enough for the workflow's CodeRabbit policy.
@@ -347,6 +347,9 @@ Common arguments:
 - `planAdapter` and `planModel`: adapter and model for planning agents.
 - `reviewAdapter` and `reviewModel`: adapter and model for design review, code
   review, expert review, and audit agents.
+- `triageAdapter` and `triageModel`: adapter and model for remediation triage
+  (routing review and audit proposals onto roadmap lanes). Defaults are
+  `codex` and `gpt-5.5@high`.
 - `assessmentAdapter` and `assessmentModel`: adapter and model for partial
   branch assessment. Defaults to the review adapter and model.
 
@@ -451,7 +454,7 @@ The `recovery` result object indexes the pass for operators: `candidates`,
 `skipped` entries with machine-readable reasons (including `unmapped-branch`,
 `already-complete`, `missing-worktree`, and `candidate-cap` from discovery).
 Ids with surviving branches are held out of normal selection for the rest of
-the run so the pool cannot collide with an existing branch; hoover the branch
+the run, so the pool cannot collide with an existing branch; hoover the branch
 or resume it before expecting normal selection to rebuild that task. A fatal
 auth preflight blocks recovery entirely (`recovery.blocked =
 "auth-preflight-failed"`), and dry runs never resume.

@@ -515,18 +515,18 @@ reviewer.
   was corrected — fix the stale copy to match the authoritative one.
 - **Recoverable API faults (500 / 429 / 529):** wait and retry. The ODW
   variant reports these as `provider-fault` halts, skips partial-branch
-  assessment, and leaves pending remediation unwritten so an outage is not
+  assessment, and leaves pending remediation unwritten, so an outage is not
   mistaken for task evidence. CodeRabbit 429 backoffs are **expected and
   fine** — never shorten them. For a broad outage, schedule a long wake-up
   (≈1h) and relaunch; the fresh-restart model means nothing is lost.
 - **Worktree base-skew:** git-donkey can root a worktree on a stale local `BASE`
   (its pull-rebase prompt defaults to "no" non-interactively). The workflow's
   worktree step already mitigates this (no-param `git donkey` + an in-worktree
-  `git reset --hard origin/BASE` + a base-sha verify). If you see "based on a
-  stale commit" failures, that mitigation is the place to look.
+  `git reset --hard origin/BASE` + a base-sha verify). When "based on a
+  stale commit" failures appear, that mitigation is the place to look.
 - **A run that dies mid-flight:** do not try to resume transcripts or cached
   scheduler state. Worker interleaving is non-deterministic, so prefix-resume
-  is unreliable by design. You now have two recovery options, in order of
+  is unreliable by design. Two recovery options exist, in order of
   preference:
   1. **Assess-first relaunch:** relaunch with `resumePartialBranches=true`
      (default `resumeMode="assess"`). The fresh run discovers surviving

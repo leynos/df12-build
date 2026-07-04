@@ -42,7 +42,8 @@ make all
 ### Basic usage
 
 Create a sidecar next to the target project, copy the ODW workflow into it,
-then launch the copied workflow with the target project as `--source`:
+write the run configuration, then launch the copied workflow with the target
+project as `--source`:
 
 ```bash
 PROJECT=/data/leynos/Projects/example-project
@@ -51,6 +52,12 @@ SIDECAR="${PROJECT}.workshop/df12-build-${RUN_ID}"
 
 mkdir -p "$SIDECAR"
 cp workflows/df12-build-odw.js "$SIDECAR/df12-build-odw.js"
+
+# Author these before launching — the run will not start without them.
+# docs/users-guide.md carries a complete odw.config.json shape (adapters,
+# concurrency, timeout) and the args.json argument reference.
+"$EDITOR" "$SIDECAR/odw.config.json"
+"$EDITOR" "$SIDECAR/args.json"
 
 odw run "$SIDECAR/df12-build-odw.js" \
   --source "$PROJECT" \
