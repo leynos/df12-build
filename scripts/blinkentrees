@@ -1,0 +1,1146 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "inotify-simple>=1.3",
+#   "rich>=13.0",
+#   "textual>=0.89",
+# ]
+# ///
+"""
+blinkentrees - a Textual dasblinkenlights dashboard for sibling Git worktrees.
+
+Linux-only: uses the native inotify API via inotify_simple.
+
+Run from the parent directory containing worktrees:
+    scripts/blinkentrees --pattern 'roadmap-*' .
+
+Keys:
+    r  force discovery rescan
+    c  clear counters/feed
+    q  quit
+"""
+
+from __future__ import annotations
+
+import argparse
+import errno
+import fnmatch
+import os
+import queue
+import sys
+import time
+from collections import Counter, deque
+from dataclasses import dataclass, field
+from pathlib import Path
+from threading import Event
+from typing import Callable, Deque, Iterable, Optional
+
+try:
+    from inotify_simple import INotify, flags
+except ImportError as exc:  # pragma: no cover - friendly runtime failure
+    raise SystemExit(
+        "Missing dependency: inotify-simple\n"
+        "Run this script with: uv run --script scripts/blinkentrees"
+    ) from exc
+
+try:
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    from textual import work
+    from textual.app import App, ComposeResult
+    from textual.widgets import Footer, Header, Static
+    from textual.worker import get_current_worker
+except ImportError as exc:  # pragma: no cover - friendly runtime failure
+    raise SystemExit(
+        "Missing dependency: textual\n"
+        "Run this script with: uv run --script scripts/blinkentrees"
+    ) from exc
+
+
+DEFAULT_EXCLUDES = {
+    ".git",
+    ".cache",
+    ".idea",
+    ".mypy_cache",
+    ".nox",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pycache__",
+    "build",
+    "coverage",
+    "dist",
+    "htmlcov",
+    "node_modules",
+    "target",
+    "venv",
+}
+
+EVENT_STYLE = {
+    "write": "bold green",
+    "modify": "yellow",
+    "create": "cyan",
+    "delete": "bold red",
+    "move_to": "magenta",
+    "move_from": "bright_magenta",
+    "attrib": "blue",
+    "open": "dim white",
+    "access": "dim white",
+    "close_nowrite": "dim white",
+    "ignored": "dim",
+    "overflow": "bold white on red",
+    "other": "white",
+}
+
+EVENT_LABEL = {
+    "write": "WRITE",
+    "modify": "MOD",
+    "create": "NEW",
+    "delete": "DEL",
+    "move_to": "MOVE→",
+    "move_from": "MOVE←",
+    "attrib": "ATTR",
+    "open": "OPEN",
+    "access": "READ",
+    "close_nowrite": "CLOSE",
+    "ignored": "IGN",
+    "overflow": "OVERFLOW",
+    "other": "OTHER",
+}
+
+EVENT_WEIGHT = {
+    "write": 22.0,
+    "modify": 13.0,
+    "create": 18.0,
+    "delete": 20.0,
+    "move_to": 18.0,
+    "move_from": 18.0,
+    "attrib": 8.0,
+    "open": 2.5,
+    "access": 1.5,
+    "close_nowrite": 2.0,
+    "ignored": 1.0,
+    "overflow": 100.0,
+    "other": 5.0,
+}
+
+SPARKS = "▁▂▃▄▅▆▇█"
+
+
+@dataclass(frozen=True)
+class FsEvent:
+    root: str
+    root_name: str
+    rel_path: str
+    event_class: str
+    mask_names: tuple[str, ...]
+    is_dir: bool
+    cookie: int
+    when_wall: float
+
+
+@dataclass(frozen=True)
+class WorktreeChange:
+    root: str
+    root_name: str
+    active: bool
+    watches: int
+    reason: str
+    when_wall: float
+
+
+@dataclass(frozen=True)
+class StatusNotice:
+    roots: int
+    watches: int
+    message: str
+    when_wall: float
+
+
+@dataclass(frozen=True)
+class ErrorNotice:
+    message: str
+    when_wall: float
+
+
+@dataclass(frozen=True)
+class OverflowNotice:
+    source: str
+    count: int
+    when_wall: float
+
+
+Notice = FsEvent | WorktreeChange | StatusNotice | ErrorNotice | OverflowNotice
+
+
+@dataclass
+class WorktreeStats:
+    root: str
+    name: str
+    active: bool = True
+    watches: int = 0
+    heat: float = 0.0
+    total: int = 0
+    counts: Counter[str] = field(default_factory=Counter)
+    last_event: str = ""
+    last_path: str = ""
+    last_ts_wall: float = 0.0
+    history: Deque[float] = field(default_factory=lambda: deque(maxlen=28))
+
+
+@dataclass
+class FeedLine:
+    when_wall: float
+    label: str
+    body: str
+    style: str
+
+
+def now_wall() -> float:
+    return time.time()
+
+
+def ellipsize_left(value: str, max_len: int) -> str:
+    if len(value) <= max_len:
+        return value
+    if max_len <= 1:
+        return "…"
+    return "…" + value[-(max_len - 1) :]
+
+
+def as_flag_names(mask: int) -> tuple[str, ...]:
+    try:
+        return tuple(flag.name for flag in flags.from_mask(mask))
+    except Exception:
+        return (hex(mask),)
+
+
+def event_class_from_mask(mask: int) -> str:
+    mask_flags = set(flags.from_mask(mask))
+
+    # Ordered by semantic usefulness, not by numeric value. Inotify events often
+    # carry extra flags such as ISDIR alongside the main event.
+    if flags.Q_OVERFLOW in mask_flags:
+        return "overflow"
+    if flags.CLOSE_WRITE in mask_flags:
+        return "write"
+    if flags.CREATE in mask_flags:
+        return "create"
+    if flags.DELETE in mask_flags or flags.DELETE_SELF in mask_flags:
+        return "delete"
+    if flags.MOVED_TO in mask_flags:
+        return "move_to"
+    if flags.MOVED_FROM in mask_flags or flags.MOVE_SELF in mask_flags:
+        return "move_from"
+    if flags.MODIFY in mask_flags:
+        return "modify"
+    if flags.ATTRIB in mask_flags:
+        return "attrib"
+    if flags.OPEN in mask_flags:
+        return "open"
+    if flags.ACCESS in mask_flags:
+        return "access"
+    if flags.CLOSE_NOWRITE in mask_flags:
+        return "close_nowrite"
+    if flags.IGNORED in mask_flags:
+        return "ignored"
+    return "other"
+
+
+def has_flag(mask: int, flag: flags) -> bool:
+    return bool(mask & flag.value)
+
+
+def is_dir_event(mask: int) -> bool:
+    return has_flag(mask, flags.ISDIR)
+
+
+def build_watch_mask(include_open: bool) -> flags:
+    mask = (
+        flags.CREATE
+        | flags.DELETE
+        | flags.MODIFY
+        | flags.CLOSE_WRITE
+        | flags.MOVED_FROM
+        | flags.MOVED_TO
+        | flags.ATTRIB
+        | flags.DELETE_SELF
+        | flags.MOVE_SELF
+    )
+    if include_open:
+        mask |= flags.OPEN | flags.ACCESS | flags.CLOSE_NOWRITE
+    return mask
+
+
+def safe_relative(path: Path, root: Path) -> str:
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return str(path)
+    return "." if str(rel) == "." else str(rel)
+
+
+class InotifyWorktreeWatcher:
+    """Owns the inotify descriptor and filesystem state.
+
+    This runs in a Textual thread worker. It communicates with the UI only by
+    putting immutable notices into a queue.
+    """
+
+    def __init__(
+        self,
+        *,
+        parent: Path,
+        pattern: str,
+        excludes: set[str],
+        require_git_marker: bool,
+        include_open: bool,
+        rescan_seconds: float,
+        notices: "queue.Queue[Notice]",
+        force_rescan: Event,
+    ) -> None:
+        self.parent = parent
+        self.pattern = pattern
+        self.excludes = excludes
+        self.require_git_marker = require_git_marker
+        self.include_open = include_open
+        self.rescan_seconds = rescan_seconds
+        self.notices = notices
+        self.force_rescan = force_rescan
+
+        self.inotify = INotify()
+        self.watch_mask = build_watch_mask(include_open)
+        self.parent_mask = (
+            flags.CREATE
+            | flags.DELETE
+            | flags.MOVED_FROM
+            | flags.MOVED_TO
+            | flags.ATTRIB
+            | flags.DELETE_SELF
+            | flags.MOVE_SELF
+        )
+
+        self.parent_wd: Optional[int] = None
+        self.wd_to_path: dict[int, Path] = {}
+        self.wd_to_root: dict[int, Path] = {}
+        self.path_to_wd: dict[Path, int] = {}
+        self.root_to_wds: dict[Path, set[int]] = {}
+        self.known_roots: dict[Path, str] = {}
+        self.dropped_ui_notices = 0
+
+    def run(self, stop_event: Event, is_cancelled: Callable[[], bool]) -> None:
+        try:
+            self._add_parent_watch()
+            self.discover_worktrees(reason="initial scan")
+            next_scan = time.monotonic() + self.rescan_seconds
+
+            while not stop_event.is_set() and not is_cancelled():
+                self._flush_dropped_notice()
+
+                try:
+                    events = self.inotify.read(timeout=250)
+                except InterruptedError:
+                    continue
+                except OSError as exc:
+                    if stop_event.is_set() or is_cancelled():
+                        break
+                    self.emit(ErrorNotice(f"inotify read failed: {exc}", now_wall()))
+                    break
+
+                for event in events:
+                    self.handle_event(event)
+
+                current = time.monotonic()
+                if self.force_rescan.is_set() or current >= next_scan:
+                    self.force_rescan.clear()
+                    self.discover_worktrees(reason="periodic rescan")
+                    next_scan = current + self.rescan_seconds
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        try:
+            close = getattr(self.inotify, "close", None)
+            if close is not None:
+                close()
+            else:
+                os.close(self.inotify.fd)
+        except OSError:
+            pass
+
+    def emit(self, notice: Notice) -> None:
+        try:
+            self.notices.put_nowait(notice)
+        except queue.Full:
+            self.dropped_ui_notices += 1
+
+    def _flush_dropped_notice(self) -> None:
+        if not self.dropped_ui_notices:
+            return
+        notice = OverflowNotice("ui-queue", self.dropped_ui_notices, now_wall())
+        try:
+            self.notices.put_nowait(notice)
+            self.dropped_ui_notices = 0
+        except queue.Full:
+            pass
+
+    def _add_parent_watch(self) -> None:
+        try:
+            self.parent_wd = self.inotify.add_watch(str(self.parent), self.parent_mask | flags.ONLYDIR)
+        except OSError as exc:
+            raise SystemExit(f"Unable to watch parent directory {self.parent}: {exc}") from exc
+
+    def is_matching_worktree_candidate(self, path: Path) -> bool:
+        return path.is_dir() and fnmatch.fnmatchcase(path.name, self.pattern)
+
+    def is_worktree(self, path: Path) -> bool:
+        if not self.is_matching_worktree_candidate(path):
+            return False
+        if not self.require_git_marker:
+            return True
+        return (path / ".git").exists()
+
+    def discover_worktrees(self, *, reason: str) -> None:
+        found: set[Path] = set()
+
+        try:
+            children = list(self.parent.iterdir())
+        except OSError as exc:
+            self.emit(ErrorNotice(f"cannot scan {self.parent}: {exc}", now_wall()))
+            return
+
+        for child in children:
+            try:
+                if not self.is_worktree(child):
+                    continue
+                root = child.resolve(strict=False)
+            except OSError:
+                continue
+
+            found.add(root)
+            if root not in self.known_roots:
+                self.add_worktree(root, reason=reason)
+
+        for root in list(self.known_roots):
+            vanished = False
+            try:
+                vanished = not root.exists() or not root.is_dir()
+            except OSError:
+                vanished = True
+
+            # Once a root has been accepted, do not eject it merely because its
+            # .git marker is transiently unavailable. Remove only if the sibling
+            # directory has gone away or no longer matches the dashboard pattern.
+            if vanished or not fnmatch.fnmatchcase(root.name, self.pattern):
+                self.remove_worktree(root, reason="gone from parent")
+
+        self.emit(
+            StatusNotice(
+                roots=len(self.known_roots),
+                watches=sum(len(wds) for wds in self.root_to_wds.values()),
+                message=f"{reason}: {len(self.known_roots)} worktree(s)",
+                when_wall=now_wall(),
+            )
+        )
+
+    def add_worktree(self, root: Path, *, reason: str) -> None:
+        self.known_roots[root] = root.name
+        self.root_to_wds.setdefault(root, set())
+        added = self.add_tree(root, root)
+        self.emit(
+            WorktreeChange(
+                root=str(root),
+                root_name=root.name,
+                active=True,
+                watches=len(self.root_to_wds.get(root, ())),
+                reason=f"added by {reason}; {added} watch(es) created",
+                when_wall=now_wall(),
+            )
+        )
+
+    def remove_worktree(self, root: Path, *, reason: str) -> None:
+        for wd in list(self.root_to_wds.get(root, set())):
+            try:
+                self.inotify.rm_watch(wd)
+            except OSError:
+                pass
+            path = self.wd_to_path.pop(wd, None)
+            if path is not None:
+                self.path_to_wd.pop(path, None)
+            self.wd_to_root.pop(wd, None)
+        self.root_to_wds.pop(root, None)
+        name = self.known_roots.pop(root, root.name)
+        self.emit(
+            WorktreeChange(
+                root=str(root),
+                root_name=name,
+                active=False,
+                watches=0,
+                reason=reason,
+                when_wall=now_wall(),
+            )
+        )
+
+    def add_tree(self, start: Path, root: Path) -> int:
+        added = 0
+
+        if self.path_is_excluded(start, root):
+            return 0
+
+        def on_walk_error(exc: OSError) -> None:
+            self.emit(ErrorNotice(f"cannot descend into {exc.filename}: {exc.strerror}", now_wall()))
+
+        for dirpath, dirnames, _filenames in os.walk(start, topdown=True, followlinks=False, onerror=on_walk_error):
+            current = Path(dirpath)
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if not self.dir_name_is_excluded(name)
+                and not (current / name).is_symlink()
+                and not self.path_is_excluded(current / name, root)
+            ]
+
+            if self._add_watch(current, root):
+                added += 1
+
+        return added
+
+    def _add_watch(self, path: Path, root: Path) -> bool:
+        path = path.resolve(strict=False)
+        if path in self.path_to_wd:
+            return False
+
+        try:
+            wd = self.inotify.add_watch(str(path), self.watch_mask | flags.ONLYDIR)
+        except OSError as exc:
+            if exc.errno == errno.ENOSPC:
+                self.emit(
+                    ErrorNotice(
+                        "inotify watch limit reached; raise fs.inotify.max_user_watches",
+                        now_wall(),
+                    )
+                )
+            elif exc.errno not in {errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.EPERM}:
+                self.emit(ErrorNotice(f"cannot watch {path}: {exc}", now_wall()))
+            return False
+
+        self.path_to_wd[path] = wd
+        self.wd_to_path[wd] = path
+        self.wd_to_root[wd] = root
+        self.root_to_wds.setdefault(root, set()).add(wd)
+        return True
+
+    def dir_name_is_excluded(self, name: str) -> bool:
+        return name in self.excludes
+
+    def path_is_excluded(self, path: Path, root: Path) -> bool:
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            return False
+        return any(part in self.excludes for part in rel.parts)
+
+    def handle_event(self, event) -> None:  # event type supplied by inotify_simple
+        if has_flag(event.mask, flags.Q_OVERFLOW):
+            self.emit(OverflowNotice("inotify", 1, now_wall()))
+            # Lost events may include newly-created directories. Re-scan and
+            # ensure all current subdirectories have watches.
+            self.discover_worktrees(reason="queue overflow recovery")
+            for root in list(self.known_roots):
+                before = len(self.root_to_wds.get(root, ()))
+                self.add_tree(root, root)
+                after = len(self.root_to_wds.get(root, ()))
+                if after != before:
+                    self.emit(
+                        WorktreeChange(
+                            root=str(root),
+                            root_name=root.name,
+                            active=True,
+                            watches=after,
+                            reason="recovered watches after overflow",
+                            when_wall=now_wall(),
+                        )
+                    )
+            return
+
+        if event.wd == self.parent_wd:
+            self.handle_parent_event(event)
+            return
+
+        watched_dir = self.wd_to_path.get(event.wd)
+        root = self.wd_to_root.get(event.wd)
+        if watched_dir is None or root is None:
+            return
+
+        if has_flag(event.mask, flags.IGNORED):
+            self.forget_watch(event.wd)
+            return
+
+        path = watched_dir / event.name if event.name else watched_dir
+        if self.path_is_excluded(path, root):
+            return
+
+        klass = event_class_from_mask(event.mask)
+        is_dir = is_dir_event(event.mask)
+
+        if is_dir and klass in {"create", "move_to"}:
+            before = len(self.root_to_wds.get(root, ()))
+            self.add_tree(path, root)
+            after = len(self.root_to_wds.get(root, ()))
+            if after != before:
+                self.emit(
+                    WorktreeChange(
+                        root=str(root),
+                        root_name=root.name,
+                        active=True,
+                        watches=after,
+                        reason=f"new directory {safe_relative(path, root)}",
+                        when_wall=now_wall(),
+                    )
+                )
+
+        if klass == "delete" and path == root:
+            self.discover_worktrees(reason="root deleted")
+
+        self.emit(
+            FsEvent(
+                root=str(root),
+                root_name=self.known_roots.get(root, root.name),
+                rel_path=safe_relative(path, root),
+                event_class=klass,
+                mask_names=as_flag_names(event.mask),
+                is_dir=is_dir,
+                cookie=event.cookie,
+                when_wall=now_wall(),
+            )
+        )
+
+    def handle_parent_event(self, event) -> None:
+        if has_flag(event.mask, flags.IGNORED):
+            self.emit(ErrorNotice(f"parent watch was removed: {self.parent}", now_wall()))
+            return
+
+        # Parent events are our cue that a sibling worktree may have been added,
+        # removed, or renamed. We scan the parent instead of trusting only this
+        # single event because git worktree creation is multi-step.
+        name = event.name or ""
+        if not name or fnmatch.fnmatchcase(name, self.pattern) or is_dir_event(event.mask):
+            self.discover_worktrees(reason="parent directory event")
+
+    def forget_watch(self, wd: int) -> None:
+        path = self.wd_to_path.pop(wd, None)
+        root = self.wd_to_root.pop(wd, None)
+        if path is not None:
+            self.path_to_wd.pop(path, None)
+        if root is not None:
+            self.root_to_wds.get(root, set()).discard(wd)
+
+
+def render_lamps(heat: float, style: str) -> Text:
+    cells = 12
+    lit = max(0, min(cells, int(round((heat / 100.0) * cells))))
+    text = Text()
+    text.append("●" * lit, style=style)
+    text.append("○" * (cells - lit), style="dim")
+    return text
+
+
+def render_sparkline(history: Iterable[float], style: str) -> Text:
+    values = list(history)[-28:]
+    text = Text()
+
+    if len(values) < 28:
+        text.append(" " * (28 - len(values)), style="dim")
+
+    if not values:
+        return text
+
+    for value in values:
+        idx = int(max(0, min(len(SPARKS) - 1, round((value / 100.0) * (len(SPARKS) - 1)))))
+        char = SPARKS[idx]
+        text.append(char, style=style if value > 0 else "dim")
+    return text
+
+
+def render_counts(counts: Counter[str]) -> Text:
+    parts: list[tuple[str, str]] = []
+    order = [
+        ("write", "W"),
+        ("modify", "M"),
+        ("create", "+"),
+        ("delete", "−"),
+        ("move_to", "→"),
+        ("move_from", "←"),
+        ("attrib", "A"),
+    ]
+    for key, glyph in order:
+        count = counts.get(key, 0)
+        style = EVENT_STYLE[key] if count else "dim"
+        parts.append((f"{glyph}{count}", style))
+
+    text = Text()
+    for index, (chunk, style) in enumerate(parts):
+        if index:
+            text.append(" ")
+        text.append(chunk, style=style)
+    return text
+
+
+def feed_text(feed: Deque[FeedLine]) -> Text:
+    text = Text()
+    if not feed:
+        text.append("No filesystem events yet. The robots are either idle or being very sneaky.", style="dim")
+        return text
+
+    for line in list(feed):
+        timestamp = time.strftime("%H:%M:%S", time.localtime(line.when_wall))
+        text.append(timestamp, style="dim")
+        text.append("  ")
+        text.append(f"{line.label:<10}", style=line.style)
+        text.append("  ")
+        text.append(line.body, style=line.style)
+        text.append("\n")
+    return text
+
+
+def make_status_text(
+    *,
+    parent: Path,
+    pattern: str,
+    roots: int,
+    watches: int,
+    inotify_overflows: int,
+    ui_drops: int,
+    message: str,
+) -> Text:
+    text = Text()
+    text.append(" parent ", style="bold")
+    text.append(str(parent), style="cyan")
+    text.append("  pattern ", style="bold")
+    text.append(pattern, style="magenta")
+    text.append("  worktrees ", style="bold")
+    text.append(str(roots), style="green" if roots else "yellow")
+    text.append("  watches ", style="bold")
+    text.append(str(watches), style="green")
+
+    if inotify_overflows:
+        text.append("  inotify-overflows ", style="bold red")
+        text.append(str(inotify_overflows), style="bold red")
+    if ui_drops:
+        text.append("  ui-drops ", style="bold red")
+        text.append(str(ui_drops), style="bold red")
+
+    if message:
+        text.append("\n ")
+        text.append(message, style="dim")
+
+    return text
+
+
+class RoboLightsApp(App[None]):
+    CSS = """
+    Screen {
+        layout: vertical;
+    }
+
+    #status {
+        height: 3;
+        padding: 0 1;
+    }
+
+    #dashboard {
+        height: 1fr;
+        padding: 0 1;
+    }
+
+    #feed {
+        height: 11;
+        padding: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        ("q", "quit", "Quit"),
+        ("r", "rescan", "Rescan"),
+        ("c", "clear", "Clear"),
+    ]
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        super().__init__()
+        self.args = args
+        self.watched_parent: Path = args.parent
+        self.notices: "queue.Queue[Notice]" = queue.Queue(maxsize=args.queue_size)
+        self.stop_event = Event()
+        self.force_rescan = Event()
+        self.stats: dict[str, WorktreeStats] = {}
+        self.feed: Deque[FeedLine] = deque(maxlen=args.feed_lines)
+        self.status_message = "starting watcher"
+        self.watch_count = 0
+        self.root_count = 0
+        self.inotify_overflows = 0
+        self.ui_drops = 0
+        self.worker_handle = None
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static(id="status")
+        yield Static(id="dashboard")
+        yield Static(id="feed")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = "robolights"
+        self.sub_title = "Git worktree dasblinkenlights"
+        self.worker_handle = self.watch_worktrees()
+        self.set_interval(self.args.tick, self.tick)
+        self.redraw()
+
+    def on_unmount(self) -> None:
+        self.stop_event.set()
+
+    @work(thread=True)
+    def watch_worktrees(self) -> None:
+        worker = get_current_worker()
+        watcher = InotifyWorktreeWatcher(
+            parent=self.watched_parent,
+            pattern=self.args.pattern,
+            excludes=self.args.excludes,
+            require_git_marker=not self.args.any_matching_dir,
+            include_open=self.args.include_open,
+            rescan_seconds=self.args.rescan,
+            notices=self.notices,
+            force_rescan=self.force_rescan,
+        )
+        watcher.run(self.stop_event, lambda: worker.is_cancelled)
+
+    def action_rescan(self) -> None:
+        self.status_message = "forced rescan requested"
+        self.force_rescan.set()
+        self.redraw()
+
+    def action_clear(self) -> None:
+        for stat in self.stats.values():
+            stat.heat = 0.0
+            stat.total = 0
+            stat.counts.clear()
+            stat.last_event = ""
+            stat.last_path = ""
+            stat.last_ts_wall = 0.0
+            stat.history.clear()
+        self.feed.clear()
+        self.inotify_overflows = 0
+        self.ui_drops = 0
+        self.status_message = "counters cleared"
+        self.redraw()
+
+    def tick(self) -> None:
+        self.drain_notices()
+
+        for stat in self.stats.values():
+            stat.heat = max(0.0, stat.heat - self.args.decay)
+            stat.history.append(stat.heat)
+
+        self.redraw()
+
+    def drain_notices(self) -> None:
+        processed = 0
+        while processed < self.args.max_drain:
+            try:
+                notice = self.notices.get_nowait()
+            except queue.Empty:
+                break
+            self.apply_notice(notice)
+            processed += 1
+
+        remaining = self.notices.qsize()
+        if remaining:
+            self.status_message = f"catching up with event storm: {remaining} queued notice(s)"
+
+    def apply_notice(self, notice: Notice) -> None:
+        if isinstance(notice, FsEvent):
+            self.apply_fs_event(notice)
+        elif isinstance(notice, WorktreeChange):
+            self.apply_worktree_change(notice)
+        elif isinstance(notice, StatusNotice):
+            self.root_count = notice.roots
+            self.watch_count = notice.watches
+            self.status_message = notice.message
+        elif isinstance(notice, ErrorNotice):
+            self.status_message = notice.message
+            self.feed.appendleft(FeedLine(notice.when_wall, "ERROR", notice.message, "bold red"))
+        elif isinstance(notice, OverflowNotice):
+            if notice.source == "inotify":
+                self.inotify_overflows += notice.count
+                label = "OVERFLOW"
+                body = "inotify queue overflow; dashboard re-scanned directories"
+            else:
+                self.ui_drops += notice.count
+                label = "UI DROP"
+                body = f"dropped {notice.count} dashboard notice(s) during event storm"
+            self.feed.appendleft(FeedLine(notice.when_wall, label, body, EVENT_STYLE["overflow"]))
+            self.status_message = body
+
+    def apply_worktree_change(self, notice: WorktreeChange) -> None:
+        if notice.active:
+            stat = self.stats.setdefault(notice.root, WorktreeStats(root=notice.root, name=notice.root_name))
+            stat.name = notice.root_name
+            stat.active = True
+            stat.watches = notice.watches
+            self.feed.appendleft(
+                FeedLine(
+                    notice.when_wall,
+                    "WORKTREE",
+                    f"{notice.root_name}: {notice.reason}",
+                    "bold cyan",
+                )
+            )
+        else:
+            if self.args.keep_gone:
+                stat = self.stats.setdefault(notice.root, WorktreeStats(root=notice.root, name=notice.root_name))
+                stat.active = False
+                stat.watches = 0
+                stat.heat = 0.0
+            else:
+                self.stats.pop(notice.root, None)
+            self.feed.appendleft(
+                FeedLine(
+                    notice.when_wall,
+                    "REMOVED",
+                    f"{notice.root_name}: {notice.reason}",
+                    "bold red",
+                )
+            )
+
+    def apply_fs_event(self, notice: FsEvent) -> None:
+        stat = self.stats.setdefault(notice.root, WorktreeStats(root=notice.root, name=notice.root_name))
+        stat.name = notice.root_name
+        stat.active = True
+        stat.total += 1
+        stat.counts[notice.event_class] += 1
+        stat.heat = min(100.0, stat.heat + EVENT_WEIGHT.get(notice.event_class, EVENT_WEIGHT["other"]))
+        stat.last_event = notice.event_class
+        stat.last_path = notice.rel_path
+        stat.last_ts_wall = notice.when_wall
+
+        style = EVENT_STYLE.get(notice.event_class, EVENT_STYLE["other"])
+        label = EVENT_LABEL.get(notice.event_class, notice.event_class.upper())
+        dir_mark = "/" if notice.is_dir else ""
+        path = ellipsize_left(notice.rel_path + dir_mark, self.args.feed_path_width)
+        flags_text = ",".join(notice.mask_names)
+        if notice.cookie:
+            flags_text += f" cookie={notice.cookie}"
+        self.feed.appendleft(
+            FeedLine(
+                notice.when_wall,
+                label,
+                f"{notice.root_name}: {path} [{flags_text}]",
+                style,
+            )
+        )
+
+    def redraw(self) -> None:
+        status = self.query_one("#status", Static)
+        dashboard = self.query_one("#dashboard", Static)
+        feed_widget = self.query_one("#feed", Static)
+
+        status.update(
+            make_status_text(
+                parent=self.watched_parent,
+                pattern=self.args.pattern,
+                roots=self.root_count,
+                watches=self.watch_count,
+                inotify_overflows=self.inotify_overflows,
+                ui_drops=self.ui_drops,
+                message=self.status_message,
+            )
+        )
+
+        dashboard.update(self.render_dashboard())
+        feed_widget.update(Panel(feed_text(self.feed), title="event feed", border_style="dim"))
+
+    def render_dashboard(self) -> Table | Panel:
+        if not self.stats:
+            return Panel(
+                Text(
+                    "No matching worktrees yet. Create or move one into the parent directory and the lamps should wake up.",
+                    style="yellow",
+                ),
+                title="dashboard",
+                border_style="dim",
+            )
+
+        table = Table(
+            title="robot worktree activity",
+            expand=True,
+            show_lines=False,
+            pad_edge=False,
+        )
+        table.add_column("worktree", no_wrap=True, ratio=2)
+        table.add_column("lamps", no_wrap=True, width=12)
+        table.add_column("trail", no_wrap=True, width=28)
+        table.add_column("events", justify="right", no_wrap=True)
+        table.add_column("classes", no_wrap=True, ratio=2)
+        table.add_column("last", no_wrap=True)
+        table.add_column("age", justify="right", no_wrap=True)
+        table.add_column("path", ratio=3, overflow="ellipsis")
+        table.add_column("watches", justify="right", no_wrap=True)
+
+        current = now_wall()
+        for stat in sorted(self.stats.values(), key=lambda item: item.name):
+            style = EVENT_STYLE.get(stat.last_event or "other", "white")
+            row_style = "" if stat.active else "dim"
+            last = EVENT_LABEL.get(stat.last_event, "") if stat.last_event else ""
+            age = ""
+            if stat.last_ts_wall:
+                delta = max(0.0, current - stat.last_ts_wall)
+                age = f"{delta:.1f}s" if delta < 10 else f"{int(delta)}s"
+
+            name_text = Text(stat.name, style="bold" if stat.active else "dim")
+            if not stat.active:
+                name_text.append(" gone", style="dim red")
+
+            last_text = Text(last, style=style)
+            path_text = Text(ellipsize_left(stat.last_path, self.args.table_path_width), style=style if stat.last_path else "dim")
+
+            table.add_row(
+                name_text,
+                render_lamps(stat.heat, style),
+                render_sparkline(stat.history, style),
+                str(stat.total),
+                render_counts(stat.counts),
+                last_text,
+                age,
+                path_text,
+                str(stat.watches),
+                style=row_style,
+            )
+
+        return table
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Textual dasblinkenlights for sibling Git worktrees, powered by Linux inotify."
+    )
+    parser.add_argument(
+        "parent",
+        nargs="?",
+        default=".",
+        type=Path,
+        help="directory containing sibling worktrees; default: current directory",
+    )
+    parser.add_argument(
+        "--pattern",
+        default="roadmap-*",
+        help="glob for sibling worktree directory names; default: roadmap-*",
+    )
+    parser.add_argument(
+        "--any-matching-dir",
+        action="store_true",
+        help="watch matching directories even without a .git marker",
+    )
+    parser.add_argument(
+        "--include-open",
+        action="store_true",
+        help="also track OPEN, ACCESS and CLOSE_NOWRITE; very noisy but pretty",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="directory name to exclude; may be repeated",
+    )
+    parser.add_argument(
+        "--no-default-excludes",
+        action="store_true",
+        help="do not use the built-in exclusion list",
+    )
+    parser.add_argument(
+        "--rescan",
+        type=float,
+        default=1.5,
+        help="seconds between parent rescans for new/removed worktrees; default: 1.5",
+    )
+    parser.add_argument(
+        "--tick",
+        type=float,
+        default=0.20,
+        help="UI refresh/decay interval in seconds; default: 0.20",
+    )
+    parser.add_argument(
+        "--decay",
+        type=float,
+        default=3.0,
+        help="lamp heat decay per tick; default: 3.0",
+    )
+    parser.add_argument(
+        "--queue-size",
+        type=int,
+        default=20000,
+        help="max queued notices between watcher and UI; default: 20000",
+    )
+    parser.add_argument(
+        "--max-drain",
+        type=int,
+        default=4000,
+        help="max notices processed per UI tick; default: 4000",
+    )
+    parser.add_argument(
+        "--feed-lines",
+        type=int,
+        default=12,
+        help="event feed lines to keep; default: 12",
+    )
+    parser.add_argument(
+        "--feed-path-width",
+        type=int,
+        default=90,
+        help="max path width in feed; default: 90",
+    )
+    parser.add_argument(
+        "--table-path-width",
+        type=int,
+        default=70,
+        help="max path width in table; default: 70",
+    )
+    parser.add_argument(
+        "--keep-gone",
+        action="store_true",
+        help="keep removed worktrees as dim ghost rows instead of removing them",
+    )
+
+    args = parser.parse_args(argv)
+    args.parent = args.parent.expanduser().resolve(strict=True)
+    if not args.parent.is_dir():
+        parser.error(f"parent is not a directory: {args.parent}")
+
+    excludes = set(args.exclude)
+    if not args.no_default_excludes:
+        excludes |= DEFAULT_EXCLUDES
+    args.excludes = excludes
+
+    if args.rescan <= 0:
+        parser.error("--rescan must be positive")
+    if args.tick <= 0:
+        parser.error("--tick must be positive")
+    if args.queue_size <= 0:
+        parser.error("--queue-size must be positive")
+    if args.max_drain <= 0:
+        parser.error("--max-drain must be positive")
+
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    app = RoboLightsApp(args)
+    app.run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

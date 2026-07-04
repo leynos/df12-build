@@ -34,8 +34,9 @@ Relevant paths:
 - `workflows/df12-build-odw.js`: ODW/Codex workflow.
 - `workflows/df12-build.js`: baseline workflow.
 - `skills/df12-build-supervisor/SKILL.md`: operator skill.
-- `scripts/list-odw-runs.py` and `scripts/odw-watch`: operator run-monitoring
-  scripts (documented in the user guide's "Monitoring runs" section).
+- `scripts/blinkentrees`, `scripts/git-commit-feed`, `scripts/odw-list-runs`,
+  and `scripts/odw-watch`: operator monitoring scripts (documented in the user
+  guide's "Monitoring runs" section).
 - `tests/`: Node suites for the ODW workflow plus
   `tests/run-odw-script-tests.py` for the operator scripts.
 - `docs/roadmap.md`: this repository's own GIST roadmap.

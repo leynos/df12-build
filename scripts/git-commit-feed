@@ -1,0 +1,419 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "GitPython>=3.1.44,<4",
+#   "rich>=13.7.0,<15",
+# ]
+# ///
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from git import GitCommandError, InvalidGitRepositoryError, NoSuchPathError, Repo
+from rich.console import Console
+from rich.text import Text
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Print a live commit feed for all local branches in a Git repository. "
+            "By default it prints the latest 10 existing commits, oldest first, "
+            "with absolute timestamps, then follows branch updates."
+        )
+    )
+    parser.add_argument(
+        "repo",
+        nargs="?",
+        default=".",
+        help="Path inside the repository to follow. Defaults to the current directory.",
+    )
+    parser.add_argument(
+        "-n",
+        "--initial",
+        type=int,
+        default=10,
+        help="Number of existing commits to print before following. Use 0 for follow-only. Defaults to 10.",
+    )
+    parser.add_argument(
+        "--initial-order",
+        choices=("newest", "oldest"),
+        default="oldest",
+        help="Order for the initial backlog. Live commits are always printed oldest-to-newest per update. Defaults to oldest.",
+    )
+    parser.add_argument(
+        "--remotes",
+        action="store_true",
+        help="Also follow remote-tracking branches such as origin/main.",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=1.0,
+        help="Polling interval in seconds. Defaults to 1.0.",
+    )
+    parser.add_argument(
+        "--time",
+        choices=("relative", "absolute", "both"),
+        default="absolute",
+        help="Time format to display. Defaults to absolute.",
+    )
+    parser.add_argument(
+        "--abbrev",
+        type=int,
+        default=7,
+        help="Number of commit hash characters to print. Defaults to 7.",
+    )
+    parser.add_argument(
+        "--author",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show the commit author. Defaults to true.",
+    )
+    parser.add_argument(
+        "--dedupe",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Suppress a commit SHA after it has appeared once. "
+            "Use --no-dedupe to print the same SHA when another branch moves to it."
+        ),
+    )
+    parser.add_argument(
+        "--no-colour",
+        "--no-color",
+        action="store_true",
+        dest="no_colour",
+        help="Disable Rich colour output.",
+    )
+    return parser.parse_args()
+
+
+def open_repo(path: str | Path) -> Repo:
+    return Repo(str(path), search_parent_directories=True)
+
+
+def active_branch_name(repo: Repo) -> str | None:
+    try:
+        return repo.active_branch.name
+    except (TypeError, ValueError):
+        return None
+
+
+def remote_names(repo: Repo) -> set[str]:
+    return {remote.name for remote in repo.remotes}
+
+
+def current_branch_tips(repo: Repo, include_remotes: bool) -> dict[str, str]:
+    tips: dict[str, str] = {}
+
+    for head in repo.heads:
+        try:
+            tips[head.name] = head.commit.hexsha
+        except (TypeError, ValueError):
+            continue
+
+    if include_remotes:
+        for remote in repo.remotes:
+            for ref in remote.refs:
+                name = ref.name
+                if name.endswith("/HEAD"):
+                    continue
+                try:
+                    tips[name] = ref.commit.hexsha
+                except (TypeError, ValueError):
+                    continue
+
+    return tips
+
+
+def ref_selectors(include_remotes: bool) -> list[str]:
+    selectors = ["--branches"]
+    if include_remotes:
+        selectors.append("--remotes")
+    return selectors
+
+
+def rev_list(repo: Repo, *args: str) -> list[str]:
+    try:
+        output = repo.git.rev_list(*args)
+    except GitCommandError as exc:
+        message = f"{getattr(exc, 'stderr', '')} {exc}".lower()
+        if (
+            "does not have any commits yet" in message
+            or "bad revision" in message
+            or "ambiguous argument" in message
+        ):
+            return []
+        raise
+
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def initial_commit_shas(repo: Repo, include_remotes: bool, limit: int) -> list[str]:
+    if limit <= 0:
+        return []
+
+    return rev_list(
+        repo,
+        "--date-order",
+        f"--max-count={limit}",
+        *ref_selectors(include_remotes),
+    )
+
+
+def all_reachable_shas(repo: Repo, include_remotes: bool) -> set[str]:
+    return set(rev_list(repo, *ref_selectors(include_remotes)))
+
+
+def is_remote_ref(name: str, remotes: set[str]) -> bool:
+    remote, sep, _rest = name.partition("/")
+    return bool(sep) and remote in remotes
+
+
+def branch_rank(name: str, active: str | None, remotes: set[str]) -> tuple[int, int, str]:
+    return (
+        0 if active == name else 1,
+        1 if is_remote_ref(name, remotes) else 0,
+        name,
+    )
+
+
+def prefer_branch(names: list[str], active: str | None, remotes: set[str]) -> str:
+    return min(names, key=lambda name: branch_rank(name, active, remotes))
+
+
+def is_ancestor(repo: Repo, ancestor: str, descendant: str) -> bool:
+    try:
+        repo.git.merge_base("--is-ancestor", ancestor, descendant)
+        return True
+    except GitCommandError as exc:
+        if getattr(exc, "status", None) == 1:
+            return False
+
+        if "exit code(1)" in str(exc) or "returned non-zero exit status 1" in str(exc):
+            return False
+
+        raise
+
+
+def commit_distance(repo: Repo, older: str, newer: str) -> int:
+    if older == newer:
+        return 0
+
+    return int(repo.git.rev_list("--count", f"{older}..{newer}").strip() or "0")
+
+
+def best_branch_for_existing_commit(
+    repo: Repo,
+    sha: str,
+    tips: dict[str, str],
+    active: str | None,
+    remotes: set[str],
+) -> str:
+    exact_tip_matches = [name for name, tip in tips.items() if tip == sha]
+    if exact_tip_matches:
+        return prefer_branch(exact_tip_matches, active, remotes)
+
+    candidates: list[tuple[int, tuple[int, int, str], str]] = []
+
+    for name, tip in tips.items():
+        if is_ancestor(repo, sha, tip):
+            candidates.append(
+                (
+                    commit_distance(repo, sha, tip),
+                    branch_rank(name, active, remotes),
+                    name,
+                )
+            )
+
+    if not candidates:
+        return "?"
+
+    return min(candidates)[2]
+
+
+def aware_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+
+    return dt.astimezone(timezone.utc)
+
+
+def relative_time(dt: datetime) -> str:
+    seconds = int((datetime.now(timezone.utc) - aware_utc(dt)).total_seconds())
+
+    if seconds < 0:
+        return "from the future"
+
+    if seconds < 5:
+        return "just now"
+
+    units = (
+        ("year", 365 * 24 * 60 * 60),
+        ("month", 30 * 24 * 60 * 60),
+        ("week", 7 * 24 * 60 * 60),
+        ("day", 24 * 60 * 60),
+        ("hour", 60 * 60),
+        ("minute", 60),
+        ("second", 1),
+    )
+
+    for name, size in units:
+        if seconds >= size:
+            value = seconds // size
+            suffix = "" if value == 1 else "s"
+            return f"{value} {name}{suffix} ago"
+
+    return "just now"
+
+
+def format_time(dt: datetime, mode: str) -> str:
+    local = dt.astimezone()
+    absolute = local.strftime("%Y-%m-%d %H:%M:%S %z")
+
+    if mode == "absolute":
+        return absolute
+
+    if mode == "both":
+        return f"{relative_time(dt)} @ {absolute}"
+
+    return relative_time(dt)
+
+
+def branch_style(branch: str, active: str | None, remotes: set[str]) -> str:
+    if branch == active:
+        return "bold yellow"
+
+    if is_remote_ref(branch, remotes):
+        return "bright_blue"
+
+    return "bold magenta"
+
+
+def format_commit(
+    commit: Any,
+    branch: str,
+    active: str | None,
+    remotes: set[str],
+    args: argparse.Namespace,
+) -> Text:
+    text = Text()
+
+    text.append(commit.hexsha[: args.abbrev], style="bold cyan")
+    text.append(" ")
+    text.append(format_time(commit.committed_datetime, args.time), style="green")
+    text.append(" ")
+    text.append("(", style="dim")
+    text.append(branch, style=branch_style(branch, active, remotes))
+    text.append(")", style="dim")
+    text.append(" ")
+
+    summary = commit.summary.replace("\n", " ").strip()
+    text.append(summary, style="default")
+
+    if args.author:
+        text.append(" ")
+        text.append(f"<{commit.author.name}>", style="dim")
+
+    return text
+
+
+def new_shas_for_ref_update(
+    repo: Repo,
+    old_sha: str | None,
+    new_sha: str,
+    previous_tips: dict[str, str],
+) -> list[str]:
+    if old_sha is None:
+        exclusions = sorted(set(previous_tips.values()))
+
+        if exclusions:
+            return rev_list(repo, "--reverse", new_sha, "--not", *exclusions)
+
+        return rev_list(repo, "--reverse", new_sha)
+
+    return rev_list(repo, "--reverse", f"{old_sha}..{new_sha}")
+
+
+def main() -> int:
+    args = parse_args()
+
+    console = Console(highlight=False, no_color=args.no_colour)
+    err_console = Console(stderr=True, highlight=False, no_color=args.no_colour)
+
+    try:
+        repo = open_repo(args.repo)
+    except (InvalidGitRepositoryError, NoSuchPathError) as exc:
+        err_console.print(f"git-commit-feed: {exc}", style="bold red")
+        return 2
+
+    repo_root = repo.working_tree_dir or repo.git_dir
+
+    tips = current_branch_tips(repo, args.remotes)
+    if not tips:
+        err_console.print("git-commit-feed: no branch refs with commits found", style="bold red")
+        return 1
+
+    active = active_branch_name(repo)
+    remotes = remote_names(repo)
+
+    initial_shas = initial_commit_shas(repo, args.remotes, args.initial)
+    if args.initial_order == "oldest":
+        initial_shas = list(reversed(initial_shas))
+
+    for sha in initial_shas:
+        branch = best_branch_for_existing_commit(repo, sha, tips, active, remotes)
+        console.print(format_commit(repo.commit(sha), branch, active, remotes, args), soft_wrap=True)
+
+    known = all_reachable_shas(repo, args.remotes) if args.dedupe else set()
+    last_tips = tips
+
+    try:
+        while True:
+            time.sleep(args.interval)
+
+            repo = open_repo(repo_root)
+            new_tips = current_branch_tips(repo, args.remotes)
+            active = active_branch_name(repo)
+            remotes = remote_names(repo)
+
+            pending: list[tuple[datetime, str, str]] = []
+
+            for branch, new_sha in sorted(new_tips.items()):
+                old_sha = last_tips.get(branch)
+
+                if old_sha == new_sha:
+                    continue
+
+                for sha in new_shas_for_ref_update(repo, old_sha, new_sha, last_tips):
+                    if args.dedupe and sha in known:
+                        continue
+
+                    commit = repo.commit(sha)
+                    pending.append((commit.committed_datetime, branch, sha))
+
+                    if args.dedupe:
+                        known.add(sha)
+
+            for _when, branch, sha in sorted(pending, key=lambda item: (item[0], item[1], item[2])):
+                console.print(
+                    format_commit(repo.commit(sha), branch, active, remotes, args),
+                    soft_wrap=True,
+                )
+
+            last_tips = new_tips
+
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

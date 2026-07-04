@@ -17,11 +17,11 @@ Example
 -------
 List the running runs for one project::
 
-    scripts/list-odw-runs.py --source my-project
+    scripts/odw-list-runs --source my-project
 
 List every failed or stopped run::
 
-    scripts/list-odw-runs.py -s failed -s stopped
+    scripts/odw-list-runs -s failed -s stopped
 """
 
 from __future__ import annotations

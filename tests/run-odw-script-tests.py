@@ -7,7 +7,7 @@
 # ///
 """Behavioural tests for the ODW operator scripts.
 
-Loads ``scripts/list-odw-runs.py`` and ``scripts/odw-watch`` (hyphenated and
+Loads ``scripts/odw-list-runs`` and ``scripts/odw-watch`` (hyphenated and
 extensionless, hence the explicit source loaders) and exercises their pure
 helpers and filesystem behaviour against throwaway fixtures: JSON tolerance
 and warnings, filtering and sorting, exact table and event rendering, torn
@@ -49,7 +49,7 @@ def load_script(module_name: str, filename: str) -> types.ModuleType:
     return module
 
 
-list_runs = load_script("list_odw_runs", "list-odw-runs.py")
+list_runs = load_script("list_odw_runs", "odw-list-runs")
 odw_watch = load_script("odw_watch", "odw-watch")
 
 
