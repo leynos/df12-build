@@ -228,6 +228,35 @@ test('combination: review-mode resume skips a dirty branch fail-closed', async (
   assert.deepEqual(repoStateSnapshot(repo), before)
 })
 
+test('combination: continue mode finishes a draft-plan survivor through the whole pipeline', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+
+  const { result, calls } = await runSimulation({
+    repo,
+    args: { resumePartialBranches: true, resumeMode: 'continue' },
+  })
+
+  assert.equal(result.recovery.mode, 'continue')
+  assert.equal(result.recovery.resumed, 1)
+  assert.deepEqual(
+    result.recovery.results.map((entry) => [entry.id, entry.action, entry.resumeStage, entry.planStatus]),
+    [['1.2.3', 'resumed', 'plan', 'draft']],
+  )
+  assert.deepEqual(result.processed, ['1.2.3'])
+  assert.ok(!calls.some((label) => label.startsWith('recover-assess:')), 'continue mode spawns no judgement agent')
+  assert.deepEqual(calls.slice(0, 2), ['write-probe:claude', 'write-probe:codex-medium'])
+  assert.deepEqual(calls.slice(2), [
+    'plan:1.2.3 r1',
+    'design-review:1.2.3 r1',
+    'implement:1.2.3',
+    'code-review:1.2.3 r1',
+    'expert-review:1.2.3 r1',
+    'integrate:1.2.3',
+  ])
+  // roadmap-1-2-4 (no worktree) is still an unresolved survivor.
+  assert.match(result.halted, /needs-operator-recovery: 1 recovery survivor branch\(es\).*1\.2\.4/)
+})
+
 test('combination: auth preflight failure blocks recovery entirely', async () => {
   const repo = makeRecoveryRepo()
   const before = repoStateSnapshot(repo)

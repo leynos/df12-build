@@ -63,6 +63,29 @@ async function respond(label, prompt) {
     if (details) await writeFile(details.file, details.token, 'utf8')
     return { ok: true }
   }
+  if (label.startsWith('plan:')) {
+    return scenario.plan || {
+      execplanPath: 'docs/execplans/roadmap-1-2-3.md',
+      workItems: ['work item 1'],
+      summary: 'plan completed and committed',
+    }
+  }
+  if (label.startsWith('design-review:')) {
+    return scenario.designReview || { satisfied: true, blocking: [] }
+  }
+  if (label.startsWith('implement:')) {
+    return scenario.implement || {
+      ok: true,
+      gatesGreen: true,
+      execplanPath: 'docs/execplans/roadmap-1-2-3.md',
+      workItemsCompleted: 1,
+      workItemsTotal: 1,
+      commits: ['Finish remaining work items'],
+      coderabbitRuns: 1,
+      openIssues: [],
+      summary: 'resumed and completed the remaining work items',
+    }
+  }
   if (label.startsWith('code-review:') || label.startsWith('expert-review:')) {
     return scenario.review || { verdict: 'pass', blocking: [], summary: 'ship it' }
   }

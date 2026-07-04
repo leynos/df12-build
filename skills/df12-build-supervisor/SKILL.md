@@ -158,7 +158,10 @@ provides the doc skills):
    discovery of surviving `roadmap-*` branches, default off), `resumeMode`
    (`assess` reports only — the default; `review` may route clean, committed,
    task-scoped `adopt-complete` branches with validation evidence back through
-   the ordinary review + integration path), `resumeTaskId` (narrow discovery
+   the ordinary review + integration path; `continue` dispatches each survivor
+   deterministically from its committed ExecPlan `Status` — DRAFT re-plans,
+   APPROVED/IN PROGRESS re-implements, COMPLETE re-reviews, BLOCKED reports —
+   with no judgement agent), `resumeTaskId` (narrow discovery
    to one id; separate from `taskId`), `resumeMaxCandidates` (default 4), and
    `worktreeWritePreflight` (host-verified probe that the plan and build
    adapters can write into sibling task worktrees; on by default).
@@ -543,17 +546,26 @@ reviewer.
   stale commit" failures appear, that mitigation is the place to look.
 - **A run that dies mid-flight:** do not try to resume transcripts or cached
   scheduler state. Worker interleaving is non-deterministic, so prefix-resume
-  is unreliable by design. Two recovery options exist, in order of
+  is unreliable by design. Three recovery options exist, in order of
   preference:
-  1. **Assess-first relaunch:** relaunch with `resumePartialBranches=true`
+  1. **Continue-mode relaunch:** relaunch with `resumePartialBranches=true`
+     and `resumeMode="continue"`. Each clean survivor branch is dispatched
+     from its committed ExecPlan `Status` — a DRAFT plan re-enters the
+     plan/design-review loop, an APPROVED or IN PROGRESS plan re-enters
+     implementation from the first unticked work item, and a COMPLETE plan
+     re-enters dual review and integration. No judgement agent is spent; the
+     ordinary downstream gates are the judgement. Dirty worktrees, addendum
+     branches, and BLOCKED plans are reported for you instead.
+  2. **Assess-first relaunch:** relaunch with `resumePartialBranches=true`
      (default `resumeMode="assess"`). The fresh run discovers surviving
      `roadmap-*` branches, assesses each against ADR 002, and reports them in
      the top-level `recovery` object without mutating anything. Read the
      classifications, then decide per branch: enable `resumeMode="review"` on
      a follow-up run to let clean `adopt-complete` branches re-enter review
      and integration, finish `continue-manual` branches by hand, or hoover
-     `discard` branches.
-  2. **Hoover and rebuild:** the pre-recovery behaviour — stash-park, remove
+     `discard` branches. Prefer this over continue mode when you do not yet
+     trust the survivors enough to spend build effort on them.
+  3. **Hoover and rebuild:** the pre-recovery behaviour — stash-park, remove
      worktrees, reset branches, and let selection rebuild the task from
      `origin/BASE`. Still correct when the surviving work is worthless.
   While recovery is enabled, every id with a surviving branch is held out of
@@ -589,16 +601,23 @@ holds, `results[]`, and `assessments[]`), choose exactly one disposition:
    route residual review proposals into roadmap tasks/addenda (load
    `roadmap-grooming` first), then merge through the protected integration
    path and tick the roadmap task.
-2. **Resume** — for clean `adopt-complete` branches with validation evidence:
-   relaunch with `resumeMode="review"` (optionally `resumeTaskId`) so the
-   branch re-enters the ordinary dual review and integration path. Note that a
-   `resume-failed` outcome now halts the run with the blocking review items in
-   `halted` and the per-round evidence in the result's `reviewRounds` — do not
-   simply relaunch the same resume; act on the blockers first.
-3. **Split / add addenda** — for `adopt-partial` branches: preserve the
-   coherent slice, convert the remaining work into a completion task or
-   addendum sub-tasks (via `roadmap-grooming` + `mapsplice`), and leave the
-   original task unchecked.
+2. **Resume** — the default for any clean survivor whose work should simply
+   be finished: relaunch with `resumeMode="continue"` (optionally
+   `resumeTaskId`) and the workflow dispatches each branch from its committed
+   ExecPlan `Status` — DRAFT finishes planning, APPROVED/IN PROGRESS finishes
+   the build from the first unticked work item, COMPLETE re-enters review and
+   integration. Use `resumeMode="review"` instead when only a pristine
+   `adopt-complete` branch should re-enter and everything else should stay
+   parked. Note that a `resume-failed` outcome now halts the run with the
+   blocking review items in `halted` and the per-round evidence in the
+   result's `reviewRounds` — do not simply relaunch the same resume; act on
+   the blockers first.
+3. **Split / add addenda** — for partial branches whose remaining scope no
+   longer matches the original task: preserve the coherent slice, convert the
+   remaining work into a completion task or addendum sub-tasks (via
+   `roadmap-grooming` + `mapsplice`), and leave the original task unchecked.
+   Prefer plain continue-mode resume when the ExecPlan still describes the
+   remaining work accurately.
 4. **Preserve-for-manual** — for `continue-manual` branches (typically
    planning-stage survivors): record an explicit operator decision in
    `operator-notes.md`. Do not let them block dependents indefinitely — decide

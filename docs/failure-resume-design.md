@@ -148,7 +148,7 @@ Add these ODW `args` fields:
 | Argument | Default | Meaning |
 | - | - | - |
 | `resumePartialBranches` | `false` | Enable fresh-run recovery discovery. |
-| `resumeMode` | `"assess"` | One of `"assess"` or `"review"`. `"assess"` reports only. `"review"` may route clean `adopt-complete` branches into review and integration. |
+| `resumeMode` | `"assess"` | One of `"assess"`, `"review"`, or `"continue"`. `"assess"` reports only. `"review"` may route clean `adopt-complete` branches into review and integration. `"continue"` dispatches deterministically on the committed ExecPlan `Status` and re-enters the ordinary pipeline at the plan, implement, or review stage. |
 | `resumeTaskId` | unset | Limit recovery discovery to one roadmap id. This is separate from `taskId`, which selects normal roadmap work. |
 | `resumeMaxCandidates` | `4` | Bound startup recovery fan-in so a messy repository does not consume the whole run. |
 | `reuseAcceptedExecPlans` | `false` | Enable accepted-plan adoption after normal roadmap selection. When disabled, every normal task still enters the existing plan/design loop. |
@@ -287,6 +287,44 @@ construct a synthetic implementation result from durable evidence:
 The synthetic result is only a bridge into review. It is not proof that the
 branch is shippable. The existing code review, expert review, CodeRabbit, gate,
 and integration requirements remain decisive.
+
+## Continue-mode resume path
+
+`resumeMode="continue"` removes the judgement agent from recovery entirely.
+The committed ExecPlan is the durable source of truth for where a task stands,
+so a fresh run can dispatch a survivor branch from durable state alone:
+
+| Committed ExecPlan `Status` | Continue-mode action |
+| - | - |
+| file missing, `DRAFT`, or unrecognized | Re-enter the plan/design-review loop; the planner completes or revises the existing draft in place. |
+| `APPROVED` or `IN PROGRESS` | Re-enter implementation; the builder verifies ticked work items briefly and continues from the first unticked one. |
+| `COMPLETE` | Re-enter dual review and integration via the synthetic implementation bridge. |
+| `BLOCKED` | Report for the operator (`plan-blocked` skip reason). |
+
+Hygiene checks still fail closed before any dispatch: addendum branches,
+evidence-collection errors, and dirty worktrees are reported, and a `COMPLETE`
+plan with no committed work reports `no-committed-work`. Dry runs report the
+stage they would have resumed.
+
+Safety comes from the downstream gates a resumed branch still has to pass —
+design review, the deterministic commit gates, dual review, and serialized
+integration — not from an up-front classification. The worst case of resuming
+a half-built branch is the same as a fresh task failing review.
+
+Continue mode depends on an agent-side durability contract enforced by the
+prompts:
+
+- the planner commits the ExecPlan when first written and after every
+  revision, leaving `Status: DRAFT`;
+- the design reviewer flips `Status` to `APPROVED` (and commits) if and only
+  if it is satisfied;
+- the implementer sets `Status: IN PROGRESS` before the first work item,
+  commits the plan with every work-item tick, and sets `Status: COMPLETE` with
+  the retrospective when done;
+- fix rounds commit their ExecPlan updates with the fix.
+
+An uncommitted plan is lost when a run dies; a stale `Status` resumes the task
+at an earlier stage than necessary, which costs effort but never correctness.
 
 ## Returned result shape
 

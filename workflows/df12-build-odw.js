@@ -59,9 +59,9 @@ const AUTH_PREFLIGHT = cfg.authPreflight !== false // false => skip local CLI au
 const REQUIRE_CODERABBIT_AUTH = cfg.requireCoderabbitAuth !== false && !DRY_RUN // CodeRabbit is required once implementation/review can run
 const ASSESS_PARTIAL_BRANCHES = cfg.assessPartialBranches !== false // false => skip report-only assessment of failed task branches
 const RESUME_PARTIAL_BRANCHES = cfg.resumePartialBranches === true // opt-in: discover surviving roadmap-* branches on fresh launch before normal selection
-const RESUME_MODE = String(cfg.resumeMode || 'assess').toLowerCase() // maximum recovery action: "assess" reports only; "review" may route clean adopt-complete branches into review + integration
-if (!['assess', 'review'].includes(RESUME_MODE)) {
-  throw new Error(`Unsupported resumeMode: ${RESUME_MODE} (use "assess" or "review")`)
+const RESUME_MODE = String(cfg.resumeMode || 'assess').toLowerCase() // maximum recovery action: "assess" reports only; "review" may route clean adopt-complete branches into review + integration; "continue" dispatches on the committed ExecPlan Status (DRAFT->plan, APPROVED/IN PROGRESS->implement, COMPLETE->review) so partial work is finished through the ordinary gates instead of parked
+if (!['assess', 'review', 'continue'].includes(RESUME_MODE)) {
+  throw new Error(`Unsupported resumeMode: ${RESUME_MODE} (use "assess", "review", or "continue")`)
 }
 const RESUME_TASK_ID = cfg.resumeTaskId ? String(cfg.resumeTaskId) : null // limit recovery discovery to one roadmap id (separate from taskId, which selects normal roadmap work)
 const RESUME_MAX_CANDIDATES_RAW = Number(cfg.resumeMaxCandidates ?? 4)
@@ -914,7 +914,7 @@ function selectRoadmapTask(roadmapText, taken) {
 // ---------------------------------------------------------------------------
 // Prompt builders
 // ---------------------------------------------------------------------------
-function planPrompt(task, worktree, priorVerdict, round) {
+function planPrompt(task, worktree, priorVerdict, round, opts = {}) {
   const revision =
     round === 1
       ? 'This is the first planning round.'
@@ -926,6 +926,12 @@ function planPrompt(task, worktree, priorVerdict, round) {
     preamble(worktree),
     `TASK: Produce (or revise) a self-contained ExecPlan for roadmap task ${task.id} — "${task.title}".`,
     '',
+    ...(opts.resume
+      ? [
+          'RESUME: this branch survived a previous run. A committed ExecPlan draft may already exist at docs/execplans/<branch-leaf>.md, and the branch may already carry commits. Read the existing draft (Status, Progress, Decision Log) and the branch history FIRST, then complete or revise the plan IN PLACE rather than starting over. Account for any work already committed on the branch.',
+          '',
+        ]
+      : []),
     SPARK_DELEGATION_GUIDANCE,
     '',
     'Use the `execplans` skill and follow it exactly. Name the plan docs/execplans/<branch-leaf>.md within the worktree (branch leaf = the part after the last "/").',
@@ -945,7 +951,9 @@ function planPrompt(task, worktree, priorVerdict, round) {
     '',
     revision,
     '',
-    'Write/update the execplan file on disk in the worktree. Return its path, the ordered work-item titles, the docs and skills cited, and a short summary. Do NOT begin implementation.',
+    'EXECPLAN DURABILITY CONTRACT: the committed ExecPlan is the durable source of truth for where this task stands — an uncommitted plan is lost when the run dies. COMMIT the ExecPlan on the task branch as soon as it is first written, and commit again after EVERY revision (en-GB imperative subject). Keep the header Status field accurate: it stays `DRAFT` while planning; the design reviewer flips it to `APPROVED`. Never return with the ExecPlan uncommitted or the worktree dirty.',
+    '',
+    'Write/update the execplan file on disk in the worktree and COMMIT it. Return its path, the ordered work-item titles, the docs and skills cited, and a short summary. Do NOT begin implementation.',
   ].join('\n')
 }
 
@@ -961,14 +969,22 @@ function designReviewPrompt(task, worktree, plan, round) {
     'Where the plan asserts any external or locked-library behaviour, verify it against the REAL source (a vendored or sibling checkout if the project has one) and the official docs. Treat any uncited memory-based claim about library behaviour as a blocking defect: the plan must verify and cite official docs when tools permit, or pin the behaviour with a test. Do not reject an otherwise implementable plan solely because Memtrace, GrepAI, Leta, Firecrawl, or sem was unavailable in the planner session; reject it if that unavailability was turned into a hard blocker instead of a documented fallback.',
     '',
     'Set satisfied=true ONLY when you would stake your name on the plan being implementable and design-conformant as written. Otherwise list precise, addressable blocking defects (these go straight back to the planner).',
+    '',
+    'STATUS TRANSITION: when (and only when) you set satisfied=true, update the ExecPlan header Status field from `DRAFT` to `APPROVED` and COMMIT that change (en-GB imperative subject) — the committed Status is what a resumed run dispatches on. If you are NOT satisfied, leave Status as `DRAFT`, and commit any review notes you chose to leave in the worktree so nothing is lost if the run dies.',
   ].join('\n')
 }
 
-function implementPrompt(task, worktree, plan) {
+function implementPrompt(task, worktree, plan, opts = {}) {
   return [
     preamble(worktree),
     `TASK: Implement roadmap task ${task.id} ("${task.title}") by executing the approved ExecPlan at ${plan.execplanPath}, work item by work item, in order.`,
     '',
+    ...(opts.resume
+      ? [
+          'RESUME: this branch survived a previous run, and the committed ExecPlan is the source of truth for where the build stands. Read its Status, Progress checkboxes, and Decision Log FIRST. Verify already-ticked work items briefly (their commits exist on the branch and gates still pass) rather than redoing them, then continue from the first unticked work item.',
+          '',
+        ]
+      : []),
     SPARK_DELEGATION_GUIDANCE,
     '',
     SCRUTINEER_DELEGATION_GUIDANCE,
@@ -980,6 +996,8 @@ function implementPrompt(task, worktree, plan) {
     `     - ${CODERABBIT_REVIEW_GUIDANCE}`,
     '  4. Update the execplan IN PLACE with findings, progress (tick the work item), and any decisions or deviations, with rationale.',
     '  5. Commit the work item and the execplan update together as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).',
+    '',
+    'EXECPLAN DURABILITY CONTRACT: the committed ExecPlan (Status + Progress checkboxes) is the durable source of truth for where this task stands. Before starting the first work item, set the header Status to `IN PROGRESS` and commit it. When every work item is complete and the gates are green, set Status to `COMPLETE` together with the Outcomes & Retrospective update, and commit. Never leave the ExecPlan stale or uncommitted at any stopping point — if you must stop early, commit the plan reflecting exactly what is done and what remains.',
     '',
     'Use leta for navigation, sem for history, and the language router skill for the languages you touch. Follow the per-work-item skill and documentation signposts in the plan.',
     '',
@@ -1000,7 +1018,7 @@ function fixPrompt(task, worktree, plan, blocking, round) {
     'The dual review returned the following BLOCKING items. Resolve every one:',
     ...blocking.map((b, i) => `  ${i + 1}. ${b}`),
     '',
-    `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT}, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND}\`, then an atomic commit, then update the execplan with what changed and why. ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
+    `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT}, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND}\`, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth — never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
     '',
     'Return the commit subjects you added, whether every deterministic gate is green at HEAD after your fixes, the number of CodeRabbit runs you completed, how each blocking item was resolved, any open issues with reasons, and a short summary. This structured report is durable validation evidence for the branch — be precise about which gates ran and at which commit.',
   ].join('\n')
@@ -1446,6 +1464,7 @@ const RECOVERY_SKIP_REASONS = [
   'not-task-scoped',
   'missing-validation-evidence',
   'missing-execplan',
+  'plan-blocked',
   'dry-run',
 ]
 
@@ -1484,6 +1503,80 @@ function recoveryDecision(candidate, evidence, assessment, mode, flags = {}) {
   return { action: 'resume', classification, reason: '', skip: false }
 }
 
+// ---------------------------------------------------------------------------
+// Continue-mode dispatch (failure resume, phase 3) — the committed ExecPlan is
+// the durable source of truth for where a task stands. Agents commit the plan
+// after every change and keep its Status field accurate, so a fresh run can
+// dispatch a survivor branch deterministically, with no judgement agent:
+//   Status DRAFT (or missing/unfilled) -> re-enter the plan/design-review loop
+//   Status APPROVED or IN PROGRESS     -> re-enter implementation
+//   Status COMPLETE                    -> re-enter dual review + integration
+//   Status BLOCKED                     -> report for the operator
+// Safety comes from the downstream gates the resumed branch still has to pass
+// (design review, deterministic gates, dual review, serialized integration),
+// not from an up-front classification.
+// ---------------------------------------------------------------------------
+const EXECPLAN_STATUS_MAP = {
+  draft: 'draft',
+  approved: 'approved',
+  'in progress': 'in-progress',
+  blocked: 'blocked',
+  complete: 'complete',
+}
+
+// Parse the durable state out of a committed ExecPlan: the Status field and
+// the Progress checkbox tallies (informational — dispatch keys on Status
+// alone). An unfilled skeleton line ("Status: DRAFT | APPROVED | …") or an
+// unrecognized value parses as 'unknown', which dispatches to planning.
+function parseExecplanState(text) {
+  const source = String(text || '')
+  let status = 'unknown'
+  const statusMatch = source.match(/^Status:\s*([A-Za-z ]+?)\s*$/m)
+  if (statusMatch) {
+    const value = statusMatch[1].trim().toLowerCase().replace(/\s+/g, ' ')
+    status = EXECPLAN_STATUS_MAP[value] || 'unknown'
+  }
+  let ticked = 0
+  let unticked = 0
+  const progressSection = source.split(/^##\s+/m).find((section) => /^progress\b/i.test(section)) || ''
+  for (const line of progressSection.split(/\r?\n/)) {
+    if (/^\s*-\s+\[[xX]\]/.test(line)) ticked += 1
+    else if (/^\s*-\s+\[ \]/.test(line)) unticked += 1
+  }
+  return { status, ticked, unticked }
+}
+
+async function readExecplanState(candidate) {
+  if (!candidate?.execplanPath) return { status: 'missing', ticked: 0, unticked: 0 }
+  const path = process.getBuiltinModule('node:path')
+  try {
+    const text = await readFileText(path.join(candidate.worktreePath, candidate.execplanPath))
+    return parseExecplanState(text)
+  } catch {
+    return { status: 'missing', ticked: 0, unticked: 0 }
+  }
+}
+
+// The continue-mode decision table. Purely deterministic: hygiene checks from
+// host-collected evidence, then a stage keyed on the committed ExecPlan
+// Status. Returns { action: 'report'|'resume', stage, reason, skip }.
+function recoveryContinueDecision(candidate, evidence, planState, flags = {}) {
+  const report = (reason) => ({ action: 'report', stage: null, reason, skip: true })
+  if (candidate?.isAddendum) return report('addendum-branch')
+  if ((evidence?.collectionErrors || []).length) return report('evidence-collection-error')
+  if (evidence?.dirtyState !== 'clean') return report('dirty-worktree')
+  if (planState.status === 'blocked') return report('plan-blocked')
+  const stage =
+    planState.status === 'approved' || planState.status === 'in-progress'
+      ? 'implement'
+      : planState.status === 'complete'
+        ? 'review'
+        : 'plan' // missing, draft, or unknown: (re-)enter planning
+  if (stage === 'review' && !(evidence?.recentCommits || []).length) return report('no-committed-work')
+  if (flags.dryRun) return { action: 'report', stage, reason: 'dry-run', skip: true }
+  return { action: 'resume', stage, reason: '', skip: false }
+}
+
 // Skip reasons whose branch still exists and still maps to a selectable
 // roadmap id — normal selection must not re-open these this run, because
 // `git worktree add -b` would collide with the surviving branch.
@@ -1520,11 +1613,54 @@ async function syntheticRecoveryImpl(candidate, evidence) {
   }
 }
 
-// Fresh-run recovery pass: discover -> assess -> decide -> report or resume.
+// Execute a resume at the dispatched stage through the ordinary pipeline.
+// Every stage funnels into the SAME dual-review + merge-lock integration path
+// as fresh work; the host-verified write gate runs first because plan, build,
+// fix, and integration agents all write into the recovered worktree.
+async function executeResume(task, candidate, enriched, evidence, stage, mergeLock) {
+  const worktree = candidate.worktreePath
+  const extra = { kind: 'recovery-resume' }
+  const writeAccess = await ensureTaskAgentWriteAccess(worktree, candidate.taskId)
+  if (!writeAccess.ok) {
+    const detail = `task-agent writable-root preflight failed (launch/sandbox fault, not a task defect): ${writeAccess.failures.map((failure) => `${failure.adapter}: ${failure.detail}`).join('; ')}`
+    return { id: candidate.taskId, status: 'failed', stage: 'worktree-write', detail, worktree, proposals: [], ...extra }
+  }
+  try {
+    let plan
+    let impl
+    if (stage === 'plan') {
+      const planned = await runPlanDesignLoop(task, worktree, { resume: true, extra })
+      if (planned.fail) return planned.fail
+      plan = planned.plan
+    } else if (stage === 'implement') {
+      plan = {
+        execplanPath: enriched.execplanPath,
+        workItems: [],
+        summary: 'Resumed from the committed ExecPlan on the surviving branch.',
+      }
+    }
+    if (stage === 'plan' || stage === 'implement') {
+      const built = await runImplementationStage(task, worktree, plan, { resume: stage === 'implement', extra })
+      if (built.fail) return built.fail
+      impl = built.impl
+    } else {
+      impl = await syntheticRecoveryImpl(enriched, evidence)
+      plan = { execplanPath: impl.execplanPath, workItems: [], summary: impl.summary }
+    }
+    return await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock, { kind: 'recovery-resume' })
+  } catch (error) {
+    const detail = `unhandled agent error: ${(error && error.message) || String(error)}`
+    return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: 'recovery-resume' })
+  }
+}
+
+// Fresh-run recovery pass: discover -> decide -> report or resume.
 // Assess mode never mutates the target project: it reads Git state and spawns
 // read-only assessment agents. Review mode may route eligible adopt-complete
 // candidates through the SAME dual-review + merge-lock integration path as
-// ordinary tasks; nothing merges outside that path.
+// ordinary tasks. Continue mode dispatches deterministically on the committed
+// ExecPlan Status and re-enters the ordinary pipeline at the plan, implement,
+// or review stage; nothing merges outside that path in any mode.
 async function runRecovery(root, mergeLock = null) {
   const summary = {
     enabled: true,
@@ -1569,129 +1705,102 @@ async function runRecovery(root, mergeLock = null) {
 
   for (const candidate of discovery.candidates) {
     holdCandidate(candidate.branchName, candidate.taskId)
-    log(`[recovery] assessing ${candidate.branchName} (task ${candidate.taskId})`)
-    const { assessment, assessmentError } = await assessRecoveryCandidate(candidate)
-    if (!assessment) {
-      summary.results.push({
-        id: candidate.taskId,
-        branchName: candidate.branchName,
-        classification: '',
-        action: 'assessment-error',
-        assessmentError,
-      })
-      summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: 'assessment-error' })
-      if (authFailureDetail(assessmentError) || providerFailureDetail(assessmentError)) {
-        // Infrastructure faults during recovery poison every later agent call
-        // too — halt the run instead of pretending branches were assessed.
-        return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessmentError) }
-      }
-      continue
+    const task = {
+      id: candidate.taskId,
+      title: candidate.taskTitle,
+      requires: [],
+      rationale: `${RESUME_MODE}-mode recovery resume of a surviving task branch`,
+      isAddendum: false,
+      subtasks: [],
     }
-    summary.assessed += 1
-    const evidence = assessment.hostEvidence
-    // Resolve the durable ExecPlan before deciding: resume eligibility
-    // requires it, and its absence must stay visible as missing-execplan.
-    const enriched = { ...candidate, execplanPath: await recoveryExecplanPath(candidate) }
-    const decision = recoveryDecision(enriched, evidence, assessment, RESUME_MODE, { dryRun: DRY_RUN })
+    const resumeWt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit }
+
+    let decision
+    let evidence
+    let enriched
+    let assessment = null
+    let planState = null
+    if (RESUME_MODE === 'continue') {
+      // Deterministic dispatch: host git evidence plus the committed ExecPlan
+      // Status. No judgement agent — the downstream gates ARE the judgement.
+      log(`[recovery] dispatching ${candidate.branchName} (task ${candidate.taskId}) from its committed ExecPlan`)
+      evidence = await collectAssessmentEvidence(task, resumeWt)
+      enriched = { ...candidate, execplanPath: await recoveryExecplanPath(candidate) }
+      planState = await readExecplanState(enriched)
+      decision = { classification: '', ...recoveryContinueDecision(enriched, evidence, planState, { dryRun: DRY_RUN }) }
+    } else {
+      log(`[recovery] assessing ${candidate.branchName} (task ${candidate.taskId})`)
+      const assessed = await assessRecoveryCandidate(candidate)
+      if (!assessed.assessment) {
+        summary.results.push({
+          id: candidate.taskId,
+          branchName: candidate.branchName,
+          classification: '',
+          action: 'assessment-error',
+          assessmentError: assessed.assessmentError,
+        })
+        summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: 'assessment-error' })
+        if (authFailureDetail(assessed.assessmentError) || providerFailureDetail(assessed.assessmentError)) {
+          // Infrastructure faults during recovery poison every later agent
+          // call too — halt the run instead of pretending branches were
+          // assessed.
+          return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessed.assessmentError) }
+        }
+        continue
+      }
+      assessment = assessed.assessment
+      summary.assessed += 1
+      evidence = assessment.hostEvidence
+      // Resolve the durable ExecPlan before deciding: resume eligibility
+      // requires it, and its absence must stay visible as missing-execplan.
+      enriched = { ...candidate, execplanPath: await recoveryExecplanPath(candidate) }
+      decision = { stage: 'review', ...recoveryDecision(enriched, evidence, assessment, RESUME_MODE, { dryRun: DRY_RUN }) }
+    }
+
+    const resultBase = {
+      id: candidate.taskId,
+      branchName: candidate.branchName,
+      classification: decision.classification,
+      ...(planState ? { planStatus: planState.status } : {}),
+    }
+
     if (decision.action !== 'resume') {
       if (decision.skip) {
         summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: decision.reason })
       }
       summary.results.push({
-        id: candidate.taskId,
-        branchName: candidate.branchName,
-        classification: decision.classification,
+        ...resultBase,
         action: 'reported',
         ...(decision.reason ? { reason: decision.reason } : {}),
-        assessment,
+        ...(assessment ? { assessment } : {}),
       })
-      log(`[recovery] ${candidate.branchName}: ${decision.classification} (reported${decision.reason ? `; ${decision.reason}` : ''})`)
+      log(`[recovery] ${candidate.branchName}: ${decision.classification || planState?.status || 'reported'} (reported${decision.reason ? `; ${decision.reason}` : ''})`)
       continue
     }
 
-    // --- Review-mode resume: re-enter the ordinary review + integration path.
-    // No re-implementation: a synthetic result bridges the recovered branch
-    // into dual review, and integration ticks the roadmap under the merge lock.
-    log(`[recovery] resuming ${candidate.branchName} through the ordinary review and integration path`)
-    const task = {
-      id: candidate.taskId,
-      title: candidate.taskTitle,
-      requires: [],
-      rationale: 'review-mode recovery resume of a clean adopt-complete branch',
-      isAddendum: false,
-      subtasks: [],
-    }
-    const resumeWt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit }
-    // Same host-verified write gate as ordinary tasks: review fix rounds and
-    // integration write into the recovered worktree, so the sandbox boundary
-    // must be proven before any agent can touch it.
-    const writeAccess = await ensureTaskAgentWriteAccess(candidate.worktreePath, candidate.taskId)
-    if (!writeAccess.ok) {
-      const detail = `task-agent writable-root preflight failed (launch/sandbox fault, not a task defect): ${writeAccess.failures.map((failure) => `${failure.adapter}: ${failure.detail}`).join('; ')}`
-      taskResults.push({
-        task,
-        result: { id: candidate.taskId, status: 'failed', stage: 'worktree-write', detail, worktree: candidate.worktreePath, proposals: [], kind: 'recovery-resume' },
-      })
-      summary.results.push({
-        id: candidate.taskId,
-        branchName: candidate.branchName,
-        classification: decision.classification,
-        action: 'resume-failed',
-        reason: detail,
-      })
-      continue
-    }
-    const impl = await syntheticRecoveryImpl(enriched, evidence)
-    const plan = {
-      execplanPath: impl.execplanPath,
-      workItems: [],
-      summary: impl.summary,
-    }
-    let outcome
-    try {
-      outcome = await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock, { kind: 'recovery-resume' })
-    } catch (error) {
-      const detail = `unhandled agent error: ${(error && error.message) || String(error)}`
-      outcome = resultFromUnhandledAgentError(candidate.taskId, detail, { worktree: candidate.worktreePath, kind: 'recovery-resume' })
-    }
+    // --- Resume: re-enter the ordinary pipeline at the dispatched stage. The
+    // committed ExecPlan (continue mode) or the ADR 002 assessment (review
+    // mode) chose the entry point; the pipeline's own gates remain decisive,
+    // and integration ticks the roadmap under the merge lock.
+    const stage = decision.stage || 'review'
+    log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline`)
+    const outcome = await executeResume(task, candidate, enriched, evidence, stage, mergeLock)
     if (outcome.status === 'fatal-auth' || outcome.status === 'provider-fault') {
-      summary.results.push({
-        id: candidate.taskId,
-        branchName: candidate.branchName,
-        classification: decision.classification,
-        action: 'resume-failed',
-        reason: outcome.detail || outcome.status,
-      })
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status })
       return { summary, taskResults, held, fatal: outcome }
     }
     // A failed or halted resume gets a FRESH assessment through the same
-    // guard as ordinary task failures — the pre-resume assessment is stale
-    // once review rounds and fix agents have touched the branch.
+    // guard as ordinary task failures — any pre-resume snapshot is stale
+    // once later agents have touched the branch.
     taskResults.push({ task, result: outcome.status === 'done' ? outcome : await attachAssessment(task, resumeWt, outcome) })
     if (outcome.status === 'done') {
       summary.resumed += 1
-      summary.results.push({
-        id: candidate.taskId,
-        branchName: candidate.branchName,
-        classification: decision.classification,
-        action: 'resumed',
-      })
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resumed' })
       log(`[recovery] ${candidate.branchName}: resumed and integrated`)
     } else if (outcome.status === 'manual-merge-ready') {
-      summary.results.push({
-        id: candidate.taskId,
-        branchName: candidate.branchName,
-        classification: decision.classification,
-        action: 'manual-merge-ready',
-      })
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'manual-merge-ready' })
     } else {
-      summary.results.push({
-        id: candidate.taskId,
-        branchName: candidate.branchName,
-        classification: decision.classification,
-        action: 'resume-failed',
-        reason: outcome.detail || outcome.status,
-      })
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status })
       log(`[recovery] ${candidate.branchName}: resume ${outcome.status} at ${outcome.stage || 'unknown stage'}`)
     }
   }
@@ -1861,6 +1970,97 @@ function ensureTaskAgentWriteAccess(worktree, tag) {
   if (!WORKTREE_WRITE_PREFLIGHT) return Promise.resolve({ ok: true, skipped: true, failures: [] })
   if (!taskAgentWritePreflight) taskAgentWritePreflight = runTaskAgentWritePreflight(worktree, tag)
   return taskAgentWritePreflight
+}
+
+// ---------------------------------------------------------------------------
+// Shared pipeline stages — used by the normal task pipeline and by
+// continue-mode recovery resume, so a resumed branch runs through exactly the
+// same planning loop, design review, implementation contract, reviewers, and
+// integration path as ordinary work. Each helper returns { fail } (an
+// unassessed result object) or its stage product; callers decide whether to
+// attach an assessment.
+// ---------------------------------------------------------------------------
+async function runPlanDesignLoop(task, worktree, opts = {}) {
+  const tag = task.id
+  const extra = opts.extra || {}
+  let plan = null
+  let designVerdict = null
+  for (let round = 1; round <= MAX_DESIGN_ROUNDS; round++) {
+    phase('Plan')
+    plan = await planningLock(() => agent(planPrompt(task, worktree, designVerdict, round, opts), planAgentOptions({
+      phase: 'Plan',
+      label: `plan:${tag} r${round}`,
+      schema: PLAN_SCHEMA,
+    })))
+    if (!plan) return { fail: { id: tag, status: 'failed', stage: 'plan', detail: 'planner returned nothing', worktree, proposals: [], ...extra } }
+    if (!await fileExists(plan.execplanPath, worktree)) {
+      return {
+        fail: {
+          id: tag,
+          status: 'failed',
+          stage: 'plan',
+          detail: `planner returned missing ExecPlan path: ${plan.execplanPath || '<empty>'}`,
+          plan,
+          worktree,
+          proposals: [],
+          ...extra,
+        },
+      }
+    }
+
+    phase('Design Review')
+    designVerdict = await planningLock(() => agent(designReviewPrompt(task, worktree, plan, round), reviewAgentOptions({
+      phase: 'Design Review',
+      label: `design-review:${tag} r${round}`,
+      schema: DESIGN_VERDICT_SCHEMA,
+    })))
+    if (designVerdict?.satisfied) {
+      log(`[task ${tag}] design approved in round ${round}`)
+      return { plan }
+    }
+    log(`[task ${tag}] design round ${round}: ${(designVerdict?.blocking || []).length} blocking point(s)`)
+  }
+  return {
+    fail: {
+      id: tag,
+      status: 'halted',
+      stage: 'design-review',
+      detail: `design review unsatisfied after ${MAX_DESIGN_ROUNDS} rounds: ${(designVerdict?.blocking || []).join('; ')}`,
+      worktree,
+      proposals: [],
+      ...extra,
+    },
+  }
+}
+
+async function runImplementationStage(task, worktree, plan, opts = {}) {
+  const tag = task.id
+  const extra = opts.extra || {}
+  phase('Implement')
+  const impl = await buildLock(() => agent(implementPrompt(task, worktree, plan, opts), buildAgentOptions({
+    phase: 'Implement',
+    label: `implement:${tag}`,
+    schema: IMPL_SCHEMA,
+  })))
+  const authDetail = implementationAuthFailureDetail(impl)
+  if (authDetail) {
+    return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
+  }
+  if (!impl || !impl.ok || !impl.gatesGreen) {
+    return {
+      fail: {
+        id: tag,
+        status: 'failed',
+        stage: 'implement',
+        detail: impl?.summary || 'implementation did not reach a green state',
+        openIssues: impl?.openIssues || [],
+        worktree,
+        proposals: [],
+        ...extra,
+      },
+    }
+  }
+  return { impl }
 }
 
 // ---------------------------------------------------------------------------
@@ -2096,50 +2296,9 @@ async function runTask(task, mergeLock) {
   }
 
   // --- Plan <-> Design review (adversarial loop) --------------------------
-  let plan = null
-  let designVerdict = null
-  for (let round = 1; round <= MAX_DESIGN_ROUNDS; round++) {
-    phase('Plan')
-    plan = await planningLock(() => agent(planPrompt(task, worktree, designVerdict, round), planAgentOptions({
-      phase: 'Plan',
-      label: `plan:${tag} r${round}`,
-      schema: PLAN_SCHEMA,
-    })))
-    if (!plan) return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'plan', detail: 'planner returned nothing', worktree, proposals: [] })
-    if (!await fileExists(plan.execplanPath, worktree)) {
-      return await attachAssessment(task, wt, {
-        id: tag,
-        status: 'failed',
-        stage: 'plan',
-        detail: `planner returned missing ExecPlan path: ${plan.execplanPath || '<empty>'}`,
-        plan,
-        worktree,
-        proposals: [],
-      })
-    }
-
-    phase('Design Review')
-    designVerdict = await planningLock(() => agent(designReviewPrompt(task, worktree, plan, round), reviewAgentOptions({
-      phase: 'Design Review',
-      label: `design-review:${tag} r${round}`,
-      schema: DESIGN_VERDICT_SCHEMA,
-    })))
-    if (designVerdict?.satisfied) {
-      log(`[task ${tag}] design approved in round ${round}`)
-      break
-    }
-    log(`[task ${tag}] design round ${round}: ${(designVerdict?.blocking || []).length} blocking point(s)`)
-    if (round === MAX_DESIGN_ROUNDS) {
-      return await attachAssessment(task, wt, {
-        id: tag,
-        status: 'halted',
-        stage: 'design-review',
-        detail: `design review unsatisfied after ${MAX_DESIGN_ROUNDS} rounds: ${(designVerdict?.blocking || []).join('; ')}`,
-        worktree,
-        proposals: [],
-      })
-    }
-  }
+  const planned = await runPlanDesignLoop(task, worktree)
+  if (planned.fail) return await attachAssessment(task, wt, planned.fail)
+  const plan = planned.plan
 
   if (DRY_RUN) {
     return {
@@ -2154,35 +2313,11 @@ async function runTask(task, mergeLock) {
   }
 
   // --- Implement ----------------------------------------------------------
-  phase('Implement')
-  const impl = await buildLock(() => agent(implementPrompt(task, worktree, plan), buildAgentOptions({
-    phase: 'Implement',
-    label: `implement:${tag}`,
-    schema: IMPL_SCHEMA,
-  })))
-  const authDetail = implementationAuthFailureDetail(impl)
-  if (authDetail) {
-    return {
-      id: tag,
-      status: 'fatal-auth',
-      stage: 'auth',
-      detail: authDetail,
-      openIssues: impl?.openIssues || [],
-      worktree,
-      proposals: [],
-    }
+  const built = await runImplementationStage(task, worktree, plan)
+  if (built.fail) {
+    return built.fail.status === 'fatal-auth' ? built.fail : await attachAssessment(task, wt, built.fail)
   }
-  if (!impl || !impl.ok || !impl.gatesGreen) {
-    return await attachAssessment(task, wt, {
-      id: tag,
-      status: 'failed',
-      stage: 'implement',
-      detail: impl?.summary || 'implementation did not reach a green state',
-      openIssues: impl?.openIssues || [],
-      worktree,
-      proposals: [],
-    })
-  }
+  const impl = built.impl
 
   // --- Dual review + integration (shared with review-mode recovery resume) --
   const outcome = await runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock)

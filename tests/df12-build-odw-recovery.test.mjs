@@ -47,6 +47,8 @@ return {
   RECOVERY_SKIP_REASONS,
   recoveryResumeEligibility,
   recoveryDecision,
+  parseExecplanState,
+  recoveryContinueDecision,
   syntheticRecoveryImpl,
   branchToRoadmapId,
   parseWorktreeList,
@@ -54,6 +56,9 @@ return {
   assessmentPrompt,
   recoveryAssessmentPrompt,
   assessRecoveryCandidate,
+  planPrompt,
+  designReviewPrompt,
+  implementPrompt,
   runRecovery,
 }
 `,
@@ -397,6 +402,7 @@ test('skip reasons are a stable published contract', async () => {
     'not-task-scoped',
     'missing-validation-evidence',
     'missing-execplan',
+    'plan-blocked',
     'dry-run',
   ])
 })
@@ -650,6 +656,29 @@ function reviewModeAgent(calls, overrides = {}) {
     if (label.startsWith('recover-assess:') || label.startsWith('assess:')) {
       return (overrides.assess || (async () => sampleAssessment()))(prompt, opts)
     }
+    if (label.startsWith('plan:')) {
+      return (overrides.plan || (async () => ({
+        execplanPath: 'docs/execplans/roadmap-1-2-3.md',
+        workItems: ['work item 1'],
+        summary: 'plan completed and committed',
+      })))(prompt, opts)
+    }
+    if (label.startsWith('design-review:')) {
+      return (overrides.designReview || (async () => ({ satisfied: true, blocking: [] })))(prompt, opts)
+    }
+    if (label.startsWith('implement:')) {
+      return (overrides.implement || (async () => ({
+        ok: true,
+        gatesGreen: true,
+        execplanPath: 'docs/execplans/roadmap-1-2-3.md',
+        workItemsCompleted: 1,
+        workItemsTotal: 1,
+        commits: ['Finish remaining work items'],
+        coderabbitRuns: 1,
+        openIssues: [],
+        summary: 'resumed and completed the remaining work items',
+      })))(prompt, opts)
+    }
     if (label.startsWith('code-review:') || label.startsWith('expert-review:')) {
       return (overrides.review || (async () => ({ verdict: 'pass', blocking: [], summary: 'ship it' })))(prompt, opts)
     }
@@ -861,6 +890,253 @@ test('autoMerge=false resume stops at manual-merge-ready instead of integrating'
   )
   assert.equal(outcome.taskResults[0].result.status, 'manual-merge-ready')
   assert.ok(!calls.some((label) => label.startsWith('integrate:')))
+})
+
+// --- Continue mode: the committed ExecPlan is the durable source of truth ---
+
+test('the ExecPlan parser reads the status vocabulary the prompts require', async () => {
+  const surface = await loadRecoverySurface({})
+
+  const rows = [
+    ['Status: DRAFT', 'draft'],
+    ['Status: APPROVED', 'approved'],
+    ['Status: IN PROGRESS', 'in-progress'],
+    ['Status: In Progress', 'in-progress'],
+    ['Status: BLOCKED', 'blocked'],
+    ['Status: COMPLETE', 'complete'],
+    ['Status: DRAFT | APPROVED | IN PROGRESS | BLOCKED | COMPLETE', 'unknown'],
+    ['Status: SHIPPED', 'unknown'],
+    ['no status line at all', 'unknown'],
+  ]
+  for (const [text, expected] of rows) {
+    assert.equal(surface.parseExecplanState(text).status, expected, text)
+  }
+
+  const withProgress = surface.parseExecplanState(
+    ['Status: IN PROGRESS', '', '## Progress', '', '- [x] (2026-07-01) Done step.', '- [ ] Remaining step.', '- [ ] Another remaining step.', '', '## Decision log', '', '- [ ] not a progress tick'].join('\n'),
+  )
+  assert.equal(withProgress.ticked, 1)
+  assert.equal(withProgress.unticked, 2)
+})
+
+test('the continue-mode decision table dispatches on the committed ExecPlan Status', async () => {
+  const surface = await loadRecoverySurface({})
+  const candidate = eligibleCandidate()
+  const evidence = eligibleEvidence()
+  const plan = (status) => ({ status, ticked: 0, unticked: 0 })
+
+  const rows = [
+    [plan('missing'), 'plan'],
+    [plan('draft'), 'plan'],
+    [plan('unknown'), 'plan'],
+    [plan('approved'), 'implement'],
+    [plan('in-progress'), 'implement'],
+    [plan('complete'), 'review'],
+  ]
+  for (const [planState, stage] of rows) {
+    assert.deepEqual(
+      surface.recoveryContinueDecision(candidate, evidence, planState, {}),
+      { action: 'resume', stage, reason: '', skip: false },
+      planState.status,
+    )
+  }
+
+  const reports = [
+    [{ candidate: { ...candidate, isAddendum: true } }, plan('draft'), 'addendum-branch'],
+    [{ evidence: eligibleEvidence({ collectionErrors: ['diff failed'] }) }, plan('draft'), 'evidence-collection-error'],
+    [{ evidence: eligibleEvidence({ dirtyState: 'dirty' }) }, plan('approved'), 'dirty-worktree'],
+    [{}, plan('blocked'), 'plan-blocked'],
+    [{ evidence: eligibleEvidence({ recentCommits: [] }) }, plan('complete'), 'no-committed-work'],
+  ]
+  for (const [overrides, planState, reason] of reports) {
+    const decision = surface.recoveryContinueDecision(
+      overrides.candidate || candidate,
+      overrides.evidence || evidence,
+      planState,
+      {},
+    )
+    assert.equal(decision.action, 'report', reason)
+    assert.equal(decision.reason, reason)
+    assert.equal(decision.skip, true)
+  }
+
+  assert.deepEqual(surface.recoveryContinueDecision(candidate, evidence, plan('draft'), { dryRun: true }), {
+    action: 'report',
+    stage: 'plan',
+    reason: 'dry-run',
+    skip: true,
+  })
+})
+
+test('the prompt status vocabulary matches the continue-mode parser contract', async () => {
+  const surface = await loadRecoverySurface({})
+  const task = { id: '1.2.3', title: 'Implement the parser state machine.' }
+  const plan = { execplanPath: 'docs/execplans/roadmap-1-2-3.md' }
+
+  const planPrompt = surface.planPrompt(task, '/tmp/wt', null, 1)
+  assert.match(planPrompt, /COMMIT the ExecPlan/)
+  assert.match(planPrompt, /`DRAFT`/)
+  assert.match(surface.planPrompt(task, '/tmp/wt', null, 1, { resume: true }), /^RESUME:/m)
+  assert.doesNotMatch(planPrompt, /^RESUME:/m)
+
+  const reviewPrompt = surface.designReviewPrompt(task, '/tmp/wt', plan, 1)
+  assert.match(reviewPrompt, /`APPROVED`/)
+
+  const buildPrompt = surface.implementPrompt(task, '/tmp/wt', plan)
+  assert.match(buildPrompt, /`IN PROGRESS`/)
+  assert.match(buildPrompt, /`COMPLETE`/)
+  assert.match(surface.implementPrompt(task, '/tmp/wt', plan, { resume: true }), /^RESUME:/m)
+  assert.doesNotMatch(buildPrompt, /^RESUME:/m)
+
+  // Every status token the prompts instruct agents to write must round-trip
+  // through the parser to the stage continue mode dispatches on.
+  for (const [token, parsed] of [
+    ['DRAFT', 'draft'],
+    ['APPROVED', 'approved'],
+    ['IN PROGRESS', 'in-progress'],
+    ['BLOCKED', 'blocked'],
+    ['COMPLETE', 'complete'],
+  ]) {
+    assert.equal(surface.parseExecplanState(`Status: ${token}`).status, parsed)
+  }
+})
+
+test('continue mode resumes a draft-plan branch at the plan stage with no judgement agent', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'continue' },
+    reviewModeAgent(calls),
+  )
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.fatal, null)
+  assert.equal(outcome.summary.resumed, 1)
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'resumed')
+  assert.equal(entry.resumeStage, 'plan')
+  assert.equal(entry.planStatus, 'draft')
+  assert.equal(outcome.taskResults[0].result.status, 'done')
+  assert.equal(outcome.taskResults[0].result.kind, 'recovery-resume')
+  assert.ok(!calls.some((label) => label.startsWith('recover-assess:')), 'continue mode spawns no judgement agent')
+  assert.deepEqual(calls, [
+    'write-probe:claude',
+    'write-probe:codex-medium',
+    'plan:1.2.3 r1',
+    'design-review:1.2.3 r1',
+    'implement:1.2.3',
+    'code-review:1.2.3 r1',
+    'expert-review:1.2.3 r1',
+    'integrate:1.2.3',
+  ])
+})
+
+test('continue mode resumes an approved-plan branch at the implement stage', async () => {
+  const calls = []
+  const prompts = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'continue' },
+    reviewModeAgent(calls, {
+      implement: async (prompt) => {
+        prompts.push(prompt)
+        return {
+          ok: true,
+          gatesGreen: true,
+          execplanPath: 'docs/execplans/roadmap-1-2-3.md',
+          workItemsCompleted: 2,
+          workItemsTotal: 2,
+          commits: ['Finish remaining work items'],
+          coderabbitRuns: 1,
+          openIssues: [],
+          summary: 'resumed and completed the remaining work items',
+        }
+      },
+    }),
+  )
+  const repo = makeRecoveryRepo({
+    parserExecplanStatus: 'IN PROGRESS',
+    parserExecplanProgress: ['- [x] (2026-07-04) First work item.', '- [ ] Second work item.'],
+  })
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 1)
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'resumed')
+  assert.equal(entry.resumeStage, 'implement')
+  assert.equal(entry.planStatus, 'in-progress')
+  assert.ok(
+    !calls.some((label) => label.startsWith('plan:') || label.startsWith('design-review:')),
+    'an approved plan must not be re-planned',
+  )
+  assert.ok(calls.includes('implement:1.2.3'))
+  assert.match(prompts[0], /^RESUME:/m, 'the resumed builder is told the committed ExecPlan is the source of truth')
+})
+
+test('continue mode routes a complete-plan branch straight to review and integration', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'continue' },
+    reviewModeAgent(calls),
+  )
+  const repo = makeRecoveryRepo() // fixture ExecPlan Status: COMPLETE
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 1)
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'resumed')
+  assert.equal(entry.resumeStage, 'review')
+  assert.equal(entry.planStatus, 'complete')
+  assert.ok(
+    !calls.some((label) => label.startsWith('plan:') || label.startsWith('implement:')),
+    'a complete plan re-enters at review, not implementation',
+  )
+  assert.ok(calls.includes('code-review:1.2.3 r1'))
+  assert.ok(calls.includes('integrate:1.2.3'))
+})
+
+test('continue mode reports a BLOCKED plan for the operator without spending agents', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'continue' },
+    reviewModeAgent(calls),
+  )
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'BLOCKED' })
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  assert.deepEqual(outcome.taskResults, [])
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'reported')
+  assert.equal(entry.reason, 'plan-blocked')
+  assert.equal(entry.planStatus, 'blocked')
+  assert.ok(
+    outcome.summary.skipped.some(
+      (skip) => skip.branchName === 'roadmap-1-2-3' && skip.reason === 'plan-blocked',
+    ),
+  )
+  assert.deepEqual(calls, [], 'a blocked plan is pure operator work')
+})
+
+test('continue mode reports a dirty survivor fail-closed like the other modes', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'continue' },
+    reviewModeAgent(calls),
+  )
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+  writeFileSync(path.join(repo.parserWorktree, 'dirty.txt'), 'uncommitted draft plan work\n')
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'reported')
+  assert.equal(entry.reason, 'dirty-worktree')
+  assert.deepEqual(calls, [], 'no agent spend on a dirty worktree')
 })
 
 test('normal tasks and recovery resume share one review and integration implementation', async () => {
