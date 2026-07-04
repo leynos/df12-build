@@ -1,4 +1,6 @@
 .grepai/
+.memdb/
+~/
 *.sw?
 .*.sw?
 __pycache__/
