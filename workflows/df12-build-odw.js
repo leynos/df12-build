@@ -1724,22 +1724,34 @@ async function clearProbeArtifact(probeFile) {
 
 async function verifyWriteProbe(probeFile, token) {
   const fs = process.getBuiltinModule('node:fs/promises')
+  const { constants } = process.getBuiltinModule('node:fs')
+  // Open once with O_NOFOLLOW and verify/read through the handle: the check
+  // and the read then target the same inode, so a symlink (or a swap between
+  // a check and a separate path-based read) can never redirect the read.
+  let handle = null
+  let content = null
   try {
-    // lstat + reject non-regular files: never read through a symlink the
-    // agent (or a committed tree) left at the probe path. The agent finished
-    // before verification, so there is no live writer to race.
-    const stat = await fs.lstat(probeFile)
-    if (stat.isSymbolicLink() || !stat.isFile()) {
+    handle = await fs.open(probeFile, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const stat = await handle.stat()
+    if (stat.isFile()) {
+      content = await handle.readFile({ encoding: 'utf8' })
+    }
+  } catch (error) {
+    // Linux reports ELOOP for O_NOFOLLOW on a symlink; FreeBSD uses EMLINK.
+    if (error && (error.code === 'ELOOP' || error.code === 'EMLINK')) {
       await fs.rm(probeFile, { force: true, recursive: true })
       return { ok: false, detail: 'probe path is not a regular file (symlink or special file rejected)' }
     }
-    const content = await fs.readFile(probeFile, 'utf8')
-    await fs.rm(probeFile, { force: true })
-    if (content.trim() === token) return { ok: true, detail: '' }
-    return { ok: false, detail: `probe file content mismatch (${content.trim().slice(0, 80) || '<empty>'})` }
-  } catch (error) {
     return { ok: false, detail: `probe file missing or unreadable: ${(error && error.message) || String(error)}` }
+  } finally {
+    if (handle) await handle.close()
   }
+  await fs.rm(probeFile, { force: true, recursive: true })
+  if (content === null) {
+    return { ok: false, detail: 'probe path is not a regular file (symlink or special file rejected)' }
+  }
+  if (content.trim() === token) return { ok: true, detail: '' }
+  return { ok: false, detail: `probe file content mismatch (${content.trim().slice(0, 80) || '<empty>'})` }
 }
 
 async function hostWriteProbe(worktree) {

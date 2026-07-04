@@ -27,6 +27,7 @@ import io
 import json
 import sys
 import tempfile
+import types
 import unittest
 from collections.abc import Mapping
 from importlib.machinery import SourceFileLoader
@@ -36,7 +37,7 @@ from typing import Any
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 
 
-def load_script(module_name: str, filename: str):
+def load_script(module_name: str, filename: str) -> types.ModuleType:
     """Import a script that is not a conventionally named module."""
     loader = SourceFileLoader(module_name, str(SCRIPTS_DIR / filename))
     spec = importlib.util.spec_from_loader(module_name, loader)
@@ -164,7 +165,9 @@ class FilterAndTableTests(unittest.TestCase):
 
 
 class EventParsingTests(unittest.TestCase):
-    def run_fixture(self, tmp: Path) -> object:
+    # -> Any, not object: the value is a dynamically loaded odw_watch.Run,
+    # whose attributes (.path, .events_path) object would not promise.
+    def run_fixture(self, tmp: Path) -> Any:
         run_dir = tmp / "wf" / "run1"
         run_dir.mkdir(parents=True)
         return odw_watch.Run(path=run_dir, run_id="run1", source=str(tmp / "src"))
