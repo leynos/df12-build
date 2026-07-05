@@ -333,9 +333,15 @@ loop enforces it host-side at every stage boundary, the same philosophy as the
 write probe:
 
 - after each planner round, the ExecPlan must exist at `HEAD` with no
-  uncommitted modifications; otherwise the round is bounced straight back to
-  the planner as an `EXECPLAN DURABILITY` blocking item without spending the
-  design reviewer;
+  uncommitted modifications. When the plan file is the only uncommitted path,
+  the host salvages it deterministically: it commits the plan path itself
+  (hermetic identity, `Draft ExecPlan for task <id>`) rather than spending a
+  30–90 minute planner round on git bookkeeping — live runs showed three
+  consecutive rounds burnt on exactly this. Anything else dirty declines the
+  salvage and bounces to the planner as an `EXECPLAN DURABILITY` blocking
+  item carrying the evidence (the foreign dirty paths, or the host's own git
+  error when the environment blocks committing), without spending the design
+  reviewer;
 - when the design reviewer is satisfied, the control loop itself rewrites the
   header to `Status: APPROVED` and commits only the plan path as a
   deterministic machine commit, so the reviewer stays read-only and the

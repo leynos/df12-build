@@ -284,10 +284,14 @@ For every active `roadmap-*` worktree, check:
 - `git log --oneline origin/BASE..HEAD`;
 - any returned `execplanPath` exists on disk;
 - after a stage boundary, the ExecPlan is committed at HEAD with an accurate
-  `Status` (the workflow now enforces this: uncommitted plans bounce back to
-  the planner, the `APPROVED` flip is a deterministic host commit, and a green
+  `Status` (the workflow now enforces this: a plan-only dirty draft is
+  host-committed as `Draft ExecPlan for task <id>` without spending a planner
+  round, a draft with foreign dirt bounces back to the planner with the dirty
+  paths named, the `APPROVED` flip is a deterministic host commit, and a green
   implementation that leaves uncommitted state fails at `implement`). Dirt is
-  normal only *mid*-agent-turn;
+  normal only *mid*-agent-turn. Repeated `host salvage declined: git commit
+  failed` bounces mean the ENVIRONMENT blocks committing in that worktree
+  (hooks, identity, permissions) — stop and repair rather than relaunch;
 - advertised gate logs exist;
 - claimed commits, dirty files, or clean branches match the agent output.
 

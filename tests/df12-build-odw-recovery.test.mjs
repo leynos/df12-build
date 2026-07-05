@@ -61,6 +61,7 @@ return {
   implementPrompt,
   verifyExecplanCommitted,
   commitExecplanApproval,
+  commitExecplanDraft,
   verifyWorktreeCommitted,
   runPlanDesignLoop,
   runImplementationStage,
@@ -1187,12 +1188,64 @@ test('the approval flip is host-committed, path-scoped, and idempotent', async (
   assert.match(again.detail, /already committed/)
 })
 
-test('the plan loop bounces an uncommitted plan back to the planner as a blocking item', async () => {
+test('the draft salvage commit is path-scoped and declines foreign dirt', async () => {
+  const surface = await loadRecoverySurface({})
   const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
   const worktree = repo.parserWorktree
-  // Simulate the observed live failure: the planner revises the plan on disk
-  // but does not commit until it is bounced.
+
+  // Clean tree: nothing to salvage.
+  const clean = await surface.commitExecplanDraft(worktree, PARSER_PLAN, '1.2.3')
+  assert.equal(clean.ok, false)
+  assert.match(clean.detail, /already clean/)
+
+  // Plan-only dirt: the host commits it, path-scoped, hermetic identity.
+  writeFileSync(path.join(worktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nrevised but uncommitted\n')
+  const salvaged = await surface.commitExecplanDraft(worktree, PARSER_PLAN, '1.2.3')
+  assert.equal(salvaged.ok, true, salvaged.detail)
+  assert.match(git(worktree, 'log', '-1', '--format=%s'), /Draft ExecPlan for task 1\.2\.3/)
+  assert.match(git(worktree, 'show', `HEAD:${PARSER_PLAN}`), /revised but uncommitted/)
+  assert.equal(git(worktree, 'status', '--porcelain=v1'), '')
+
+  // Foreign dirt alongside the plan: declined, with the paths as evidence.
+  writeFileSync(path.join(worktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nsecond revision\n')
+  writeFileSync(path.join(worktree, 'scratch.txt'), 'planner scratch\n')
+  const declined = await surface.commitExecplanDraft(worktree, PARSER_PLAN, '1.2.3')
+  assert.equal(declined.ok, false)
+  assert.match(declined.detail, /beyond the plan file/)
+  assert.match(declined.detail, /scratch\.txt/)
+  assert.doesNotMatch(git(worktree, 'log', '-1', '--format=%s'), /second/, 'a declined salvage commits nothing')
+})
+
+test('the plan loop host-commits a plan-only dirty draft without spending a round', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+  const worktree = repo.parserWorktree
+  // The observed live failure: the planner revises the plan on disk but does
+  // not commit. With only the plan dirty, durability is host bookkeeping.
   writeFileSync(path.join(worktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nrevised draft\n')
+
+  const labels = []
+  const agentImpl = async (prompt, opts = {}) => {
+    labels.push(opts.label || '')
+    if (opts.label?.startsWith('plan:')) return { execplanPath: PARSER_PLAN, workItems: ['w1'], summary: 'plan' }
+    if (opts.label?.startsWith('design-review:')) return { satisfied: true, blocking: [] }
+    throw new Error(`unexpected label: ${opts.label}`)
+  }
+  const gated = await loadRecoverySurface({}, agentImpl)
+
+  const outcome = await gated.runPlanDesignLoop({ id: '1.2.3', title: 'Parser' }, worktree)
+
+  assert.ok(!outcome.fail, JSON.stringify(outcome.fail || {}))
+  assert.deepEqual(labels, ['plan:1.2.3 r1', 'design-review:1.2.3 r1'], 'no planner round is spent on bookkeeping')
+  assert.match(git(worktree, 'show', `HEAD:${PARSER_PLAN}`), /^Status: APPROVED$/m, 'approval leaves a committed APPROVED status')
+})
+
+test('the plan loop bounces an uncommitted plan with foreign dirt back to the planner', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+  const worktree = repo.parserWorktree
+  // Dirty plan PLUS other uncommitted work: the host must not guess, so the
+  // bounce reaches the planner carrying the salvage-refusal evidence.
+  writeFileSync(path.join(worktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nrevised draft\n')
+  writeFileSync(path.join(worktree, 'half-done.txt'), 'uncommitted planner side effect\n')
 
   const planPrompts = []
   const labels = []
@@ -1201,8 +1254,8 @@ test('the plan loop bounces an uncommitted plan back to the planner as a blockin
     if (opts.label?.startsWith('plan:')) {
       planPrompts.push(prompt)
       if (planPrompts.length === 2) {
-        git(worktree, 'add', PARSER_PLAN)
-        git(worktree, 'commit', '-m', 'Revise parser ExecPlan')
+        git(worktree, 'add', '--all')
+        git(worktree, 'commit', '-m', 'Revise parser ExecPlan and commit side effects')
       }
       return { execplanPath: PARSER_PLAN, workItems: ['w1'], summary: 'plan' }
     }
@@ -1216,6 +1269,8 @@ test('the plan loop bounces an uncommitted plan back to the planner as a blockin
   assert.ok(!outcome.fail, JSON.stringify(outcome.fail || {}))
   assert.deepEqual(labels, ['plan:1.2.3 r1', 'plan:1.2.3 r2', 'design-review:1.2.3 r2'])
   assert.match(planPrompts[1], /EXECPLAN DURABILITY/, 'the bounce reaches the planner as a blocking item')
+  assert.match(planPrompts[1], /host salvage declined/, 'the bounce carries the salvage-refusal evidence')
+  assert.match(planPrompts[1], /half-done\.txt/, 'the foreign dirty path is named for the planner')
   assert.match(
     git(worktree, 'show', `HEAD:${PARSER_PLAN}`),
     /^Status: APPROVED$/m,

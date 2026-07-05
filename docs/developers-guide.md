@@ -105,7 +105,10 @@ ExecPlan `Status:` line (`DRAFT`/missing to plan, `APPROVED`/`IN PROGRESS` to
 implement, `COMPLETE` to review, `BLOCKED` and every hygiene failure to a
 report). The committed ExecPlan is the durable source of truth, and the host
 enforces that durability at stage boundaries (`verifyExecplanCommitted`,
-`verifyWorktreeCommitted`, `commitExecplanApproval`).
+`verifyWorktreeCommitted`, `commitExecplanApproval`). A plan-only dirty
+worktree after a planner round is salvaged host-side (`commitExecplanDraft`
+commits just the plan path) instead of bouncing; any other dirty path still
+bounces to the planner with the salvage-refusal evidence.
 
 Failure classification is layered: `authFailureDetail` (fatal-auth), then
 `providerFailureDetail` (provider-fault), then `infrastructureFailureDetail`

@@ -2151,6 +2151,37 @@ async function commitExecplanApproval(worktree, planPath, tag) {
   return { ok: true, detail: '' }
 }
 
+// Live runs showed planners repeatedly returning with the drafted plan dirty
+// — each bounce burnt a 30–90 minute planner round on pure git bookkeeping.
+// Making the drafted plan durable is deterministic bookkeeping (the same
+// philosophy as the APPROVED flip), so when the plan file is the ONLY
+// uncommitted path the host commits it, path-scoped, and proceeds. Any other
+// dirty path still bounces to the planner: the plan may depend on work the
+// host must not guess at. A failed host commit surfaces the underlying git
+// error — the strongest evidence when the environment, not the agent, is
+// what blocks committing. Returns { ok, detail }.
+async function commitExecplanDraft(worktree, relPath, tag) {
+  const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1'])
+  if (!status.ok) return { ok: false, detail: `git status failed: ${(status.message || status.stderr || '').trim()}` }
+  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean)
+  if (!lines.length) return { ok: false, detail: 'nothing to commit: the worktree is already clean' }
+  const foreign = lines.filter((line) => line.slice(3).replace(/^"(.*)"$/, '$1') !== relPath)
+  if (foreign.length) {
+    const sample = foreign.slice(0, 8).map((line) => line.trim()).join('; ')
+    return { ok: false, detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? '; …' : ''})` }
+  }
+  const add = await execFileStatus('git', ['-C', worktree, 'add', '--', relPath])
+  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || '').trim()}` }
+  const commit = await execFileStatus('git', [
+    '-C', worktree,
+    '-c', 'user.name=df12-build',
+    '-c', 'user.email=df12-build@workflow.invalid',
+    'commit', '-m', `Draft ExecPlan for task ${tag}`, '--', relPath,
+  ])
+  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || '').trim()}` }
+  return { ok: true, detail: '' }
+}
+
 // Every path a successful implementation leaves uncommitted is unreviewable
 // (the dual review judges committed work) and is silently lost at the squash
 // merge. Returns { ok, detail } with a bounded path sample.
@@ -2202,15 +2233,29 @@ async function runPlanDesignLoop(task, worktree, opts = {}) {
         },
       }
     }
-    // Host-verified durability gate: an uncommitted plan is bounced straight
-    // back to the planner as a blocking item, without spending the reviewer.
-    const durability = await verifyExecplanCommitted(worktree, plan.execplanPath)
+    // Host-verified durability gate. Deterministic salvage first: when the
+    // plan file is the only uncommitted path, the host commits it rather
+    // than spending a 30–90 minute planner round on git bookkeeping. Only a
+    // declined or failed salvage bounces to the planner as a blocking item,
+    // carrying the salvage evidence (foreign dirty paths, or the git error
+    // when the environment itself blocks committing).
+    let durability = await verifyExecplanCommitted(worktree, plan.execplanPath)
+    let salvageNote = ''
     if (!durability.ok) {
-      log(`[task ${tag}] plan round ${round}: ExecPlan not durable (${durability.detail})`)
+      const salvage = await commitExecplanDraft(worktree, contained.relPath, tag)
+      if (salvage.ok) {
+        log(`[task ${tag}] plan round ${round}: ${durability.detail}; host committed the drafted plan`)
+        durability = await verifyExecplanCommitted(worktree, plan.execplanPath)
+      } else {
+        salvageNote = ` (host salvage declined: ${salvage.detail})`
+      }
+    }
+    if (!durability.ok) {
+      log(`[task ${tag}] plan round ${round}: ExecPlan not durable (${durability.detail})${salvageNote}`)
       designVerdict = {
         satisfied: false,
         blocking: [
-          `EXECPLAN DURABILITY: ${durability.detail}. The committed ExecPlan is the durable source of truth — COMMIT the plan (and every file you changed) on the task branch with an en-GB imperative subject, then return the same plan.`,
+          `EXECPLAN DURABILITY: ${durability.detail}${salvageNote}. The committed ExecPlan is the durable source of truth — COMMIT the plan (and every file you changed) on the task branch with an en-GB imperative subject, then return the same plan.`,
         ],
       }
       continue
