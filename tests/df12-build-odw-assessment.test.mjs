@@ -15,6 +15,16 @@ import test from 'node:test'
 const WORKFLOW_PATH = new URL('../workflows/df12-build-odw.js', import.meta.url)
 const CONTROL_LOOP_MARKER = '// --- Worker-pool control loop'
 
+// Source-invariant regexes read the src tree verbatim: the bundler reprints
+// the built artifact (normalized quotes, stripped comments), and `make
+// workflow-freshness` ties the artifact back to this text.
+const WORKFLOW_SRC_DIR = new URL('../src/workflows/df12-build-odw/', import.meta.url)
+async function readWorkflowSource() {
+  const meta = await readFile(new URL('meta.js', WORKFLOW_SRC_DIR), 'utf8')
+  const main = await readFile(new URL('main.js', WORKFLOW_SRC_DIR), 'utf8')
+  return `${meta}\n${main}`
+}
+
 async function loadAssessmentSurface(args = {}) {
   let source = await readFile(WORKFLOW_PATH, 'utf8')
   source = source.replace(/^export const meta\s*=/m, 'const meta =')
@@ -326,7 +336,7 @@ test('filesystem faults surface distinctly from absent files', async () => {
 })
 
 test('integration is never retried on infrastructure faults', async () => {
-  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  const source = await readWorkflowSource()
   // The push to origin/BASE is not idempotent: a hidden-success first
   // attempt re-run after an adapter death could integrate the task twice.
   assert.doesNotMatch(source, /withInfraRetry\([^\n]*integratePrompt/)
@@ -649,7 +659,7 @@ test('green addendum implementation contract drift is manual merge ready', async
 })
 
 test('addendum deferred-review manual handoff bypasses the assessment agent', async () => {
-  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  const source = await readWorkflowSource()
   // The manual-merge-ready return must be checked BEFORE the failure branch
   // that calls attachAssessment, so a bounded deferred-review handoff can
   // never fall through into an unbounded Assess agent (issue #27).
@@ -767,7 +777,7 @@ test('auth preflight reports a signed-out Claude as a failure', async () => {
 })
 
 test('normal and addendum implementations gate auth before integration', async () => {
-  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  const source = await readWorkflowSource()
 
   assert.match(
     source,

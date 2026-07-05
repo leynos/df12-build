@@ -1,0 +1,11 @@
+{
+  "name": "df12-build",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@aboviq/bun-test-cucumber": "^0.2.0",
+    "esbuild": "^0.28.1",
+    "fast-check": "^4.8.0",
+    "lemmascript": "^0.5.9"
+  }
+}

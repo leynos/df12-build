@@ -6,9 +6,17 @@ MARKDOWN_FILES := $(shell find . \
 	-name '*.md' -print | sort)
 WORKFLOW_FILES := workflows/df12-build-odw.js workflows/df12-build.js
 
-.PHONY: all check-fmt lint typecheck markdownlint nixie test workflow-parse
+.PHONY: all check-fmt lint typecheck markdownlint nixie test workflow-parse workflow-build workflow-freshness
 
 all: check-fmt lint typecheck markdownlint nixie test
+
+# Regenerate the ODW workflow artifact from the module tree under src/.
+workflow-build:
+	bun scripts/build-workflow.mjs
+
+# Fail when the committed artifact is stale relative to the src tree.
+workflow-freshness: workflow-build
+	git diff --exit-code -- workflows/df12-build-odw.js
 
 check-fmt:
 	git diff --check "$$(git merge-base HEAD $(BASE))..HEAD"

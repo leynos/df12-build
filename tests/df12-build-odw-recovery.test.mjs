@@ -24,6 +24,16 @@ import {
 const WORKFLOW_PATH = new URL('../workflows/df12-build-odw.js', import.meta.url)
 const CONTROL_LOOP_MARKER = '// --- Worker-pool control loop'
 
+// Source-invariant regexes read the src tree verbatim: the bundler reprints
+// the built artifact (normalized quotes, stripped comments), and `make
+// workflow-freshness` ties the artifact back to this text.
+const WORKFLOW_SRC_DIR = new URL('../src/workflows/df12-build-odw/', import.meta.url)
+async function readWorkflowSource() {
+  const meta = await readFile(new URL('meta.js', WORKFLOW_SRC_DIR), 'utf8')
+  const main = await readFile(new URL('main.js', WORKFLOW_SRC_DIR), 'utf8')
+  return `${meta}\n${main}`
+}
+
 async function loadRecoverySurface(args = {}, agentImpl = async () => null) {
   let source = await readFile(WORKFLOW_PATH, 'utf8')
   source = source.replace(/^export const meta\s*=/m, 'const meta =')
@@ -643,7 +653,7 @@ test('assess-only recovery leaves every piece of durable git state untouched', a
 })
 
 test('recovery marks processed only for pushed, integrated resume results', async () => {
-  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  const source = await readWorkflowSource()
   assert.match(
     source,
     new RegExp(
@@ -1550,7 +1560,7 @@ test('a green implementation with a committed clean worktree passes the durabili
 })
 
 test('normal tasks and recovery resume share one review and integration implementation', async () => {
-  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  const source = await readWorkflowSource()
 
   assert.match(
     source,
@@ -1565,7 +1575,7 @@ test('normal tasks and recovery resume share one review and integration implemen
 })
 
 test('control loop wires recovery ahead of normal selection', async () => {
-  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  const source = await readWorkflowSource()
 
   assert.match(source, /\{ title: 'Recovery' \},/, 'meta.phases should declare the Recovery lane')
   assert.match(
