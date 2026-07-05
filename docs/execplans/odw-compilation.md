@@ -241,8 +241,25 @@ Planned work:
   (including null-reply and thrown-agent paths), triage lane contract,
   and the triage agent wiring. Milestone 7's CodeRabbit review returned
   zero findings first.
-- [ ] Milestone 9: dual review, integration, and the per-task pipeline
-  (`integration.ts`, `run-task.ts`).
+- [x] (2026-07-06 03:10Z) Milestone 9: the shared pipeline stages, dual
+  review + serialized integration, and `runTask` peeled into a single
+  `run-task.ts` (one subsystem, one module — a separate `integration.ts`
+  would have split `runDualReviewAndIntegration` from the stages it is
+  interleaved with). `summarizeReviewVerdict`/`summarizeFixReport` are
+  direct exports; `makeTaskPipeline(deps)` binds the run wiring
+  (twenty-two dependencies: config caps, nine prompt builders, three
+  agent-option routers, two stage locks, retry, assessment, write gate,
+  worktree creation) once after the semaphores. `readWorkflowSource()`
+  in the three invariant suites now concatenates the whole src tree so
+  regexes keep matching as helpers migrate; one regex needed a
+  re-anchor for the TypeScript result cast (`(await buildLock(...)`).
+  New scripted-primitive module suite: happy path, fix-round loop,
+  bounded review halt with assessment, fatal-auth bypass of assessment,
+  the dirty-worktree durability gate, addendum manual-merge handoff,
+  and the recovery-resume kind tag through the shared integration path.
+  main.js is down to 1,006 lines (config unpacking, bindings, auth
+  preflight, worktree creation, recovery glue, control loop).
+  Milestone 8's CodeRabbit review returned zero findings first.
 - [ ] Milestone 10: convert `main.js` to `main.ts`; retire artefact slicing
   from tests that can now import modules; close out the plan.
 

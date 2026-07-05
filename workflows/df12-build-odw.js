@@ -1686,6 +1686,460 @@ async function verifyWorktreeCommitted(worktree) {
   return { ok: false, detail: `${lines.length} uncommitted path(s): ${sample}${lines.length > 8 ? "; \u2026" : ""}` };
 }
 
+// src/workflows/df12-build-odw/run-task.ts
+function summarizeReviewVerdict(review) {
+  if (!review) return null;
+  return {
+    verdict: review.verdict || "",
+    blocking: review.blocking || [],
+    summary: review.summary || ""
+  };
+}
+function summarizeFixReport(fix) {
+  if (!fix) return null;
+  if (typeof fix === "string") return { summary: fix };
+  return {
+    commits: fix.commits || [],
+    gatesGreen: fix.gatesGreen === true,
+    coderabbitRuns: Number(fix.coderabbitRuns) || 0,
+    resolved: fix.resolved || [],
+    openIssues: fix.openIssues || [],
+    summary: fix.summary || ""
+  };
+}
+function makeTaskPipeline(deps) {
+  const {
+    MAX_DESIGN_ROUNDS: MAX_DESIGN_ROUNDS2,
+    MAX_REVIEW_ROUNDS: MAX_REVIEW_ROUNDS2,
+    DRY_RUN: DRY_RUN2,
+    AUTO_MERGE: AUTO_MERGE2,
+    BASE: BASE2,
+    planPrompt: planPrompt2,
+    designReviewPrompt: designReviewPrompt2,
+    implementPrompt: implementPrompt2,
+    fixPrompt: fixPrompt2,
+    codeReviewPrompt: codeReviewPrompt2,
+    expertReviewPrompt: expertReviewPrompt2,
+    addendumReviewPrompt: addendumReviewPrompt2,
+    implementAddendumPrompt: implementAddendumPrompt2,
+    integratePrompt: integratePrompt2,
+    planAgentOptions: planAgentOptions2,
+    reviewAgentOptions: reviewAgentOptions2,
+    buildAgentOptions: buildAgentOptions2,
+    planningLock: planningLock2,
+    buildLock: buildLock2,
+    withInfraRetry: withInfraRetry2,
+    attachAssessment: attachAssessment2,
+    ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2,
+    createWorktree: createWorktree2
+  } = deps;
+  async function runPlanDesignLoop2(task, worktree, opts = {}) {
+    const tag = task.id;
+    const extra = opts.extra || {};
+    let plan = null;
+    let designVerdict = null;
+    for (let round = 1; round <= MAX_DESIGN_ROUNDS2; round++) {
+      phase("Plan");
+      plan = await planningLock2(() => withInfraRetry2(() => agent(planPrompt2(task, worktree, designVerdict, round, opts), planAgentOptions2({
+        phase: "Plan",
+        label: `plan:${tag} r${round}`,
+        schema: PLAN_SCHEMA
+      })), `plan:${tag} r${round}`));
+      if (!plan) return { fail: { id: tag, status: "failed", stage: "plan", detail: "planner returned nothing", worktree, proposals: [], ...extra } };
+      const contained = execplanRelPath(worktree, plan.execplanPath);
+      if (!contained.ok) {
+        return { fail: { id: tag, status: "failed", stage: "plan", detail: `planner returned an unusable ExecPlan path: ${contained.detail}`, plan, worktree, proposals: [], ...extra } };
+      }
+      const planFile = await fileState(contained.relPath, worktree);
+      if (!planFile.ok) {
+        return { fail: { id: tag, status: "failed", stage: "plan", detail: `could not verify the ExecPlan path: ${planFile.detail}`, plan, worktree, proposals: [], ...extra } };
+      }
+      if (!planFile.exists) {
+        return {
+          fail: {
+            id: tag,
+            status: "failed",
+            stage: "plan",
+            detail: `planner returned missing ExecPlan path: ${plan.execplanPath || "<empty>"}`,
+            plan,
+            worktree,
+            proposals: [],
+            ...extra
+          }
+        };
+      }
+      let durability = await verifyExecplanCommitted(worktree, plan.execplanPath);
+      let salvageNote = "";
+      if (!durability.ok) {
+        const salvage = await commitExecplanDraft(worktree, contained.relPath, tag);
+        if (salvage.ok) {
+          log(`[task ${tag}] plan round ${round}: ${durability.detail}; host committed the drafted plan`);
+          durability = await verifyExecplanCommitted(worktree, plan.execplanPath);
+        } else {
+          salvageNote = ` (host salvage declined: ${salvage.detail})`;
+        }
+      }
+      if (!durability.ok) {
+        log(`[task ${tag}] plan round ${round}: ExecPlan not durable (${durability.detail})${salvageNote}`);
+        designVerdict = {
+          satisfied: false,
+          blocking: [
+            `EXECPLAN DURABILITY: ${durability.detail}${salvageNote}. The committed ExecPlan is the durable source of truth \u2014 COMMIT the plan (and every file you changed) on the task branch with an en-GB imperative subject, then return the same plan.`
+          ]
+        };
+        continue;
+      }
+      phase("Design Review");
+      designVerdict = await planningLock2(() => withInfraRetry2(() => agent(designReviewPrompt2(task, worktree, plan, round), reviewAgentOptions2({
+        phase: "Design Review",
+        label: `design-review:${tag} r${round}`,
+        schema: DESIGN_VERDICT_SCHEMA
+      })), `design-review:${tag} r${round}`));
+      if (designVerdict?.satisfied) {
+        log(`[task ${tag}] design approved in round ${round}`);
+        const approved = await commitExecplanApproval(worktree, plan.execplanPath, tag);
+        if (!approved.ok) {
+          return {
+            fail: {
+              id: tag,
+              status: "failed",
+              stage: "design-review",
+              detail: `failed to record the committed ExecPlan approval: ${approved.detail}`,
+              plan,
+              worktree,
+              proposals: [],
+              ...extra
+            }
+          };
+        }
+        return { plan };
+      }
+      log(`[task ${tag}] design round ${round}: ${(designVerdict?.blocking || []).length} blocking point(s)`);
+    }
+    return {
+      fail: {
+        id: tag,
+        status: "halted",
+        stage: "design-review",
+        detail: `design review unsatisfied after ${MAX_DESIGN_ROUNDS2} rounds: ${(designVerdict?.blocking || []).join("; ")}`,
+        worktree,
+        proposals: [],
+        ...extra
+      }
+    };
+  }
+  async function runImplementationStage2(task, worktree, plan, opts = {}) {
+    const tag = task.id;
+    const extra = opts.extra || {};
+    phase("Implement");
+    const impl = await buildLock2(() => withInfraRetry2(() => agent(implementPrompt2(task, worktree, plan, opts), buildAgentOptions2({
+      phase: "Implement",
+      label: `implement:${tag}`,
+      schema: IMPL_SCHEMA
+    })), `implement:${tag}`));
+    const authDetail = implementationAuthFailureDetail(impl);
+    if (authDetail) {
+      return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
+    }
+    if (!impl || !impl.ok || !impl.gatesGreen) {
+      return {
+        fail: {
+          id: tag,
+          status: "failed",
+          stage: "implement",
+          detail: impl?.summary || "implementation did not reach a green state",
+          openIssues: impl?.openIssues || [],
+          worktree,
+          proposals: [],
+          ...extra
+        }
+      };
+    }
+    const committed = await verifyWorktreeCommitted(worktree);
+    if (!committed.ok) {
+      return {
+        fail: {
+          id: tag,
+          status: "failed",
+          stage: "implement",
+          detail: `implementation returned ok but left uncommitted state in the worktree (${committed.detail}); every work item must be committed before returning`,
+          openIssues: impl?.openIssues || [],
+          worktree,
+          proposals: [],
+          ...extra
+        }
+      };
+    }
+    if (plan?.execplanPath) {
+      const contained = execplanRelPath(worktree, plan.execplanPath);
+      if (!contained.ok) {
+        log(`[task ${tag}] skipping the post-implementation plan-status check: ${contained.detail}`);
+      } else {
+        const planState = await readExecplanState({ worktreePath: worktree, execplanPath: contained.relPath });
+        if (planState.status !== "complete") {
+          log(`[task ${tag}] implementation returned ok but the committed ExecPlan status is '${planState.status}' (expected COMPLETE)${planState.error ? `: ${planState.error}` : ""}`);
+        }
+      }
+    }
+    return { impl };
+  }
+  async function runDualReviewAndIntegration2(task, worktree, plan, impl, mergeLock2, options = {}) {
+    const tag = task.id;
+    const kindExtra = options.kind ? { kind: options.kind } : {};
+    const proposals = [];
+    const reviewRounds = [];
+    let reviewsPass = false;
+    for (let round = 1; round <= MAX_REVIEW_ROUNDS2; round++) {
+      const reviewInfraFaults = [];
+      const runReviewAgent = (promptText, reviewPhase, label) => () => withInfraRetry2(() => agent(promptText, reviewAgentOptions2({ phase: reviewPhase, label, schema: REVIEW_SCHEMA })), label).catch((error) => {
+        const message = error && error.message || String(error);
+        if (!infrastructureFailureDetail(message)) throw error;
+        reviewInfraFaults.push(`${label}: ${message}`);
+        return null;
+      });
+      const [codeReview, expertReview] = await parallel([
+        runReviewAgent(codeReviewPrompt2(task, worktree, plan), "Code Review", `code-review:${tag} r${round}`),
+        runReviewAgent(expertReviewPrompt2(task, worktree, plan), "Expert Review", `expert-review:${tag} r${round}`)
+      ]);
+      for (const r of [codeReview, expertReview]) {
+        if (r?.proposedRoadmapItems?.length) proposals.push(...r.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })));
+      }
+      if (!codeReview || !expertReview) {
+        const missing = [
+          !codeReview ? "code review" : null,
+          !expertReview ? "expert review" : null
+        ].filter(Boolean).join(" and ");
+        reviewRounds.push({ round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking: [], fix: null });
+        if (reviewInfraFaults.length) {
+          faultMetrics.infraFaults += 1;
+          return {
+            id: tag,
+            status: "infra-fault",
+            stage: "review",
+            detail: `dual review interrupted by infrastructure fault(s): ${reviewInfraFaults.join("; ")}; the branch is untouched \u2014 relaunch with resumeMode: "continue" to re-run review from the committed state`,
+            reviewRounds,
+            worktree,
+            proposals,
+            ...kindExtra
+          };
+        }
+        return {
+          id: tag,
+          status: "failed",
+          stage: "review",
+          detail: `dual review failed to return a structured verdict from ${missing}; branch left unmerged for the root agent`,
+          reviewRounds,
+          worktree,
+          proposals,
+          ...kindExtra
+        };
+      }
+      const blocking = [
+        ...codeReview.blocking || [],
+        ...expertReview.blocking || []
+      ];
+      const roundRecord = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, fix: null };
+      reviewRounds.push(roundRecord);
+      if (blocking.length === 0 && codeReview?.verdict === "pass" && expertReview?.verdict === "pass") {
+        reviewsPass = true;
+        log(`[task ${tag}] dual review passed in round ${round}`);
+        break;
+      }
+      log(`[task ${tag}] review round ${round}: ${blocking.length} blocking item(s)`);
+      if (round === MAX_REVIEW_ROUNDS2) break;
+      phase("Implement");
+      const fix = await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, blocking, round), buildAgentOptions2({ phase: "Implement", label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`));
+      roundRecord.fix = summarizeFixReport(fix);
+    }
+    if (!reviewsPass) {
+      const lastRound = reviewRounds[reviewRounds.length - 1];
+      const finalBlocking = (lastRound?.blocking || []).slice(0, 6).join("; ");
+      return {
+        id: tag,
+        status: "halted",
+        stage: "review",
+        detail: `reviewers not satisfied within cap; branch left unmerged for the root agent${finalBlocking ? `. Final blocking items: ${finalBlocking}` : ""}`,
+        reviewRounds,
+        worktree,
+        proposals,
+        ...kindExtra
+      };
+    }
+    let integration = null;
+    if (AUTO_MERGE2) {
+      const doIntegrate = () => {
+        phase("Integrate");
+        return buildLock2(() => agent(integratePrompt2(task, worktree), buildAgentOptions2({ phase: "Integrate", label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })));
+      };
+      try {
+        integration = mergeLock2 ? await mergeLock2(doIntegrate) : await doIntegrate();
+      } catch (error) {
+        const message = error && error.message || String(error);
+        if (!infrastructureFailureDetail(message)) throw error;
+        faultMetrics.infraFaults += 1;
+        return {
+          id: tag,
+          status: "infra-fault",
+          stage: "integrate",
+          detail: `integration agent died on an infrastructure fault (${message}); integration is never retried because the push to origin/${BASE2} is not idempotent \u2014 inspect origin/${BASE2} and the roadmap for a partial or hidden-success integration before relaunching with resumeMode: "continue"`,
+          worktree,
+          proposals,
+          ...kindExtra
+        };
+      }
+      if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
+        return { id: tag, status: "halted", stage: "integrate", detail: integration?.conflicts || integration?.summary || "integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)", worktree, proposals, ...kindExtra };
+      }
+    } else {
+      return { id: tag, status: "manual-merge-ready", plan, impl, integration, worktree, proposals, ...kindExtra };
+    }
+    return { id: tag, status: "done", plan, impl, integration, worktree, proposals, ...kindExtra };
+  }
+  async function runTask2(task, mergeLock2) {
+    const tag = `${task.id}`;
+    log(`[task ${tag}] ${task.title}`);
+    phase("Worktree");
+    const wt = await createWorktree2(task);
+    if (!wt || !wt.ok || !wt.worktreePath) {
+      return { id: tag, status: "failed", stage: "worktree", detail: wt?.notes || "worktree creation failed", proposals: [] };
+    }
+    const worktree = wt.worktreePath;
+    log(`[task ${tag}] worktree ${wt.branch} @ ${worktree}`);
+    try {
+      const writeAccess = await ensureTaskAgentWriteAccess2(worktree, tag);
+      if (!writeAccess.ok) {
+        return {
+          id: tag,
+          status: "failed",
+          stage: "worktree-write",
+          detail: `task-agent writable-root preflight failed (launch/sandbox fault, not a task defect): ${writeAccess.failures.map((failure) => `${failure.adapter}: ${failure.detail}`).join("; ")}`,
+          worktree,
+          proposals: []
+        };
+      }
+      if (task.isAddendum) {
+        if (DRY_RUN2) {
+          return {
+            id: tag,
+            status: "dry-run",
+            stage: "addendum",
+            detail: "dry run stopped before addendum implementation",
+            worktree,
+            proposals: [],
+            kind: "addendum"
+          };
+        }
+        phase("Implement");
+        const impl2 = await buildLock2(() => withInfraRetry2(() => agent(implementAddendumPrompt2(task, worktree), buildAgentOptions2({ phase: "Implement", label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`));
+        const authDetail = implementationAuthFailureDetail(impl2);
+        if (authDetail) {
+          return {
+            id: tag,
+            status: "fatal-auth",
+            stage: "auth",
+            detail: authDetail,
+            openIssues: impl2?.openIssues || [],
+            worktree,
+            proposals: [],
+            kind: "addendum"
+          };
+        }
+        const openIssues = impl2?.openIssues || [];
+        const onlyDeferredReviewIssues = hasOnlyDeferredReviewIssues(openIssues);
+        if (addendumImplementationNeedsManualMerge(impl2)) {
+          const deferredEvidence = openIssues.length ? ` Outstanding deferred review evidence: ${openIssues.join("; ")}` : "";
+          return {
+            id: tag,
+            status: "manual-merge-ready",
+            stage: "addendum",
+            detail: `addendum implementation reported completed work and green gates but did not set ok=true${openIssues.length ? " and left only deferred/recoverable review issues open" : " and no open issues"}; branch left for operator verification before integration.${deferredEvidence}`,
+            openIssues,
+            impl: impl2,
+            worktree,
+            proposals: [],
+            kind: "addendum"
+          };
+        }
+        if (!impl2 || !impl2.ok || !impl2.gatesGreen || openIssues.length > 0 && !onlyDeferredReviewIssues) {
+          return await attachAssessment2(task, wt, { id: tag, status: "failed", stage: "addendum", detail: impl2?.summary || "addendum did not reach a green state or left open issues", openIssues: impl2?.openIssues || [], worktree, proposals: [], kind: "addendum" });
+        }
+        const proposals = [];
+        let addendumReview = null;
+        if (onlyDeferredReviewIssues) {
+          phase("Code Review");
+          addendumReview = await withInfraRetry2(() => agent(addendumReviewPrompt2(task, worktree, impl2), reviewAgentOptions2({ phase: "Code Review", label: `addendum-review:${tag}`, schema: REVIEW_SCHEMA })), `addendum-review:${tag}`);
+          if (addendumReview?.proposedRoadmapItems?.length) {
+            proposals.push(...addendumReview.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })));
+          }
+          const blocking = addendumReview?.blocking || [];
+          if (!addendumReview || addendumReview.verdict !== "pass" || blocking.length > 0) {
+            return await attachAssessment2(task, wt, { id: tag, status: "halted", stage: "addendum-review", detail: blocking.join("; ") || addendumReview?.summary || "addendum fallback review did not pass", impl: impl2, addendumReview, worktree, proposals, kind: "addendum" });
+          }
+          log(`[task ${tag}] addendum fallback review passed after deferred CodeRabbit review`);
+        }
+        let integration = null;
+        if (AUTO_MERGE2) {
+          const doIntegrate = () => {
+            phase("Integrate");
+            return buildLock2(() => agent(integratePrompt2(task, worktree), buildAgentOptions2({ phase: "Integrate", label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })));
+          };
+          try {
+            integration = mergeLock2 ? await mergeLock2(doIntegrate) : await doIntegrate();
+          } catch (error) {
+            const message = error && error.message || String(error);
+            if (!infrastructureFailureDetail(message)) throw error;
+            faultMetrics.infraFaults += 1;
+            return {
+              id: tag,
+              status: "infra-fault",
+              stage: "integrate",
+              detail: `integration agent died on an infrastructure fault (${message}); integration is never retried because the push to origin/${BASE2} is not idempotent \u2014 inspect origin/${BASE2} and the roadmap for a partial or hidden-success integration before relaunching with resumeMode: "continue"`,
+              worktree,
+              proposals,
+              kind: "addendum"
+            };
+          }
+          if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
+            return await attachAssessment2(task, wt, { id: tag, status: "halted", stage: "integrate", detail: integration?.conflicts || integration?.summary || "integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)", worktree, proposals, kind: "addendum" });
+          }
+        } else {
+          return { id: tag, status: "manual-merge-ready", impl: impl2, addendumReview, integration, worktree, proposals, kind: "addendum" };
+        }
+        return { id: tag, status: "done", impl: impl2, addendumReview, integration, worktree, proposals, kind: "addendum" };
+      }
+      const planned = await runPlanDesignLoop2(task, worktree);
+      if (planned.fail) return await attachAssessment2(task, wt, planned.fail);
+      const plan = planned.plan;
+      if (DRY_RUN2) {
+        return {
+          id: tag,
+          status: "dry-run",
+          stage: "post-design",
+          detail: "dry run stopped after planning and design review",
+          plan,
+          worktree,
+          proposals: []
+        };
+      }
+      const built = await runImplementationStage2(task, worktree, plan);
+      if (built.fail) {
+        return built.fail.status === "fatal-auth" ? built.fail : await attachAssessment2(task, wt, built.fail);
+      }
+      const impl = built.impl;
+      const outcome = await runDualReviewAndIntegration2(task, worktree, plan, impl, mergeLock2);
+      if (outcome.status === "failed" || outcome.status === "halted") {
+        return await attachAssessment2(task, wt, outcome);
+      }
+      return outcome;
+    } catch (error) {
+      const detail = `unhandled agent error: ${error && error.message || String(error)}`;
+      const result = resultFromUnhandledAgentError(tag, detail, { worktree });
+      return await attachAssessment2(task, wt, result);
+    }
+  }
+  return { runPlanDesignLoop: runPlanDesignLoop2, runImplementationStage: runImplementationStage2, runDualReviewAndIntegration: runDualReviewAndIntegration2, runTask: runTask2 };
+}
+
 // src/workflows/df12-build-odw/main.js
 var CONFIG = makeConfig(args);
 var {
@@ -2080,430 +2534,6 @@ function writeProbeTargets() {
     return true;
   });
 }
-async function runPlanDesignLoop(task, worktree, opts = {}) {
-  const tag = task.id;
-  const extra = opts.extra || {};
-  let plan = null;
-  let designVerdict = null;
-  for (let round = 1; round <= MAX_DESIGN_ROUNDS; round++) {
-    phase("Plan");
-    plan = await planningLock(() => withInfraRetry(() => agent(planPrompt(task, worktree, designVerdict, round, opts), planAgentOptions({
-      phase: "Plan",
-      label: `plan:${tag} r${round}`,
-      schema: PLAN_SCHEMA
-    })), `plan:${tag} r${round}`));
-    if (!plan) return { fail: { id: tag, status: "failed", stage: "plan", detail: "planner returned nothing", worktree, proposals: [], ...extra } };
-    const contained = execplanRelPath(worktree, plan.execplanPath);
-    if (!contained.ok) {
-      return { fail: { id: tag, status: "failed", stage: "plan", detail: `planner returned an unusable ExecPlan path: ${contained.detail}`, plan, worktree, proposals: [], ...extra } };
-    }
-    const planFile = await fileState(contained.relPath, worktree);
-    if (!planFile.ok) {
-      return { fail: { id: tag, status: "failed", stage: "plan", detail: `could not verify the ExecPlan path: ${planFile.detail}`, plan, worktree, proposals: [], ...extra } };
-    }
-    if (!planFile.exists) {
-      return {
-        fail: {
-          id: tag,
-          status: "failed",
-          stage: "plan",
-          detail: `planner returned missing ExecPlan path: ${plan.execplanPath || "<empty>"}`,
-          plan,
-          worktree,
-          proposals: [],
-          ...extra
-        }
-      };
-    }
-    let durability = await verifyExecplanCommitted(worktree, plan.execplanPath);
-    let salvageNote = "";
-    if (!durability.ok) {
-      const salvage = await commitExecplanDraft(worktree, contained.relPath, tag);
-      if (salvage.ok) {
-        log(`[task ${tag}] plan round ${round}: ${durability.detail}; host committed the drafted plan`);
-        durability = await verifyExecplanCommitted(worktree, plan.execplanPath);
-      } else {
-        salvageNote = ` (host salvage declined: ${salvage.detail})`;
-      }
-    }
-    if (!durability.ok) {
-      log(`[task ${tag}] plan round ${round}: ExecPlan not durable (${durability.detail})${salvageNote}`);
-      designVerdict = {
-        satisfied: false,
-        blocking: [
-          `EXECPLAN DURABILITY: ${durability.detail}${salvageNote}. The committed ExecPlan is the durable source of truth \u2014 COMMIT the plan (and every file you changed) on the task branch with an en-GB imperative subject, then return the same plan.`
-        ]
-      };
-      continue;
-    }
-    phase("Design Review");
-    designVerdict = await planningLock(() => withInfraRetry(() => agent(designReviewPrompt(task, worktree, plan, round), reviewAgentOptions({
-      phase: "Design Review",
-      label: `design-review:${tag} r${round}`,
-      schema: DESIGN_VERDICT_SCHEMA
-    })), `design-review:${tag} r${round}`));
-    if (designVerdict?.satisfied) {
-      log(`[task ${tag}] design approved in round ${round}`);
-      const approved = await commitExecplanApproval(worktree, plan.execplanPath, tag);
-      if (!approved.ok) {
-        return {
-          fail: {
-            id: tag,
-            status: "failed",
-            stage: "design-review",
-            detail: `failed to record the committed ExecPlan approval: ${approved.detail}`,
-            plan,
-            worktree,
-            proposals: [],
-            ...extra
-          }
-        };
-      }
-      return { plan };
-    }
-    log(`[task ${tag}] design round ${round}: ${(designVerdict?.blocking || []).length} blocking point(s)`);
-  }
-  return {
-    fail: {
-      id: tag,
-      status: "halted",
-      stage: "design-review",
-      detail: `design review unsatisfied after ${MAX_DESIGN_ROUNDS} rounds: ${(designVerdict?.blocking || []).join("; ")}`,
-      worktree,
-      proposals: [],
-      ...extra
-    }
-  };
-}
-async function runImplementationStage(task, worktree, plan, opts = {}) {
-  const tag = task.id;
-  const extra = opts.extra || {};
-  phase("Implement");
-  const impl = await buildLock(() => withInfraRetry(() => agent(implementPrompt(task, worktree, plan, opts), buildAgentOptions({
-    phase: "Implement",
-    label: `implement:${tag}`,
-    schema: IMPL_SCHEMA
-  })), `implement:${tag}`));
-  const authDetail = implementationAuthFailureDetail(impl);
-  if (authDetail) {
-    return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
-  }
-  if (!impl || !impl.ok || !impl.gatesGreen) {
-    return {
-      fail: {
-        id: tag,
-        status: "failed",
-        stage: "implement",
-        detail: impl?.summary || "implementation did not reach a green state",
-        openIssues: impl?.openIssues || [],
-        worktree,
-        proposals: [],
-        ...extra
-      }
-    };
-  }
-  const committed = await verifyWorktreeCommitted(worktree);
-  if (!committed.ok) {
-    return {
-      fail: {
-        id: tag,
-        status: "failed",
-        stage: "implement",
-        detail: `implementation returned ok but left uncommitted state in the worktree (${committed.detail}); every work item must be committed before returning`,
-        openIssues: impl?.openIssues || [],
-        worktree,
-        proposals: [],
-        ...extra
-      }
-    };
-  }
-  if (plan?.execplanPath) {
-    const contained = execplanRelPath(worktree, plan.execplanPath);
-    if (!contained.ok) {
-      log(`[task ${tag}] skipping the post-implementation plan-status check: ${contained.detail}`);
-    } else {
-      const planState = await readExecplanState({ worktreePath: worktree, execplanPath: contained.relPath });
-      if (planState.status !== "complete") {
-        log(`[task ${tag}] implementation returned ok but the committed ExecPlan status is '${planState.status}' (expected COMPLETE)${planState.error ? `: ${planState.error}` : ""}`);
-      }
-    }
-  }
-  return { impl };
-}
-function summarizeReviewVerdict(review) {
-  if (!review) return null;
-  return {
-    verdict: review.verdict || "",
-    blocking: review.blocking || [],
-    summary: review.summary || ""
-  };
-}
-function summarizeFixReport(fix) {
-  if (!fix) return null;
-  if (typeof fix === "string") return { summary: fix };
-  return {
-    commits: fix.commits || [],
-    gatesGreen: fix.gatesGreen === true,
-    coderabbitRuns: Number(fix.coderabbitRuns) || 0,
-    resolved: fix.resolved || [],
-    openIssues: fix.openIssues || [],
-    summary: fix.summary || ""
-  };
-}
-async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock2, options = {}) {
-  const tag = task.id;
-  const kindExtra = options.kind ? { kind: options.kind } : {};
-  const proposals = [];
-  const reviewRounds = [];
-  let reviewsPass = false;
-  for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
-    const reviewInfraFaults = [];
-    const runReviewAgent = (promptText, reviewPhase, label) => () => withInfraRetry(() => agent(promptText, reviewAgentOptions({ phase: reviewPhase, label, schema: REVIEW_SCHEMA })), label).catch((error) => {
-      const message = error && error.message || String(error);
-      if (!infrastructureFailureDetail(message)) throw error;
-      reviewInfraFaults.push(`${label}: ${message}`);
-      return null;
-    });
-    const [codeReview, expertReview] = await parallel([
-      runReviewAgent(codeReviewPrompt(task, worktree, plan), "Code Review", `code-review:${tag} r${round}`),
-      runReviewAgent(expertReviewPrompt(task, worktree, plan), "Expert Review", `expert-review:${tag} r${round}`)
-    ]);
-    for (const r of [codeReview, expertReview]) {
-      if (r?.proposedRoadmapItems?.length) proposals.push(...r.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })));
-    }
-    if (!codeReview || !expertReview) {
-      const missing = [
-        !codeReview ? "code review" : null,
-        !expertReview ? "expert review" : null
-      ].filter(Boolean).join(" and ");
-      reviewRounds.push({ round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking: [], fix: null });
-      if (reviewInfraFaults.length) {
-        faultMetrics.infraFaults += 1;
-        return {
-          id: tag,
-          status: "infra-fault",
-          stage: "review",
-          detail: `dual review interrupted by infrastructure fault(s): ${reviewInfraFaults.join("; ")}; the branch is untouched \u2014 relaunch with resumeMode: "continue" to re-run review from the committed state`,
-          reviewRounds,
-          worktree,
-          proposals,
-          ...kindExtra
-        };
-      }
-      return {
-        id: tag,
-        status: "failed",
-        stage: "review",
-        detail: `dual review failed to return a structured verdict from ${missing}; branch left unmerged for the root agent`,
-        reviewRounds,
-        worktree,
-        proposals,
-        ...kindExtra
-      };
-    }
-    const blocking = [
-      ...codeReview.blocking || [],
-      ...expertReview.blocking || []
-    ];
-    const roundRecord = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, fix: null };
-    reviewRounds.push(roundRecord);
-    if (blocking.length === 0 && codeReview?.verdict === "pass" && expertReview?.verdict === "pass") {
-      reviewsPass = true;
-      log(`[task ${tag}] dual review passed in round ${round}`);
-      break;
-    }
-    log(`[task ${tag}] review round ${round}: ${blocking.length} blocking item(s)`);
-    if (round === MAX_REVIEW_ROUNDS) break;
-    phase("Implement");
-    const fix = await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, blocking, round), buildAgentOptions({ phase: "Implement", label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`));
-    roundRecord.fix = summarizeFixReport(fix);
-  }
-  if (!reviewsPass) {
-    const lastRound = reviewRounds[reviewRounds.length - 1];
-    const finalBlocking = (lastRound?.blocking || []).slice(0, 6).join("; ");
-    return {
-      id: tag,
-      status: "halted",
-      stage: "review",
-      detail: `reviewers not satisfied within cap; branch left unmerged for the root agent${finalBlocking ? `. Final blocking items: ${finalBlocking}` : ""}`,
-      reviewRounds,
-      worktree,
-      proposals,
-      ...kindExtra
-    };
-  }
-  let integration = null;
-  if (AUTO_MERGE) {
-    const doIntegrate = () => {
-      phase("Integrate");
-      return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: "Integrate", label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })));
-    };
-    try {
-      integration = mergeLock2 ? await mergeLock2(doIntegrate) : await doIntegrate();
-    } catch (error) {
-      const message = error && error.message || String(error);
-      if (!infrastructureFailureDetail(message)) throw error;
-      faultMetrics.infraFaults += 1;
-      return {
-        id: tag,
-        status: "infra-fault",
-        stage: "integrate",
-        detail: `integration agent died on an infrastructure fault (${message}); integration is never retried because the push to origin/${BASE} is not idempotent \u2014 inspect origin/${BASE} and the roadmap for a partial or hidden-success integration before relaunching with resumeMode: "continue"`,
-        worktree,
-        proposals,
-        ...kindExtra
-      };
-    }
-    if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
-      return { id: tag, status: "halted", stage: "integrate", detail: integration?.conflicts || integration?.summary || "integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)", worktree, proposals, ...kindExtra };
-    }
-  } else {
-    return { id: tag, status: "manual-merge-ready", plan, impl, integration, worktree, proposals, ...kindExtra };
-  }
-  return { id: tag, status: "done", plan, impl, integration, worktree, proposals, ...kindExtra };
-}
-async function runTask(task, mergeLock2) {
-  const tag = `${task.id}`;
-  log(`[task ${tag}] ${task.title}`);
-  phase("Worktree");
-  const wt = await createWorktree(task);
-  if (!wt || !wt.ok || !wt.worktreePath) {
-    return { id: tag, status: "failed", stage: "worktree", detail: wt?.notes || "worktree creation failed", proposals: [] };
-  }
-  const worktree = wt.worktreePath;
-  log(`[task ${tag}] worktree ${wt.branch} @ ${worktree}`);
-  try {
-    const writeAccess = await ensureTaskAgentWriteAccess(worktree, tag);
-    if (!writeAccess.ok) {
-      return {
-        id: tag,
-        status: "failed",
-        stage: "worktree-write",
-        detail: `task-agent writable-root preflight failed (launch/sandbox fault, not a task defect): ${writeAccess.failures.map((failure) => `${failure.adapter}: ${failure.detail}`).join("; ")}`,
-        worktree,
-        proposals: []
-      };
-    }
-    if (task.isAddendum) {
-      if (DRY_RUN) {
-        return {
-          id: tag,
-          status: "dry-run",
-          stage: "addendum",
-          detail: "dry run stopped before addendum implementation",
-          worktree,
-          proposals: [],
-          kind: "addendum"
-        };
-      }
-      phase("Implement");
-      const impl2 = await buildLock(() => withInfraRetry(() => agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: "Implement", label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`));
-      const authDetail = implementationAuthFailureDetail(impl2);
-      if (authDetail) {
-        return {
-          id: tag,
-          status: "fatal-auth",
-          stage: "auth",
-          detail: authDetail,
-          openIssues: impl2?.openIssues || [],
-          worktree,
-          proposals: [],
-          kind: "addendum"
-        };
-      }
-      const openIssues = impl2?.openIssues || [];
-      const onlyDeferredReviewIssues = hasOnlyDeferredReviewIssues(openIssues);
-      if (addendumImplementationNeedsManualMerge(impl2)) {
-        const deferredEvidence = openIssues.length ? ` Outstanding deferred review evidence: ${openIssues.join("; ")}` : "";
-        return {
-          id: tag,
-          status: "manual-merge-ready",
-          stage: "addendum",
-          detail: `addendum implementation reported completed work and green gates but did not set ok=true${openIssues.length ? " and left only deferred/recoverable review issues open" : " and no open issues"}; branch left for operator verification before integration.${deferredEvidence}`,
-          openIssues,
-          impl: impl2,
-          worktree,
-          proposals: [],
-          kind: "addendum"
-        };
-      }
-      if (!impl2 || !impl2.ok || !impl2.gatesGreen || openIssues.length > 0 && !onlyDeferredReviewIssues) {
-        return await attachAssessment(task, wt, { id: tag, status: "failed", stage: "addendum", detail: impl2?.summary || "addendum did not reach a green state or left open issues", openIssues: impl2?.openIssues || [], worktree, proposals: [], kind: "addendum" });
-      }
-      const proposals = [];
-      let addendumReview = null;
-      if (onlyDeferredReviewIssues) {
-        phase("Code Review");
-        addendumReview = await withInfraRetry(() => agent(addendumReviewPrompt(task, worktree, impl2), reviewAgentOptions({ phase: "Code Review", label: `addendum-review:${tag}`, schema: REVIEW_SCHEMA })), `addendum-review:${tag}`);
-        if (addendumReview?.proposedRoadmapItems?.length) {
-          proposals.push(...addendumReview.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })));
-        }
-        const blocking = addendumReview?.blocking || [];
-        if (!addendumReview || addendumReview.verdict !== "pass" || blocking.length > 0) {
-          return await attachAssessment(task, wt, { id: tag, status: "halted", stage: "addendum-review", detail: blocking.join("; ") || addendumReview?.summary || "addendum fallback review did not pass", impl: impl2, addendumReview, worktree, proposals, kind: "addendum" });
-        }
-        log(`[task ${tag}] addendum fallback review passed after deferred CodeRabbit review`);
-      }
-      let integration = null;
-      if (AUTO_MERGE) {
-        const doIntegrate = () => {
-          phase("Integrate");
-          return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: "Integrate", label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })));
-        };
-        try {
-          integration = mergeLock2 ? await mergeLock2(doIntegrate) : await doIntegrate();
-        } catch (error) {
-          const message = error && error.message || String(error);
-          if (!infrastructureFailureDetail(message)) throw error;
-          faultMetrics.infraFaults += 1;
-          return {
-            id: tag,
-            status: "infra-fault",
-            stage: "integrate",
-            detail: `integration agent died on an infrastructure fault (${message}); integration is never retried because the push to origin/${BASE} is not idempotent \u2014 inspect origin/${BASE} and the roadmap for a partial or hidden-success integration before relaunching with resumeMode: "continue"`,
-            worktree,
-            proposals,
-            kind: "addendum"
-          };
-        }
-        if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
-          return await attachAssessment(task, wt, { id: tag, status: "halted", stage: "integrate", detail: integration?.conflicts || integration?.summary || "integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)", worktree, proposals, kind: "addendum" });
-        }
-      } else {
-        return { id: tag, status: "manual-merge-ready", impl: impl2, addendumReview, integration, worktree, proposals, kind: "addendum" };
-      }
-      return { id: tag, status: "done", impl: impl2, addendumReview, integration, worktree, proposals, kind: "addendum" };
-    }
-    const planned = await runPlanDesignLoop(task, worktree);
-    if (planned.fail) return await attachAssessment(task, wt, planned.fail);
-    const plan = planned.plan;
-    if (DRY_RUN) {
-      return {
-        id: tag,
-        status: "dry-run",
-        stage: "post-design",
-        detail: "dry run stopped after planning and design review",
-        plan,
-        worktree,
-        proposals: []
-      };
-    }
-    const built = await runImplementationStage(task, worktree, plan);
-    if (built.fail) {
-      return built.fail.status === "fatal-auth" ? built.fail : await attachAssessment(task, wt, built.fail);
-    }
-    const impl = built.impl;
-    const outcome = await runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock2);
-    if (outcome.status === "failed" || outcome.status === "halted") {
-      return await attachAssessment(task, wt, outcome);
-    }
-    return outcome;
-  } catch (error) {
-    const detail = `unhandled agent error: ${error && error.message || String(error)}`;
-    const result = resultFromUnhandledAgentError(tag, detail, { worktree });
-    return await attachAssessment(task, wt, result);
-  }
-}
 async function runAudit(task) {
   phase("Audit");
   const audit = await agent(auditPrompt(task, null), reviewAgentOptions({ phase: "Audit", label: `audit:after-${task.id}`, schema: AUDIT_SCHEMA }));
@@ -2569,6 +2599,36 @@ function semaphore(limit) {
 }
 var planningLock = semaphore(MAX_PLANNING_PARALLEL);
 var buildLock = semaphore(MAX_BUILD_PARALLEL);
+var {
+  runPlanDesignLoop,
+  runImplementationStage,
+  runDualReviewAndIntegration,
+  runTask
+} = makeTaskPipeline({
+  MAX_DESIGN_ROUNDS,
+  MAX_REVIEW_ROUNDS,
+  DRY_RUN,
+  AUTO_MERGE,
+  BASE,
+  planPrompt,
+  designReviewPrompt,
+  implementPrompt,
+  fixPrompt,
+  codeReviewPrompt,
+  expertReviewPrompt,
+  addendumReviewPrompt,
+  implementAddendumPrompt,
+  integratePrompt,
+  planAgentOptions,
+  reviewAgentOptions,
+  buildAgentOptions,
+  planningLock,
+  buildLock,
+  withInfraRetry,
+  attachAssessment,
+  ensureTaskAgentWriteAccess,
+  createWorktree
+});
 var selectSeq = 0;
 async function doSelect(taken) {
   phase("Select");
