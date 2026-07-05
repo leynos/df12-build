@@ -161,8 +161,18 @@ Planned work:
   filter) and fast-check properties (step-range expansion, generated
   roadmap round-trips, phase-prefix completion, selection invariants).
   Milestone 1's CodeRabbit review returned zero findings first.
-- [ ] Milestone 3: process and failure-classification helpers
-  (`exec.ts`, `faults.ts`).
+- [x] (2026-07-05 22:00Z) Milestone 3: `exec.ts` (execFile wrappers,
+  `shellQuote`, `fileState`) and `faults.ts` (classifiers, `faultMetrics`,
+  `resultFromUnhandledAgentError`, retry). `withInfraRetry` became a
+  factory — `makeWithInfraRetry(attempts)` in the module, bound once in
+  `main.js` as `const withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS)`
+  — so all nine multiline call sites and the source-invariant regexes
+  stayed untouched, and no top-level name collides with a module export
+  (which the build's rename assertion would reject). Red-then-green
+  suites: sixteen-row classifier table with negatives, retry-budget and
+  never-retry-product behaviour, error-routing, `shellQuote` reverse
+  property, and `fileState` absent-vs-fault cases. Milestone 2's
+  CodeRabbit review returned zero findings first.
 - [ ] Milestone 4: git evidence and recovery discovery (`git-evidence.ts`,
   `recovery-discovery.ts`).
 - [ ] Milestone 5: configuration record and prompt builders (`config.ts`,
@@ -224,6 +234,21 @@ Planned work:
   extra tooling; the build script's fail-closed bundle checks remain as the
   second, independent line of defence.
   Date/Author: 2026-07-05, Claude with pmcintosh.
+- Decision: when a helper closes over a run-configuration constant, prefer
+  exporting a factory (`makeWithInfraRetry(attempts)`) bound once in the
+  entry over threading the constant through every call site.
+  Rationale: call sites keep their shape (no source-invariant regex churn,
+  no multiline edits), and a same-named local binding in the entry plus a
+  same-named module export would collide in the flat bundle and trip the
+  rename assertion; the factory avoids both.
+  Date/Author: 2026-07-05, Claude.
+- Decision: the build-script rename assertion requires every src module to
+  be imported by the bundle, so new modules must be wired into `main.js`
+  in the same change that creates them (a module authored ahead of its
+  import fails `make workflow-build`).
+  Rationale: observed during milestone 3; this is fail-closed in the right
+  direction — an orphaned module is a mistake, not a state to preserve.
+  Date/Author: 2026-07-05, Claude.
 - Decision: `meta.js` stays JavaScript permanently.
   Rationale: it is concatenated verbatim into the artefact without any
   transpilation step, so it must be loader-dialect JS as written.

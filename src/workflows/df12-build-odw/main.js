@@ -24,6 +24,15 @@ import {
   roadmapTaskIndex,
   selectRoadmapTask,
 } from './roadmap.ts'
+import { execFileStatus, execFileText, fileState, shellQuote } from './exec.ts'
+import {
+  authFailureDetail,
+  faultMetrics,
+  infrastructureFailureDetail,
+  makeWithInfraRetry,
+  providerFailureDetail,
+  resultFromUnhandledAgentError,
+} from './faults.ts'
 
 // ---------------------------------------------------------------------------
 // Configuration (all overridable through the ODW `args` object).
@@ -50,10 +59,6 @@ const MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4 // plan <-> design-review exc
 const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review cycles
 const STAGE_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2)) // total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, schema-retry exhaustion); product failures are never retried
 
-// Bounded-cardinality fault counters, surfaced verbatim in the run result so
-// operators can see retry pressure and terminal fault classes without
-// scraping logs. Fixed keys only — never keyed by task id or error text.
-const faultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 }
 const AUTO_MERGE = cfg.autoMerge !== false // false => stop after review, leave branch for manual merge
 const DOCUMENT_AUDIT = cfg.documentAudit !== false // false => return audit findings only, write nothing
 const DRY_RUN = cfg.dryRun === true // plan/review/audit only; skip implement, merge, and doc writes
@@ -131,50 +136,8 @@ function assessmentAgentOptions(options = {}) {
   return { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL, ...options }
 }
 
-// Bounded in-run retry for stage agents. An infrastructure fault (a hung or
-// killed adapter stream, schema-retry exhaustion) says nothing about the task
-// branch, and the committed-ExecPlan durability contract makes a warm re-run
-// cheap — the retried agent finds the committed plan and any committed work
-// already on disk. Product failures (review verdicts, gate failures) are
-// never retried here; they flow through the ordinary failure paths.
-async function withInfraRetry(run, label) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await run()
-    } catch (error) {
-      const message = (error && error.message) || String(error)
-      if (attempt >= STAGE_ATTEMPTS || !infrastructureFailureDetail(message)) throw error
-      faultMetrics.infraRetries += 1
-      log(`[${label}] infrastructure fault (${message}); retrying the stage agent (attempt ${attempt + 1} of ${STAGE_ATTEMPTS})`)
-    }
-  }
-}
-
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, "'\\''")}'`
-}
-
-// Distinguish "the file is absent" from "the filesystem would not answer":
-// ENOENT/ENOTDIR mean absent; anything else (permissions, I/O) is a fault the
-// caller must surface rather than conflate with a missing file. Returns
-// { ok, exists, detail }.
-async function fileState(pathValue, baseDir = process.cwd()) {
-  if (!pathValue) return { ok: true, exists: false, detail: '' }
-  const path = process.getBuiltinModule('node:path')
-  const candidate = path.isAbsolute(String(pathValue))
-    ? String(pathValue)
-    : path.join(baseDir, String(pathValue))
-  const fs = process.getBuiltinModule('node:fs/promises')
-  try {
-    const stat = await fs.stat(candidate)
-    return { ok: true, exists: stat.isFile(), detail: '' }
-  } catch (error) {
-    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
-      return { ok: true, exists: false, detail: '' }
-    }
-    return { ok: false, exists: false, detail: `stat failed for ${candidate}: ${(error && error.message) || String(error)}` }
-  }
-}
+// Stage-agent retry with the run's attempt budget bound once (see faults.ts).
+const withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS)
 
 function grepaiSearchCommand() {
   const workspaceArg = shellQuote(GREPAI_WORKSPACE)
@@ -229,130 +192,6 @@ function preamble(worktree) {
 // ---------------------------------------------------------------------------
 // Deterministic roadmap selection
 // ---------------------------------------------------------------------------
-async function execFileText(command, commandArgs) {
-  const { execFile } = process.getBuiltinModule('node:child_process')
-  return await new Promise((resolve, reject) => {
-    execFile(command, commandArgs, { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) {
-        error.stdout = stdout
-        error.stderr = stderr
-        reject(error)
-        return
-      }
-      resolve(stdout)
-    })
-  })
-}
-
-async function execFileStatus(command, commandArgs) {
-  try {
-    return { ok: true, stdout: await execFileText(command, commandArgs), stderr: '' }
-  } catch (error) {
-    return {
-      ok: false,
-      stdout: error?.stdout || '',
-      stderr: error?.stderr || '',
-      message: (error && error.message) || String(error),
-    }
-  }
-}
-
-function authFailureDetail(value) {
-  const text = String(value || '')
-  const patterns = [
-    /401 Unauthorized/i,
-    /Missing bearer or basic authentication/i,
-    /no Codex credentials/i,
-    /\bNot logged in\b/i,
-    /\bsigned out\b/i,
-    /no token is available/i,
-    /\bauth(?:entication)? failed\b/i,
-    /\bbrowser login required\b/i,
-    /\btoken missing\b/i,
-    /\bmissing token\b/i,
-    /\btoken expired\b/i,
-    /\bnot authenticated\b/i,
-    /"loggedIn"\s*:\s*false/i,
-    /Run `?coderabbit auth login`?/i,
-    /Run codex login/i,
-  ]
-  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
-}
-
-function providerFailureDetail(value) {
-  const text = String(value || '')
-  const patterns = [
-    /\bAPI Error:\s*(?:429|500|502|503|504|529)\b/i,
-    /\b(?:429|500|502|503|504|529)\b.*\b(?:gateway|overload|rate limit|server-side|temporar|timeout|unavailable)\b/i,
-    /\b(?:gateway timeout|model overloaded|overloaded|rate limited|server-side issue|service unavailable|temporarily unavailable|try again in a moment)\b/i,
-  ]
-  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
-}
-
-// ODW-level infrastructure faults: the agent process died or its reply
-// channel failed, so the error carries no evidence about the task branch.
-// The patterns pin ODW's own stable error strings (bridge.ts
-// cliFailureMessage and the schema-retry exhaustion message).
-function infrastructureFailureDetail(value) {
-  const text = String(value || '')
-  const patterns = [
-    /\badapter '[^']*' timed out\b/i,
-    /\badapter '[^']*' exited with code \d+/i,
-    /\bAdapterExecutionError\b/,
-    /\bSchemaValidationError\b/,
-    /did not satisfy the schema after \d+ attempt/i,
-    /\bno JSON value found in the reply\b/i,
-  ]
-  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
-}
-
-function resultFromUnhandledAgentError(id, detail, extra = {}) {
-  const authDetail = authFailureDetail(detail)
-  if (authDetail) {
-    faultMetrics.authFaults += 1
-    return {
-      id,
-      status: 'fatal-auth',
-      stage: 'auth',
-      detail,
-      proposals: [],
-      ...extra,
-    }
-  }
-  const providerDetail = providerFailureDetail(detail)
-  if (providerDetail) {
-    faultMetrics.providerFaults += 1
-    return {
-      id,
-      status: 'provider-fault',
-      stage: 'provider',
-      detail,
-      proposals: [],
-      ...extra,
-    }
-  }
-  const infraDetail = infrastructureFailureDetail(detail)
-  if (infraDetail) {
-    faultMetrics.infraFaults += 1
-    return {
-      id,
-      status: 'infra-fault',
-      stage: 'infrastructure',
-      detail,
-      proposals: [],
-      ...extra,
-    }
-  }
-  return {
-    id,
-    status: 'failed',
-    stage: 'error',
-    detail,
-    proposals: [],
-    ...extra,
-  }
-}
-
 function parseNameStatus(output) {
   return String(output || '')
     .split(/\r?\n/)

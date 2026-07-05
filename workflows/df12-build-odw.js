@@ -500,6 +500,160 @@ function candidateRoadmapComplete(task, isAddendum) {
   return isTaskFullyComplete(task);
 }
 
+// src/workflows/df12-build-odw/exec.ts
+async function execFileText(command, commandArgs) {
+  const { execFile } = process.getBuiltinModule("node:child_process");
+  return await new Promise((resolve, reject) => {
+    execFile(command, [...commandArgs], { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        const failure = error;
+        failure.stdout = stdout;
+        failure.stderr = stderr;
+        reject(failure);
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+async function execFileStatus(command, commandArgs) {
+  try {
+    return { ok: true, stdout: await execFileText(command, commandArgs), stderr: "" };
+  } catch (error) {
+    const failure = error;
+    return {
+      ok: false,
+      stdout: failure?.stdout || "",
+      stderr: failure?.stderr || "",
+      message: failure && failure.message || String(error)
+    };
+  }
+}
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+async function fileState(pathValue, baseDir = process.cwd()) {
+  if (!pathValue) return { ok: true, exists: false, detail: "" };
+  const path = process.getBuiltinModule("node:path");
+  const candidate = path.isAbsolute(String(pathValue)) ? String(pathValue) : path.join(baseDir, String(pathValue));
+  const fs = process.getBuiltinModule("node:fs/promises");
+  try {
+    const stat = await fs.stat(candidate);
+    return { ok: true, exists: stat.isFile(), detail: "" };
+  } catch (error) {
+    const failure = error;
+    if (failure && (failure.code === "ENOENT" || failure.code === "ENOTDIR")) {
+      return { ok: true, exists: false, detail: "" };
+    }
+    return { ok: false, exists: false, detail: `stat failed for ${candidate}: ${failure && failure.message || String(error)}` };
+  }
+}
+
+// src/workflows/df12-build-odw/faults.ts
+var faultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 };
+function authFailureDetail(value) {
+  const text = String(value || "");
+  const patterns = [
+    /401 Unauthorized/i,
+    /Missing bearer or basic authentication/i,
+    /no Codex credentials/i,
+    /\bNot logged in\b/i,
+    /\bsigned out\b/i,
+    /no token is available/i,
+    /\bauth(?:entication)? failed\b/i,
+    /\bbrowser login required\b/i,
+    /\btoken missing\b/i,
+    /\bmissing token\b/i,
+    /\btoken expired\b/i,
+    /\bnot authenticated\b/i,
+    /"loggedIn"\s*:\s*false/i,
+    /Run `?coderabbit auth login`?/i,
+    /Run codex login/i
+  ];
+  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
+}
+function providerFailureDetail(value) {
+  const text = String(value || "");
+  const patterns = [
+    /\bAPI Error:\s*(?:429|500|502|503|504|529)\b/i,
+    /\b(?:429|500|502|503|504|529)\b.*\b(?:gateway|overload|rate limit|server-side|temporar|timeout|unavailable)\b/i,
+    /\b(?:gateway timeout|model overloaded|overloaded|rate limited|server-side issue|service unavailable|temporarily unavailable|try again in a moment)\b/i
+  ];
+  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
+}
+function infrastructureFailureDetail(value) {
+  const text = String(value || "");
+  const patterns = [
+    /\badapter '[^']*' timed out\b/i,
+    /\badapter '[^']*' exited with code \d+/i,
+    /\bAdapterExecutionError\b/,
+    /\bSchemaValidationError\b/,
+    /did not satisfy the schema after \d+ attempt/i,
+    /\bno JSON value found in the reply\b/i
+  ];
+  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
+}
+function makeWithInfraRetry(attempts) {
+  return async function withInfraRetry2(run, label) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await run();
+      } catch (error) {
+        const message = error && error.message || String(error);
+        if (attempt >= attempts || !infrastructureFailureDetail(message)) throw error;
+        faultMetrics.infraRetries += 1;
+        log(`[${label}] infrastructure fault (${message}); retrying the stage agent (attempt ${attempt + 1} of ${attempts})`);
+      }
+    }
+  };
+}
+function resultFromUnhandledAgentError(id, detail, extra = {}) {
+  const authDetail = authFailureDetail(detail);
+  if (authDetail) {
+    faultMetrics.authFaults += 1;
+    return {
+      id,
+      status: "fatal-auth",
+      stage: "auth",
+      detail,
+      proposals: [],
+      ...extra
+    };
+  }
+  const providerDetail = providerFailureDetail(detail);
+  if (providerDetail) {
+    faultMetrics.providerFaults += 1;
+    return {
+      id,
+      status: "provider-fault",
+      stage: "provider",
+      detail,
+      proposals: [],
+      ...extra
+    };
+  }
+  const infraDetail = infrastructureFailureDetail(detail);
+  if (infraDetail) {
+    faultMetrics.infraFaults += 1;
+    return {
+      id,
+      status: "infra-fault",
+      stage: "infrastructure",
+      detail,
+      proposals: [],
+      ...extra
+    };
+  }
+  return {
+    id,
+    status: "failed",
+    stage: "error",
+    detail,
+    proposals: [],
+    ...extra
+  };
+}
+
 // src/workflows/df12-build-odw/main.js
 var cfg = args || {};
 var PROJECT_ROOT = cfg.projectRoot || process.cwd();
@@ -522,7 +676,6 @@ var MAX_BUILD_PARALLEL = Math.max(1, cfg.maxBuildParallel || 8);
 var MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4;
 var MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3;
 var STAGE_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2));
-var faultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 };
 var AUTO_MERGE = cfg.autoMerge !== false;
 var DOCUMENT_AUDIT = cfg.documentAudit !== false;
 var DRY_RUN = cfg.dryRun === true;
@@ -582,36 +735,7 @@ function triageAgentOptions(options = {}) {
 function assessmentAgentOptions(options = {}) {
   return { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL, ...options };
 }
-async function withInfraRetry(run, label) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await run();
-    } catch (error) {
-      const message = error && error.message || String(error);
-      if (attempt >= STAGE_ATTEMPTS || !infrastructureFailureDetail(message)) throw error;
-      faultMetrics.infraRetries += 1;
-      log(`[${label}] infrastructure fault (${message}); retrying the stage agent (attempt ${attempt + 1} of ${STAGE_ATTEMPTS})`);
-    }
-  }
-}
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, "'\\''")}'`;
-}
-async function fileState(pathValue, baseDir = process.cwd()) {
-  if (!pathValue) return { ok: true, exists: false, detail: "" };
-  const path = process.getBuiltinModule("node:path");
-  const candidate = path.isAbsolute(String(pathValue)) ? String(pathValue) : path.join(baseDir, String(pathValue));
-  const fs = process.getBuiltinModule("node:fs/promises");
-  try {
-    const stat = await fs.stat(candidate);
-    return { ok: true, exists: stat.isFile(), detail: "" };
-  } catch (error) {
-    if (error && (error.code === "ENOENT" || error.code === "ENOTDIR")) {
-      return { ok: true, exists: false, detail: "" };
-    }
-    return { ok: false, exists: false, detail: `stat failed for ${candidate}: ${error && error.message || String(error)}` };
-  }
-}
+var withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS);
 function grepaiSearchCommand() {
   const workspaceArg = shellQuote(GREPAI_WORKSPACE);
   const projectArg = GREPAI_PROJECT ? shellQuote(GREPAI_PROJECT) : "$(get-project)";
@@ -649,120 +773,6 @@ function preamble(worktree) {
     "- Signpost the documentation and skills you relied on in your output so the next agent can follow the same trail.",
     ""
   ].join("\n");
-}
-async function execFileText(command, commandArgs) {
-  const { execFile } = process.getBuiltinModule("node:child_process");
-  return await new Promise((resolve, reject) => {
-    execFile(command, commandArgs, { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) {
-        error.stdout = stdout;
-        error.stderr = stderr;
-        reject(error);
-        return;
-      }
-      resolve(stdout);
-    });
-  });
-}
-async function execFileStatus(command, commandArgs) {
-  try {
-    return { ok: true, stdout: await execFileText(command, commandArgs), stderr: "" };
-  } catch (error) {
-    return {
-      ok: false,
-      stdout: error?.stdout || "",
-      stderr: error?.stderr || "",
-      message: error && error.message || String(error)
-    };
-  }
-}
-function authFailureDetail(value) {
-  const text = String(value || "");
-  const patterns = [
-    /401 Unauthorized/i,
-    /Missing bearer or basic authentication/i,
-    /no Codex credentials/i,
-    /\bNot logged in\b/i,
-    /\bsigned out\b/i,
-    /no token is available/i,
-    /\bauth(?:entication)? failed\b/i,
-    /\bbrowser login required\b/i,
-    /\btoken missing\b/i,
-    /\bmissing token\b/i,
-    /\btoken expired\b/i,
-    /\bnot authenticated\b/i,
-    /"loggedIn"\s*:\s*false/i,
-    /Run `?coderabbit auth login`?/i,
-    /Run codex login/i
-  ];
-  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
-}
-function providerFailureDetail(value) {
-  const text = String(value || "");
-  const patterns = [
-    /\bAPI Error:\s*(?:429|500|502|503|504|529)\b/i,
-    /\b(?:429|500|502|503|504|529)\b.*\b(?:gateway|overload|rate limit|server-side|temporar|timeout|unavailable)\b/i,
-    /\b(?:gateway timeout|model overloaded|overloaded|rate limited|server-side issue|service unavailable|temporarily unavailable|try again in a moment)\b/i
-  ];
-  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
-}
-function infrastructureFailureDetail(value) {
-  const text = String(value || "");
-  const patterns = [
-    /\badapter '[^']*' timed out\b/i,
-    /\badapter '[^']*' exited with code \d+/i,
-    /\bAdapterExecutionError\b/,
-    /\bSchemaValidationError\b/,
-    /did not satisfy the schema after \d+ attempt/i,
-    /\bno JSON value found in the reply\b/i
-  ];
-  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
-}
-function resultFromUnhandledAgentError(id, detail, extra = {}) {
-  const authDetail = authFailureDetail(detail);
-  if (authDetail) {
-    faultMetrics.authFaults += 1;
-    return {
-      id,
-      status: "fatal-auth",
-      stage: "auth",
-      detail,
-      proposals: [],
-      ...extra
-    };
-  }
-  const providerDetail = providerFailureDetail(detail);
-  if (providerDetail) {
-    faultMetrics.providerFaults += 1;
-    return {
-      id,
-      status: "provider-fault",
-      stage: "provider",
-      detail,
-      proposals: [],
-      ...extra
-    };
-  }
-  const infraDetail = infrastructureFailureDetail(detail);
-  if (infraDetail) {
-    faultMetrics.infraFaults += 1;
-    return {
-      id,
-      status: "infra-fault",
-      stage: "infrastructure",
-      detail,
-      proposals: [],
-      ...extra
-    };
-  }
-  return {
-    id,
-    status: "failed",
-    stage: "error",
-    detail,
-    proposals: [],
-    ...extra
-  };
 }
 function parseNameStatus(output) {
   return String(output || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
