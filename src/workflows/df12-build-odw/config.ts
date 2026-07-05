@@ -1,0 +1,226 @@
+// Run configuration: every `args` default, clamp, validation, and derived
+// guidance string, built once by makeConfig and destructured by the entry.
+// Field names deliberately match the entry's historical constant names so
+// `const { BASE, ROADMAP, ... } = makeConfig(args)` keeps every reference
+// intact. makeConfig is pure: the projectRoot chdir side effect stays with
+// the caller.
+
+export interface RawWorkflowArgs {
+  projectRoot?: string
+  base?: string
+  roadmap?: string
+  designDocs?: string
+  researchNote?: string
+  taskId?: string
+  maxTasks?: number
+  maxParallel?: number
+  maxPlanningParallel?: number
+  maxPlanParallel?: number
+  maxBuildParallel?: number
+  maxDesignRounds?: number
+  maxReviewRounds?: number
+  stageAttempts?: number | string
+  autoMerge?: boolean
+  documentAudit?: boolean
+  dryRun?: boolean
+  authPreflight?: boolean
+  requireCoderabbitAuth?: boolean
+  assessPartialBranches?: boolean
+  resumePartialBranches?: boolean
+  resumeMode?: string
+  resumeTaskId?: string | number
+  resumeMaxCandidates?: number | string
+  worktreeWritePreflight?: boolean
+  searchBackend?: string
+  codeSearchBackend?: string
+  grepaiWorkspace?: string
+  grepaiProject?: string
+  project?: string
+  memtraceRepoId?: string
+  buildAdapter?: string
+  planAdapter?: string
+  reviewAdapter?: string
+  triageAdapter?: string
+  assessmentAdapter?: string
+  buildModel?: string
+  planModel?: string
+  reviewModel?: string
+  triageModel?: string
+  assessmentModel?: string
+  coderabbitReviewCommand?: string
+  commitGates?: unknown
+}
+
+export interface WorkflowConfig {
+  PROJECT_ROOT: string
+  BASE: string
+  ROADMAP: string
+  DESIGN_DOCS: string
+  RESEARCH_NOTE: string | null
+  ONLY_TASK: string | null
+  MAX_TASKS: number
+  MAX_PARALLEL: number
+  MAX_PLANNING_PARALLEL: number
+  MAX_BUILD_PARALLEL: number
+  MAX_DESIGN_ROUNDS: number
+  MAX_REVIEW_ROUNDS: number
+  STAGE_ATTEMPTS: number
+  AUTO_MERGE: boolean
+  DOCUMENT_AUDIT: boolean
+  DRY_RUN: boolean
+  AUTH_PREFLIGHT: boolean
+  REQUIRE_CODERABBIT_AUTH: boolean
+  ASSESS_PARTIAL_BRANCHES: boolean
+  RESUME_PARTIAL_BRANCHES: boolean
+  RESUME_MODE: string
+  RESUME_TASK_ID: string | null
+  RESUME_MAX_CANDIDATES: number
+  WORKTREE_WRITE_PREFLIGHT: boolean
+  BUDGET_RESERVE: number
+  SEARCH_BACKEND: string
+  GREPAI_WORKSPACE: string
+  GREPAI_PROJECT: string | null
+  MEMTRACE_REPO_ID: string | null
+  BUILD_ADAPTER: string
+  PLAN_ADAPTER: string
+  REVIEW_ADAPTER: string
+  TRIAGE_ADAPTER: string
+  ASSESSMENT_ADAPTER: string
+  BUILD_MODEL: string
+  PLAN_MODEL: string
+  REVIEW_MODEL: string
+  TRIAGE_MODEL: string
+  ASSESSMENT_MODEL: string
+  AUTH_REQUIRED_ADAPTERS: Set<string>
+  CODERABBIT_REVIEW_COMMAND: string
+  COMMIT_GATES: string[]
+  COMMIT_GATE_TEXT: string
+  COMMIT_GATE_GUIDANCE: string
+  CODERABBIT_REVIEW_GUIDANCE: string
+  SPARK_DELEGATION_GUIDANCE: string
+  SCRUTINEER_DELEGATION_GUIDANCE: string
+}
+
+export function makeConfig(rawArgs: Record<string, unknown> | null | undefined): WorkflowConfig {
+  const cfg = (rawArgs || {}) as RawWorkflowArgs
+  const PROJECT_ROOT = cfg.projectRoot || process.cwd()
+  const BASE = cfg.base || 'main' // integration branch: rebase + squash-merge target, roadmap source of truth
+  const ROADMAP = cfg.roadmap || 'docs/roadmap.md'
+  const DESIGN_DOCS = cfg.designDocs || 'the design document(s) and the ADRs (docs/adr-*.md) under docs/' // project design sources cited in prompts
+  const RESEARCH_NOTE = cfg.researchNote || null // optional project-specific external-library research note (e.g. a vendored lib source path to verify against)
+  const ONLY_TASK = cfg.taskId || null // process exactly one named roadmap id (e.g. "1.2.1")
+  const MAX_TASKS = ONLY_TASK ? 1 : cfg.maxTasks || 12 // hard ceiling on roadmap steps per run
+  const MAX_PARALLEL = ONLY_TASK ? 1 : Math.max(1, cfg.maxParallel || 16) // worker-pool width: tasks in flight. Defaults to 16 to match the normal ODW/Codex runtime concurrency cap.
+  const MAX_PLANNING_PARALLEL = Math.max(1, cfg.maxPlanningParallel || cfg.maxPlanParallel || 8) // concurrent planning-stage agents.
+  const MAX_BUILD_PARALLEL = Math.max(1, cfg.maxBuildParallel || 8) // concurrent build-stage agents.
+  const MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4 // plan <-> design-review exchanges before halting
+  const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review cycles
+  const STAGE_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2)) // total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, schema-retry exhaustion); product failures are never retried
+
+  const AUTO_MERGE = cfg.autoMerge !== false // false => stop after review, leave branch for manual merge
+  const DOCUMENT_AUDIT = cfg.documentAudit !== false // false => return audit findings only, write nothing
+  const DRY_RUN = cfg.dryRun === true // plan/review/audit only; skip implement, merge, and doc writes
+  const AUTH_PREFLIGHT = cfg.authPreflight !== false // false => skip local CLI auth checks before spawning agents
+  const REQUIRE_CODERABBIT_AUTH = cfg.requireCoderabbitAuth !== false && !DRY_RUN // CodeRabbit is required once implementation/review can run
+  const ASSESS_PARTIAL_BRANCHES = cfg.assessPartialBranches !== false // false => skip report-only assessment of failed task branches
+  const RESUME_PARTIAL_BRANCHES = cfg.resumePartialBranches === true // opt-in: discover surviving roadmap-* branches on fresh launch before normal selection
+  const RESUME_MODE = String(cfg.resumeMode || 'assess').toLowerCase() // maximum recovery action: "assess" reports only; "review" may route clean adopt-complete branches into review + integration; "continue" dispatches on the committed ExecPlan Status (DRAFT->plan, APPROVED/IN PROGRESS->implement, COMPLETE->review) so partial work is finished through the ordinary gates instead of parked
+  if (!['assess', 'review', 'continue'].includes(RESUME_MODE)) {
+    throw new Error(`Unsupported resumeMode: ${RESUME_MODE} (use "assess", "review", or "continue")`)
+  }
+  const RESUME_TASK_ID = cfg.resumeTaskId ? String(cfg.resumeTaskId) : null // limit recovery discovery to one roadmap id (separate from taskId, which selects normal roadmap work)
+  const RESUME_MAX_CANDIDATES_RAW = Number(cfg.resumeMaxCandidates ?? 4)
+  const RESUME_MAX_CANDIDATES = Number.isFinite(RESUME_MAX_CANDIDATES_RAW)
+    ? Math.max(1, Math.floor(RESUME_MAX_CANDIDATES_RAW))
+    : 4 // bound startup recovery fan-in so a messy repository does not consume the whole run
+  const WORKTREE_WRITE_PREFLIGHT = cfg.worktreeWritePreflight !== false // false => skip the once-per-run probe that proves task agents can write into sibling roadmap-* worktrees
+  const BUDGET_RESERVE = 80_000 // stop opening new tasks when remaining budget falls below this
+  const SEARCH_BACKEND = String(cfg.searchBackend || cfg.codeSearchBackend || (cfg.memtraceRepoId ? 'memtrace' : 'grepai')).toLowerCase()
+  const GREPAI_WORKSPACE = cfg.grepaiWorkspace || 'Projects'
+  const GREPAI_PROJECT = cfg.grepaiProject || (SEARCH_BACKEND === 'grepai' ? cfg.project : null) || null // canonical main-branch GrepAI project; set this when source is a worktree
+  const MEMTRACE_REPO_ID = cfg.memtraceRepoId || (SEARCH_BACKEND === 'memtrace' ? cfg.project : null) || null // canonical Memtrace repo id; discover with list_indexed_repositories when unset
+  const BUILD_ADAPTER = cfg.buildAdapter || 'codex-medium'
+  const PLAN_ADAPTER = cfg.planAdapter || 'claude'
+  const REVIEW_ADAPTER = cfg.reviewAdapter || 'claude'
+  const TRIAGE_ADAPTER = cfg.triageAdapter || 'codex'
+  const ASSESSMENT_ADAPTER = cfg.assessmentAdapter || REVIEW_ADAPTER
+  const BUILD_MODEL = cfg.buildModel || 'gpt-5.5'
+  const PLAN_MODEL = cfg.planModel || 'claude-opus-4-8'
+  const REVIEW_MODEL = cfg.reviewModel || 'claude-opus-4-8'
+  const TRIAGE_MODEL = cfg.triageModel || 'gpt-5.5@high'
+  const ASSESSMENT_MODEL = cfg.assessmentModel || REVIEW_MODEL
+  const AUTH_REQUIRED_ADAPTERS = new Set([
+    BUILD_ADAPTER,
+    PLAN_ADAPTER,
+    REVIEW_ADAPTER,
+    TRIAGE_ADAPTER,
+    ASSESSMENT_ADAPTER,
+  ].map((adapter) => String(adapter || '').toLowerCase()))
+  const CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || 'coderabbit review --agent'
+  // The deterministic commit-gate command set for the target project. `make all`
+  // is the df12 house default, but it is NOT universal: some projects alias
+  // `all` to a release build, so operators must be able to name the authoritative
+  // gate targets (e.g. sequential check-fmt/typecheck/lint/test) via args.
+  const COMMIT_GATES = (Array.isArray(cfg.commitGates) && cfg.commitGates.length
+    ? cfg.commitGates
+    : ['make all']).map((command) => String(command))
+  const COMMIT_GATE_TEXT = COMMIT_GATES.map((command) => `\`${command}\``).join(' then ')
+  const COMMIT_GATE_GUIDANCE =
+    `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well — NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.`
+  const CODERABBIT_REVIEW_GUIDANCE =
+    'Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.'
+  const SPARK_DELEGATION_GUIDANCE =
+    "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
+  const SCRUTINEER_DELEGATION_GUIDANCE =
+    `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`
+
+  return {
+    PROJECT_ROOT,
+    BASE,
+    ROADMAP,
+    DESIGN_DOCS,
+    RESEARCH_NOTE,
+    ONLY_TASK,
+    MAX_TASKS,
+    MAX_PARALLEL,
+    MAX_PLANNING_PARALLEL,
+    MAX_BUILD_PARALLEL,
+    MAX_DESIGN_ROUNDS,
+    MAX_REVIEW_ROUNDS,
+    STAGE_ATTEMPTS,
+    AUTO_MERGE,
+    DOCUMENT_AUDIT,
+    DRY_RUN,
+    AUTH_PREFLIGHT,
+    REQUIRE_CODERABBIT_AUTH,
+    ASSESS_PARTIAL_BRANCHES,
+    RESUME_PARTIAL_BRANCHES,
+    RESUME_MODE,
+    RESUME_TASK_ID,
+    RESUME_MAX_CANDIDATES,
+    WORKTREE_WRITE_PREFLIGHT,
+    BUDGET_RESERVE,
+    SEARCH_BACKEND,
+    GREPAI_WORKSPACE,
+    GREPAI_PROJECT,
+    MEMTRACE_REPO_ID,
+    BUILD_ADAPTER,
+    PLAN_ADAPTER,
+    REVIEW_ADAPTER,
+    TRIAGE_ADAPTER,
+    ASSESSMENT_ADAPTER,
+    BUILD_MODEL,
+    PLAN_MODEL,
+    REVIEW_MODEL,
+    TRIAGE_MODEL,
+    ASSESSMENT_MODEL,
+    AUTH_REQUIRED_ADAPTERS,
+    CODERABBIT_REVIEW_COMMAND,
+    COMMIT_GATES,
+    COMMIT_GATE_TEXT,
+    COMMIT_GATE_GUIDANCE,
+    CODERABBIT_REVIEW_GUIDANCE,
+    SPARK_DELEGATION_GUIDANCE,
+    SCRUTINEER_DELEGATION_GUIDANCE,
+  }
+}
