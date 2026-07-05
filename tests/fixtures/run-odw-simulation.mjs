@@ -13,7 +13,11 @@
  *   pathPrefix?: "<dir prepended to PATH before the body runs>",
  *   assessment?: {...overrides for the scripted ADR 002 assessment reply...},
  *   review?: {...full scripted reply for code-review/expert-review labels...},
- *   fix?: {...full scripted reply for fix: labels...}
+ *   fix?: {...full scripted reply for fix: labels...},
+ *   failures?: { "<exact label>": { error?: "<message>", times?: N } }
+ *     — the scripted agent throws `error` for the first `times` calls with
+ *       that label (every call when `times` is omitted), then answers
+ *       normally; used to simulate adapter/infrastructure faults.
  * }
  * Prints JSON: { result, error, calls, phases }
  */
@@ -125,9 +129,16 @@ const body = new AsyncFunction(
 
 const calls = []
 const phases = []
+const failures = scenario.failures || {}
 const agent = async (prompt, opts = {}) => {
-  calls.push(opts.label || opts.adapter || '')
-  return respond(opts.label || '', prompt)
+  const label = opts.label || opts.adapter || ''
+  calls.push(label)
+  const fault = failures[label]
+  if (fault && (fault.times === undefined || fault.times > 0)) {
+    if (fault.times !== undefined) fault.times -= 1
+    throw new Error(fault.error || "adapter 'claude' timed out")
+  }
+  return respond(label, prompt)
 }
 const parallel = (thunks) => Promise.all(thunks.map((thunk) => Promise.resolve().then(thunk).catch(() => null)))
 const pipeline = async (items, ...stages) =>

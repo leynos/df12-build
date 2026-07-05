@@ -42,6 +42,9 @@ return {
   shouldAssessFailure,
   authFailureDetail,
   providerFailureDetail,
+  infrastructureFailureDetail,
+  withInfraRetry,
+  STAGE_ATTEMPTS,
   resultFromUnhandledAgentError,
   isDeferredReviewIssue,
   hasOnlyDeferredReviewIssues,
@@ -151,6 +154,80 @@ test('provider-shaped agent failures are retry-later infrastructure faults', asy
     detail,
     proposals: [],
   })
+})
+
+test('ODW infrastructure faults classify distinctly from product failures', async () => {
+  const surface = await loadAssessmentSurface()
+
+  // The overnight-run shapes: a hung stream killed by the adapter hard
+  // timeout, and schema-retry exhaustion after the reply channel failed.
+  const rows = [
+    ["unhandled agent error: adapter 'claude' timed out", true],
+    ["unhandled agent error: adapter 'codex' exited with code 143", true],
+    ["SchemaValidationError: adapter 'claude' did not satisfy the schema after 3 attempt(s); last problems: no JSON value found in the reply", true],
+    ['AdapterExecutionError: something died', true],
+    ['implementation did not reach a green state', false],
+    ['reviewers not satisfied within cap', false],
+    ['make test failed: the adapter pattern timed out waiting for the queue', false],
+  ]
+  for (const [detail, expected] of rows) {
+    assert.equal(Boolean(surface.infrastructureFailureDetail(detail)), expected, detail)
+  }
+
+  const detail = "unhandled agent error: adapter 'claude' timed out"
+  assert.deepEqual(surface.resultFromUnhandledAgentError('6.4.1', detail), {
+    id: '6.4.1',
+    status: 'infra-fault',
+    stage: 'infrastructure',
+    detail,
+    proposals: [],
+  })
+  // Auth and provider classification keep precedence over the infra check.
+  assert.equal(
+    surface.resultFromUnhandledAgentError('6.4.1', "adapter 'claude' exited with code 1: Run codex login").status,
+    'fatal-auth',
+  )
+  assert.equal(
+    surface.resultFromUnhandledAgentError('6.4.1', "adapter 'claude' exited with code 1: API Error: 529 Overloaded, temporarily unavailable").status,
+    'provider-fault',
+  )
+})
+
+test('withInfraRetry retries infrastructure faults only, within the attempt cap', async () => {
+  const surface = await loadAssessmentSurface()
+  assert.equal(surface.STAGE_ATTEMPTS, 2)
+
+  // Transient infra fault: one retry, then the reply lands.
+  let calls = 0
+  const value = await surface.withInfraRetry(async () => {
+    calls += 1
+    if (calls === 1) throw new Error("adapter 'claude' timed out")
+    return { ok: true }
+  }, 'plan:test r1')
+  assert.deepEqual(value, { ok: true })
+  assert.equal(calls, 2)
+
+  // Product failure: never retried.
+  calls = 0
+  await assert.rejects(
+    surface.withInfraRetry(async () => {
+      calls += 1
+      throw new Error('reviewers found a real defect')
+    }, 'plan:test r1'),
+    /real defect/,
+  )
+  assert.equal(calls, 1)
+
+  // Persistent infra fault: surfaces after the attempt cap.
+  calls = 0
+  await assert.rejects(
+    surface.withInfraRetry(async () => {
+      calls += 1
+      throw new Error("adapter 'claude' timed out")
+    }, 'plan:test r1'),
+    /timed out/,
+  )
+  assert.equal(calls, 2)
 })
 
 test('recoverable review faults classify as deferred review issues', async () => {
@@ -362,7 +439,7 @@ test('normal and addendum implementations gate auth before integration', async (
   )
   assert.match(
     source,
-    /const impl = await buildLock\(\(\) => agent\(implementPrompt\(task, worktree, plan, opts\)[\s\S]*?const authDetail = implementationAuthFailureDetail\(impl\)[\s\S]*?status: 'fatal-auth'/,
+    /const impl = await buildLock\(\(\) => withInfraRetry\(\(\) => agent\(implementPrompt\(task, worktree, plan, opts\)[\s\S]*?const authDetail = implementationAuthFailureDetail\(impl\)[\s\S]*?status: 'fatal-auth'/,
   )
 })
 
@@ -382,6 +459,8 @@ test('assessment guard admits only non-auth failed or halted task branches', asy
   assert.equal(shouldAssessFailure({ status: 'done', stage: 'integrate', detail: '' }, wt), false)
   assert.equal(shouldAssessFailure({ status: 'fatal-auth', stage: 'auth', detail: 'Run codex login' }, wt), false)
   assert.equal(shouldAssessFailure({ status: 'failed', stage: 'provider', detail: 'API Error: 529 Overloaded' }, wt), false)
+  assert.equal(shouldAssessFailure({ status: 'infra-fault', stage: 'infrastructure', detail: "adapter 'claude' timed out" }, wt), false)
+  assert.equal(shouldAssessFailure({ status: 'failed', stage: 'implement', detail: "unhandled agent error: adapter 'claude' timed out" }, wt), false)
   assert.equal(shouldAssessFailure({ status: 'failed', stage: 'implement', detail: '401 Unauthorized' }, wt), false)
   assert.equal(shouldAssessFailure({ status: 'failed', stage: 'implement', detail: 'API Error: 429 rate limited' }, wt), false)
   assert.equal(

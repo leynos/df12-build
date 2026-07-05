@@ -153,6 +153,7 @@ Add these ODW `args` fields:
 | `resumeMaxCandidates` | `4` | Bound startup recovery fan-in so a messy repository does not consume the whole run. |
 | `reuseAcceptedExecPlans` | `false` | Enable accepted-plan adoption after normal roadmap selection. When disabled, every normal task still enters the existing plan/design loop. |
 | `acceptedPlanMode` | `"verify"` | One of `"verify"` or `"build"`. `"verify"` reports whether a matching plan is adoptable. `"build"` may enter implementation when the plan is fresh and accepted. |
+| `stageAttempts` | `2` | Total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, killed CLI, schema-retry exhaustion). Product failures are never retried. |
 
 `resumeMode` is intentionally not called `autoResume`. The name should force an
 operator to choose the maximum action allowed by the run.
@@ -440,6 +441,43 @@ accepted plan.
 | Accepted plan metadata is prompt-injected or unparsable | Treat the plan as unavailable for automation and run the normal plan/design loop. |
 | Accepted plan build fails | Halt through the existing implementation failure path with the task branch left intact. |
 | Auth preflight fails | Stop as `fatal-auth`; do not assess or resume branches. |
+| Stage agent dies on an infrastructure fault | Retry the stage agent in place up to `stageAttempts` total attempts; if the fault persists, stop as `infra-fault` without an assessment. |
+
+### Infrastructure faults
+
+An infrastructure fault is an agent process that died without producing a
+verdict: a hung stream killed by the adapter hard timeout (`adapter 'claude'
+timed out`), a CLI that exited non-zero (`exited with code 143`), or
+schema-retry exhaustion after the reply channel failed (`did not satisfy the
+schema after N attempt(s)`). These strings are pinned from ODW's own error
+messages (`bridge.ts`).
+
+Such a fault carries no evidence about the task branch, so it is handled
+unlike a product failure:
+
+1. **Retry in place.** The stage agent is re-run (bounded by `stageAttempts`,
+   default 2 total attempts). The ExecPlan durability contract makes the
+   retry a warm start: the committed plan and any committed work are already
+   on the branch, and every stage prompt tolerates re-entry. In the dual
+   review, a reviewer thunk that dies on an infrastructure fault is retried
+   inside its `parallel` slot; a residual fault is recorded so it cannot be
+   mistaken for a reviewer that returned nothing.
+2. **Terminal `infra-fault`, not `failed`.** If the fault persists, the task
+   result carries `status: "infra-fault"`, `stage: "infrastructure"` (or
+   `stage: "review"` when the dual review was interrupted). No assessment
+   agent is spawned — there is nothing about the branch to judge — and, as
+   with provider faults, end-of-run remediation triage skips its roadmap
+   writes so an outage never masquerades as task evidence.
+3. **Resume via `continue` mode.** The `halted` detail directs the operator
+   to relaunch with `resumeMode: "continue"`; the committed ExecPlan `Status`
+   dispatches the branch back into the pipeline at the stage where it died.
+
+The bounded retry cannot shorten a hang itself: ODW's adapter timeout is
+adapter-level configuration (`timeout` in the ODW config), not a per-call
+option. A hung stream burns the full adapter timeout before the workflow can
+react, so set the adapter timeout well below the 6-hour default — plan and
+review stages normally finish within tens of minutes, and a multi-hour silent
+stream is a hang, not progress.
 
 ## Security and permissions
 

@@ -21,7 +21,7 @@ const DRIVER = fileURLToPath(new URL('./fixtures/run-odw-simulation.mjs', import
 // fixture repository; only agent() replies are scripted, keyed on labels.
 // `taskId: '9.9.9'` pins normal selection to a non-existent task so the pool
 // never opens ordinary work, keeping each combination focused on recovery.
-async function runSimulation({ repo, args = {}, pathPrefix = '', assessment = null, review = null, fix = null }) {
+async function runSimulation({ repo, args = {}, pathPrefix = '', assessment = null, review = null, fix = null, failures = null }) {
   const scenarioDir = mkdtempSync(path.join(tmpdir(), 'df12-scenario-'))
   const scenarioPath = path.join(scenarioDir, 'scenario.json')
   writeFileSync(
@@ -37,6 +37,7 @@ async function runSimulation({ repo, args = {}, pathPrefix = '', assessment = nu
       ...(assessment ? { assessment } : {}),
       ...(review ? { review } : {}),
       ...(fix ? { fix } : {}),
+      ...(failures ? { failures } : {}),
     }),
   )
   const { stdout } = await execFileAsync(process.execPath, [DRIVER, scenarioPath], {
@@ -255,6 +256,51 @@ test('combination: continue mode finishes a draft-plan survivor through the whol
   ])
   // roadmap-1-2-4 (no worktree) is still an unresolved survivor.
   assert.match(result.halted, /needs-operator-recovery: 1 recovery survivor branch\(es\).*1\.2\.4/)
+})
+
+test('combination: a transient infrastructure fault is retried in place and the pipeline completes', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+
+  const { result, calls } = await runSimulation({
+    repo,
+    args: { resumePartialBranches: true, resumeMode: 'continue' },
+    failures: {
+      'plan:1.2.3 r1': { error: "adapter 'claude' timed out", times: 1 },
+    },
+  })
+
+  // The hung/killed stage agent is re-run once (warm start from the committed
+  // ExecPlan) instead of failing the task; the pipeline then completes.
+  assert.equal(result.recovery.resumed, 1)
+  assert.equal(calls.filter((label) => label === 'plan:1.2.3 r1').length, 2)
+  assert.ok(!calls.some((label) => label.startsWith('assess:')), 'a retried infra fault must not spend an assessment agent')
+  assert.deepEqual(
+    result.recovery.results.map((entry) => [entry.id, entry.action]),
+    [['1.2.3', 'resumed']],
+  )
+})
+
+test('combination: a persistent infrastructure fault halts as infra-fault without an assessment', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+
+  const { result, calls } = await runSimulation({
+    repo,
+    args: { resumePartialBranches: true, resumeMode: 'continue' },
+    failures: {
+      'implement:1.2.3': { error: "adapter 'codex' timed out" },
+    },
+  })
+
+  // Both attempts fail -> infra-fault, a fault of the harness, not the
+  // branch: no assessment agent runs, and the terminal state names the fault
+  // so the operator relaunches instead of treating it as task evidence.
+  assert.equal(calls.filter((label) => label === 'implement:1.2.3').length, 2)
+  assert.ok(!calls.some((label) => label.startsWith('assess:')), 'infra faults must not be assessed')
+  assert.match(result.halted, /recovery infra-fault at infrastructure/)
+  assert.match(result.halted, /timed out/)
+  const fatal = result.results.find((entry) => entry.status === 'infra-fault')
+  assert.ok(fatal, 'the infra-fault result must be recorded')
+  assert.equal(fatal.stage, 'infrastructure')
 })
 
 test('combination: auth preflight failure blocks recovery entirely', async () => {

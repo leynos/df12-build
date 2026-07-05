@@ -162,9 +162,17 @@ provides the doc skills):
    deterministically from its committed ExecPlan `Status` — DRAFT re-plans,
    APPROVED/IN PROGRESS re-implements, COMPLETE re-reviews, BLOCKED reports —
    with no judgement agent), `resumeTaskId` (narrow discovery
-   to one id; separate from `taskId`), `resumeMaxCandidates` (default 4), and
+   to one id; separate from `taskId`), `resumeMaxCandidates` (default 4),
+   `stageAttempts` (total attempts per stage agent when the previous attempt
+   died on an infrastructure fault such as an adapter timeout or schema-retry
+   exhaustion — default 2; product failures are never retried), and
    `worktreeWritePreflight` (host-verified probe that the plan and build
    adapters can write into sibling task worktrees; on by default).
+
+   Set the ODW adapter `timeout` (in the ODW config, not workflow args) well
+   below its 6-hour default — plan and review stages normally finish within
+   tens of minutes, so a multi-hour silent stream is a hung API connection,
+   and the workflow cannot react until the adapter kills it.
 
    The checked-in defaults split execution from judgement. Build-side work
    uses Codex defaults, while planning and review judgement use Claude Code
@@ -192,7 +200,10 @@ Every time a run completes you do the same loop:
    classification/action/reason, `skipped` with machine-readable reasons, and
    `unresolved` — survivor branches the run reported but did not integrate),
    `commitGates` (the deterministic gate set every branch agent was told to
-   run — audit reported gate greenness against it), `halted` (null on a clean
+   run — audit reported gate greenness against it), `stageAttempts` (the
+   in-run retry budget for stage agents that die on infrastructure faults;
+   a result with `status: "infra-fault"` means the fault outlived that budget
+   and carries no evidence about the branch), `halted` (null on a clean
    stop; `needs-operator-recovery: …` when unresolved recovery survivors still
    block the frontier), `audits[]`, `remediationTriage[]`, `pendingProposals`
    (proposals left unwritten because the run halted — triage them manually
@@ -217,6 +228,16 @@ Every time a run completes you do the same loop:
      `recovery.unresolved` survivor branches still hold their roadmap ids out
      of selection. This is operator work, not completion — follow
      "Post-assessment recovery closure" below, then relaunch.
+   - **`halted: task <id> infrastructure fault …`** (result status
+     `infra-fault`): a stage agent died on the harness side — hung stream
+     killed by the adapter timeout, killed CLI, or schema-retry exhaustion —
+     after `stageAttempts` in-run retries. This is NOT task evidence: no
+     assessment was spawned and no remediation was written. The branch state
+     is durable (committed ExecPlan); relaunch with
+     `resumePartialBranches=true` and `resumeMode="continue"` to resume the
+     branch at the stage where it died. Repeated infra faults across
+     relaunches point at the environment (API health, adapter timeout too
+     high, sandbox), not the roadmap.
    - **Halted (anything else):** diagnose with the failure-mode playbook, apply
      the fix to the roadmap (or environment), then relaunch.
 5. **Run mandatory roadmap maintenance before editing the roadmap.** If the run

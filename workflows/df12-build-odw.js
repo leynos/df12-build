@@ -52,6 +52,7 @@ const MAX_PLANNING_PARALLEL = Math.max(1, cfg.maxPlanningParallel || cfg.maxPlan
 const MAX_BUILD_PARALLEL = Math.max(1, cfg.maxBuildParallel || 8) // concurrent build-stage agents.
 const MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4 // plan <-> design-review exchanges before halting
 const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review cycles
+const STAGE_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2)) // total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, schema-retry exhaustion); product failures are never retried
 const AUTO_MERGE = cfg.autoMerge !== false // false => stop after review, leave branch for manual merge
 const DOCUMENT_AUDIT = cfg.documentAudit !== false // false => return audit findings only, write nothing
 const DRY_RUN = cfg.dryRun === true // plan/review/audit only; skip implement, merge, and doc writes
@@ -127,6 +128,24 @@ function triageAgentOptions(options = {}) {
 
 function assessmentAgentOptions(options = {}) {
   return { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL, ...options }
+}
+
+// Bounded in-run retry for stage agents. An infrastructure fault (a hung or
+// killed adapter stream, schema-retry exhaustion) says nothing about the task
+// branch, and the committed-ExecPlan durability contract makes a warm re-run
+// cheap — the retried agent finds the committed plan and any committed work
+// already on disk. Product failures (review verdicts, gate failures) are
+// never retried here; they flow through the ordinary failure paths.
+async function withInfraRetry(run, label) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await run()
+    } catch (error) {
+      const message = (error && error.message) || String(error)
+      if (attempt >= STAGE_ATTEMPTS || !infrastructureFailureDetail(message)) throw error
+      log(`[${label}] infrastructure fault (${message}); retrying the stage agent (attempt ${attempt + 1} of ${STAGE_ATTEMPTS})`)
+    }
+  }
 }
 
 function shellQuote(value) {
@@ -461,6 +480,23 @@ function providerFailureDetail(value) {
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
 }
 
+// ODW-level infrastructure faults: the agent process died or its reply
+// channel failed, so the error carries no evidence about the task branch.
+// The patterns pin ODW's own stable error strings (bridge.ts
+// cliFailureMessage and the schema-retry exhaustion message).
+function infrastructureFailureDetail(value) {
+  const text = String(value || '')
+  const patterns = [
+    /\badapter '[^']*' timed out\b/i,
+    /\badapter '[^']*' exited with code \d+/i,
+    /\bAdapterExecutionError\b/,
+    /\bSchemaValidationError\b/,
+    /did not satisfy the schema after \d+ attempt/i,
+    /\bno JSON value found in the reply\b/i,
+  ]
+  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
+}
+
 function resultFromUnhandledAgentError(id, detail, extra = {}) {
   const authDetail = authFailureDetail(detail)
   if (authDetail) {
@@ -479,6 +515,17 @@ function resultFromUnhandledAgentError(id, detail, extra = {}) {
       id,
       status: 'provider-fault',
       stage: 'provider',
+      detail,
+      proposals: [],
+      ...extra,
+    }
+  }
+  const infraDetail = infrastructureFailureDetail(detail)
+  if (infraDetail) {
+    return {
+      id,
+      status: 'infra-fault',
+      stage: 'infrastructure',
       detail,
       proposals: [],
       ...extra,
@@ -1259,11 +1306,12 @@ async function assessRecoveryCandidate(candidate) {
   const wt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit }
   const evidence = await collectAssessmentEvidence(task, wt)
   try {
-    const assessment = await agent(recoveryAssessmentPrompt(task, candidate, evidence), assessmentAgentOptions({
+    const label = `recover-assess:${candidate.taskId}${candidate.isAddendum ? '-addendum' : ''}`
+    const assessment = await withInfraRetry(() => agent(recoveryAssessmentPrompt(task, candidate, evidence), assessmentAgentOptions({
       phase: 'Recovery',
-      label: `recover-assess:${candidate.taskId}${candidate.isAddendum ? '-addendum' : ''}`,
+      label,
       schema: ASSESSMENT_SCHEMA,
-    }))
+    })), label)
     if (!assessment) {
       return { evidence, assessment: null, assessmentError: 'assessment agent returned no structured output' }
     }
@@ -1277,9 +1325,9 @@ function shouldAssessFailure(result, wt) {
   if (!ASSESS_PARTIAL_BRANCHES) return false
   if (!wt?.branch || !wt?.worktreePath) return false
   if (!result || !['failed', 'halted'].includes(result.status)) return false
-  if (result.stage === 'worktree' || result.stage === 'worktree-write' || result.stage === 'auth' || result.stage === 'provider' || result.status === 'fatal-auth' || result.status === 'provider-fault') return false
+  if (result.stage === 'worktree' || result.stage === 'worktree-write' || result.stage === 'auth' || result.stage === 'provider' || result.stage === 'infrastructure' || result.status === 'fatal-auth' || result.status === 'provider-fault' || result.status === 'infra-fault') return false
   const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
-  return !authFailureDetail(detail) && !providerFailureDetail(detail)
+  return !authFailureDetail(detail) && !providerFailureDetail(detail) && !infrastructureFailureDetail(detail)
 }
 
 async function attachAssessment(task, wt, result) {
@@ -1287,11 +1335,11 @@ async function attachAssessment(task, wt, result) {
   phase('Assess')
   const evidence = await collectAssessmentEvidence(task, wt)
   try {
-    const assessment = await agent(assessmentPrompt(task, wt, result, evidence), assessmentAgentOptions({
+    const assessment = await withInfraRetry(() => agent(assessmentPrompt(task, wt, result, evidence), assessmentAgentOptions({
       phase: 'Assess',
       label: `assess:${task.id}`,
       schema: ASSESSMENT_SCHEMA,
-    }))
+    })), `assess:${task.id}`)
     if (!assessment) {
       return { ...result, assessmentError: 'assessment agent returned no structured output', assessmentEvidence: evidence }
     }
@@ -1785,7 +1833,7 @@ async function runRecovery(root, mergeLock = null) {
     const stage = decision.stage || 'review'
     log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline`)
     const outcome = await executeResume(task, candidate, enriched, evidence, stage, mergeLock)
-    if (outcome.status === 'fatal-auth' || outcome.status === 'provider-fault') {
+    if (outcome.status === 'fatal-auth' || outcome.status === 'provider-fault' || outcome.status === 'infra-fault') {
       summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status })
       return { summary, taskResults, held, fatal: outcome }
     }
@@ -2066,11 +2114,11 @@ async function runPlanDesignLoop(task, worktree, opts = {}) {
   let designVerdict = null
   for (let round = 1; round <= MAX_DESIGN_ROUNDS; round++) {
     phase('Plan')
-    plan = await planningLock(() => agent(planPrompt(task, worktree, designVerdict, round, opts), planAgentOptions({
+    plan = await planningLock(() => withInfraRetry(() => agent(planPrompt(task, worktree, designVerdict, round, opts), planAgentOptions({
       phase: 'Plan',
       label: `plan:${tag} r${round}`,
       schema: PLAN_SCHEMA,
-    })))
+    })), `plan:${tag} r${round}`))
     if (!plan) return { fail: { id: tag, status: 'failed', stage: 'plan', detail: 'planner returned nothing', worktree, proposals: [], ...extra } }
     if (!await fileExists(plan.execplanPath, worktree)) {
       return {
@@ -2101,11 +2149,11 @@ async function runPlanDesignLoop(task, worktree, opts = {}) {
     }
 
     phase('Design Review')
-    designVerdict = await planningLock(() => agent(designReviewPrompt(task, worktree, plan, round), reviewAgentOptions({
+    designVerdict = await planningLock(() => withInfraRetry(() => agent(designReviewPrompt(task, worktree, plan, round), reviewAgentOptions({
       phase: 'Design Review',
       label: `design-review:${tag} r${round}`,
       schema: DESIGN_VERDICT_SCHEMA,
-    })))
+    })), `design-review:${tag} r${round}`))
     if (designVerdict?.satisfied) {
       log(`[task ${tag}] design approved in round ${round}`)
       // Deterministic bookkeeping owned by the control loop: record the
@@ -2146,11 +2194,11 @@ async function runImplementationStage(task, worktree, plan, opts = {}) {
   const tag = task.id
   const extra = opts.extra || {}
   phase('Implement')
-  const impl = await buildLock(() => agent(implementPrompt(task, worktree, plan, opts), buildAgentOptions({
+  const impl = await buildLock(() => withInfraRetry(() => agent(implementPrompt(task, worktree, plan, opts), buildAgentOptions({
     phase: 'Implement',
     label: `implement:${tag}`,
     schema: IMPL_SCHEMA,
-  })))
+  })), `implement:${tag}`))
   const authDetail = implementationAuthFailureDetail(impl)
   if (authDetail) {
     return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
@@ -2237,9 +2285,21 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
   const reviewRounds = []
   let reviewsPass = false
   for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
+    // parallel() resolves a thrown thunk to null, which would make an adapter
+    // timeout indistinguishable from a reviewer that returned nothing — so
+    // each reviewer retries infra faults and records any residual one here.
+    const reviewInfraFaults = []
+    const runReviewAgent = (promptText, reviewPhase, label) => () =>
+      withInfraRetry(() => agent(promptText, reviewAgentOptions({ phase: reviewPhase, label, schema: REVIEW_SCHEMA })), label)
+        .catch((error) => {
+          const message = (error && error.message) || String(error)
+          if (!infrastructureFailureDetail(message)) throw error
+          reviewInfraFaults.push(`${label}: ${message}`)
+          return null
+        })
     const [codeReview, expertReview] = await parallel([
-      () => agent(codeReviewPrompt(task, worktree, plan), reviewAgentOptions({ phase: 'Code Review', label: `code-review:${tag} r${round}`, schema: REVIEW_SCHEMA })),
-      () => agent(expertReviewPrompt(task, worktree, plan), reviewAgentOptions({ phase: 'Expert Review', label: `expert-review:${tag} r${round}`, schema: REVIEW_SCHEMA })),
+      runReviewAgent(codeReviewPrompt(task, worktree, plan), 'Code Review', `code-review:${tag} r${round}`),
+      runReviewAgent(expertReviewPrompt(task, worktree, plan), 'Expert Review', `expert-review:${tag} r${round}`),
     ])
     for (const r of [codeReview, expertReview]) {
       if (r?.proposedRoadmapItems?.length) proposals.push(...r.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
@@ -2250,6 +2310,18 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
         !expertReview ? 'expert review' : null,
       ].filter(Boolean).join(' and ')
       reviewRounds.push({ round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking: [], fix: null })
+      if (reviewInfraFaults.length) {
+        return {
+          id: tag,
+          status: 'infra-fault',
+          stage: 'review',
+          detail: `dual review interrupted by infrastructure fault(s): ${reviewInfraFaults.join('; ')}; the branch is untouched — relaunch with resumeMode: "continue" to re-run review from the committed state`,
+          reviewRounds,
+          worktree,
+          proposals,
+          ...kindExtra,
+        }
+      }
       return {
         id: tag,
         status: 'failed',
@@ -2275,7 +2347,7 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
     log(`[task ${tag}] review round ${round}: ${blocking.length} blocking item(s)`)
     if (round === MAX_REVIEW_ROUNDS) break
     phase('Implement')
-    const fix = await buildLock(() => agent(fixPrompt(task, worktree, plan, blocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })))
+    const fix = await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, blocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`))
     roundRecord.fix = summarizeFixReport(fix)
   }
 
@@ -2302,7 +2374,7 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
   if (AUTO_MERGE) {
     const doIntegrate = () => {
       phase('Integrate')
-      return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
+      return buildLock(() => withInfraRetry(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })), `integrate:${tag}`))
     }
     integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
     if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
@@ -2362,7 +2434,7 @@ async function runTask(task, mergeLock) {
     }
 
     phase('Implement')
-    const impl = await buildLock(() => agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: 'Implement', label: `addendum:${tag}`, schema: IMPL_SCHEMA })))
+    const impl = await buildLock(() => withInfraRetry(() => agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: 'Implement', label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`))
     const authDetail = implementationAuthFailureDetail(impl)
     if (authDetail) {
       return {
@@ -2404,7 +2476,7 @@ async function runTask(task, mergeLock) {
     let addendumReview = null
     if (onlyDeferredReviewIssues) {
       phase('Code Review')
-      addendumReview = await agent(addendumReviewPrompt(task, worktree, impl), reviewAgentOptions({ phase: 'Code Review', label: `addendum-review:${tag}`, schema: REVIEW_SCHEMA }))
+      addendumReview = await withInfraRetry(() => agent(addendumReviewPrompt(task, worktree, impl), reviewAgentOptions({ phase: 'Code Review', label: `addendum-review:${tag}`, schema: REVIEW_SCHEMA })), `addendum-review:${tag}`)
       if (addendumReview?.proposedRoadmapItems?.length) {
         proposals.push(...addendumReview.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
       }
@@ -2418,7 +2490,7 @@ async function runTask(task, mergeLock) {
     if (AUTO_MERGE) {
       const doIntegrate = () => {
         phase('Integrate')
-        return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
+        return buildLock(() => withInfraRetry(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })), `integrate:${tag}`))
       }
       integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
       if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
@@ -2810,7 +2882,7 @@ if (RESUME_PARTIAL_BRANCHES && !halted) {
     if (outcome.fatal) {
       results.push(outcome.fatal)
       halted = `recovery ${outcome.fatal.status} at ${outcome.fatal.stage}: ${outcome.fatal.detail}`
-      if (outcome.fatal.status === 'provider-fault') providerFaultHalt = true
+      if (outcome.fatal.status === 'provider-fault' || outcome.fatal.status === 'infra-fault') providerFaultHalt = true
       stop = true
     }
   } catch (error) {
@@ -2863,6 +2935,14 @@ while (true) {
     stop = true
   } else if (result.status === 'provider-fault') {
     halted = `task ${done.id} provider fault at ${result.stage}: ${result.detail}`
+    providerFaultHalt = true
+    stop = true
+  } else if (result.status === 'infra-fault') {
+    // The agent process died (hung stream, killed CLI, reply-channel failure)
+    // after in-run retries — no evidence about the branch, so no assessment
+    // and no roadmap triage writes. The committed ExecPlan makes the branch
+    // resumable: relaunch with resumeMode "continue" to pick up where it died.
+    halted = `task ${done.id} infrastructure fault at ${result.stage}: ${result.detail}; branch state is durable — relaunch with resumeMode: "continue" to resume from the committed ExecPlan`
     providerFaultHalt = true
     stop = true
   } else if (!halted) {
@@ -2944,6 +3024,7 @@ return {
   // The exact deterministic gate set every branch agent was instructed to run
   // (issue #28): operators can audit reported gate greenness against it.
   commitGates: COMMIT_GATES,
+  stageAttempts: STAGE_ATTEMPTS,
   processed,
   results,
   assessments,
