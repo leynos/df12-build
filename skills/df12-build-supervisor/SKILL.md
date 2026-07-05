@@ -687,14 +687,17 @@ survivors, and every held id stays out of selection on relaunch too. The
 workflow surfaces this as `halted: needs-operator-recovery: …` with the ids in
 `recovery.unresolved`; treat that terminal state as your queue.
 
-Drive the pass from `recovery.unresolved` — it is exactly the set of live
-survivor branches still holding roadmap ids (reported classifications,
-`resume-failed` branches, and discovery holds such as `missing-worktree` and
-`candidate-cap`). Do NOT work through `recovery.skipped[]` wholesale:
-non-hold entries like `unmapped-branch` and `already-complete` are not
-actionable survivors. Use `recovery.results[]`, `results[]`, and
-`assessments[]` as the evidence for each unresolved id, and choose exactly
-one disposition per survivor:
+Drive the pass from `recovery.unresolved` and any live survivor branches on
+disk (reported classifications, `resume-failed` branches, and holds such as
+`missing-worktree`). Keep discovery-only entries such as `candidate-cap` out
+of the disposition loop: a capped candidate was never assessed, so there is
+no evidence to classify it against — raise `resumeMaxCandidates` and
+relaunch so the next recovery pass assesses it, and do NOT work through
+`recovery.skipped[]` wholesale (non-hold entries like `unmapped-branch` and
+`already-complete` are not actionable survivors at all). Use
+`recovery.results[]`, `results[]`, and `assessments[]` as the evidence for
+each remaining unresolved id, and choose exactly one disposition per
+survivor:
 
 1. **Close/integrate** — for `adopt-complete` and `resume-failed` branches
    whose remaining blockers are mechanical: retry or supersede any deferred
