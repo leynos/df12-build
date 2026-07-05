@@ -5,8 +5,9 @@
 // from tests/fixtures/recovery-repo.mjs.
 
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
@@ -65,12 +66,16 @@ return {
   verifyWorktreeCommitted,
   runPlanDesignLoop,
   runImplementationStage,
+  runDualReviewAndIntegration,
   runRecovery,
 }
 `,
   )
   return factory(
-    args,
+    // Host review defaults OFF here: several tests drive the review and
+    // integration pipeline against fixture repos, and the host review would
+    // exec the REAL coderabbit CLI on PATH and burn review quota.
+    { coderabbitHostReview: false, ...args },
     () => {},
     () => {},
     agentImpl,
@@ -1276,6 +1281,69 @@ test('the plan loop bounces an uncommitted plan with foreign dirt back to the pl
     /^Status: APPROVED$/m,
     'approval leaves a committed APPROVED status',
   )
+})
+
+test('host-run CodeRabbit findings drive a fix round through the real CLI seam', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'COMPLETE' })
+  const worktree = repo.parserWorktree
+
+  // Fake coderabbit on PATH: one major finding on the first review, clean on
+  // the re-review after the fix round. NDJSON matches the pinned contract.
+  const bin = mkdtempSync(path.join(tmpdir(), 'df12-cr-bin-'))
+  const countFile = path.join(bin, 'count')
+  writeFileSync(path.join(bin, 'coderabbit'), [
+    '#!/bin/sh',
+    `count_file="${countFile}"`,
+    'n=$(cat "$count_file" 2>/dev/null || echo 0)',
+    'n=$((n+1)); echo $n > "$count_file"',
+    'if [ "$n" -eq 1 ]; then',
+    `  echo '{"type":"finding","severity":"major","fileName":"src/a.rs","comment":"guard the index"}'`,
+    `  echo '{"type":"complete","status":"reviewed","findings":1}'`,
+    'else',
+    `  echo '{"type":"complete","status":"reviewed","findings":0}'`,
+    'fi',
+    '',
+  ].join('\n'))
+  chmodSync(path.join(bin, 'coderabbit'), 0o755)
+
+  const labels = []
+  const fixPrompts = []
+  const agentImpl = async (prompt, opts = {}) => {
+    labels.push(opts.label || '')
+    if (opts.label?.startsWith('code-review:') || opts.label?.startsWith('expert-review:')) {
+      return { verdict: 'pass', blocking: [], summary: 'ship it' }
+    }
+    if (opts.label?.startsWith('fix:')) {
+      fixPrompts.push(prompt)
+      return { gatesGreen: true, commits: ['Guard the index'], coderabbitRuns: 0, resolved: ['guard'], openIssues: [], summary: 'fixed' }
+    }
+    if (opts.label?.startsWith('integrate:')) {
+      return { ok: true, roadmapMarkedDone: true, rebased: true, squashMerged: true, mergeSha: 'feed', pushed: true, conflicts: '', summary: 'merged' }
+    }
+    throw new Error(`unexpected label: ${opts.label}`)
+  }
+  const surface = await loadRecoverySurface({ coderabbitHostReview: true }, agentImpl)
+
+  const previousPath = process.env.PATH
+  process.env.PATH = `${bin}:${previousPath}`
+  let outcome
+  try {
+    outcome = await surface.runDualReviewAndIntegration(
+      { id: '1.2.3', title: 'Parser' },
+      worktree,
+      { execplanPath: PARSER_PLAN },
+      { ok: true, gatesGreen: true },
+      null,
+    )
+  } finally {
+    process.env.PATH = previousPath
+  }
+
+  assert.equal(outcome.status, 'done', JSON.stringify(outcome))
+  assert.equal(readFileSync(countFile, 'utf8').trim(), '2', 'the committed diff is re-reviewed after the fix round')
+  assert.ok(labels.some((label) => label.startsWith('fix:1.2.3 r1')), 'the CodeRabbit finding forces a fix round')
+  assert.match(fixPrompts[0], /CodeRabbit \(major\) src\/a\.rs: guard the index/, 'the fix agent sees the finding verbatim')
+  assert.equal(outcome.openIssues, undefined, 'no deferred-review issue on a clean pass')
 })
 
 test('a green implementation that leaves uncommitted state fails the durability gate', async () => {

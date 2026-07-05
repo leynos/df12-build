@@ -43,11 +43,15 @@ agents, four build-stage agents, and review, triage, audit, or assessment
 slack. Keep `maxAgents` high (such as the ODW default of `1000`) because it is
 the per-run dispatch guard rather than the live process-pool size.
 
-Set the adapter `timeout` high enough for the workflow's CodeRabbit policy.
-Implementation agents may legitimately wait through three 45-90 minute
-CodeRabbit rate-limit backoffs using `vsleep`, so a one-hour adapter timeout can
-kill a healthy task. A normal long-running workshop should use a timeout of at
-least `21600` seconds unless the operator deliberately wants a shorter cap.
+Set the adapter `timeout` with the CodeRabbit flow in mind. With the default
+host-run CodeRabbit review (`coderabbitHostReview`, see the configuration
+list), agents never wait on CodeRabbit — the host absorbs rate-limit backoff
+in its own wall-clock — so the adapter timeout only needs to cover honest
+stage work; 4500–5400 seconds (75–90 minutes) is generous, and a longer
+silent stream is a hung connection, not progress. Only when
+`coderabbitHostReview=false` do implementation agents wait through 45–90
+minute CodeRabbit backoffs with `vsleep` themselves, and then the timeout
+must be at least `21600` seconds to avoid killing a healthy task mid-backoff.
 
 Make sure every adapter named by `args.json` exists in `odw.config.json` or in
 ODW's built-in adapter set. The checked-in ODW workflow now defaults planning
@@ -346,6 +350,19 @@ Common arguments:
   schema-retry exhaustion). Defaults to `2`. Product failures are never
   retried, and integration is never retried because its push to
   `origin/<base>` is not idempotent.
+- `coderabbitHostReview`: when `true` (the default), the workflow host runs
+  `coderabbit review --agent` against each task's committed work instead of
+  asking agents to babysit CodeRabbit. Rate-limit backoff is absorbed as host
+  wall-clock (zero agent tokens), and blocking findings feed the fix rounds.
+  Set `false` to restore the legacy agent-run flow.
+- `coderabbitAttempts`: total host review attempts when CodeRabbit rate
+  limits. Defaults to `3`.
+- `coderabbitBackoffMinutes`: `[low, high]` range for the deterministic
+  backoff wait between rate-limited attempts. Defaults to `[45, 90]`.
+- `coderabbitFindingsFile`: optional absolute path to an append-only JSONL
+  file recording every CodeRabbit finding (timestamp, task, severity, file,
+  comment). Point it at a sidecar file to accumulate findings across runs and
+  tune deterministic lint rules from the recurring classes.
 - `taskId`: run exactly one roadmap task.
 - `dryRun`: when `true`, plan, review, and audit without implementation,
   integration, or document writes.
@@ -420,6 +437,30 @@ Example `args.json`:
   "reviewModel": "claude-opus-4-8"
 }
 ```
+
+## Host-run CodeRabbit review
+
+By default the workflow host — not the task agents — runs
+`coderabbit review --agent --type committed` against each task branch: once
+per dual-review round (alongside the code and expert reviewers) and once per
+addendum implementation. Because only committed changes are reviewed, the
+ExecPlan durability contract doubles as the review contract. The host parses
+the CLI's structured findings; `critical` and `major` severities join the
+reviewers' blocking items and drive the ordinary fix rounds, while lower
+severities are captured without gating integration.
+
+Rate limits are absorbed by the host: a rate-limited review waits a
+deterministic 45–90 minutes (`coderabbitBackoffMinutes`) and retries, up to
+`coderabbitAttempts` total attempts, costing wall-clock but zero agent
+tokens. A rate limit that outlives every attempt — or a CLI fault — defers
+the review with a documented `openIssues` entry on the task result instead of
+blocking integration; the dual reviewers remain decisive. A CodeRabbit
+authentication failure halts the task as `fatal-auth`.
+
+The run result's `coderabbit` object reports the effective configuration and
+bounded counters (reviews run, findings by severity, rate-limited runs,
+deferred reviews). When `coderabbitFindingsFile` is set, every finding is
+also appended as JSONL for cross-run linter tuning.
 
 ## Recovery model
 

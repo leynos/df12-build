@@ -53,8 +53,11 @@ provides the doc skills):
   typecheck, test), and `make markdownlint` + `make nixie` (markdown + mermaid
   gates) run whenever markdown changes. If a project names its gate
   differently, it is not yet df12-conformant — align it first.
-- **`coderabbit review --agent`** as the per-work-item AI review (a shared,
-  rate-limited quota — see the throughput note below).
+- **`coderabbit review --agent`** as the AI review (a shared, rate-limited
+  quota — see the throughput note below). With `coderabbitHostReview` on (the
+  workflow default) the HOST runs it against committed work per review round
+  and absorbs rate-limit backoff in wall-clock; agents run it themselves only
+  in the legacy `coderabbitHostReview=false` flow.
 - **`git donkey`** for worktree/branch creation (leynos/git-donkey).
 - **The skill toolchain** (installed from `agent-helper-scripts` via
   `install-skills` / `install-sub-agents`): `execplans`,
@@ -108,11 +111,12 @@ provides the doc skills):
    proven change back to the `df12-build` repository as an ordinary branch.
    For normal Codex and Claude Code workshops, set ODW `concurrency` to `16`;
    keep `maxAgents` high (for example `1000`) because it is the per-run
-   dispatch guard, not the live process-pool size. Set the adapter `timeout`
-   high enough for CodeRabbit's expected rate-limit backoff: agents may
-   legitimately sleep for three 45-90 minute retries, so a one-hour timeout can
-   kill healthy work. Use `21600` seconds for ordinary long-running workshops
-   unless you deliberately want a shorter cap.
+   dispatch guard, not the live process-pool size. With host-run CodeRabbit
+   review (the default), agents never wait on CodeRabbit, so the adapter
+   `timeout` only needs to cover honest stage work — see the timeout
+   recommendation below. Only with `coderabbitHostReview=false` do agents
+   sleep through three 45–90 minute CodeRabbit retries themselves, and then
+   the timeout must be `21600` seconds to avoid killing healthy work.
 
    When copying a newer workflow into an existing sidecar, audit `args.json`
    before relaunch. Stale `planAdapter`, `reviewAdapter`, or
@@ -169,6 +173,18 @@ provides the doc skills):
    `worktreeWritePreflight` (host-verified probe that the plan and build
    adapters can write into sibling task worktrees; on by default).
 
+   CodeRabbit knobs: `coderabbitHostReview` (default on — the host runs
+   `coderabbit review --agent --type committed` per review round and per
+   addendum, absorbs rate-limit backoff in wall-clock with zero agent tokens,
+   and feeds `critical`/`major` findings into the fix rounds; a rate limit
+   that outlives the attempts defers with an `openIssues` entry rather than
+   blocking, and a CodeRabbit auth failure halts as `fatal-auth`),
+   `coderabbitAttempts` (default 3), `coderabbitBackoffMinutes` (default
+   `[45, 90]`), and `coderabbitFindingsFile` (point it at a durable sidecar
+   JSONL file, e.g. `$SIDECAR/coderabbit-findings.jsonl`, to accumulate
+   findings across runs for linter tuning — recurring finding classes are
+   candidates for deterministic lint rules).
+
    Set the ODW adapter `timeout` (in the ODW config, not workflow args) well
    below its 6-hour default. ODW has no per-call timeout, so the workflow's
    `stageAttempts` retry can only begin after the adapter kills the process —
@@ -207,7 +223,11 @@ Every time a run completes you do the same loop:
    run — audit reported gate greenness against it), `stageAttempts` (the
    in-run retry budget for stage agents that die on infrastructure faults;
    a result with `status: "infra-fault"` means the fault outlived that budget
-   and carries no evidence about the branch), `halted` (null on a clean
+   and carries no evidence about the branch), `coderabbit` (host-review
+   configuration plus counters: reviews run, findings by severity,
+   rate-limited runs, deferred reviews — rising `deferred` means the quota is
+   exhausted and wall-clock is absorbing it; check the task results'
+   `openIssues` for the deferral evidence), `halted` (null on a clean
    stop; `needs-operator-recovery: …` when unresolved recovery survivors still
    block the frontier), `audits[]`, `remediationTriage[]`, `pendingProposals`
    (proposals left unwritten because the run halted — triage them manually
@@ -531,8 +551,9 @@ reviewer.
     boundary when there are two), correct the fact in the task so the planner
     cannot repeat it.
 - **Implement halt** (often a turn-budget/size issue): a task with many work
-  items, each gated by `make all` + a per-item coderabbit review, can exceed
-  one agent turn. Check `result.assessment` before decomposing the task. A
+  items, each gated by `make all` (plus a per-item coderabbit review in the
+  legacy `coderabbitHostReview=false` flow), can exceed one agent turn.
+  Check `result.assessment` before decomposing the task. A
   timeout may leave a coherent partial slice worth preserving, but the roadmap
   task stays unchecked unless its success criterion is complete and gates/review
   prove it. If the assessment does not identify useful partial work, decompose

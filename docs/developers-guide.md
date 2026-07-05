@@ -121,6 +121,20 @@ writes. Never wrap the integration agent in `withInfraRetry` — its push to
 `origin/<base>` is not idempotent, and a source-invariant test pins both call
 sites as unwrapped.
 
+Host-run CodeRabbit review (`coderabbitHostReview`, default on) moves the
+CLI invocation from agent prompts to the control loop: `coderabbit review
+--agent --type committed` runs per dual-review round and per addendum, its
+NDJSON events are parsed host-side (the CLI exits 0 even on fatal errors, so
+classification must read events, never exit codes), `critical`/`major`
+findings join the fix-round blocking items, and rate-limit backoff sleeps in
+host wall-clock with deterministic jitter (`Math.random()`, `Date.now()`, and
+arg-less `new Date()` are banned by ODW's `scanDualCompat` for Claude Code
+dual-compatibility — hash a seed instead, and shell out to `date` for
+timestamps). Test loaders and the simulation driver force
+`coderabbitHostReview: false` so fixture runs can never invoke the real CLI
+and burn review quota; the pipeline seam is covered by a fake NDJSON-emitting
+`coderabbit` on `PATH`.
+
 The run result exposes the contract for operators and tests: `commitGates`
 (the effective deterministic gate list; agents must never assume `make all`
 aggregates a project's gates), `stageAttempts`, bounded-cardinality

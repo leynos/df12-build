@@ -49,6 +49,18 @@ return {
   fileState,
   readExecplanState,
   execplanRelPath,
+  CODERABBIT_HOST_REVIEW,
+  CODERABBIT_ATTEMPTS,
+  CODERABBIT_BACKOFF_MINUTES,
+  parseCoderabbitAgentOutput,
+  classifyCoderabbitOutcome,
+  coderabbitBackoffMinutes,
+  runCoderabbitHostReview,
+  recordCoderabbitReview,
+  coderabbitBlockingItems,
+  coderabbitCapture,
+  implementPrompt,
+  fixPrompt,
   resultFromUnhandledAgentError,
   isDeferredReviewIssue,
   hasOnlyDeferredReviewIssues,
@@ -315,6 +327,175 @@ test('integration is never retried on infrastructure faults', async () => {
   assert.doesNotMatch(source, /withInfraRetry\([^\n]*integratePrompt/)
   const bareCalls = source.match(/buildLock\(\(\) => agent\(integratePrompt\(task, worktree\)/g) || []
   assert.equal(bareCalls.length, 2, 'both integrate call sites (normal and addendum) stay unwrapped')
+})
+
+test('the CodeRabbit NDJSON parser reads the pinned agent wire contract', async () => {
+  const surface = await loadAssessmentSurface()
+  // Event sequence captured from a live `coderabbit review --agent` probe,
+  // plus a finding event and junk lines the parser must tolerate.
+  const stdout = [
+    '{"type":"review_context","reviewType":"committed","currentBranch":"roadmap-1-2-3","baseBranch":"main","workingDirectory":"/tmp/wt"}',
+    '{"type":"status","phase":"setup","status":"reviewing"}',
+    '{"type":"heartbeat","status":"reviewing"}',
+    'not json at all',
+    '{"type":"finding","severity":"major","fileName":"src/parser.rs","comment":"Off-by-one in the range check"}',
+    '{"type":"finding","severity":"info","fileName":"README.md","comment":"nit","suggestions":[{"a":1}]}',
+    '{"type":"complete","status":"reviewed","findings":2}',
+    '',
+  ].join('\n')
+  const parsed = surface.parseCoderabbitAgentOutput(stdout)
+  assert.equal(parsed.events.length, 6)
+  assert.deepEqual(parsed.rawLines, ['not json at all'])
+  assert.equal(parsed.findings.length, 2)
+  assert.equal(parsed.complete.findings, 2)
+  assert.equal(parsed.error, null)
+})
+
+test('CodeRabbit outcomes classify from events, never exit codes', async () => {
+  const surface = await loadAssessmentSurface()
+  const ok = { ok: true, stdout: '', stderr: '' }
+  const complete = '{"type":"complete","status":"reviewed","findings":0}'
+  const finding = '{"type":"finding","severity":"minor","fileName":"a.js","comment":"x"}'
+
+  const rows = [
+    // The CLI exits 0 even on fatal errors, so ok:true with a rate_limit
+    // error event must still classify as rate-limited.
+    [{ ...ok, stdout: '{"type":"error","errorType":"rate_limit","message":"Review limit reached","recoverable":true}' }, 'rate-limited'],
+    [{ ok: false, stdout: '', stderr: 'Review limit reached — try again later', message: '' }, 'rate-limited'],
+    [{ ...ok, stdout: '{"type":"error","errorType":"unknown","message":"Run `coderabbit auth login` to authenticate","recoverable":false}' }, 'auth'],
+    [{ ...ok, stdout: '{"type":"error","errorType":"unknown","message":"Failed to get branch information","recoverable":false}' }, 'error'],
+    [{ ok: false, stdout: '', stderr: '', message: 'spawn coderabbit ENOENT' }, 'error'],
+    [{ ...ok, stdout: complete }, 'clean'],
+    [{ ...ok, stdout: `${finding}\n${complete.replace('0', '1')}` }, 'findings'],
+  ]
+  for (const [execResult, expected] of rows) {
+    const parsed = surface.parseCoderabbitAgentOutput(execResult.stdout)
+    assert.equal(surface.classifyCoderabbitOutcome(execResult, parsed), expected, JSON.stringify(execResult))
+  }
+})
+
+test('CodeRabbit backoff jitter is deterministic, seeded, and range-bound', async () => {
+  const surface = await loadAssessmentSurface()
+  assert.deepEqual(surface.CODERABBIT_BACKOFF_MINUTES, [45, 90])
+  const first = surface.coderabbitBackoffMinutes('coderabbit:1.2.3 r1#1')
+  assert.equal(surface.coderabbitBackoffMinutes('coderabbit:1.2.3 r1#1'), first, 'same seed, same wait')
+  const seeds = ['a#1', 'a#2', 'b#1', 'coderabbit:9.9.9 r3#2']
+  for (const seed of seeds) {
+    const minutes = surface.coderabbitBackoffMinutes(seed)
+    assert.ok(minutes >= 45 && minutes <= 90, `${seed} -> ${minutes}`)
+  }
+  const narrow = await loadAssessmentSurface({ coderabbitBackoffMinutes: [1, 2] })
+  const minutes = narrow.coderabbitBackoffMinutes('x#1')
+  assert.ok(minutes >= 1 && minutes <= 2)
+})
+
+test('the host review loop backs off on rate limits and stops at the attempt cap', async () => {
+  const surface = await loadAssessmentSurface()
+  assert.equal(surface.CODERABBIT_HOST_REVIEW, true)
+  assert.equal(surface.CODERABBIT_ATTEMPTS, 3)
+
+  const rateLimited = { ok: true, stdout: '{"type":"error","errorType":"rate_limit","message":"Review limit reached"}', stderr: '' }
+  const clean = { ok: true, stdout: '{"type":"complete","status":"reviewed","findings":0}', stderr: '' }
+
+  // Transient: two rate limits, then a clean review on the final attempt.
+  const execCalls = []
+  const sleeps = []
+  let replies = [rateLimited, rateLimited, clean]
+  const deps = {
+    exec: async (command, commandArgs, options) => {
+      execCalls.push({ command, commandArgs, cwd: options.cwd })
+      return replies.shift()
+    },
+    sleep: async (minutes) => { sleeps.push(minutes) },
+  }
+  const review = await surface.runCoderabbitHostReview('/tmp/wt', 'coderabbit:1.2.3 r1', deps)
+  assert.equal(review.outcome, 'clean')
+  assert.equal(review.attempts, 3)
+  assert.equal(execCalls.length, 3)
+  assert.deepEqual(execCalls[0].commandArgs, ['review', '--agent', '--type', 'committed', '--base', 'main'])
+  assert.equal(execCalls[0].cwd, '/tmp/wt')
+  assert.equal(sleeps.length, 2)
+  for (const minutes of sleeps) assert.ok(minutes >= 45 && minutes <= 90)
+
+  // Persistent: the rate limit survives every attempt and is returned, not
+  // slept on again after the final attempt.
+  replies = [rateLimited, rateLimited, rateLimited]
+  sleeps.length = 0
+  const exhausted = await surface.runCoderabbitHostReview('/tmp/wt', 'coderabbit:1.2.3 r2', deps)
+  assert.equal(exhausted.outcome, 'rate-limited')
+  assert.equal(exhausted.attempts, 3)
+  assert.equal(sleeps.length, 2)
+  assert.match(exhausted.detail, /Review limit reached/)
+
+  // Auth failures never sleep: the run must halt, not wait 45 minutes.
+  replies = [{ ok: true, stdout: '{"type":"error","errorType":"unknown","message":"Run `coderabbit auth login`"}', stderr: '' }]
+  sleeps.length = 0
+  const auth = await surface.runCoderabbitHostReview('/tmp/wt', 'coderabbit:1.2.3 r3', deps)
+  assert.equal(auth.outcome, 'auth')
+  assert.equal(sleeps.length, 0)
+})
+
+test('only critical and major CodeRabbit findings block; the rest are captured only', async () => {
+  const surface = await loadAssessmentSurface()
+  const findings = [
+    { severity: 'critical', fileName: 'a.rs', comment: 'UB on empty input' },
+    { severity: 'major', fileName: 'b.rs', codegenInstructions: 'guard the index' },
+    { severity: 'minor', fileName: 'c.rs', comment: 'naming nit' },
+    { severity: 'trivial', fileName: 'd.rs', comment: 'whitespace' },
+    { severity: 'info', fileName: 'e.rs', comment: 'fyi' },
+  ]
+  const blocking = surface.coderabbitBlockingItems(findings)
+  assert.equal(blocking.length, 2)
+  assert.match(blocking[0], /^CodeRabbit \(critical\) a\.rs: UB on empty input/)
+  assert.match(blocking[1], /^CodeRabbit \(major\) b\.rs: guard the index/)
+})
+
+test('CodeRabbit findings are captured to the JSONL sink and the run aggregate', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'df12-cr-findings-'))
+  const sink = path.join(dir, 'coderabbit-findings.jsonl')
+  const surface = await loadAssessmentSurface({ coderabbitFindingsFile: sink })
+
+  await surface.recordCoderabbitReview('1.2.3 r1', {
+    outcome: 'findings',
+    attempts: 1,
+    findings: [
+      { severity: 'major', fileName: 'src/a.rs', comment: 'boom', suggestions: [{ x: 1 }] },
+      { severity: 'info', fileName: 'docs/b.md', comment: 'nit' },
+    ],
+    detail: '',
+  })
+  await surface.recordCoderabbitReview('1.2.3 r2', { outcome: 'rate-limited', attempts: 3, findings: [], detail: 'Review limit reached' })
+
+  assert.deepEqual(
+    { ...surface.coderabbitCapture, bySeverity: { ...surface.coderabbitCapture.bySeverity } },
+    { reviews: 2, findings: 2, rateLimitedRuns: 1, deferred: 0, bySeverity: { major: 1, info: 1 }, sinkError: '' },
+  )
+  const lines = readFileSync(sink, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+  assert.equal(lines.length, 2)
+  assert.equal(lines[0].severity, 'major')
+  assert.equal(lines[0].file, 'src/a.rs')
+  assert.equal(lines[0].comment, 'boom')
+  assert.equal(lines[0].suggestions, 1)
+  assert.equal(lines[0].label, '1.2.3 r1')
+  assert.match(lines[0].ts, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
+})
+
+test('host review flips the prompts from agent-run CodeRabbit to host-run', async () => {
+  const task = { id: '1.2.3', title: 'Parser' }
+  const plan = { execplanPath: 'docs/execplans/roadmap-1-2-3.md' }
+
+  const hosted = await loadAssessmentSurface()
+  const hostedImplement = hosted.implementPrompt(task, '/tmp/wt', plan)
+  assert.match(hostedImplement, /Do NOT run coderabbit yourself/)
+  assert.doesNotMatch(hostedImplement, /summon `scrutineer` to run `coderabbit review --agent`/)
+  assert.match(hosted.fixPrompt(task, '/tmp/wt', plan, ['item'], 1), /Do NOT run coderabbit yourself/)
+  assert.match(hosted.implementAddendumPrompt({ id: '1.2.3', subtasks: [{ id: '1.2.3.1' }] }, '/tmp/wt'), /Do NOT run coderabbit yourself/)
+
+  const legacy = await loadAssessmentSurface({ coderabbitHostReview: false })
+  assert.equal(legacy.CODERABBIT_HOST_REVIEW, false)
+  const legacyImplement = legacy.implementPrompt(task, '/tmp/wt', plan)
+  assert.match(legacyImplement, /coderabbit review --agent/)
+  assert.doesNotMatch(legacyImplement, /Do NOT run coderabbit yourself/)
 })
 
 test('recoverable review faults classify as deferred review issues', async () => {

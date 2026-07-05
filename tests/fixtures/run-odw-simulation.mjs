@@ -163,7 +163,10 @@ try {
     pipeline,
     (title) => phases.push(title),
     () => {},
-    scenario.args || {},
+    // Host review defaults OFF in simulations: it would invoke the REAL
+    // coderabbit CLI on PATH and burn review quota. A scenario that wants it
+    // must opt in AND provide a fake `coderabbit` via pathPrefix.
+    { coderabbitHostReview: false, ...(scenario.args || {}) },
     { total: null, spent: () => 0, remaining: () => Infinity },
     async () => {
       throw new Error('nested workflow not scripted')

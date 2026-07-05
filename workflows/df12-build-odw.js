@@ -98,6 +98,21 @@ const AUTH_REQUIRED_ADAPTERS = new Set([
   ASSESSMENT_ADAPTER,
 ].map((adapter) => String(adapter || '').toLowerCase()))
 const CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || 'coderabbit review --agent'
+// Host-run CodeRabbit review: the control loop invokes the CLI against
+// committed work, absorbs rate-limit backoff in host wall-clock instead of
+// agent tokens, and feeds actionable findings back into the fix rounds.
+// coderabbitHostReview=false restores the legacy agent-run flow.
+const CODERABBIT_HOST_REVIEW = cfg.coderabbitHostReview !== false
+const CODERABBIT_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.coderabbitAttempts) || 3)) // total attempts per host review when rate limited
+const CODERABBIT_BACKOFF_MINUTES = (() => {
+  const range = Array.isArray(cfg.coderabbitBackoffMinutes) ? cfg.coderabbitBackoffMinutes : []
+  const low = Math.max(1, Math.trunc(Number(range[0]) || 45))
+  const high = Math.max(low, Math.trunc(Number(range[1]) || 90))
+  return [low, high]
+})()
+// Optional durable JSONL sink for every CodeRabbit finding, so recurring
+// finding classes can be tuned into deterministic lint rules over time.
+const CODERABBIT_FINDINGS_FILE = String(cfg.coderabbitFindingsFile || '')
 // The deterministic commit-gate command set for the target project. `make all`
 // is the df12 house default, but it is NOT universal: some projects alias
 // `all` to a release build, so operators must be able to name the authoritative
@@ -108,12 +123,14 @@ const COMMIT_GATES = (Array.isArray(cfg.commitGates) && cfg.commitGates.length
 const COMMIT_GATE_TEXT = COMMIT_GATES.map((command) => `\`${command}\``).join(' then ')
 const COMMIT_GATE_GUIDANCE =
   `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well — NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.`
-const CODERABBIT_REVIEW_GUIDANCE =
-  'Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.'
+const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW
+  ? 'Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work — only committed changes reach the host review.'
+  : 'Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.'
 const SPARK_DELEGATION_GUIDANCE =
   "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
-const SCRUTINEER_DELEGATION_GUIDANCE =
-  `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`
+const SCRUTINEER_DELEGATION_GUIDANCE = CODERABBIT_HOST_REVIEW
+  ? `Delegate deterministic gate execution to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until the gates are green. ${CODERABBIT_REVIEW_GUIDANCE}`
+  : `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`
 
 function buildAgentOptions(options = {}) {
   return { adapter: BUILD_ADAPTER, model: BUILD_MODEL, ...options }
@@ -433,10 +450,10 @@ const REQUIRES_LINE_RE = /^\s*-\s+Requires\s+(.+?)\.?\s*$/
 const STEP_RANGE_RE = /\bsteps?\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)\b/gi
 const ROADMAP_ID_RE = /\b\d+(?:\.\d+)+\b/g
 
-async function execFileText(command, commandArgs) {
+async function execFileText(command, commandArgs, options = {}) {
   const { execFile } = process.getBuiltinModule('node:child_process')
   return await new Promise((resolve, reject) => {
-    execFile(command, commandArgs, { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile(command, commandArgs, { cwd: options.cwd || process.cwd(), maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
         error.stdout = stdout
         error.stderr = stderr
@@ -448,9 +465,9 @@ async function execFileText(command, commandArgs) {
   })
 }
 
-async function execFileStatus(command, commandArgs) {
+async function execFileStatus(command, commandArgs, options = {}) {
   try {
-    return { ok: true, stdout: await execFileText(command, commandArgs), stderr: '' }
+    return { ok: true, stdout: await execFileText(command, commandArgs, options), stderr: '' }
   } catch (error) {
     return {
       ok: false,
@@ -555,6 +572,138 @@ function resultFromUnhandledAgentError(id, detail, extra = {}) {
     proposals: [],
     ...extra,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Host-run CodeRabbit review. The CLI's --agent mode emits NDJSON events on
+// stdout and exits 0 even on fatal errors, so classification parses events,
+// never exit codes. Wire contract pinned against coderabbit CLI internals:
+//   {"type":"review_context"|"status"|"heartbeat"} — progress events
+//   {"type":"finding", severity: critical|major|minor|trivial|info,
+//    fileName, comment?, suggestions?, codegenInstructions?}
+//   {"type":"complete", status, findings: N, message?}
+//   {"type":"error", errorType ("rate_limit" for quota), message,
+//    recoverable, details?/metadata?{waitTime}}
+// ---------------------------------------------------------------------------
+function parseCoderabbitAgentOutput(stdout) {
+  const events = []
+  const rawLines = []
+  for (const line of String(stdout || '').split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    try {
+      const event = JSON.parse(trimmed)
+      if (event && typeof event === 'object') {
+        events.push(event)
+        continue
+      }
+    } catch {
+      // fall through: keep the raw line as evidence
+    }
+    rawLines.push(trimmed)
+  }
+  return {
+    events,
+    rawLines,
+    findings: events.filter((event) => event.type === 'finding'),
+    complete: events.find((event) => event.type === 'complete') || null,
+    error: events.find((event) => event.type === 'error') || null,
+  }
+}
+
+const CODERABBIT_BLOCKING_SEVERITIES = new Set(['critical', 'major'])
+
+// One of: 'clean' | 'findings' | 'rate-limited' | 'auth' | 'error'.
+function classifyCoderabbitOutcome(execResult, parsed) {
+  const errorText = [parsed.error?.message || '', execResult.stderr || '', execResult.message || ''].join('\n')
+  if (parsed.error?.errorType === 'rate_limit' || /\brate.?limit|review limit reached/i.test(errorText)) return 'rate-limited'
+  if (authFailureDetail(errorText)) return 'auth'
+  if (parsed.error || (!execResult.ok && !parsed.complete)) return 'error'
+  if (parsed.findings.length) return 'findings'
+  if (parsed.complete) return 'clean'
+  return 'error'
+}
+
+// Deterministic jitter in [low, high] minutes: Math.random() is banned for
+// Claude Code workflow dual-compatibility (ODW scanDualCompat), and a seeded
+// spread keeps sibling tasks from hammering the quota in lockstep.
+function coderabbitBackoffMinutes(seed) {
+  let hash = 5381
+  for (const ch of String(seed)) hash = ((hash * 33) ^ ch.codePointAt(0)) >>> 0
+  const [low, high] = CODERABBIT_BACKOFF_MINUTES
+  return low + (hash % (high - low + 1))
+}
+
+async function hostSleepMinutes(minutes) {
+  await new Promise((resolve) => setTimeout(resolve, minutes * 60000))
+}
+
+// Run one host review against the worktree's COMMITTED changes, absorbing
+// rate-limit backoff in host wall-clock (zero agent tokens). Returns
+// { outcome, attempts, findings, detail }. deps are injectable for tests.
+async function runCoderabbitHostReview(worktree, label, deps = {}) {
+  const exec = deps.exec || execFileStatus
+  const sleep = deps.sleep || hostSleepMinutes
+  const commandArgs = ['review', '--agent', '--type', 'committed', '--base', BASE]
+  for (let attempt = 1; ; attempt++) {
+    log(`[${label}] CodeRabbit host review attempt ${attempt} of ${CODERABBIT_ATTEMPTS}`)
+    const result = await exec('coderabbit', commandArgs, { cwd: worktree })
+    const parsed = parseCoderabbitAgentOutput(result.stdout)
+    const outcome = classifyCoderabbitOutcome(result, parsed)
+    if (outcome === 'rate-limited' && attempt < CODERABBIT_ATTEMPTS) {
+      const minutes = coderabbitBackoffMinutes(`${label}#${attempt}`)
+      log(`[${label}] CodeRabbit rate limited; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${CODERABBIT_ATTEMPTS} (wall-clock only, no agent tokens)`)
+      await sleep(minutes)
+      continue
+    }
+    const detail = outcome === 'clean' || outcome === 'findings'
+      ? ''
+      : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join('; ') || 'coderabbit produced no parsable outcome').trim()
+    return { outcome, attempts: attempt, findings: parsed.findings, detail }
+  }
+}
+
+// Bounded-cardinality run-result aggregate plus the optional durable JSONL
+// sink for linter tuning.
+const coderabbitCapture = { reviews: 0, findings: 0, rateLimitedRuns: 0, deferred: 0, bySeverity: {}, sinkError: '' }
+
+async function recordCoderabbitReview(label, review) {
+  coderabbitCapture.reviews += 1
+  if (review.outcome === 'rate-limited') coderabbitCapture.rateLimitedRuns += 1
+  for (const finding of review.findings) {
+    coderabbitCapture.findings += 1
+    const severity = String(finding.severity || 'unknown').toLowerCase()
+    coderabbitCapture.bySeverity[severity] = (coderabbitCapture.bySeverity[severity] || 0) + 1
+  }
+  if (!CODERABBIT_FINDINGS_FILE || !review.findings.length) return
+  // Wall-clock stamp shelled out to `date`: Date.now()/new Date() are banned
+  // for Claude Code workflow dual-compatibility (ODW scanDualCompat).
+  const stamp = await execFileStatus('date', ['-u', '+%Y-%m-%dT%H:%M:%SZ'])
+  const ts = stamp.ok ? stamp.stdout.trim() : ''
+  const lines = review.findings.map((finding) => JSON.stringify({
+    ts,
+    label,
+    severity: String(finding.severity || ''),
+    file: String(finding.fileName || ''),
+    comment: String(finding.comment || '').slice(0, 2000),
+    codegenInstructions: String(finding.codegenInstructions || '').slice(0, 2000),
+    suggestions: Array.isArray(finding.suggestions) ? finding.suggestions.length : 0,
+  }))
+  try {
+    const fs = process.getBuiltinModule('node:fs/promises')
+    await fs.appendFile(CODERABBIT_FINDINGS_FILE, `${lines.join('\n')}\n`, 'utf8')
+  } catch (error) {
+    coderabbitCapture.sinkError = (error && error.message) || String(error)
+    log(`[${label}] could not append CodeRabbit findings to ${CODERABBIT_FINDINGS_FILE}: ${coderabbitCapture.sinkError}`)
+  }
+}
+
+// Blocking severities become fix-round items; the rest are captured for the
+// findings sink and linter tuning but never gate integration.
+function coderabbitBlockingItems(findings) {
+  return (findings || [])
+    .filter((finding) => CODERABBIT_BLOCKING_SEVERITIES.has(String(finding.severity || '').toLowerCase()))
+    .map((finding) => `CodeRabbit (${finding.severity}) ${finding.fileName || 'unknown file'}: ${String(finding.comment || finding.codegenInstructions || 'see the recorded suggestions').slice(0, 500)}`)
 }
 
 function parseNameStatus(output) {
@@ -1054,9 +1203,13 @@ function implementPrompt(task, worktree, plan, opts = {}) {
     '',
     'For EACH execplan work item, in this exact order:',
     '  1. Implement the work item (code + tests + docs) per the plan and AGENTS.md.',
-    `  2. DETERMINISTIC GATE FIRST: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT}, plus any further gate targets AGENTS.md names). If it reports failures, fix them yourself (format, lint, typecheck, tests, audit) and summon \`scrutineer\` again until green. For any markdown you touched, also have \`scrutineer\` run \`make markdownlint\` and \`make nixie\` and fix failures. Do not proceed to coderabbit until the deterministic gates are green.`,
-    `  3. THEN summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. Address actionable feedback yourself (highest severity first). After applying fixes, summon \`scrutineer\` again to re-run the commit gates and confirm they are still green.`,
-    `     - ${CODERABBIT_REVIEW_GUIDANCE}`,
+    `  2. DETERMINISTIC GATE FIRST: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT}, plus any further gate targets AGENTS.md names). If it reports failures, fix them yourself (format, lint, typecheck, tests, audit) and summon \`scrutineer\` again until green. For any markdown you touched, also have \`scrutineer\` run \`make markdownlint\` and \`make nixie\` and fix failures.`,
+    ...(CODERABBIT_HOST_REVIEW
+      ? [`  3. ${CODERABBIT_REVIEW_GUIDANCE}`]
+      : [
+          `  3. THEN summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. Address actionable feedback yourself (highest severity first). After applying fixes, summon \`scrutineer\` again to re-run the commit gates and confirm they are still green.`,
+          `     - ${CODERABBIT_REVIEW_GUIDANCE}`,
+        ]),
     '  4. Update the execplan IN PLACE with findings, progress (tick the work item), and any decisions or deviations, with rationale.',
     '  5. Commit the work item and the execplan update together as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).',
     '',
@@ -1081,7 +1234,9 @@ function fixPrompt(task, worktree, plan, blocking, round) {
     'The dual review returned the following BLOCKING items. Resolve every one:',
     ...blocking.map((b, i) => `  ${i + 1}. ${b}`),
     '',
-    `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT}, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND}\`, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth — never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
+    CODERABBIT_HOST_REVIEW
+      ? `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT}, plus markdownlint/nixie for markdown) first and green, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth — never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`
+      : `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT}, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND}\`, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth — never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
     '',
     'Return the commit subjects you added, whether every deterministic gate is green at HEAD after your fixes, the number of CodeRabbit runs you completed, how each blocking item was resolved, any open issues with reasons, and a short summary. This structured report is durable validation evidence for the branch — be precise about which gates ran and at which commit.',
   ].join('\n')
@@ -1158,7 +1313,9 @@ function implementAddendumPrompt(task, worktree) {
     'For EACH open sub-task, in id order:',
     '  1. Make ONLY the change the Addenda item describes. Do not expand scope.',
     `  2. DETERMINISTIC GATE: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT}, plus any further gate targets AGENTS.md names). For any Markdown you touched, also have it run \`make markdownlint\` and \`make nixie\`. Fix until green.`,
-    `  3. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to re-run the commit gates and confirm green. ${CODERABBIT_REVIEW_GUIDANCE}`,
+    CODERABBIT_HOST_REVIEW
+      ? `  3. ${CODERABBIT_REVIEW_GUIDANCE}`
+      : `  3. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to re-run the commit gates and confirm green. ${CODERABBIT_REVIEW_GUIDANCE}`,
     `  4. Tick the sub-task in the Addenda checklist of its execplan (\`- [ ] ${task.id}.<n>\` → \`- [x] …\`).`,
     '  5. Commit the sub-task and Addenda tick together as one atomic commit (en-GB imperative subject).',
     '',
@@ -2402,6 +2559,7 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
   const proposals = []
   const reviewRounds = []
   let reviewsPass = false
+  const coderabbitDeferred = []
   for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
     // parallel() resolves a thrown thunk to null, which would make an adapter
     // timeout indistinguishable from a reviewer that returned nothing — so
@@ -2452,9 +2610,31 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
         ...kindExtra,
       }
     }
+    // Host-run CodeRabbit review of the committed diff, sequential after the
+    // reviewer agents (its rate-limit backoff must never outlive the round).
+    // Blocking severities join the fix round; a persistent rate limit or CLI
+    // fault defers with a documented open issue, the same contract as the
+    // legacy agent-run flow — the dual reviewers remain decisive.
+    let coderabbitBlocking = []
+    if (CODERABBIT_HOST_REVIEW) {
+      const coderabbit = await runCoderabbitHostReview(worktree, `coderabbit:${tag} r${round}`)
+      await recordCoderabbitReview(`${tag} r${round}`, coderabbit)
+      if (coderabbit.outcome === 'auth') {
+        return { id: tag, status: 'fatal-auth', stage: 'review', detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, reviewRounds, worktree, proposals, ...kindExtra }
+      }
+      if (coderabbit.outcome === 'rate-limited' || coderabbit.outcome === 'error') {
+        coderabbitCapture.deferred += 1
+        coderabbitDeferred.push(`CodeRabbit review deferred in round ${round} (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`)
+        log(`[task ${tag}] CodeRabbit host review deferred in round ${round}: ${coderabbit.outcome} (${coderabbit.detail})`)
+      } else {
+        coderabbitBlocking = coderabbitBlockingItems(coderabbit.findings)
+        log(`[task ${tag}] CodeRabbit host review round ${round}: ${coderabbit.findings.length} finding(s), ${coderabbitBlocking.length} blocking`)
+      }
+    }
     const blocking = [
       ...(codeReview.blocking || []),
       ...(expertReview.blocking || []),
+      ...coderabbitBlocking,
     ]
     const roundRecord = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, fix: null }
     reviewRounds.push(roundRecord)
@@ -2519,10 +2699,10 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
       return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, ...kindExtra }
     }
   } else {
-    return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals, ...kindExtra }
+    return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals, ...(coderabbitDeferred.length ? { openIssues: coderabbitDeferred } : {}), ...kindExtra }
   }
 
-  return { id: tag, status: 'done', plan, impl, integration, worktree, proposals, ...kindExtra }
+  return { id: tag, status: 'done', plan, impl, integration, worktree, proposals, ...(coderabbitDeferred.length ? { openIssues: coderabbitDeferred } : {}), ...kindExtra }
 }
 
 // ---------------------------------------------------------------------------
@@ -2611,6 +2791,28 @@ async function runTask(task, mergeLock) {
       return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: impl?.summary || 'addendum did not reach a green state or left open issues', openIssues: impl?.openIssues || [], worktree, proposals: [], kind: 'addendum' })
     }
     const proposals = []
+    const addendumOpenIssues = []
+    // Host-run CodeRabbit review of the committed addendum work. Blocking
+    // severities halt the addendum for assessment (addenda have no fix loop);
+    // a persistent rate limit or CLI fault defers with a documented open
+    // issue, mirroring the dual-review contract.
+    if (CODERABBIT_HOST_REVIEW) {
+      phase('Code Review')
+      const coderabbit = await runCoderabbitHostReview(worktree, `coderabbit:${tag} addendum`)
+      await recordCoderabbitReview(`${tag} addendum`, coderabbit)
+      if (coderabbit.outcome === 'auth') {
+        return { id: tag, status: 'fatal-auth', stage: 'auth', detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, worktree, proposals, kind: 'addendum' }
+      }
+      const blockingFindings = coderabbitBlockingItems(coderabbit.findings)
+      if (blockingFindings.length) {
+        return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: `CodeRabbit host review found blocking issue(s): ${blockingFindings.join('; ')}`, impl, worktree, proposals, kind: 'addendum' })
+      }
+      if (coderabbit.outcome === 'rate-limited' || coderabbit.outcome === 'error') {
+        coderabbitCapture.deferred += 1
+        addendumOpenIssues.push(`CodeRabbit review deferred (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`)
+        log(`[task ${tag}] CodeRabbit host review deferred for the addendum: ${coderabbit.outcome} (${coderabbit.detail})`)
+      }
+    }
     let addendumReview = null
     if (onlyDeferredReviewIssues) {
       phase('Code Review')
@@ -2652,9 +2854,9 @@ async function runTask(task, mergeLock) {
         return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, kind: 'addendum' })
       }
     } else {
-      return { id: tag, status: 'manual-merge-ready', impl, addendumReview, integration, worktree, proposals, kind: 'addendum' }
+      return { id: tag, status: 'manual-merge-ready', impl, addendumReview, integration, worktree, proposals, ...(addendumOpenIssues.length ? { openIssues: addendumOpenIssues } : {}), kind: 'addendum' }
     }
-    return { id: tag, status: 'done', impl, addendumReview, integration, worktree, proposals, kind: 'addendum' }
+    return { id: tag, status: 'done', impl, addendumReview, integration, worktree, proposals, ...(addendumOpenIssues.length ? { openIssues: addendumOpenIssues } : {}), kind: 'addendum' }
   }
 
   // --- Plan <-> Design review (adversarial loop) --------------------------
@@ -3184,6 +3386,18 @@ return {
   // infrastructure faults plus terminal fault counts per class, so operators
   // can read retry pressure straight from the result instead of the logs.
   faultMetrics: { ...faultMetrics },
+  // Host-run CodeRabbit review aggregate: effective configuration plus
+  // bounded counters (reviews run, findings by severity, rate-limited runs,
+  // deferred reviews). Per-finding detail goes to the JSONL sink when
+  // coderabbitFindingsFile is configured.
+  coderabbit: {
+    hostReview: CODERABBIT_HOST_REVIEW,
+    attempts: CODERABBIT_ATTEMPTS,
+    backoffMinutes: CODERABBIT_BACKOFF_MINUTES,
+    findingsFile: CODERABBIT_FINDINGS_FILE,
+    ...coderabbitCapture,
+    bySeverity: { ...coderabbitCapture.bySeverity },
+  },
   processed,
   results,
   assessments,

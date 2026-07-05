@@ -44,7 +44,9 @@ return {
 `,
   )
   return factory(
-    args,
+    // Host review defaults OFF: runTask tests drive the pipeline against
+    // fixture repos, and the host review would exec the REAL coderabbit CLI.
+    { coderabbitHostReview: false, ...args },
     () => {},
     () => {},
     agentImpl,

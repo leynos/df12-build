@@ -57,6 +57,9 @@ async function runSmoke(resumeMode) {
       projectRoot: repo.dir,
       taskId: '9.9.9',
       authPreflight: false,
+      // Host review would exec the REAL coderabbit CLI (it does not route
+      // through the mock adapters) and burn review quota.
+      coderabbitHostReview: false,
       resumePartialBranches: true,
       resumeMode,
       planAdapter: 'mock',
