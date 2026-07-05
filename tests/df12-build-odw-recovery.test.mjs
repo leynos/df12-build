@@ -951,6 +951,7 @@ test('the continue-mode decision table dispatches on the committed ExecPlan Stat
     [{ evidence: eligibleEvidence({ collectionErrors: ['diff failed'] }) }, plan('draft'), 'evidence-collection-error'],
     [{ evidence: eligibleEvidence({ dirtyState: 'dirty' }) }, plan('approved'), 'dirty-worktree'],
     [{}, plan('blocked'), 'plan-blocked'],
+    [{}, { ...plan('unreadable'), error: 'docs/execplans/roadmap-1-2-3.md: EACCES' }, 'plan-unreadable'],
     [{ evidence: eligibleEvidence({ recentCommits: [] }) }, plan('complete'), 'no-committed-work'],
   ]
   for (const [overrides, planState, reason] of reports) {

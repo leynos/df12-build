@@ -45,6 +45,10 @@ return {
   infrastructureFailureDetail,
   withInfraRetry,
   STAGE_ATTEMPTS,
+  faultMetrics,
+  fileState,
+  readExecplanState,
+  execplanRelPath,
   resultFromUnhandledAgentError,
   isDeferredReviewIssue,
   hasOnlyDeferredReviewIssues,
@@ -228,6 +232,89 @@ test('withInfraRetry retries infrastructure faults only, within the attempt cap'
     /timed out/,
   )
   assert.equal(calls, 2)
+})
+
+test('fault metrics count retries and terminal fault classes with fixed keys', async () => {
+  const surface = await loadAssessmentSurface()
+  assert.deepEqual(surface.faultMetrics, { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 })
+
+  let calls = 0
+  await surface.withInfraRetry(async () => {
+    calls += 1
+    if (calls === 1) throw new Error("adapter 'claude' timed out")
+    return { ok: true }
+  }, 'plan:metrics r1')
+  assert.equal(surface.faultMetrics.infraRetries, 1)
+
+  surface.resultFromUnhandledAgentError('1.1.1', "adapter 'claude' timed out")
+  surface.resultFromUnhandledAgentError('1.1.1', 'API Error: 529 Overloaded, temporarily unavailable')
+  surface.resultFromUnhandledAgentError('1.1.1', 'CodeRabbit auth failed')
+  surface.resultFromUnhandledAgentError('1.1.1', 'make test failed: 3 assertions')
+  assert.deepEqual(surface.faultMetrics, { infraRetries: 1, infraFaults: 1, providerFaults: 1, authFaults: 1 })
+})
+
+test('ExecPlan paths are contained within the worktree before any filesystem access', async () => {
+  const surface = await loadAssessmentSurface()
+  const worktree = '/work/tree'
+
+  assert.deepEqual(surface.execplanRelPath(worktree, 'docs/execplans/roadmap-1-2-3.md'), {
+    ok: true,
+    relPath: 'docs/execplans/roadmap-1-2-3.md',
+    detail: '',
+  })
+  assert.deepEqual(surface.execplanRelPath(worktree, '/work/tree/docs/plan.md'), {
+    ok: true,
+    relPath: 'docs/plan.md',
+    detail: '',
+  })
+  // A leading-dots FILENAME is not an escape.
+  assert.equal(surface.execplanRelPath(worktree, '..plan.md').ok, true)
+
+  const escapes = [
+    '../outside.md',
+    'docs/../../outside.md',
+    '/etc/passwd',
+    '/work/tree/../tree-b/plan.md',
+    '..',
+    '.',
+    '',
+  ]
+  for (const escape of escapes) {
+    const contained = surface.execplanRelPath(worktree, escape)
+    assert.equal(contained.ok, false, JSON.stringify(escape))
+    assert.equal(contained.relPath, '')
+    assert.match(contained.detail, /escapes the assigned worktree/)
+  }
+})
+
+test('filesystem faults surface distinctly from absent files', async () => {
+  const surface = await loadAssessmentSurface()
+  const repo = makeRepo()
+
+  assert.deepEqual(await surface.fileState('README.md', repo.dir), { ok: true, exists: true, detail: '' })
+  assert.deepEqual(await surface.fileState('no-such-file.md', repo.dir), { ok: true, exists: false, detail: '' })
+  // ENOTDIR (a path component is a file) still means "absent", not a fault.
+  assert.deepEqual(await surface.fileState('README.md/nested.md', repo.dir), { ok: true, exists: false, detail: '' })
+  // A fault the filesystem raises (here an invalid path) must NOT read as
+  // "absent": the caller has to see it and fail closed.
+  const fault = await surface.fileState('plan\0.md', repo.dir)
+  assert.equal(fault.ok, false)
+  assert.equal(fault.exists, false)
+  assert.match(fault.detail, /stat failed/)
+
+  assert.equal((await surface.readExecplanState({ worktreePath: repo.dir, execplanPath: 'no-plan.md' })).status, 'missing')
+  const unreadable = await surface.readExecplanState({ worktreePath: repo.dir, execplanPath: 'plan\0.md' })
+  assert.equal(unreadable.status, 'unreadable')
+  assert.match(unreadable.error, /plan\0\.md/)
+})
+
+test('integration is never retried on infrastructure faults', async () => {
+  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  // The push to origin/BASE is not idempotent: a hidden-success first
+  // attempt re-run after an adapter death could integrate the task twice.
+  assert.doesNotMatch(source, /withInfraRetry\([^\n]*integratePrompt/)
+  const bareCalls = source.match(/buildLock\(\(\) => agent\(integratePrompt\(task, worktree\)/g) || []
+  assert.equal(bareCalls.length, 2, 'both integrate call sites (normal and addendum) stay unwrapped')
 })
 
 test('recoverable review faults classify as deferred review issues', async () => {

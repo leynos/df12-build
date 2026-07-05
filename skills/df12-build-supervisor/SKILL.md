@@ -239,9 +239,14 @@ Every time a run completes you do the same loop:
      assessment was spawned and no remediation was written. The branch state
      is durable (committed ExecPlan); relaunch with
      `resumePartialBranches=true` and `resumeMode="continue"` to resume the
-     branch at the stage where it died. Repeated infra faults across
-     relaunches point at the environment (API health, adapter timeout too
-     high, sandbox), not the roadmap.
+     branch at the stage where it died. Exception: a fault at
+     `stage: "integrate"` was deliberately NOT retried (the push to
+     `origin/BASE` is not idempotent) — inspect `origin/BASE` and the roadmap
+     for a partial or hidden-success integration BEFORE relaunching. Repeated
+     infra faults across relaunches point at the environment (API health,
+     adapter timeout too high, sandbox), not the roadmap. The result's
+     `faultMetrics` counters (`infraRetries`, `infraFaults`,
+     `providerFaults`, `authFaults`) show the retry pressure at a glance.
    - **Halted (anything else):** diagnose with the failure-mode playbook, apply
      the fix to the roadmap (or environment), then relaunch.
 5. **Run mandatory roadmap maintenance before editing the roadmap.** If the run

@@ -335,6 +335,17 @@ Common arguments:
 - `maxTasks`: maximum roadmap tasks for one run.
 - `maxDesignRounds`: planning and design-review exchange cap. Defaults to `4`.
 - `maxReviewRounds`: implementation review/fix exchange cap. Defaults to `3`.
+- `commitGates`: ordered list of deterministic gate commands every task,
+  addendum, fix, and remediation agent must run before declaring work green.
+  Defaults to `["make all"]`. The run result echoes the effective list so
+  operators can audit reported gate greenness against it; agents are told
+  never to assume `make all` aggregates the gates a project names in
+  `AGENTS.md`.
+- `stageAttempts`: total attempts per stage agent when the previous attempt
+  died on an infrastructure fault (an ODW adapter timeout or crash, or
+  schema-retry exhaustion). Defaults to `2`. Product failures are never
+  retried, and integration is never retried because its push to
+  `origin/<base>` is not idempotent.
 - `taskId`: run exactly one roadmap task.
 - `dryRun`: when `true`, plan, review, and audit without implementation,
   integration, or document writes.
@@ -351,7 +362,9 @@ Common arguments:
 - `resumeMode`: the maximum recovery action for discovered branches. `assess`
   (the default) reports only. `review` may additionally route clean, committed,
   task-scoped `adopt-complete` branches with validation evidence into the
-  ordinary review and integration path. Any other value fails fast at launch.
+  ordinary review and integration path. `continue` dispatches each surviving
+  branch deterministically from its committed ExecPlan status, with no
+  judgement agent. Any other value fails fast at launch.
 - `resumeTaskId`: limit recovery discovery to one roadmap id. This is separate
   from `taskId`, which selects normal roadmap work.
 - `resumeMaxCandidates`: bound on recovery candidates per run. Defaults to `4`;
@@ -436,6 +449,20 @@ dry runs, successful tasks, and manual-merge-ready branches are not assessed.
 Provider outages also suppress the final remediation flush, so transient
 adapter failures do not create roadmap work.
 
+Infrastructure faults are classified separately from product failures. When a
+stage agent's process dies — an ODW adapter timeout or crash, or schema-retry
+exhaustion — the failure carries no evidence about the task branch, so the
+workflow retries the stage agent in place up to `stageAttempts` total
+attempts. A persistent fault terminates the task with status `infra-fault`
+rather than `failed`: no assessment agent is spawned, remediation triage
+writes are skipped (as with provider faults), and the halt detail directs the
+operator to relaunch with `resumePartialBranches=true` and
+`resumeMode="continue"`. Integration is the exception: a fault there is never
+retried, because a hidden-success first attempt may already have pushed —
+inspect `origin/<base>` and the roadmap before relaunching. The run result's
+`faultMetrics` object counts retries and terminal faults per class
+(`infraRetries`, `infraFaults`, `providerFaults`, `authFaults`).
+
 Addendum implementations have one extra recovery state. If an addendum agent
 reports all work items complete, green gates, and no open issues, but fails to
 set the strict `ok=true` schema field, the workflow returns
@@ -468,6 +495,16 @@ Set `resumePartialBranches=true` and choose the maximum action with
   `missing-validation-evidence`, `evidence-collection-error`, or
   `addendum-branch`). Review-mode resume mutates the target project exactly as
   ordinary integration does, so grant it the same permissions and trust.
+- **Continue-mode resume** (`resumeMode="continue"`): no judgement agent at
+  all. The workflow collects host git evidence and reads the committed
+  ExecPlan `Status:` line, then dispatches deterministically: `DRAFT` (or a
+  missing plan) re-enters planning, `APPROVED` or `IN PROGRESS` re-enters
+  implementation, `COMPLETE` re-enters the dual review, and `BLOCKED` is
+  reported. The downstream gates and reviewers are the judgement. Dirty
+  worktrees, addendum branches, evidence-collection failures, and plans the
+  host cannot read are reported instead of resumed (reasons such as
+  `dirty-worktree`, `plan-blocked`, and `plan-unreadable`). Continue-mode
+  resume mutates the target project exactly as ordinary work does.
 
 The `recovery` result object indexes the pass for operators: `candidates`,
 `assessed`, `resumed`, per-candidate `results` (classification and action), and
@@ -475,7 +512,11 @@ The `recovery` result object indexes the pass for operators: `candidates`,
 `already-complete`, `missing-worktree`, and `candidate-cap` from discovery).
 Ids with surviving branches are held out of normal selection for the rest of
 the run, so the pool cannot collide with an existing branch; hoover the branch
-or resume it before expecting normal selection to rebuild that task. A fatal
+or resume it before expecting normal selection to rebuild that task. Survivor
+branches that are still unresolved when the run ends are listed in
+`recovery.unresolved` (id, branch, last classification, action, and reason),
+and the run reports `halted: needs-operator-recovery …` instead of a clean
+stop, so a blocked roadmap frontier is never mistaken for finished work. A fatal
 auth preflight blocks recovery entirely (`recovery.blocked =
 "auth-preflight-failed"`), and dry runs never resume.
 

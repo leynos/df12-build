@@ -461,16 +461,36 @@ unlike a product failure:
    on the branch, and every stage prompt tolerates re-entry. In the dual
    review, a reviewer thunk that dies on an infrastructure fault is retried
    inside its `parallel` slot; a residual fault is recorded so it cannot be
-   mistaken for a reviewer that returned nothing.
+   mistaken for a reviewer that returned nothing. Integration is the one
+   exception: it is never retried, because its push to `origin/<base>` is not
+   idempotent — a hidden-success first attempt re-run after an adapter death
+   could squash and push the same task twice. A fault there terminates
+   immediately and the detail tells the operator to inspect `origin/<base>`
+   and the roadmap before relaunching.
 2. **Terminal `infra-fault`, not `failed`.** If the fault persists, the task
    result carries `status: "infra-fault"`, `stage: "infrastructure"` (or
-   `stage: "review"` when the dual review was interrupted). No assessment
+   `stage: "review"` when the dual review was interrupted, or
+   `stage: "integrate"` for the unretried integration fault). No assessment
    agent is spawned — there is nothing about the branch to judge — and, as
    with provider faults, end-of-run remediation triage skips its roadmap
    writes so an outage never masquerades as task evidence.
 3. **Resume via `continue` mode.** The `halted` detail directs the operator
    to relaunch with `resumeMode: "continue"`; the committed ExecPlan `Status`
    dispatches the branch back into the pipeline at the stage where it died.
+
+The run result carries bounded-cardinality `faultMetrics` (`infraRetries`,
+`infraFaults`, `providerFaults`, `authFaults` — fixed keys, never keyed by
+task id or error text) so operators can read retry pressure and terminal
+fault classes straight from the result instead of scraping logs.
+
+Host filesystem access around the durable ExecPlan fails closed. Agent-supplied
+plan paths pass through a containment check (`execplanRelPath`) that rejects
+absolute paths outside the worktree and `../` escapes before any read, write,
+or git call. Stat and read faults are never conflated with "the file is
+absent": only `ENOENT`/`ENOTDIR` mean absent, and any other fault surfaces as
+a structured error — continue-mode recovery reports it as `plan-unreadable`
+(or `execplan-stat-error` in assess mode) rather than dispatching a planner
+over durable work it could not verify.
 
 The bounded retry cannot shorten a hang itself: ODW's adapter timeout is
 adapter-level configuration (`timeout` in the ODW config), not a per-call

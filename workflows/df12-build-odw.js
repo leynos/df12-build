@@ -53,6 +53,11 @@ const MAX_BUILD_PARALLEL = Math.max(1, cfg.maxBuildParallel || 8) // concurrent 
 const MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4 // plan <-> design-review exchanges before halting
 const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review cycles
 const STAGE_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2)) // total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, schema-retry exhaustion); product failures are never retried
+
+// Bounded-cardinality fault counters, surfaced verbatim in the run result so
+// operators can see retry pressure and terminal fault classes without
+// scraping logs. Fixed keys only — never keyed by task id or error text.
+const faultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 }
 const AUTO_MERGE = cfg.autoMerge !== false // false => stop after review, leave branch for manual merge
 const DOCUMENT_AUDIT = cfg.documentAudit !== false // false => return audit findings only, write nothing
 const DRY_RUN = cfg.dryRun === true // plan/review/audit only; skip implement, merge, and doc writes
@@ -143,6 +148,7 @@ async function withInfraRetry(run, label) {
     } catch (error) {
       const message = (error && error.message) || String(error)
       if (attempt >= STAGE_ATTEMPTS || !infrastructureFailureDetail(message)) throw error
+      faultMetrics.infraRetries += 1
       log(`[${label}] infrastructure fault (${message}); retrying the stage agent (attempt ${attempt + 1} of ${STAGE_ATTEMPTS})`)
     }
   }
@@ -152,8 +158,12 @@ function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`
 }
 
-async function fileExists(pathValue, baseDir = process.cwd()) {
-  if (!pathValue) return false
+// Distinguish "the file is absent" from "the filesystem would not answer":
+// ENOENT/ENOTDIR mean absent; anything else (permissions, I/O) is a fault the
+// caller must surface rather than conflate with a missing file. Returns
+// { ok, exists, detail }.
+async function fileState(pathValue, baseDir = process.cwd()) {
+  if (!pathValue) return { ok: true, exists: false, detail: '' }
   const path = process.getBuiltinModule('node:path')
   const candidate = path.isAbsolute(String(pathValue))
     ? String(pathValue)
@@ -161,9 +171,12 @@ async function fileExists(pathValue, baseDir = process.cwd()) {
   const fs = process.getBuiltinModule('node:fs/promises')
   try {
     const stat = await fs.stat(candidate)
-    return stat.isFile()
-  } catch {
-    return false
+    return { ok: true, exists: stat.isFile(), detail: '' }
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
+      return { ok: true, exists: false, detail: '' }
+    }
+    return { ok: false, exists: false, detail: `stat failed for ${candidate}: ${(error && error.message) || String(error)}` }
   }
 }
 
@@ -500,6 +513,7 @@ function infrastructureFailureDetail(value) {
 function resultFromUnhandledAgentError(id, detail, extra = {}) {
   const authDetail = authFailureDetail(detail)
   if (authDetail) {
+    faultMetrics.authFaults += 1
     return {
       id,
       status: 'fatal-auth',
@@ -511,6 +525,7 @@ function resultFromUnhandledAgentError(id, detail, extra = {}) {
   }
   const providerDetail = providerFailureDetail(detail)
   if (providerDetail) {
+    faultMetrics.providerFaults += 1
     return {
       id,
       status: 'provider-fault',
@@ -522,6 +537,7 @@ function resultFromUnhandledAgentError(id, detail, extra = {}) {
   }
   const infraDetail = infrastructureFailureDetail(detail)
   if (infraDetail) {
+    faultMetrics.infraFaults += 1
     return {
       id,
       status: 'infra-fault',
@@ -1600,8 +1616,19 @@ async function readExecplanState(candidate) {
   try {
     const text = await readFileText(path.join(candidate.worktreePath, candidate.execplanPath))
     return parseExecplanState(text)
-  } catch {
-    return { status: 'missing', ticked: 0, unticked: 0 }
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
+      return { status: 'missing', ticked: 0, unticked: 0 }
+    }
+    // A plan that cannot be read is NOT a missing plan: dispatching to the
+    // planning stage on an I/O or permission fault could overwrite durable
+    // work. Surface the fault; the continue boundary reports it.
+    return {
+      status: 'unreadable',
+      ticked: 0,
+      unticked: 0,
+      error: `${candidate.execplanPath}: ${(error && error.message) || String(error)}`,
+    }
   }
 }
 
@@ -1613,6 +1640,7 @@ function recoveryContinueDecision(candidate, evidence, planState, flags = {}) {
   if (candidate?.isAddendum) return report('addendum-branch')
   if ((evidence?.collectionErrors || []).length) return report('evidence-collection-error')
   if (evidence?.dirtyState !== 'clean') return report('dirty-worktree')
+  if (planState.status === 'unreadable') return report('plan-unreadable')
   if (planState.status === 'blocked') return report('plan-blocked')
   const stage =
     planState.status === 'approved' || planState.status === 'in-progress'
@@ -1640,23 +1668,28 @@ const RECOVERY_HOLD_REASONS = new Set(['missing-worktree', 'candidate-cap', 'unr
 // substitute the canonical path back in after this check has failed.
 async function recoveryExecplanPath(candidate) {
   const canonicalPlan = `docs/execplans/${candidate.branchName}.md`
-  return (await fileExists(canonicalPlan, candidate.worktreePath)) ? canonicalPlan : ''
+  const state = await fileState(canonicalPlan, candidate.worktreePath)
+  if (!state.ok) return { execplanPath: '', error: state.detail }
+  return { execplanPath: state.exists ? canonicalPlan : '', error: '' }
 }
 
 async function syntheticRecoveryImpl(candidate, evidence) {
-  const execplanPath =
+  const resolved =
     typeof candidate.execplanPath === 'string'
-      ? candidate.execplanPath
+      ? { execplanPath: candidate.execplanPath, error: '' }
       : await recoveryExecplanPath(candidate)
   return {
     ok: true,
     gatesGreen: true,
-    execplanPath,
+    execplanPath: resolved.execplanPath,
     workItemsCompleted: 0,
     workItemsTotal: 0,
     commits: evidence?.recentCommits || [],
     coderabbitRuns: 0,
-    openIssues: ['recovered branch requires fresh review'],
+    openIssues: [
+      'recovered branch requires fresh review',
+      ...(resolved.error ? [`could not verify the durable ExecPlan: ${resolved.error}`] : []),
+    ],
     summary: 'Recovered adopt-complete branch from durable git state.',
   }
 }
@@ -1773,8 +1806,14 @@ async function runRecovery(root, mergeLock = null) {
       // Status. No judgement agent — the downstream gates ARE the judgement.
       log(`[recovery] dispatching ${candidate.branchName} (task ${candidate.taskId}) from its committed ExecPlan`)
       evidence = await collectAssessmentEvidence(task, resumeWt)
-      enriched = { ...candidate, execplanPath: await recoveryExecplanPath(candidate) }
-      planState = await readExecplanState(enriched)
+      const resolved = await recoveryExecplanPath(candidate)
+      enriched = { ...candidate, execplanPath: resolved.execplanPath }
+      // A plan the host cannot stat or read is a fault, never 'missing':
+      // treating it as missing would dispatch a fresh planner over durable
+      // work. Fold the stat fault into planState so the decision reports it.
+      planState = resolved.error
+        ? { status: 'unreadable', ticked: 0, unticked: 0, error: resolved.error }
+        : await readExecplanState(enriched)
       decision = { classification: '', ...recoveryContinueDecision(enriched, evidence, planState, { dryRun: DRY_RUN }) }
     } else {
       log(`[recovery] assessing ${candidate.branchName} (task ${candidate.taskId})`)
@@ -1801,8 +1840,13 @@ async function runRecovery(root, mergeLock = null) {
       evidence = assessment.hostEvidence
       // Resolve the durable ExecPlan before deciding: resume eligibility
       // requires it, and its absence must stay visible as missing-execplan.
-      enriched = { ...candidate, execplanPath: await recoveryExecplanPath(candidate) }
-      decision = { stage: 'review', ...recoveryDecision(enriched, evidence, assessment, RESUME_MODE, { dryRun: DRY_RUN }) }
+      // A stat FAULT is neither present nor absent — report it distinctly
+      // rather than resuming or classifying on unverifiable evidence.
+      const resolved = await recoveryExecplanPath(candidate)
+      enriched = { ...candidate, execplanPath: resolved.execplanPath }
+      decision = resolved.error
+        ? { classification: '', action: 'report', stage: null, reason: 'execplan-stat-error', skip: true }
+        : { stage: 'review', ...recoveryDecision(enriched, evidence, assessment, RESUME_MODE, { dryRun: DRY_RUN }) }
     }
 
     const resultBase = {
@@ -2035,15 +2079,27 @@ function ensureTaskAgentWriteAccess(worktree, tag) {
 // durable state at every stage boundary, the same philosophy as the
 // write-probe: prompts request, the host verifies.
 // ---------------------------------------------------------------------------
+// Contain an agent-supplied ExecPlan path within the task worktree. Plan
+// paths come back from planner agents — untrusted, prompt-injectable data
+// under the documented threat model — so an absolute path outside the
+// worktree or a ../ escape must fail closed BEFORE any filesystem or git
+// access. Returns { ok, relPath, detail }.
 function execplanRelPath(worktree, planPath) {
   const path = process.getBuiltinModule('node:path')
-  return path.isAbsolute(String(planPath)) ? path.relative(worktree, String(planPath)) : String(planPath)
+  const raw = String(planPath || '')
+  const rel = path.isAbsolute(raw) ? path.relative(worktree, raw) : path.normalize(raw)
+  if (!raw || !rel || rel === '.' || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    return { ok: false, relPath: '', detail: `ExecPlan path escapes the assigned worktree: ${raw || '<empty>'}` }
+  }
+  return { ok: true, relPath: rel, detail: '' }
 }
 
 // A plan is durable only when it exists at HEAD with no uncommitted
 // modifications. Returns { ok, detail }.
 async function verifyExecplanCommitted(worktree, planPath) {
-  const relPath = execplanRelPath(worktree, planPath)
+  const contained = execplanRelPath(worktree, planPath)
+  if (!contained.ok) return { ok: false, detail: contained.detail }
+  const relPath = contained.relPath
   const inHead = await execFileStatus('git', ['-C', worktree, 'cat-file', '-e', `HEAD:${relPath}`])
   if (!inHead.ok) return { ok: false, detail: `the plan file ${relPath} is not committed at HEAD` }
   const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1', '--', relPath])
@@ -2061,7 +2117,9 @@ async function verifyExecplanCommitted(worktree, planPath) {
 async function commitExecplanApproval(worktree, planPath, tag) {
   const fs = process.getBuiltinModule('node:fs/promises')
   const path = process.getBuiltinModule('node:path')
-  const relPath = execplanRelPath(worktree, planPath)
+  const contained = execplanRelPath(worktree, planPath)
+  if (!contained.ok) return { ok: false, detail: contained.detail }
+  const relPath = contained.relPath
   const absPath = path.join(worktree, relPath)
   try {
     const text = await fs.readFile(absPath, 'utf8')
@@ -2120,7 +2178,17 @@ async function runPlanDesignLoop(task, worktree, opts = {}) {
       schema: PLAN_SCHEMA,
     })), `plan:${tag} r${round}`))
     if (!plan) return { fail: { id: tag, status: 'failed', stage: 'plan', detail: 'planner returned nothing', worktree, proposals: [], ...extra } }
-    if (!await fileExists(plan.execplanPath, worktree)) {
+    // Containment before any filesystem access: the planner's path is
+    // untrusted data, and an escape fails the task closed.
+    const contained = execplanRelPath(worktree, plan.execplanPath)
+    if (!contained.ok) {
+      return { fail: { id: tag, status: 'failed', stage: 'plan', detail: `planner returned an unusable ExecPlan path: ${contained.detail}`, plan, worktree, proposals: [], ...extra } }
+    }
+    const planFile = await fileState(contained.relPath, worktree)
+    if (!planFile.ok) {
+      return { fail: { id: tag, status: 'failed', stage: 'plan', detail: `could not verify the ExecPlan path: ${planFile.detail}`, plan, worktree, proposals: [], ...extra } }
+    }
+    if (!planFile.exists) {
       return {
         fail: {
           id: tag,
@@ -2238,9 +2306,14 @@ async function runImplementationStage(task, worktree, plan, opts = {}) {
   // Stale plan status costs a resumed run one redundant stage, never
   // correctness — log it rather than failing a green implementation.
   if (plan?.execplanPath) {
-    const planState = await readExecplanState({ worktreePath: worktree, execplanPath: execplanRelPath(worktree, plan.execplanPath) })
-    if (planState.status !== 'complete') {
-      log(`[task ${tag}] implementation returned ok but the committed ExecPlan status is '${planState.status}' (expected COMPLETE)`)
+    const contained = execplanRelPath(worktree, plan.execplanPath)
+    if (!contained.ok) {
+      log(`[task ${tag}] skipping the post-implementation plan-status check: ${contained.detail}`)
+    } else {
+      const planState = await readExecplanState({ worktreePath: worktree, execplanPath: contained.relPath })
+      if (planState.status !== 'complete') {
+        log(`[task ${tag}] implementation returned ok but the committed ExecPlan status is '${planState.status}' (expected COMPLETE)${planState.error ? `: ${planState.error}` : ''}`)
+      }
     }
   }
   return { impl }
@@ -2311,6 +2384,7 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
       ].filter(Boolean).join(' and ')
       reviewRounds.push({ round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking: [], fix: null })
       if (reviewInfraFaults.length) {
+        faultMetrics.infraFaults += 1
         return {
           id: tag,
           status: 'infra-fault',
@@ -2374,9 +2448,28 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
   if (AUTO_MERGE) {
     const doIntegrate = () => {
       phase('Integrate')
-      return buildLock(() => withInfraRetry(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })), `integrate:${tag}`))
+      // Deliberately NOT wrapped in withInfraRetry: integration pushes to
+      // origin/BASE, so a hidden-success first attempt re-run after an
+      // adapter death could squash and push the same task twice. A fault
+      // here is terminal and hands verification to the operator.
+      return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
     }
-    integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
+    try {
+      integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
+    } catch (error) {
+      const message = (error && error.message) || String(error)
+      if (!infrastructureFailureDetail(message)) throw error
+      faultMetrics.infraFaults += 1
+      return {
+        id: tag,
+        status: 'infra-fault',
+        stage: 'integrate',
+        detail: `integration agent died on an infrastructure fault (${message}); integration is never retried because the push to origin/${BASE} is not idempotent — inspect origin/${BASE} and the roadmap for a partial or hidden-success integration before relaunching with resumeMode: "continue"`,
+        worktree,
+        proposals,
+        ...kindExtra,
+      }
+    }
     if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
       return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, ...kindExtra }
     }
@@ -2490,9 +2583,26 @@ async function runTask(task, mergeLock) {
     if (AUTO_MERGE) {
       const doIntegrate = () => {
         phase('Integrate')
-        return buildLock(() => withInfraRetry(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })), `integrate:${tag}`))
+        // Deliberately NOT wrapped in withInfraRetry: the push to origin/BASE
+        // is not idempotent (see the normal-pipeline integrate above).
+        return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
       }
-      integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
+      try {
+        integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
+      } catch (error) {
+        const message = (error && error.message) || String(error)
+        if (!infrastructureFailureDetail(message)) throw error
+        faultMetrics.infraFaults += 1
+        return {
+          id: tag,
+          status: 'infra-fault',
+          stage: 'integrate',
+          detail: `integration agent died on an infrastructure fault (${message}); integration is never retried because the push to origin/${BASE} is not idempotent — inspect origin/${BASE} and the roadmap for a partial or hidden-success integration before relaunching with resumeMode: "continue"`,
+          worktree,
+          proposals,
+          kind: 'addendum',
+        }
+      }
       if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
         return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, kind: 'addendum' })
       }
@@ -3025,6 +3135,10 @@ return {
   // (issue #28): operators can audit reported gate greenness against it.
   commitGates: COMMIT_GATES,
   stageAttempts: STAGE_ATTEMPTS,
+  // Bounded-cardinality fault metrics (fixed keys): stage retries spent on
+  // infrastructure faults plus terminal fault counts per class, so operators
+  // can read retry pressure straight from the result instead of the logs.
+  faultMetrics: { ...faultMetrics },
   processed,
   results,
   assessments,
