@@ -345,6 +345,13 @@ Common arguments:
   operators can audit reported gate greenness against it; agents are told
   never to assume `make all` aggregates the gates a project names in
   `AGENTS.md`.
+- `hostCommitGates`: when `true` (the default), the workflow host re-runs the
+  `commitGates` commands itself against each branch's committed HEAD before
+  review and integration, so a `gatesGreen` claim is verified rather than
+  trusted. Set `false` to restore the trust-the-agent flow.
+- `commitGateTimeoutSeconds`: per-command timeout for host-run gates.
+  Defaults to `3600`; a gate that exceeds it is killed and reported as a
+  failure with the timeout named in the evidence.
 - `stageAttempts`: total attempts per stage agent when the previous attempt
   died on an infrastructure fault (an ODW adapter timeout or crash, or
   schema-retry exhaustion). Defaults to `2`. Product failures are never
@@ -461,6 +468,23 @@ The run result's `coderabbit` object reports the effective configuration and
 bounded counters (reviews run, findings by severity, rate-limited runs,
 deferred reviews). When `coderabbitFindingsFile` is set, every finding is
 also appended as JSONL for cross-run linter tuning.
+
+## Host-run commit gates
+
+By default the workflow host also re-runs the deterministic `commitGates`
+commands itself — a `gatesGreen` claim from an agent is verified, never
+trusted. The gates run at the start of every dual-review round (before any
+reviewer agent spends tokens; a red branch goes straight to a fix round
+carrying the host's log evidence) and once per addendum implementation
+(addenda have no fix rounds, so an unreproducible green claim fails the
+addendum outright). Gate runs are serialized across the whole worker pool so
+sequential execution benefits from the target project's build caching, and
+each command's full output is teed to a `/tmp/df12-gate-<task>-<round>-…`
+log with a bounded tail quoted in the failure evidence. A command that
+exceeds `commitGateTimeoutSeconds` is killed and reported as a failure. The
+run result's `hostGates` object reports the configuration and bounded
+counters (gate runs, failures); per-round pass/fail detail appears in each
+failed task's `reviewRounds[].hostGates`.
 
 ## Recovery model
 

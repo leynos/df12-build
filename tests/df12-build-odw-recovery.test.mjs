@@ -72,10 +72,11 @@ return {
 `,
   )
   return factory(
-    // Host review defaults OFF here: several tests drive the review and
-    // integration pipeline against fixture repos, and the host review would
-    // exec the REAL coderabbit CLI on PATH and burn review quota.
-    { coderabbitHostReview: false, ...args },
+    // Host review and host gates default OFF here: several tests drive the
+    // review and integration pipeline against fixture repos, and the host
+    // review would exec the REAL coderabbit CLI on PATH (burning review
+    // quota) while host gates would run `make all` in Makefile-less fixtures.
+    { coderabbitHostReview: false, hostCommitGates: false, ...args },
     () => {},
     () => {},
     agentImpl,
@@ -1344,6 +1345,62 @@ test('host-run CodeRabbit findings drive a fix round through the real CLI seam',
   assert.ok(labels.some((label) => label.startsWith('fix:1.2.3 r1')), 'the CodeRabbit finding forces a fix round')
   assert.match(fixPrompts[0], /CodeRabbit \(major\) src\/a\.rs: guard the index/, 'the fix agent sees the finding verbatim')
   assert.equal(outcome.openIssues, undefined, 'no deferred-review issue on a clean pass')
+})
+
+test('a red host gate drives a fix round before any reviewer agent spends tokens', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'COMPLETE' })
+  const worktree = repo.parserWorktree
+
+  // Fake gate: red on the first run, green on the re-run after the fix.
+  const bin = mkdtempSync(path.join(tmpdir(), 'df12-gate-bin-'))
+  const countFile = path.join(bin, 'count')
+  const gateScript = path.join(bin, 'gate.sh')
+  writeFileSync(gateScript, [
+    '#!/bin/sh',
+    `count_file="${countFile}"`,
+    'n=$(cat "$count_file" 2>/dev/null || echo 0)',
+    'n=$((n+1)); echo $n > "$count_file"',
+    'if [ "$n" -eq 1 ]; then',
+    '  echo "test_parser_range FAILED: expected 3, got 2"',
+    '  exit 1',
+    'fi',
+    'echo "all gates green"',
+    '',
+  ].join('\n'))
+  chmodSync(gateScript, 0o755)
+
+  const labels = []
+  const fixPrompts = []
+  const agentImpl = async (prompt, opts = {}) => {
+    labels.push(opts.label || '')
+    if (opts.label?.startsWith('code-review:') || opts.label?.startsWith('expert-review:')) {
+      return { verdict: 'pass', blocking: [], summary: 'ship it' }
+    }
+    if (opts.label?.startsWith('fix:')) {
+      fixPrompts.push(prompt)
+      return { gatesGreen: true, commits: ['Fix the range check'], coderabbitRuns: 0, resolved: [], openIssues: [], summary: 'fixed' }
+    }
+    if (opts.label?.startsWith('integrate:')) {
+      return { ok: true, roadmapMarkedDone: true, rebased: true, squashMerged: true, mergeSha: 'feed', pushed: true, conflicts: '', summary: 'merged' }
+    }
+    throw new Error(`unexpected label: ${opts.label}`)
+  }
+  const surface = await loadRecoverySurface({ hostCommitGates: true, commitGates: [gateScript] }, agentImpl)
+
+  const outcome = await surface.runDualReviewAndIntegration(
+    { id: '1.2.3', title: 'Parser' },
+    worktree,
+    { execplanPath: PARSER_PLAN },
+    { ok: true, gatesGreen: true },
+    null,
+  )
+
+  assert.equal(outcome.status, 'done', JSON.stringify(outcome))
+  assert.equal(readFileSync(countFile, 'utf8').trim(), '2', 'the gates re-run after the fix round')
+  assert.equal(labels[0], 'fix:1.2.3 r1', 'the red gate reaches a fix agent before any reviewer runs')
+  assert.ok(!labels.slice(0, 1).some((label) => label.startsWith('code-review:')), 'no reviewer tokens spent on a red branch')
+  assert.match(fixPrompts[0], /HOST GATES RED/, 'the fix agent sees the host verdict')
+  assert.match(fixPrompts[0], /test_parser_range FAILED/, 'the fix agent sees the gate output tail')
 })
 
 test('a green implementation that leaves uncommitted state fails the durability gate', async () => {

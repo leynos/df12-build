@@ -49,6 +49,11 @@ return {
   fileState,
   readExecplanState,
   execplanRelPath,
+  HOST_COMMIT_GATES,
+  COMMIT_GATE_TIMEOUT_SECONDS,
+  COMMIT_GATE_GUIDANCE,
+  runHostCommitGates,
+  hostGateMetrics,
   CODERABBIT_HOST_REVIEW,
   CODERABBIT_ATTEMPTS,
   CODERABBIT_BACKOFF_MINUTES,
@@ -496,6 +501,64 @@ test('host review flips the prompts from agent-run CodeRabbit to host-run', asyn
   const legacyImplement = legacy.implementPrompt(task, '/tmp/wt', plan)
   assert.match(legacyImplement, /coderabbit review --agent/)
   assert.doesNotMatch(legacyImplement, /Do NOT run coderabbit yourself/)
+})
+
+test('host gates run the configured commands sequentially and tee logs to /tmp', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'df12-host-gates-'))
+  const surface = await loadAssessmentSurface({ commitGates: ['echo hello ok', 'true'] })
+  assert.equal(surface.HOST_COMMIT_GATES, true, 'host gates default on')
+
+  const green = await surface.runHostCommitGates(dir, '1.2.3', 'r1')
+  assert.equal(green.green, true)
+  assert.equal(green.detail, '')
+  assert.equal(green.results.length, 2)
+  assert.ok(green.results.every((entry) => entry.ok))
+  assert.match(readFileSync(green.results[0].logFile, 'utf8'), /hello ok/)
+  assert.deepEqual({ ...surface.hostGateMetrics }, { runs: 2, failures: 0 })
+})
+
+test('a red host gate stops the sequence and carries the log evidence', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'df12-host-gates-red-'))
+  const surface = await loadAssessmentSurface({ commitGates: ['echo pre-gate', 'echo boom; exit 3', 'echo never-runs'] })
+
+  const red = await surface.runHostCommitGates(dir, '1.2.3', 'r2')
+  assert.equal(red.green, false)
+  assert.equal(red.results.length, 2, 'later gates never run after a failure')
+  assert.equal(red.results[1].ok, false)
+  assert.match(red.detail, /host gate `echo boom; exit 3` failed/)
+  assert.match(red.detail, /boom/)
+  assert.match(red.detail, new RegExp(red.results[1].logFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.deepEqual({ ...surface.hostGateMetrics }, { runs: 2, failures: 1 })
+})
+
+test('a hung host gate is killed at the configured timeout', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'df12-host-gates-hang-'))
+  const surface = await loadAssessmentSurface({
+    commitGates: [`${process.execPath} -e "setInterval(() => {}, 50)"`],
+    commitGateTimeoutSeconds: 1,
+  })
+  assert.equal(surface.COMMIT_GATE_TIMEOUT_SECONDS, 1)
+  const hung = await surface.runHostCommitGates(dir, '1.2.3', 'r1')
+  assert.equal(hung.green, false)
+  assert.match(hung.detail, /killed after the 1s gate timeout/)
+})
+
+test('gate guidance warns about host verification only when it is enabled', async () => {
+  const hosted = await loadAssessmentSurface()
+  assert.match(hosted.COMMIT_GATE_GUIDANCE, /host independently re-runs the configured gates/)
+  const legacy = await loadAssessmentSurface({ hostCommitGates: false })
+  assert.equal(legacy.HOST_COMMIT_GATES, false)
+  assert.doesNotMatch(legacy.COMMIT_GATE_GUIDANCE, /host independently re-runs/)
+})
+
+test('the addendum lane host-verifies gates before spending any review', async () => {
+  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  const gateCheck = source.indexOf('addendum reported green gates but the host could not reproduce them')
+  const hostReview = source.indexOf("coderabbit:${tag} addendum")
+  const fallbackReview = source.indexOf('addendum-review:${tag}')
+  assert.ok(gateCheck !== -1 && hostReview !== -1 && fallbackReview !== -1)
+  assert.ok(gateCheck < hostReview, 'host gates run before the host CodeRabbit review')
+  assert.ok(hostReview < fallbackReview, 'host CodeRabbit review runs before the fallback review agent')
 })
 
 test('recoverable review faults classify as deferred review issues', async () => {

@@ -135,6 +135,18 @@ timestamps). Test loaders and the simulation driver force
 and burn review quota; the pipeline seam is covered by a fake NDJSON-emitting
 `coderabbit` on `PATH`.
 
+Host-run commit gates (`hostCommitGates`, default on) apply the same
+philosophy to gate greenness: `runHostCommitGates` executes the configured
+`commitGates` commands via `sh -c` in the task worktree, serialized pool-wide
+behind `hostGateLock` (width 1, for build-cache friendliness), with a
+per-command timeout (`commitGateTimeoutSeconds`) and full output teed to
+`/tmp/df12-gate-*` logs. In the dual-review loop the gates run FIRST each
+round — a red branch goes to a fix round with the host evidence without
+spending reviewer agents; in the addendum lane an unreproducible green claim
+fails the addendum before any review. Test loaders and the simulation driver
+force `hostCommitGates: false` (fixture repos have no `Makefile`); pipeline
+coverage uses a scripted fake gate command.
+
 The run result exposes the contract for operators and tests: `commitGates`
 (the effective deterministic gate list; agents must never assume `make all`
 aggregates a project's gates), `stageAttempts`, bounded-cardinality

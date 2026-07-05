@@ -121,8 +121,14 @@ const COMMIT_GATES = (Array.isArray(cfg.commitGates) && cfg.commitGates.length
   ? cfg.commitGates
   : ['make all']).map((command) => String(command))
 const COMMIT_GATE_TEXT = COMMIT_GATES.map((command) => `\`${command}\``).join(' then ')
+// Host-run commit gates: the control loop re-runs the configured gate
+// commands against committed HEAD before review and integration, so a
+// gatesGreen claim is verified, never trusted. hostCommitGates=false
+// restores the trust-the-agent flow.
+const HOST_COMMIT_GATES = cfg.hostCommitGates !== false
+const COMMIT_GATE_TIMEOUT_SECONDS = Math.max(1, Math.trunc(Number(cfg.commitGateTimeoutSeconds) || 3600))
 const COMMIT_GATE_GUIDANCE =
-  `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well — NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.`
+  `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well — NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.${HOST_COMMIT_GATES ? ' The workflow host independently re-runs the configured gates against your committed HEAD before review and integration; a gatesGreen claim the host cannot reproduce fails the stage with the host gate log as evidence.' : ''}`
 const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW
   ? 'Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work — only committed changes reach the host review.'
   : 'Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.'
@@ -453,7 +459,7 @@ const ROADMAP_ID_RE = /\b\d+(?:\.\d+)+\b/g
 async function execFileText(command, commandArgs, options = {}) {
   const { execFile } = process.getBuiltinModule('node:child_process')
   return await new Promise((resolve, reject) => {
-    execFile(command, commandArgs, { cwd: options.cwd || process.cwd(), maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile(command, commandArgs, { cwd: options.cwd || process.cwd(), maxBuffer: 16 * 1024 * 1024, ...(options.timeoutMs ? { timeout: options.timeoutMs } : {}) }, (error, stdout, stderr) => {
       if (error) {
         error.stdout = stdout
         error.stderr = stderr
@@ -474,6 +480,10 @@ async function execFileStatus(command, commandArgs, options = {}) {
       stdout: error?.stdout || '',
       stderr: error?.stderr || '',
       message: (error && error.message) || String(error),
+      // Set when the child was killed (e.g. by the timeoutMs option); the
+      // message alone does not say so.
+      killed: Boolean(error?.killed),
+      signal: error?.signal || '',
     }
   }
 }
@@ -696,6 +706,54 @@ async function recordCoderabbitReview(label, review) {
     coderabbitCapture.sinkError = (error && error.message) || String(error)
     log(`[${label}] could not append CodeRabbit findings to ${CODERABBIT_FINDINGS_FILE}: ${coderabbitCapture.sinkError}`)
   }
+}
+
+// ---------------------------------------------------------------------------
+// Host-run commit gates. The control loop executes the configured gate
+// commands itself against the worktree's committed HEAD — deterministic,
+// zero agent tokens, and uniform across adapters — so a red branch never
+// spends reviewer agents and a false gatesGreen claim is caught with the
+// host's own log as evidence. Full output is teed to a /tmp log per gate;
+// the returned detail carries a bounded tail.
+// ---------------------------------------------------------------------------
+const hostGateMetrics = { runs: 0, failures: 0 }
+
+function hostGateLogPath(tag, roundLabel, index, command) {
+  const slug = (value) => String(value).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
+  return `/tmp/df12-gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}-${slug(command)}.out`
+}
+
+async function runHostCommitGates(worktree, tag, roundLabel, deps = {}) {
+  const exec = deps.exec || execFileStatus
+  const fs = process.getBuiltinModule('node:fs/promises')
+  const results = []
+  for (const [index, command] of COMMIT_GATES.entries()) {
+    hostGateMetrics.runs += 1
+    log(`[task ${tag}] host gate ${index + 1}/${COMMIT_GATES.length} (${roundLabel}): ${command}`)
+    const result = await exec('sh', ['-c', command], { cwd: worktree, timeoutMs: COMMIT_GATE_TIMEOUT_SECONDS * 1000 })
+    const output = `${result.stdout || ''}${result.stderr ? `\n--- stderr ---\n${result.stderr}` : ''}`
+    const logFile = hostGateLogPath(tag, roundLabel, index, command)
+    try {
+      await fs.writeFile(logFile, output, 'utf8')
+    } catch {
+      // the log file is best-effort evidence; the tail below still lands
+    }
+    if (!result.ok) {
+      hostGateMetrics.failures += 1
+      const timedOut = result.killed || /SIGTERM|timed? ?out/i.test(result.message || '')
+        ? ` (killed after the ${COMMIT_GATE_TIMEOUT_SECONDS}s gate timeout)`
+        : ''
+      const tail = output.trim().split(/\r?\n/).slice(-12).join('\n')
+      results.push({ command, ok: false, logFile })
+      return {
+        green: false,
+        results,
+        detail: `host gate \`${command}\` failed${timedOut}; full log: ${logFile}; output tail:\n${tail}`,
+      }
+    }
+    results.push({ command, ok: true, logFile })
+  }
+  return { green: true, results, detail: '' }
 }
 
 // Blocking severities become fix-round items; the rest are captured for the
@@ -2564,6 +2622,23 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
     // parallel() resolves a thrown thunk to null, which would make an adapter
     // timeout indistinguishable from a reviewer that returned nothing — so
     // each reviewer retries infra faults and records any residual one here.
+    // Host-verified gates FIRST: deterministic, zero tokens, and a red
+    // branch must not spend reviewer agents. A red gate goes straight to a
+    // fix round carrying the host log evidence.
+    let hostGates = null
+    if (HOST_COMMIT_GATES) {
+      hostGates = await hostGateLock(() => runHostCommitGates(worktree, tag, `r${round}`))
+      if (!hostGates.green) {
+        log(`[task ${tag}] host commit gates red in round ${round}`)
+        const gateBlocking = [`HOST GATES RED: ${hostGates.detail} The agent-reported gate status was wrong or is stale — reproduce the failure from the log, fix it, re-run the gates to green, and commit.`]
+        reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: gateBlocking, hostGates: hostGates.results, fix: null })
+        if (round === MAX_REVIEW_ROUNDS) break
+        phase('Implement')
+        const gateFix = await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, gateBlocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`))
+        reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(gateFix)
+        continue
+      }
+    }
     const reviewInfraFaults = []
     const runReviewAgent = (promptText, reviewPhase, label) => () =>
       withInfraRetry(() => agent(promptText, reviewAgentOptions({ phase: reviewPhase, label, schema: REVIEW_SCHEMA })), label)
@@ -2636,7 +2711,7 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
       ...(expertReview.blocking || []),
       ...coderabbitBlocking,
     ]
-    const roundRecord = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, fix: null }
+    const roundRecord = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, ...(hostGates ? { hostGates: hostGates.results } : {}), fix: null }
     reviewRounds.push(roundRecord)
     if (blocking.length === 0 && codeReview?.verdict === 'pass' && expertReview?.verdict === 'pass') {
       reviewsPass = true
@@ -2792,6 +2867,14 @@ async function runTask(task, mergeLock) {
     }
     const proposals = []
     const addendumOpenIssues = []
+    // Host-verified gates: addenda have no review rounds, so a gatesGreen
+    // claim the host cannot reproduce fails here, before any review spend.
+    if (HOST_COMMIT_GATES) {
+      const hostGates = await hostGateLock(() => runHostCommitGates(worktree, tag, 'addendum'))
+      if (!hostGates.green) {
+        return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: `addendum reported green gates but the host could not reproduce them: ${hostGates.detail}`, openIssues, worktree, proposals, kind: 'addendum' })
+      }
+    }
     // Host-run CodeRabbit review of the committed addendum work. Blocking
     // severities halt the addendum for assessment (addenda have no fix loop);
     // a persistent rate limit or CLI fault defers with a documented open
@@ -3061,6 +3144,10 @@ function semaphore(limit) {
 
 const planningLock = semaphore(MAX_PLANNING_PARALLEL)
 const buildLock = semaphore(MAX_BUILD_PARALLEL)
+// Host gate runs are serialized across the whole pool: the target project's
+// build cache rewards sequential execution, and concurrent gate runs from
+// sibling worktrees would contend for it.
+const hostGateLock = semaphore(1)
 
 let selectSeq = 0
 async function doSelect(taken) {
@@ -3381,6 +3468,14 @@ return {
   // The exact deterministic gate set every branch agent was instructed to run
   // (issue #28): operators can audit reported gate greenness against it.
   commitGates: COMMIT_GATES,
+  // Host gate verification aggregate: whether the host re-ran the gates
+  // itself, the per-gate timeout, and bounded counters. Per-round pass/fail
+  // detail lives in each task's reviewRounds[].hostGates.
+  hostGates: {
+    enabled: HOST_COMMIT_GATES,
+    timeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
+    ...hostGateMetrics,
+  },
   stageAttempts: STAGE_ATTEMPTS,
   // Bounded-cardinality fault metrics (fixed keys): stage retries spent on
   // infrastructure faults plus terminal fault counts per class, so operators

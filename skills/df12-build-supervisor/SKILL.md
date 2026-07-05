@@ -52,7 +52,10 @@ provides the doc skills):
 - **Make gate targets:** `make all` (the deterministic gate — format, lint,
   typecheck, test), and `make markdownlint` + `make nixie` (markdown + mermaid
   gates) run whenever markdown changes. If a project names its gate
-  differently, it is not yet df12-conformant — align it first.
+  differently, it is not yet df12-conformant — align it first. With
+  `hostCommitGates` on (the workflow default), the workflow host re-runs the
+  configured `commitGates` itself before review and integration, so agent
+  gate claims are verified, never trusted.
 - **`coderabbit review --agent`** as the AI review (a shared, rate-limited
   quota — see the throughput note below). With `coderabbitHostReview` on (the
   workflow default) the HOST runs it against committed work per review round
@@ -185,6 +188,16 @@ provides the doc skills):
    findings across runs for linter tuning — recurring finding classes are
    candidates for deterministic lint rules).
 
+   Host gate knobs: `hostCommitGates` (default on — the host re-runs the
+   `commitGates` commands against committed HEAD at the start of every
+   dual-review round and once per addendum, serialized pool-wide behind a
+   gate lock for build-cache friendliness; a red gate goes straight to a fix
+   round with the host log as evidence, and an addendum whose green claim
+   the host cannot reproduce fails outright) and `commitGateTimeoutSeconds`
+   (default 3600 — a gate exceeding it is killed and reported with the
+   timeout named). Host gate logs land at `/tmp/df12-gate-<task>-<round>-…`
+   on the runner; read them before re-running a gate by hand.
+
    Set the ODW adapter `timeout` (in the ODW config, not workflow args) well
    below its 6-hour default. ODW has no per-call timeout, so the workflow's
    `stageAttempts` retry can only begin after the adapter kills the process —
@@ -220,7 +233,11 @@ Every time a run completes you do the same loop:
    classification/action/reason, `skipped` with machine-readable reasons, and
    `unresolved` — survivor branches the run reported but did not integrate),
    `commitGates` (the deterministic gate set every branch agent was told to
-   run — audit reported gate greenness against it), `stageAttempts` (the
+   run — audit reported gate greenness against it), `hostGates` (host gate
+   verification: enabled flag, per-gate timeout, and run/failure counters;
+   with host gates on, `gatesGreen` is host-verified at review time and
+   per-round pass/fail sits in failed tasks' `reviewRounds[].hostGates`
+   with `/tmp/df12-gate-*` log paths), `stageAttempts` (the
    in-run retry budget for stage agents that die on infrastructure faults;
    a result with `status: "infra-fault"` means the fault outlived that budget
    and carries no evidence about the branch), `coderabbit` (host-review
@@ -312,7 +329,8 @@ For every active `roadmap-*` worktree, check:
   normal only *mid*-agent-turn. Repeated `host salvage declined: git commit
   failed` bounces mean the ENVIRONMENT blocks committing in that worktree
   (hooks, identity, permissions) — stop and repair rather than relaunch;
-- advertised gate logs exist;
+- advertised gate logs exist (with `hostCommitGates` on, the decisive gate
+  evidence is the host's own `/tmp/df12-gate-*` logs, not agent claims);
 - claimed commits, dirty files, or clean branches match the agent output.
 
 If a planner returns an ExecPlan path but the file is missing, inspect the

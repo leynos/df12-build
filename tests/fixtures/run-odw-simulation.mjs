@@ -163,10 +163,11 @@ try {
     pipeline,
     (title) => phases.push(title),
     () => {},
-    // Host review defaults OFF in simulations: it would invoke the REAL
-    // coderabbit CLI on PATH and burn review quota. A scenario that wants it
-    // must opt in AND provide a fake `coderabbit` via pathPrefix.
-    { coderabbitHostReview: false, ...(scenario.args || {}) },
+    // Host review and host gates default OFF in simulations: they would
+    // invoke the REAL coderabbit CLI (burning review quota) and run real
+    // gate commands like `make all` in fixture repos. A scenario that wants
+    // them must opt in and provide safe fakes (pathPrefix / commitGates).
+    { coderabbitHostReview: false, hostCommitGates: false, ...(scenario.args || {}) },
     { total: null, spent: () => 0, remaining: () => Infinity },
     async () => {
       throw new Error('nested workflow not scripted')
