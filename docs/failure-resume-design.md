@@ -317,8 +317,10 @@ prompts:
 
 - the planner commits the ExecPlan when first written and after every
   revision, leaving `Status: DRAFT`;
-- the design reviewer flips `Status` to `APPROVED` (and commits) if and only
-  if it is satisfied;
+- the design reviewer stays read-only and returns approval evidence; `Status`
+  becomes `APPROVED` only after the reviewer is satisfied, and it is the
+  workflow HOST that rewrites the header and commits the plan path as a
+  deterministic machine commit (see the host-side enforcement below);
 - the implementer sets `Status: IN PROGRESS` before the first work item,
   commits the plan with every work-item tick, and sets `Status: COMPLETE` with
   the retrospective when done;
