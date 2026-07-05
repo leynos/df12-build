@@ -170,9 +170,13 @@ provides the doc skills):
    adapters can write into sibling task worktrees; on by default).
 
    Set the ODW adapter `timeout` (in the ODW config, not workflow args) well
-   below its 6-hour default — plan and review stages normally finish within
-   tens of minutes, so a multi-hour silent stream is a hung API connection,
-   and the workflow cannot react until the adapter kills it.
+   below its 6-hour default. ODW has no per-call timeout, so the workflow's
+   `stageAttempts` retry can only begin after the adapter kills the process —
+   a hung API stream always costs the full adapter timeout first. Plan and
+   review stages normally finish within tens of minutes, so 4500–5400 seconds
+   (75–90 minutes) is generous: a hang then costs roughly 1.5 hours plus one
+   warm retry from the committed ExecPlan, instead of 6 hours and a dead run.
+   A multi-hour silent stream is a hung connection, not progress.
 
    The checked-in defaults split execution from judgement. Build-side work
    uses Codex defaults, while planning and review judgement use Claude Code
