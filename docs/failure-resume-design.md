@@ -148,11 +148,12 @@ Add these ODW `args` fields:
 | Argument | Default | Meaning |
 | - | - | - |
 | `resumePartialBranches` | `false` | Enable fresh-run recovery discovery. |
-| `resumeMode` | `"assess"` | One of `"assess"` or `"review"`. `"assess"` reports only. `"review"` may route clean `adopt-complete` branches into review and integration. |
+| `resumeMode` | `"assess"` | One of `"assess"`, `"review"`, or `"continue"`. `"assess"` reports only. `"review"` may route clean `adopt-complete` branches into review and integration. `"continue"` dispatches deterministically on the committed ExecPlan `Status` and re-enters the ordinary pipeline at the plan, implement, or review stage. |
 | `resumeTaskId` | unset | Limit recovery discovery to one roadmap id. This is separate from `taskId`, which selects normal roadmap work. |
 | `resumeMaxCandidates` | `4` | Bound startup recovery fan-in so a messy repository does not consume the whole run. |
 | `reuseAcceptedExecPlans` | `false` | Enable accepted-plan adoption after normal roadmap selection. When disabled, every normal task still enters the existing plan/design loop. |
 | `acceptedPlanMode` | `"verify"` | One of `"verify"` or `"build"`. `"verify"` reports whether a matching plan is adoptable. `"build"` may enter implementation when the plan is fresh and accepted. |
+| `stageAttempts` | `2` | Total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, killed CLI, schema-retry exhaustion). Product failures are never retried. |
 
 `resumeMode` is intentionally not called `autoResume`. The name should force an
 operator to choose the maximum action allowed by the run.
@@ -288,6 +289,71 @@ The synthetic result is only a bridge into review. It is not proof that the
 branch is shippable. The existing code review, expert review, CodeRabbit, gate,
 and integration requirements remain decisive.
 
+## Continue-mode resume path
+
+`resumeMode="continue"` removes the judgement agent from recovery entirely.
+The committed ExecPlan is the durable source of truth for where a task stands,
+so a fresh run can dispatch a survivor branch from durable state alone:
+
+| Committed ExecPlan `Status` | Continue-mode action |
+| - | - |
+| file missing, `DRAFT`, or unrecognized | Re-enter the plan/design-review loop; the planner completes or revises the existing draft in place. |
+| `APPROVED` or `IN PROGRESS` | Re-enter implementation; with the per-work-item build loop (the default) the host itself dispatches from the first unticked Progress item, so resume needs no builder judgement at all. |
+| `COMPLETE` | Re-enter dual review and integration via the synthetic implementation bridge. |
+| `BLOCKED` | Report for the operator (`plan-blocked` skip reason). |
+
+Hygiene checks still fail closed before any dispatch: addendum branches,
+evidence-collection errors, and dirty worktrees are reported, and a `COMPLETE`
+plan with no committed work reports `no-committed-work`. Dry runs report the
+stage they would have resumed.
+
+Safety comes from the downstream gates a resumed branch still has to pass —
+design review, the deterministic commit gates, dual review, and serialized
+integration — not from an up-front classification. The worst case of resuming
+a half-built branch is the same as a fresh task failing review.
+
+Continue mode depends on an agent-side durability contract enforced by the
+prompts:
+
+- the planner commits the ExecPlan when first written and after every
+  revision, leaving `Status: DRAFT`;
+- the design reviewer stays read-only and returns approval evidence; `Status`
+  becomes `APPROVED` only after the reviewer is satisfied, and it is the
+  workflow HOST that rewrites the header and commits the plan path as a
+  deterministic machine commit (see the host-side enforcement below);
+- the implementer sets `Status: IN PROGRESS` before the first work item,
+  commits the plan with every work-item tick, and sets `Status: COMPLETE` with
+  the retrospective when done;
+- fix rounds commit their ExecPlan updates with the fix.
+
+An uncommitted plan is lost when a run dies; a stale `Status` resumes the task
+at an earlier stage than necessary, which costs effort but never correctness.
+
+Prose alone does not hold this contract — live runs showed planners returning
+uncommitted drafts and reviewers approving without committing — so the control
+loop enforces it host-side at every stage boundary, the same philosophy as the
+write probe:
+
+- after each planner round, the ExecPlan must exist at `HEAD` with no
+  uncommitted modifications. When the plan file is the only uncommitted path,
+  the host salvages it deterministically: it commits the plan path itself
+  (hermetic identity, `Draft ExecPlan for task <id>`) rather than spending a
+  30–90 minute planner round on git bookkeeping — live runs showed three
+  consecutive rounds burnt on exactly this. Anything else dirty declines the
+  salvage and bounces to the planner as an `EXECPLAN DURABILITY` blocking
+  item carrying the evidence (the foreign dirty paths, or the host's own git
+  error when the environment blocks committing), without spending the design
+  reviewer;
+- when the design reviewer is satisfied, the control loop itself rewrites the
+  header to `Status: APPROVED` and commits only the plan path as a
+  deterministic machine commit, so the reviewer stays read-only and the
+  transition can never be skipped;
+- when an implementation returns `ok`, the worktree must be fully committed;
+  uncommitted state fails the stage with the exact paths, because uncommitted
+  work is unreviewable and would be lost at the squash merge. A committed
+  plan whose status is not `COMPLETE` is only logged: it costs a resumed run
+  one redundant stage, never correctness.
+
 ## Returned result shape
 
 Add a top-level `recovery` object to the workflow result:
@@ -313,6 +379,16 @@ Add a top-level `recovery` object to the workflow result:
       classification: "adopt-complete",
       action: "reported"
     }
+  ],
+  unresolved: [
+    {
+      id: "1.2.3",
+      isAddendum: false,
+      branchName: "roadmap-1-2-3",
+      classification: "adopt-complete",
+      action: "reported",
+      reason: "dirty-worktree"
+    }
   ]
 }
 ```
@@ -320,6 +396,21 @@ Add a top-level `recovery` object to the workflow result:
 Per-task `results[]` entries should remain the primary place for review and
 integration outcomes. The recovery summary is an index for operators and
 supervision tools.
+
+`unresolved` lists every survivor branch the run reported but did not
+integrate (reported classifications, `resume-failed` branches, and discovery
+holds such as `missing-worktree`). These ids stay held out of normal selection
+while their branches survive, so the frontier remains blocked until an
+operator closes, resumes, splits, or hoovers each one. The run's terminal
+state makes this explicit rather than ending indistinguishably from a dry
+frontier:
+
+- A failed or halted review-mode resume sets `halted` to
+  `recovery resume of task <id> <status> at <stage>: <detail>` (the same
+  first-failure semantics as the worker pool), with the per-round reviewer
+  verdicts and structured fix-round reports in the result's `reviewRounds`.
+- A run that would otherwise stop cleanly while `unresolved` is non-empty sets
+  `halted` to `needs-operator-recovery: …` naming the surviving ids.
 
 When accepted-plan reuse is enabled, add a top-level `planReuse` object:
 
@@ -359,6 +450,63 @@ accepted plan.
 | Accepted plan metadata is prompt-injected or unparsable | Treat the plan as unavailable for automation and run the normal plan/design loop. |
 | Accepted plan build fails | Halt through the existing implementation failure path with the task branch left intact. |
 | Auth preflight fails | Stop as `fatal-auth`; do not assess or resume branches. |
+| Stage agent dies on an infrastructure fault | Retry the stage agent in place up to `stageAttempts` total attempts; if the fault persists, stop as `infra-fault` without an assessment. |
+
+### Infrastructure faults
+
+An infrastructure fault is an agent process that died without producing a
+verdict: a hung stream killed by the adapter hard timeout (`adapter 'claude'
+timed out`), a CLI that exited non-zero (`exited with code 143`), or
+schema-retry exhaustion after the reply channel failed (`did not satisfy the
+schema after N attempt(s)`). These strings are pinned from ODW's own error
+messages (`bridge.ts`).
+
+Such a fault carries no evidence about the task branch, so it is handled
+unlike a product failure:
+
+1. **Retry in place.** The stage agent is re-run (bounded by `stageAttempts`,
+   default 2 total attempts). The ExecPlan durability contract makes the
+   retry a warm start: the committed plan and any committed work are already
+   on the branch, and every stage prompt tolerates re-entry. In the dual
+   review, a reviewer thunk that dies on an infrastructure fault is retried
+   inside its `parallel` slot; a residual fault is recorded so it cannot be
+   mistaken for a reviewer that returned nothing. Integration is the one
+   exception: it is never retried, because its push to `origin/<base>` is not
+   idempotent — a hidden-success first attempt re-run after an adapter death
+   could squash and push the same task twice. A fault there terminates
+   immediately and the detail tells the operator to inspect `origin/<base>`
+   and the roadmap before relaunching.
+2. **Terminal `infra-fault`, not `failed`.** If the fault persists, the task
+   result carries `status: "infra-fault"`, `stage: "infrastructure"` (or
+   `stage: "review"` when the dual review was interrupted, or
+   `stage: "integrate"` for the unretried integration fault). No assessment
+   agent is spawned — there is nothing about the branch to judge — and, as
+   with provider faults, end-of-run remediation triage skips its roadmap
+   writes so an outage never masquerades as task evidence.
+3. **Resume via `continue` mode.** The `halted` detail directs the operator
+   to relaunch with `resumeMode: "continue"`; the committed ExecPlan `Status`
+   dispatches the branch back into the pipeline at the stage where it died.
+
+The run result carries bounded-cardinality `faultMetrics` (`infraRetries`,
+`infraFaults`, `providerFaults`, `authFaults` — fixed keys, never keyed by
+task id or error text) so operators can read retry pressure and terminal
+fault classes straight from the result instead of scraping logs.
+
+Host filesystem access around the durable ExecPlan fails closed. Agent-supplied
+plan paths pass through a containment check (`execplanRelPath`) that rejects
+absolute paths outside the worktree and `../` escapes before any read, write,
+or git call. Stat and read faults are never conflated with "the file is
+absent": only `ENOENT`/`ENOTDIR` mean absent, and any other fault surfaces as
+a structured error — continue-mode recovery reports it as `plan-unreadable`
+(or `execplan-stat-error` in assess mode) rather than dispatching a planner
+over durable work it could not verify.
+
+The bounded retry cannot shorten a hang itself: ODW's adapter timeout is
+adapter-level configuration (`timeout` in the ODW config), not a per-call
+option. A hung stream burns the full adapter timeout before the workflow can
+react, so set the adapter timeout well below the 6-hour default — plan and
+review stages normally finish within tens of minutes, and a multi-hour silent
+stream is a hang, not progress.
 
 ## Security and permissions
 

@@ -57,6 +57,13 @@ async function runSmoke(resumeMode) {
       projectRoot: repo.dir,
       taskId: '9.9.9',
       authPreflight: false,
+      // Host review would exec the REAL coderabbit CLI (it does not route
+      // through the mock adapters) and burn review quota; host gates would
+      // run `make all` in the Makefile-less fixture repo.
+      coderabbitHostReview: false,
+      hostCommitGates: false,
+      // The mock implement adapter does not tick ExecPlan Progress items.
+      perWorkItemBuild: false,
       resumePartialBranches: true,
       resumeMode,
       planAdapter: 'mock',

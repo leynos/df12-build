@@ -44,7 +44,11 @@ return {
 `,
   )
   return factory(
-    args,
+    // Host review, host gates, and the per-work-item build loop default
+    // OFF: runTask tests drive the pipeline against fixture repos, where the
+    // host review would exec the REAL coderabbit CLI, host gates would run
+    // real gate commands, and the build loop expects ticked Progress items.
+    { coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...args },
     () => {},
     () => {},
     agentImpl,

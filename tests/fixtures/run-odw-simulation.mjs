@@ -11,7 +11,13 @@
  * Scenario: {
  *   args: {...workflow args...},
  *   pathPrefix?: "<dir prepended to PATH before the body runs>",
- *   assessment?: {...overrides for the scripted ADR 002 assessment reply...}
+ *   assessment?: {...overrides for the scripted ADR 002 assessment reply...},
+ *   review?: {...full scripted reply for code-review/expert-review labels...},
+ *   fix?: {...full scripted reply for fix: labels...},
+ *   failures?: { "<exact label>": { error?: "<message>", times?: N } }
+ *     — the scripted agent throws `error` for the first `times` calls with
+ *       that label (every call when `times` is omitted), then answers
+ *       normally; used to simulate adapter/infrastructure faults.
  * }
  * Prints JSON: { result, error, calls, phases }
  */
@@ -61,8 +67,31 @@ async function respond(label, prompt) {
     if (details) await writeFile(details.file, details.token, 'utf8')
     return { ok: true }
   }
+  if (label.startsWith('plan:')) {
+    return scenario.plan || {
+      execplanPath: 'docs/execplans/roadmap-1-2-3.md',
+      workItems: ['work item 1'],
+      summary: 'plan completed and committed',
+    }
+  }
+  if (label.startsWith('design-review:')) {
+    return scenario.designReview || { satisfied: true, blocking: [] }
+  }
+  if (label.startsWith('implement:')) {
+    return scenario.implement || {
+      ok: true,
+      gatesGreen: true,
+      execplanPath: 'docs/execplans/roadmap-1-2-3.md',
+      workItemsCompleted: 1,
+      workItemsTotal: 1,
+      commits: ['Finish remaining work items'],
+      coderabbitRuns: 1,
+      openIssues: [],
+      summary: 'resumed and completed the remaining work items',
+    }
+  }
   if (label.startsWith('code-review:') || label.startsWith('expert-review:')) {
-    return { verdict: 'pass', blocking: [], summary: 'ship it' }
+    return scenario.review || { verdict: 'pass', blocking: [], summary: 'ship it' }
   }
   if (label.startsWith('integrate:')) {
     return {
@@ -76,7 +105,9 @@ async function respond(label, prompt) {
       summary: 'squash merged and pushed',
     }
   }
-  if (label.startsWith('fix:')) return 'applied fixes'
+  if (label.startsWith('fix:')) {
+    return scenario.fix || { gatesGreen: true, commits: [], coderabbitRuns: 0, resolved: [], openIssues: [], summary: 'applied fixes' }
+  }
   throw new Error(`unexpected agent label in simulation: ${label}`)
 }
 
@@ -98,9 +129,16 @@ const body = new AsyncFunction(
 
 const calls = []
 const phases = []
+const failures = scenario.failures || {}
 const agent = async (prompt, opts = {}) => {
-  calls.push(opts.label || opts.adapter || '')
-  return respond(opts.label || '', prompt)
+  const label = opts.label || opts.adapter || ''
+  calls.push(label)
+  const fault = failures[label]
+  if (fault && (fault.times === undefined || fault.times > 0)) {
+    if (fault.times !== undefined) fault.times -= 1
+    throw new Error(fault.error || "adapter 'claude' timed out")
+  }
+  return respond(label, prompt)
 }
 const parallel = (thunks) => Promise.all(thunks.map((thunk) => Promise.resolve().then(thunk).catch(() => null)))
 const pipeline = async (items, ...stages) =>
@@ -125,7 +163,12 @@ try {
     pipeline,
     (title) => phases.push(title),
     () => {},
-    scenario.args || {},
+    // Host review, host gates, and the per-work-item build loop default OFF
+    // in simulations: they would invoke the REAL coderabbit CLI (burning
+    // review quota), run real gate commands like `make all` in fixture
+    // repos, and expect scripted implement agents to tick Progress items. A
+    // scenario that wants them must opt in and provide safe fakes.
+    { coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...(scenario.args || {}) },
     { total: null, spent: () => 0, remaining: () => Infinity },
     async () => {
       throw new Error('nested workflow not scripted')

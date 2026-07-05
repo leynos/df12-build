@@ -43,11 +43,15 @@ agents, four build-stage agents, and review, triage, audit, or assessment
 slack. Keep `maxAgents` high (such as the ODW default of `1000`) because it is
 the per-run dispatch guard rather than the live process-pool size.
 
-Set the adapter `timeout` high enough for the workflow's CodeRabbit policy.
-Implementation agents may legitimately wait through three 45-90 minute
-CodeRabbit rate-limit backoffs using `vsleep`, so a one-hour adapter timeout can
-kill a healthy task. A normal long-running workshop should use a timeout of at
-least `21600` seconds unless the operator deliberately wants a shorter cap.
+Set the adapter `timeout` with the CodeRabbit flow in mind. With the default
+host-run CodeRabbit review (`coderabbitHostReview`, see the configuration
+list), agents never wait on CodeRabbit — the host absorbs rate-limit backoff
+in its own wall-clock — so the adapter timeout only needs to cover honest
+stage work; 4500–5400 seconds (75–90 minutes) is generous, and a longer
+silent stream is a hung connection, not progress. Only when
+`coderabbitHostReview=false` do implementation agents wait through 45–90
+minute CodeRabbit backoffs with `vsleep` themselves, and then the timeout
+must be at least `21600` seconds to avoid killing a healthy task mid-backoff.
 
 Make sure every adapter named by `args.json` exists in `odw.config.json` or in
 ODW's built-in adapter set. The checked-in ODW workflow now defaults planning
@@ -63,7 +67,7 @@ Minimal sidecar `odw.config.json` shape for the Claude/Codex split:
   "concurrency": 16,
   "maxAgents": 1000,
   "workspaceMode": "inplace",
-  "timeout": 21600,
+  "timeout": 5400,
   "schemaRetries": 2,
   "runsRoot": "~/.odw/runs",
   "workflowsRoot": "~/.odw/workflows",
@@ -85,6 +89,7 @@ Minimal sidecar `odw.config.json` shape for the Claude/Codex split:
     },
     "codex-medium": {
       "label": "Codex GPT 5.5 medium",
+      "timeout": 3600,
       "command": [
         "codex",
         "--ask-for-approval",
@@ -335,6 +340,44 @@ Common arguments:
 - `maxTasks`: maximum roadmap tasks for one run.
 - `maxDesignRounds`: planning and design-review exchange cap. Defaults to `4`.
 - `maxReviewRounds`: implementation review/fix exchange cap. Defaults to `3`.
+- `commitGates`: ordered list of deterministic gate commands every task,
+  addendum, fix, and remediation agent must run before declaring work green.
+  Defaults to `["make all"]`. The run result echoes the effective list so
+  operators can audit reported gate greenness against it; agents are told
+  never to assume `make all` aggregates the gates a project names in
+  `AGENTS.md`.
+- `hostCommitGates`: when `true` (the default), the workflow host re-runs the
+  `commitGates` commands itself against each branch's committed HEAD before
+  review and integration, so a `gatesGreen` claim is verified rather than
+  trusted. Set `false` to restore the trust-the-agent flow.
+- `commitGateTimeoutSeconds`: per-command timeout for host-run gates.
+  Defaults to `3600`; a gate that exceeds it is killed and reported as a
+  failure with the timeout named in the evidence.
+- `stageAttempts`: total attempts per stage agent when the previous attempt
+  died on an infrastructure fault (an ODW adapter timeout or crash, or
+  schema-retry exhaustion). Defaults to `2`. Product failures are never
+  retried, and integration is never retried because its push to
+  `origin/<base>` is not idempotent.
+- `perWorkItemBuild`: when `true` (the default), the workflow host reads the
+  approved ExecPlan's `## Progress` checklist and dispatches one builder turn
+  per unticked work item, verifying committed progress after every turn.
+  Plans without a Progress checklist fall back to the single-turn build
+  automatically; set `false` to force the single-turn build for every task.
+- `maxWorkItemRounds`: builder turns per task before the work-item loop fails
+  closed. Defaults to `16`.
+- `coderabbitHostReview`: when `true` (the default), the workflow host runs
+  `coderabbit review --agent` against each task's committed work instead of
+  asking agents to babysit CodeRabbit. Rate-limit backoff is absorbed as host
+  wall-clock (zero agent tokens), and blocking findings feed the fix rounds.
+  Set `false` to restore the legacy agent-run flow.
+- `coderabbitAttempts`: total host review attempts when CodeRabbit rate
+  limits. Defaults to `3`.
+- `coderabbitBackoffMinutes`: `[low, high]` range for the deterministic
+  backoff wait between rate-limited attempts. Defaults to `[45, 90]`.
+- `coderabbitFindingsFile`: optional absolute path to an append-only JSONL
+  file recording every CodeRabbit finding (timestamp, task, severity, file,
+  comment). Point it at a sidecar file to accumulate findings across runs and
+  tune deterministic lint rules from the recurring classes.
 - `taskId`: run exactly one roadmap task.
 - `dryRun`: when `true`, plan, review, and audit without implementation,
   integration, or document writes.
@@ -351,7 +394,9 @@ Common arguments:
 - `resumeMode`: the maximum recovery action for discovered branches. `assess`
   (the default) reports only. `review` may additionally route clean, committed,
   task-scoped `adopt-complete` branches with validation evidence into the
-  ordinary review and integration path. Any other value fails fast at launch.
+  ordinary review and integration path. `continue` dispatches each surviving
+  branch deterministically from its committed ExecPlan status, with no
+  judgement agent. Any other value fails fast at launch.
 - `resumeTaskId`: limit recovery discovery to one roadmap id. This is separate
   from `taskId`, which selects normal roadmap work.
 - `resumeMaxCandidates`: bound on recovery candidates per run. Defaults to `4`;
@@ -395,6 +440,7 @@ Example `args.json`:
   "maxPlanningParallel": 4,
   "maxBuildParallel": 4,
   "maxTasks": 12,
+  "coderabbitFindingsFile": "/home/example/Projects/example-project.workshop/df12-build-run/coderabbit-findings.jsonl",
   "buildAdapter": "codex-medium",
   "buildModel": "gpt-5.5",
   "planAdapter": "claude",
@@ -407,6 +453,72 @@ Example `args.json`:
   "reviewModel": "claude-opus-4-8"
 }
 ```
+
+## Host-run CodeRabbit review
+
+By default the workflow host — not the task agents — runs
+`coderabbit review --agent --type committed` against each task branch: once
+per dual-review round (alongside the code and expert reviewers) and once per
+addendum implementation. Because only committed changes are reviewed, the
+ExecPlan durability contract doubles as the review contract. The host parses
+the CLI's structured findings; `critical` and `major` severities join the
+reviewers' blocking items and drive the ordinary fix rounds, while lower
+severities are captured without gating integration.
+
+Rate limits are absorbed by the host: a rate-limited review waits a
+deterministic 45–90 minutes (`coderabbitBackoffMinutes`) and retries, up to
+`coderabbitAttempts` total attempts, costing wall-clock but zero agent
+tokens. A rate limit that outlives every attempt — or a CLI fault — defers
+the review with a documented `openIssues` entry on the task result instead of
+blocking integration; the dual reviewers remain decisive. A CodeRabbit
+authentication failure halts the task as `fatal-auth`.
+
+The run result's `coderabbit` object reports the effective configuration and
+bounded counters (reviews run, findings by severity, rate-limited runs,
+deferred reviews). When `coderabbitFindingsFile` is set, every finding is
+also appended as JSONL for cross-run linter tuning.
+
+## Per-work-item builds
+
+By default the build is host-driven, one work item at a time. The planner
+records the plan's work items as `- [ ] WI-<n>: <imperative title>` checklist
+lines in the ExecPlan's `## Progress` section, and after design approval the
+host loops: read the committed checklist, dispatch a builder turn scoped to
+exactly the first unticked item, then verify that the turn left the worktree
+fully committed and moved the committed checklist forward. A turn that
+returns `ok` without committing a tick is bounced once with the defect named
+in the next prompt; two consecutive no-progress turns fail the task. The
+loop is bounded by `maxWorkItemRounds`, and the committed checklist — not the
+agent's say-so — decides when the build is done.
+
+Small turns change the failure economics: each builder turn does one work
+item's worth of code, tests, docs, gates, and one atomic commit, so the ODW
+build adapter can sit on a tight timeout (roughly 3600 seconds) and a hung
+stream costs at most one work item plus a warm `stageAttempts` retry from
+the committed ExecPlan — not a whole task. Legacy plans whose Progress
+section is prose ticks rather than work items still work: the loop
+dispatches "the first unticked item" by its text, and a plan with no
+checklist at all falls back to the single-turn build.
+
+The run result's `workItemBuild` object reports the effective configuration.
+Work-item turns appear in the events as `implement:<id> wi<n>` labels.
+
+## Host-run commit gates
+
+By default the workflow host also re-runs the deterministic `commitGates`
+commands itself — a `gatesGreen` claim from an agent is verified, never
+trusted. The gates run at the start of every dual-review round (before any
+reviewer agent spends tokens; a red branch goes straight to a fix round
+carrying the host's log evidence) and once per addendum implementation
+(addenda have no fix rounds, so an unreproducible green claim fails the
+addendum outright). Gate runs are serialized across the whole worker pool so
+sequential execution benefits from the target project's build caching, and
+each command's full output is teed to a `/tmp/df12-gate-<task>-<round>-…`
+log with a bounded tail quoted in the failure evidence. A command that
+exceeds `commitGateTimeoutSeconds` is killed and reported as a failure. The
+run result's `hostGates` object reports the configuration and bounded
+counters (gate runs, failures); per-round pass/fail detail appears in each
+failed task's `reviewRounds[].hostGates`.
 
 ## Recovery model
 
@@ -435,6 +547,20 @@ provider outages such as `429`, `500`, or `529`, worktree-creation failures,
 dry runs, successful tasks, and manual-merge-ready branches are not assessed.
 Provider outages also suppress the final remediation flush, so transient
 adapter failures do not create roadmap work.
+
+Infrastructure faults are classified separately from product failures. When a
+stage agent's process dies — an ODW adapter timeout or crash, or schema-retry
+exhaustion — the failure carries no evidence about the task branch, so the
+workflow retries the stage agent in place up to `stageAttempts` total
+attempts. A persistent fault terminates the task with status `infra-fault`
+rather than `failed`: no assessment agent is spawned, remediation triage
+writes are skipped (as with provider faults), and the halt detail directs the
+operator to relaunch with `resumePartialBranches=true` and
+`resumeMode="continue"`. Integration is the exception: a fault there is never
+retried, because a hidden-success first attempt may already have pushed —
+inspect `origin/<base>` and the roadmap before relaunching. The run result's
+`faultMetrics` object counts retries and terminal faults per class
+(`infraRetries`, `infraFaults`, `providerFaults`, `authFaults`).
 
 Addendum implementations have one extra recovery state. If an addendum agent
 reports all work items complete, green gates, and no open issues, but fails to
@@ -468,6 +594,16 @@ Set `resumePartialBranches=true` and choose the maximum action with
   `missing-validation-evidence`, `evidence-collection-error`, or
   `addendum-branch`). Review-mode resume mutates the target project exactly as
   ordinary integration does, so grant it the same permissions and trust.
+- **Continue-mode resume** (`resumeMode="continue"`): no judgement agent at
+  all. The workflow collects host git evidence and reads the committed
+  ExecPlan `Status:` line, then dispatches deterministically: `DRAFT` (or a
+  missing plan) re-enters planning, `APPROVED` or `IN PROGRESS` re-enters
+  implementation, `COMPLETE` re-enters the dual review, and `BLOCKED` is
+  reported. The downstream gates and reviewers are the judgement. Dirty
+  worktrees, addendum branches, evidence-collection failures, and plans the
+  host cannot read are reported instead of resumed (reasons such as
+  `dirty-worktree`, `plan-blocked`, and `plan-unreadable`). Continue-mode
+  resume mutates the target project exactly as ordinary work does.
 
 The `recovery` result object indexes the pass for operators: `candidates`,
 `assessed`, `resumed`, per-candidate `results` (classification and action), and
@@ -475,7 +611,11 @@ The `recovery` result object indexes the pass for operators: `candidates`,
 `already-complete`, `missing-worktree`, and `candidate-cap` from discovery).
 Ids with surviving branches are held out of normal selection for the rest of
 the run, so the pool cannot collide with an existing branch; hoover the branch
-or resume it before expecting normal selection to rebuild that task. A fatal
+or resume it before expecting normal selection to rebuild that task. Survivor
+branches that are still unresolved when the run ends are listed in
+`recovery.unresolved` (id, branch, last classification, action, and reason),
+and the run reports `halted: needs-operator-recovery …` instead of a clean
+stop, so a blocked roadmap frontier is never mistaken for finished work. A fatal
 auth preflight blocks recovery entirely (`recovery.blocked =
 "auth-preflight-failed"`), and dry runs never resume.
 

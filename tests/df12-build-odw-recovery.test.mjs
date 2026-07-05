@@ -5,8 +5,9 @@
 // from tests/fixtures/recovery-repo.mjs.
 
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
@@ -47,6 +48,8 @@ return {
   RECOVERY_SKIP_REASONS,
   recoveryResumeEligibility,
   recoveryDecision,
+  parseExecplanState,
+  recoveryContinueDecision,
   syntheticRecoveryImpl,
   branchToRoadmapId,
   parseWorktreeList,
@@ -54,12 +57,27 @@ return {
   assessmentPrompt,
   recoveryAssessmentPrompt,
   assessRecoveryCandidate,
+  planPrompt,
+  designReviewPrompt,
+  implementPrompt,
+  verifyExecplanCommitted,
+  commitExecplanApproval,
+  commitExecplanDraft,
+  verifyWorktreeCommitted,
+  runPlanDesignLoop,
+  runImplementationStage,
+  runDualReviewAndIntegration,
   runRecovery,
 }
 `,
   )
   return factory(
-    args,
+    // Host review, host gates, and the per-work-item build loop default OFF
+    // here: several tests drive the pipeline against fixture repos, where
+    // the host review would exec the REAL coderabbit CLI on PATH (burning
+    // review quota), host gates would run `make all` in Makefile-less
+    // fixtures, and the build loop expects agents to tick Progress items.
+    { coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...args },
     () => {},
     () => {},
     agentImpl,
@@ -397,6 +415,9 @@ test('skip reasons are a stable published contract', async () => {
     'not-task-scoped',
     'missing-validation-evidence',
     'missing-execplan',
+    'plan-blocked',
+    'plan-unreadable',
+    'execplan-stat-error',
     'dry-run',
   ])
 })
@@ -650,6 +671,29 @@ function reviewModeAgent(calls, overrides = {}) {
     if (label.startsWith('recover-assess:') || label.startsWith('assess:')) {
       return (overrides.assess || (async () => sampleAssessment()))(prompt, opts)
     }
+    if (label.startsWith('plan:')) {
+      return (overrides.plan || (async () => ({
+        execplanPath: 'docs/execplans/roadmap-1-2-3.md',
+        workItems: ['work item 1'],
+        summary: 'plan completed and committed',
+      })))(prompt, opts)
+    }
+    if (label.startsWith('design-review:')) {
+      return (overrides.designReview || (async () => ({ satisfied: true, blocking: [] })))(prompt, opts)
+    }
+    if (label.startsWith('implement:')) {
+      return (overrides.implement || (async () => ({
+        ok: true,
+        gatesGreen: true,
+        execplanPath: 'docs/execplans/roadmap-1-2-3.md',
+        workItemsCompleted: 1,
+        workItemsTotal: 1,
+        commits: ['Finish remaining work items'],
+        coderabbitRuns: 1,
+        openIssues: [],
+        summary: 'resumed and completed the remaining work items',
+      })))(prompt, opts)
+    }
     if (label.startsWith('code-review:') || label.startsWith('expert-review:')) {
       return (overrides.review || (async () => ({ verdict: 'pass', blocking: [], summary: 'ship it' })))(prompt, opts)
     }
@@ -799,10 +843,15 @@ test('review-mode resume reports non-adopt-complete classifications without spen
 
 test('a failed resume review halts the branch without integration', async () => {
   const calls = []
+  const assessPrompts = []
   const surface = await loadRecoverySurface(
-    { resumePartialBranches: true, resumeMode: 'review', maxReviewRounds: 1 },
+    { resumePartialBranches: true, resumeMode: 'review', maxReviewRounds: 2 },
     reviewModeAgent(calls, {
       review: async () => ({ verdict: 'changes-requested', blocking: ['recovered slice misses the success criterion'], summary: 'not shippable' }),
+      assess: async (prompt) => {
+        assessPrompts.push(prompt)
+        return sampleAssessment()
+      },
     }),
   )
   const repo = makeRecoveryRepo()
@@ -812,17 +861,30 @@ test('a failed resume review halts the branch without integration', async () => 
   assert.equal(outcome.summary.resumed, 0)
   const [entry] = outcome.summary.results
   assert.equal(entry.action, 'resume-failed')
-  assert.equal(outcome.taskResults[0].result.status, 'halted')
-  assert.equal(outcome.taskResults[0].result.stage, 'review')
+  const haltedResult = outcome.taskResults[0].result
+  assert.equal(haltedResult.status, 'halted')
+  assert.equal(haltedResult.stage, 'review')
+  assert.match(haltedResult.detail, /Final blocking items: recovered slice misses the success criterion/)
   assert.ok(
     calls.includes('assess:1.2.3'),
     'a failed resume must be re-assessed with current branch evidence, not the stale pre-resume assessment',
   )
-  assert.equal(outcome.taskResults[0].result.assessment.classification, 'adopt-complete')
+  assert.equal(haltedResult.assessment.classification, 'adopt-complete')
   assert.ok(
-    outcome.taskResults[0].result.assessment.hostEvidence,
+    haltedResult.assessment.hostEvidence,
     'the refreshed assessment carries newly collected host evidence',
   )
+  // The halted outcome records each review round and the fix agent's
+  // structured report, and that evidence reaches the fresh assessment prompt
+  // together with the freshness rules (issue #24).
+  assert.equal(haltedResult.reviewRounds.length, 2)
+  assert.equal(haltedResult.reviewRounds[0].codeReview.verdict, 'changes-requested')
+  assert.deepEqual(haltedResult.reviewRounds[0].fix, { summary: 'applied fixes' })
+  assert.equal(haltedResult.reviewRounds[1].fix, null, 'no fix round after the final review round')
+  const finalAssessPrompt = assessPrompts.filter((prompt) => prompt.includes('after a workflow failure')).pop()
+  assert.ok(finalAssessPrompt, 'the fresh post-resume assessment prompt must exist')
+  assert.match(finalAssessPrompt, /"reviewRounds"/)
+  assert.match(finalAssessPrompt, /Evidence freshness rules:/)
   assert.ok(!calls.some((label) => label.startsWith('integrate:')), 'no integration after a failed review')
 })
 
@@ -843,6 +905,648 @@ test('autoMerge=false resume stops at manual-merge-ready instead of integrating'
   )
   assert.equal(outcome.taskResults[0].result.status, 'manual-merge-ready')
   assert.ok(!calls.some((label) => label.startsWith('integrate:')))
+})
+
+// --- Continue mode: the committed ExecPlan is the durable source of truth ---
+
+test('the ExecPlan parser reads the status vocabulary the prompts require', async () => {
+  const surface = await loadRecoverySurface({})
+
+  const rows = [
+    ['Status: DRAFT', 'draft'],
+    ['Status: APPROVED', 'approved'],
+    ['Status: IN PROGRESS', 'in-progress'],
+    ['Status: In Progress', 'in-progress'],
+    ['Status: BLOCKED', 'blocked'],
+    ['Status: COMPLETE', 'complete'],
+    ['Status: DRAFT | APPROVED | IN PROGRESS | BLOCKED | COMPLETE', 'unknown'],
+    ['Status: SHIPPED', 'unknown'],
+    ['no status line at all', 'unknown'],
+  ]
+  for (const [text, expected] of rows) {
+    assert.equal(surface.parseExecplanState(text).status, expected, text)
+  }
+
+  const withProgress = surface.parseExecplanState(
+    ['Status: IN PROGRESS', '', '## Progress', '', '- [x] (2026-07-01) Done step.', '- [ ] Remaining step.', '- [ ] Another remaining step.', '', '## Decision log', '', '- [ ] not a progress tick'].join('\n'),
+  )
+  assert.equal(withProgress.ticked, 1)
+  assert.equal(withProgress.unticked, 2)
+  // The work-item build loop dispatches from this list, in order.
+  assert.deepEqual(withProgress.items, [
+    { text: '(2026-07-01) Done step.', ticked: true },
+    { text: 'Remaining step.', ticked: false },
+    { text: 'Another remaining step.', ticked: false },
+  ])
+  assert.deepEqual(surface.parseExecplanState('Status: DRAFT\n\nno progress section').items, [])
+})
+
+test('the continue-mode decision table dispatches on the committed ExecPlan Status', async () => {
+  const surface = await loadRecoverySurface({})
+  const candidate = eligibleCandidate()
+  const evidence = eligibleEvidence()
+  const plan = (status) => ({ status, ticked: 0, unticked: 0 })
+
+  const rows = [
+    [plan('missing'), 'plan'],
+    [plan('draft'), 'plan'],
+    [plan('unknown'), 'plan'],
+    [plan('approved'), 'implement'],
+    [plan('in-progress'), 'implement'],
+    [plan('complete'), 'review'],
+  ]
+  for (const [planState, stage] of rows) {
+    assert.deepEqual(
+      surface.recoveryContinueDecision(candidate, evidence, planState, {}),
+      { action: 'resume', stage, reason: '', skip: false },
+      planState.status,
+    )
+  }
+
+  const reports = [
+    [{ candidate: { ...candidate, isAddendum: true } }, plan('draft'), 'addendum-branch'],
+    [{ evidence: eligibleEvidence({ collectionErrors: ['diff failed'] }) }, plan('draft'), 'evidence-collection-error'],
+    [{ evidence: eligibleEvidence({ dirtyState: 'dirty' }) }, plan('approved'), 'dirty-worktree'],
+    [{}, plan('blocked'), 'plan-blocked'],
+    [{}, { ...plan('unreadable'), error: 'docs/execplans/roadmap-1-2-3.md: EACCES' }, 'plan-unreadable'],
+    [{ evidence: eligibleEvidence({ recentCommits: [] }) }, plan('complete'), 'no-committed-work'],
+  ]
+  for (const [overrides, planState, reason] of reports) {
+    const decision = surface.recoveryContinueDecision(
+      overrides.candidate || candidate,
+      overrides.evidence || evidence,
+      planState,
+      {},
+    )
+    assert.equal(decision.action, 'report', reason)
+    assert.equal(decision.reason, reason)
+    assert.equal(decision.skip, true)
+  }
+
+  assert.deepEqual(surface.recoveryContinueDecision(candidate, evidence, plan('draft'), { dryRun: true }), {
+    action: 'report',
+    stage: 'plan',
+    reason: 'dry-run',
+    skip: true,
+  })
+})
+
+test('the prompt status vocabulary matches the continue-mode parser contract', async () => {
+  const surface = await loadRecoverySurface({})
+  const task = { id: '1.2.3', title: 'Implement the parser state machine.' }
+  const plan = { execplanPath: 'docs/execplans/roadmap-1-2-3.md' }
+
+  const planPrompt = surface.planPrompt(task, '/tmp/wt', null, 1)
+  assert.match(planPrompt, /COMMIT the ExecPlan/)
+  assert.match(planPrompt, /`DRAFT`/)
+  assert.match(surface.planPrompt(task, '/tmp/wt', null, 1, { resume: true }), /^RESUME:/m)
+  assert.doesNotMatch(planPrompt, /^RESUME:/m)
+
+  const reviewPrompt = surface.designReviewPrompt(task, '/tmp/wt', plan, 1)
+  assert.match(reviewPrompt, /`APPROVED`/)
+
+  const buildPrompt = surface.implementPrompt(task, '/tmp/wt', plan)
+  assert.match(buildPrompt, /`IN PROGRESS`/)
+  assert.match(buildPrompt, /`COMPLETE`/)
+  assert.match(surface.implementPrompt(task, '/tmp/wt', plan, { resume: true }), /^RESUME:/m)
+  assert.doesNotMatch(buildPrompt, /^RESUME:/m)
+
+  // Every status token the prompts instruct agents to write must round-trip
+  // through the parser to the stage continue mode dispatches on.
+  for (const [token, parsed] of [
+    ['DRAFT', 'draft'],
+    ['APPROVED', 'approved'],
+    ['IN PROGRESS', 'in-progress'],
+    ['BLOCKED', 'blocked'],
+    ['COMPLETE', 'complete'],
+  ]) {
+    assert.equal(surface.parseExecplanState(`Status: ${token}`).status, parsed)
+  }
+})
+
+test('continue mode resumes a draft-plan branch at the plan stage with no judgement agent', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'continue' },
+    reviewModeAgent(calls),
+  )
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.fatal, null)
+  assert.equal(outcome.summary.resumed, 1)
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'resumed')
+  assert.equal(entry.resumeStage, 'plan')
+  assert.equal(entry.planStatus, 'draft')
+  assert.equal(outcome.taskResults[0].result.status, 'done')
+  assert.equal(outcome.taskResults[0].result.kind, 'recovery-resume')
+  assert.ok(!calls.some((label) => label.startsWith('recover-assess:')), 'continue mode spawns no judgement agent')
+  assert.deepEqual(calls, [
+    'write-probe:claude',
+    'write-probe:codex-medium',
+    'plan:1.2.3 r1',
+    'design-review:1.2.3 r1',
+    'implement:1.2.3',
+    'code-review:1.2.3 r1',
+    'expert-review:1.2.3 r1',
+    'integrate:1.2.3',
+  ])
+})
+
+test('continue mode resumes an approved-plan branch at the implement stage', async () => {
+  const calls = []
+  const prompts = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'continue' },
+    reviewModeAgent(calls, {
+      implement: async (prompt) => {
+        prompts.push(prompt)
+        return {
+          ok: true,
+          gatesGreen: true,
+          execplanPath: 'docs/execplans/roadmap-1-2-3.md',
+          workItemsCompleted: 2,
+          workItemsTotal: 2,
+          commits: ['Finish remaining work items'],
+          coderabbitRuns: 1,
+          openIssues: [],
+          summary: 'resumed and completed the remaining work items',
+        }
+      },
+    }),
+  )
+  const repo = makeRecoveryRepo({
+    parserExecplanStatus: 'IN PROGRESS',
+    parserExecplanProgress: ['- [x] (2026-07-04) First work item.', '- [ ] Second work item.'],
+  })
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 1)
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'resumed')
+  assert.equal(entry.resumeStage, 'implement')
+  assert.equal(entry.planStatus, 'in-progress')
+  assert.ok(
+    !calls.some((label) => label.startsWith('plan:') || label.startsWith('design-review:')),
+    'an approved plan must not be re-planned',
+  )
+  assert.ok(calls.includes('implement:1.2.3'))
+  assert.match(prompts[0], /^RESUME:/m, 'the resumed builder is told the committed ExecPlan is the source of truth')
+})
+
+test('continue mode routes a complete-plan branch straight to review and integration', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'continue' },
+    reviewModeAgent(calls),
+  )
+  const repo = makeRecoveryRepo() // fixture ExecPlan Status: COMPLETE
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 1)
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'resumed')
+  assert.equal(entry.resumeStage, 'review')
+  assert.equal(entry.planStatus, 'complete')
+  assert.ok(
+    !calls.some((label) => label.startsWith('plan:') || label.startsWith('implement:')),
+    'a complete plan re-enters at review, not implementation',
+  )
+  assert.ok(calls.includes('code-review:1.2.3 r1'))
+  assert.ok(calls.includes('integrate:1.2.3'))
+})
+
+test('continue mode reports a BLOCKED plan for the operator without spending agents', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'continue' },
+    reviewModeAgent(calls),
+  )
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'BLOCKED' })
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  assert.deepEqual(outcome.taskResults, [])
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'reported')
+  assert.equal(entry.reason, 'plan-blocked')
+  assert.equal(entry.planStatus, 'blocked')
+  assert.ok(
+    outcome.summary.skipped.some(
+      (skip) => skip.branchName === 'roadmap-1-2-3' && skip.reason === 'plan-blocked',
+    ),
+  )
+  assert.deepEqual(calls, [], 'a blocked plan is pure operator work')
+})
+
+test('continue mode reports a dirty survivor fail-closed like the other modes', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'continue' },
+    reviewModeAgent(calls),
+  )
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+  writeFileSync(path.join(repo.parserWorktree, 'dirty.txt'), 'uncommitted draft plan work\n')
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  const [entry] = outcome.summary.results
+  assert.equal(entry.action, 'reported')
+  assert.equal(entry.reason, 'dirty-worktree')
+  assert.deepEqual(calls, [], 'no agent spend on a dirty worktree')
+})
+
+// --- Host-enforced ExecPlan durability gates ---
+
+const PARSER_PLAN = 'docs/execplans/roadmap-1-2-3.md'
+
+test('the durability check accepts only a plan committed clean at HEAD', async () => {
+  const surface = await loadRecoverySurface({})
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+
+  assert.deepEqual(await surface.verifyExecplanCommitted(repo.parserWorktree, PARSER_PLAN), { ok: true, detail: '' })
+
+  writeFileSync(path.join(repo.parserWorktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nrevised but uncommitted\n')
+  const dirty = await surface.verifyExecplanCommitted(repo.parserWorktree, PARSER_PLAN)
+  assert.equal(dirty.ok, false)
+  assert.match(dirty.detail, /uncommitted modifications/)
+
+  const untracked = await surface.verifyExecplanCommitted(repo.parserWorktree, 'docs/execplans/never-committed.md')
+  assert.equal(untracked.ok, false)
+  assert.match(untracked.detail, /not committed at HEAD/)
+})
+
+test('the approval flip is host-committed, path-scoped, and idempotent', async () => {
+  const surface = await loadRecoverySurface({})
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+  // Unrelated dirt must survive the approval commit untouched.
+  writeFileSync(path.join(repo.parserWorktree, 'unrelated-dirt.txt'), 'agent scratch\n')
+
+  const flipped = await surface.commitExecplanApproval(repo.parserWorktree, PARSER_PLAN, '1.2.3')
+  assert.equal(flipped.ok, true, flipped.detail)
+  const committed = git(repo.parserWorktree, 'show', `HEAD:${PARSER_PLAN}`)
+  assert.match(committed, /^Status: APPROVED$/m)
+  assert.match(git(repo.parserWorktree, 'log', '-1', '--format=%s'), /Approve ExecPlan for task 1\.2\.3/)
+  assert.match(
+    git(repo.parserWorktree, 'status', '--porcelain=v1'),
+    /unrelated-dirt\.txt/,
+    'the approval commit must not sweep unrelated files',
+  )
+
+  const again = await surface.commitExecplanApproval(repo.parserWorktree, PARSER_PLAN, '1.2.3')
+  assert.equal(again.ok, true)
+  assert.match(again.detail, /already committed/)
+})
+
+test('the draft salvage commit is path-scoped and declines foreign dirt', async () => {
+  const surface = await loadRecoverySurface({})
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+  const worktree = repo.parserWorktree
+
+  // Clean tree: nothing to salvage.
+  const clean = await surface.commitExecplanDraft(worktree, PARSER_PLAN, '1.2.3')
+  assert.equal(clean.ok, false)
+  assert.match(clean.detail, /already clean/)
+
+  // Plan-only dirt: the host commits it, path-scoped, hermetic identity.
+  writeFileSync(path.join(worktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nrevised but uncommitted\n')
+  const salvaged = await surface.commitExecplanDraft(worktree, PARSER_PLAN, '1.2.3')
+  assert.equal(salvaged.ok, true, salvaged.detail)
+  assert.match(git(worktree, 'log', '-1', '--format=%s'), /Draft ExecPlan for task 1\.2\.3/)
+  assert.match(git(worktree, 'show', `HEAD:${PARSER_PLAN}`), /revised but uncommitted/)
+  assert.equal(git(worktree, 'status', '--porcelain=v1'), '')
+
+  // Foreign dirt alongside the plan: declined, with the paths as evidence.
+  writeFileSync(path.join(worktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nsecond revision\n')
+  writeFileSync(path.join(worktree, 'scratch.txt'), 'planner scratch\n')
+  const declined = await surface.commitExecplanDraft(worktree, PARSER_PLAN, '1.2.3')
+  assert.equal(declined.ok, false)
+  assert.match(declined.detail, /beyond the plan file/)
+  assert.match(declined.detail, /scratch\.txt/)
+  assert.doesNotMatch(git(worktree, 'log', '-1', '--format=%s'), /second/, 'a declined salvage commits nothing')
+})
+
+test('the plan loop host-commits a plan-only dirty draft without spending a round', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+  const worktree = repo.parserWorktree
+  // The observed live failure: the planner revises the plan on disk but does
+  // not commit. With only the plan dirty, durability is host bookkeeping.
+  writeFileSync(path.join(worktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nrevised draft\n')
+
+  const labels = []
+  const agentImpl = async (prompt, opts = {}) => {
+    labels.push(opts.label || '')
+    if (opts.label?.startsWith('plan:')) return { execplanPath: PARSER_PLAN, workItems: ['w1'], summary: 'plan' }
+    if (opts.label?.startsWith('design-review:')) return { satisfied: true, blocking: [] }
+    throw new Error(`unexpected label: ${opts.label}`)
+  }
+  const gated = await loadRecoverySurface({}, agentImpl)
+
+  const outcome = await gated.runPlanDesignLoop({ id: '1.2.3', title: 'Parser' }, worktree)
+
+  assert.ok(!outcome.fail, JSON.stringify(outcome.fail || {}))
+  assert.deepEqual(labels, ['plan:1.2.3 r1', 'design-review:1.2.3 r1'], 'no planner round is spent on bookkeeping')
+  assert.match(git(worktree, 'show', `HEAD:${PARSER_PLAN}`), /^Status: APPROVED$/m, 'approval leaves a committed APPROVED status')
+})
+
+test('the plan loop bounces an uncommitted plan with foreign dirt back to the planner', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+  const worktree = repo.parserWorktree
+  // Dirty plan PLUS other uncommitted work: the host must not guess, so the
+  // bounce reaches the planner carrying the salvage-refusal evidence.
+  writeFileSync(path.join(worktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nrevised draft\n')
+  writeFileSync(path.join(worktree, 'half-done.txt'), 'uncommitted planner side effect\n')
+
+  const planPrompts = []
+  const labels = []
+  const agentImpl = async (prompt, opts = {}) => {
+    labels.push(opts.label || '')
+    if (opts.label?.startsWith('plan:')) {
+      planPrompts.push(prompt)
+      if (planPrompts.length === 2) {
+        git(worktree, 'add', '--all')
+        git(worktree, 'commit', '-m', 'Revise parser ExecPlan and commit side effects')
+      }
+      return { execplanPath: PARSER_PLAN, workItems: ['w1'], summary: 'plan' }
+    }
+    if (opts.label?.startsWith('design-review:')) return { satisfied: true, blocking: [] }
+    throw new Error(`unexpected label: ${opts.label}`)
+  }
+  const gated = await loadRecoverySurface({}, agentImpl)
+
+  const outcome = await gated.runPlanDesignLoop({ id: '1.2.3', title: 'Parser' }, worktree)
+
+  assert.ok(!outcome.fail, JSON.stringify(outcome.fail || {}))
+  assert.deepEqual(labels, ['plan:1.2.3 r1', 'plan:1.2.3 r2', 'design-review:1.2.3 r2'])
+  assert.match(planPrompts[1], /EXECPLAN DURABILITY/, 'the bounce reaches the planner as a blocking item')
+  assert.match(planPrompts[1], /host salvage declined/, 'the bounce carries the salvage-refusal evidence')
+  assert.match(planPrompts[1], /half-done\.txt/, 'the foreign dirty path is named for the planner')
+  assert.match(
+    git(worktree, 'show', `HEAD:${PARSER_PLAN}`),
+    /^Status: APPROVED$/m,
+    'approval leaves a committed APPROVED status',
+  )
+})
+
+test('host-run CodeRabbit findings drive a fix round through the real CLI seam', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'COMPLETE' })
+  const worktree = repo.parserWorktree
+
+  // Fake coderabbit on PATH: one major finding on the first review, clean on
+  // the re-review after the fix round. NDJSON matches the pinned contract.
+  const bin = mkdtempSync(path.join(tmpdir(), 'df12-cr-bin-'))
+  const countFile = path.join(bin, 'count')
+  writeFileSync(path.join(bin, 'coderabbit'), [
+    '#!/bin/sh',
+    `count_file="${countFile}"`,
+    'n=$(cat "$count_file" 2>/dev/null || echo 0)',
+    'n=$((n+1)); echo $n > "$count_file"',
+    'if [ "$n" -eq 1 ]; then',
+    `  echo '{"type":"finding","severity":"major","fileName":"src/a.rs","comment":"guard the index"}'`,
+    `  echo '{"type":"complete","status":"reviewed","findings":1}'`,
+    'else',
+    `  echo '{"type":"complete","status":"reviewed","findings":0}'`,
+    'fi',
+    '',
+  ].join('\n'))
+  chmodSync(path.join(bin, 'coderabbit'), 0o755)
+
+  const labels = []
+  const fixPrompts = []
+  const agentImpl = async (prompt, opts = {}) => {
+    labels.push(opts.label || '')
+    if (opts.label?.startsWith('code-review:') || opts.label?.startsWith('expert-review:')) {
+      return { verdict: 'pass', blocking: [], summary: 'ship it' }
+    }
+    if (opts.label?.startsWith('fix:')) {
+      fixPrompts.push(prompt)
+      return { gatesGreen: true, commits: ['Guard the index'], coderabbitRuns: 0, resolved: ['guard'], openIssues: [], summary: 'fixed' }
+    }
+    if (opts.label?.startsWith('integrate:')) {
+      return { ok: true, roadmapMarkedDone: true, rebased: true, squashMerged: true, mergeSha: 'feed', pushed: true, conflicts: '', summary: 'merged' }
+    }
+    throw new Error(`unexpected label: ${opts.label}`)
+  }
+  const surface = await loadRecoverySurface({ coderabbitHostReview: true }, agentImpl)
+
+  const previousPath = process.env.PATH
+  process.env.PATH = `${bin}:${previousPath}`
+  let outcome
+  try {
+    outcome = await surface.runDualReviewAndIntegration(
+      { id: '1.2.3', title: 'Parser' },
+      worktree,
+      { execplanPath: PARSER_PLAN },
+      { ok: true, gatesGreen: true },
+      null,
+    )
+  } finally {
+    process.env.PATH = previousPath
+  }
+
+  assert.equal(outcome.status, 'done', JSON.stringify(outcome))
+  assert.equal(readFileSync(countFile, 'utf8').trim(), '2', 'the committed diff is re-reviewed after the fix round')
+  assert.ok(labels.some((label) => label.startsWith('fix:1.2.3 r1')), 'the CodeRabbit finding forces a fix round')
+  assert.match(fixPrompts[0], /CodeRabbit \(major\) src\/a\.rs: guard the index/, 'the fix agent sees the finding verbatim')
+  assert.equal(outcome.openIssues, undefined, 'no deferred-review issue on a clean pass')
+})
+
+test('a red host gate drives a fix round before any reviewer agent spends tokens', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'COMPLETE' })
+  const worktree = repo.parserWorktree
+
+  // Fake gate: red on the first run, green on the re-run after the fix.
+  const bin = mkdtempSync(path.join(tmpdir(), 'df12-gate-bin-'))
+  const countFile = path.join(bin, 'count')
+  const gateScript = path.join(bin, 'gate.sh')
+  writeFileSync(gateScript, [
+    '#!/bin/sh',
+    `count_file="${countFile}"`,
+    'n=$(cat "$count_file" 2>/dev/null || echo 0)',
+    'n=$((n+1)); echo $n > "$count_file"',
+    'if [ "$n" -eq 1 ]; then',
+    '  echo "test_parser_range FAILED: expected 3, got 2"',
+    '  exit 1',
+    'fi',
+    'echo "all gates green"',
+    '',
+  ].join('\n'))
+  chmodSync(gateScript, 0o755)
+
+  const labels = []
+  const fixPrompts = []
+  const agentImpl = async (prompt, opts = {}) => {
+    labels.push(opts.label || '')
+    if (opts.label?.startsWith('code-review:') || opts.label?.startsWith('expert-review:')) {
+      return { verdict: 'pass', blocking: [], summary: 'ship it' }
+    }
+    if (opts.label?.startsWith('fix:')) {
+      fixPrompts.push(prompt)
+      return { gatesGreen: true, commits: ['Fix the range check'], coderabbitRuns: 0, resolved: [], openIssues: [], summary: 'fixed' }
+    }
+    if (opts.label?.startsWith('integrate:')) {
+      return { ok: true, roadmapMarkedDone: true, rebased: true, squashMerged: true, mergeSha: 'feed', pushed: true, conflicts: '', summary: 'merged' }
+    }
+    throw new Error(`unexpected label: ${opts.label}`)
+  }
+  const surface = await loadRecoverySurface({ hostCommitGates: true, commitGates: [gateScript] }, agentImpl)
+
+  const outcome = await surface.runDualReviewAndIntegration(
+    { id: '1.2.3', title: 'Parser' },
+    worktree,
+    { execplanPath: PARSER_PLAN },
+    { ok: true, gatesGreen: true },
+    null,
+  )
+
+  assert.equal(outcome.status, 'done', JSON.stringify(outcome))
+  assert.equal(readFileSync(countFile, 'utf8').trim(), '2', 'the gates re-run after the fix round')
+  assert.equal(labels[0], 'fix:1.2.3 r1', 'the red gate reaches a fix agent before any reviewer runs')
+  assert.ok(!labels.slice(0, 1).some((label) => label.startsWith('code-review:')), 'no reviewer tokens spent on a red branch')
+  assert.match(fixPrompts[0], /HOST GATES RED/, 'the fix agent sees the host verdict')
+  assert.match(fixPrompts[0], /test_parser_range FAILED/, 'the fix agent sees the gate output tail')
+})
+
+// Tick the first unticked Progress item of the fixture plan and commit it,
+// as a compliant per-work-item builder would.
+function tickFirstProgressItem(worktree) {
+  const planPath = path.join(worktree, PARSER_PLAN)
+  const text = readFileSync(planPath, 'utf8')
+  writeFileSync(planPath, text.replace('- [ ] ', '- [x] '))
+  git(worktree, 'add', PARSER_PLAN)
+  git(worktree, 'commit', '-m', 'Complete a work item')
+}
+
+test('the work-item build loop dispatches one builder turn per unticked item', async () => {
+  const repo = makeRecoveryRepo({
+    parserExecplanStatus: 'APPROVED',
+    parserExecplanProgress: ['- [ ] WI-1: Add the parser state machine.', '- [ ] WI-2: Add the behavioural tests.'],
+  })
+  const worktree = repo.parserWorktree
+
+  const labels = []
+  const prompts = []
+  const agentImpl = async (prompt, opts = {}) => {
+    labels.push(opts.label || '')
+    prompts.push(prompt)
+    if (!opts.label?.startsWith('implement:')) throw new Error(`unexpected label: ${opts.label}`)
+    tickFirstProgressItem(worktree)
+    return { ok: true, gatesGreen: true, execplanPath: PARSER_PLAN, workItemsCompleted: 1, workItemsTotal: 2, commits: [`Complete ${opts.label}`], coderabbitRuns: 0, openIssues: [], summary: 'work item done' }
+  }
+  const surface = await loadRecoverySurface({ perWorkItemBuild: true }, agentImpl)
+
+  const outcome = await surface.runImplementationStage({ id: '1.2.3', title: 'Parser' }, worktree, { execplanPath: PARSER_PLAN })
+
+  assert.ok(outcome.impl, JSON.stringify(outcome.fail || {}))
+  assert.deepEqual(labels, ['implement:1.2.3 wi1', 'implement:1.2.3 wi2'])
+  assert.match(prompts[0], /EXACTLY ONE work item/)
+  assert.match(prompts[0], /WI-1: Add the parser state machine\./)
+  assert.match(prompts[1], /WI-2: Add the behavioural tests\./)
+  assert.equal(outcome.impl.workItemsCompleted, 2)
+  assert.equal(outcome.impl.workItemsTotal, 2)
+  assert.deepEqual(outcome.impl.commits, ['Complete implement:1.2.3 wi1', 'Complete implement:1.2.3 wi2'])
+})
+
+test('a builder that never commits a tick is bounced once, then failed', async () => {
+  const repo = makeRecoveryRepo({
+    parserExecplanStatus: 'APPROVED',
+    parserExecplanProgress: ['- [ ] WI-1: Add the parser state machine.'],
+  })
+  const worktree = repo.parserWorktree
+
+  const prompts = []
+  const agentImpl = async (prompt, opts = {}) => {
+    prompts.push(prompt)
+    if (!opts.label?.startsWith('implement:')) throw new Error(`unexpected label: ${opts.label}`)
+    // Claims success but commits nothing: the committed plan cannot move.
+    return { ok: true, gatesGreen: true, execplanPath: PARSER_PLAN, summary: 'claims done' }
+  }
+  const surface = await loadRecoverySurface({ perWorkItemBuild: true }, agentImpl)
+
+  const outcome = await surface.runImplementationStage({ id: '1.2.3', title: 'Parser' }, worktree, { execplanPath: PARSER_PLAN })
+
+  assert.ok(outcome.fail, 'two no-progress turns must fail the stage')
+  assert.equal(outcome.fail.stage, 'implement')
+  assert.match(outcome.fail.detail, /no committed ExecPlan progress in two consecutive turns/)
+  assert.equal(prompts.length, 2)
+  assert.doesNotMatch(prompts[0], /PREVIOUS TURN DEFECT/)
+  assert.match(prompts[1], /PREVIOUS TURN DEFECT/, 'the bounce reaches the second turn as evidence')
+  assert.match(prompts[1], /tick the work item you completed/)
+})
+
+test('a plan without a Progress checklist falls back to the single-turn build', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'APPROVED' })
+  const worktree = repo.parserWorktree
+
+  const labels = []
+  const agentImpl = async (prompt, opts = {}) => {
+    labels.push(opts.label || '')
+    return { ok: true, gatesGreen: true, execplanPath: PARSER_PLAN, workItemsCompleted: 1, workItemsTotal: 1, summary: 'done in one turn' }
+  }
+  const surface = await loadRecoverySurface({ perWorkItemBuild: true }, agentImpl)
+
+  const outcome = await surface.runImplementationStage({ id: '1.2.3', title: 'Parser' }, worktree, { execplanPath: PARSER_PLAN })
+
+  assert.ok(outcome.impl, JSON.stringify(outcome.fail || {}))
+  assert.deepEqual(labels, ['implement:1.2.3'], 'no wi-suffixed turns without a checklist')
+})
+
+test('the planner prompt pins the WI checklist convention the loop dispatches from', async () => {
+  const surface = await loadRecoverySurface({})
+  const prompt = surface.planPrompt({ id: '1.2.3', title: 'Parser' }, '/tmp/wt', null, 1)
+  assert.match(prompt, /- \[ \] WI-<n>: <imperative title>/)
+  assert.match(prompt, /dispatch the build one work item at a time/)
+})
+
+test('a green implementation that leaves uncommitted state fails the durability gate', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'APPROVED' })
+  const worktree = repo.parserWorktree
+  const agentImpl = async (prompt, opts = {}) => {
+    if (opts.label?.startsWith('implement:')) {
+      // A builder that claims success while leaving work uncommitted.
+      writeFileSync(path.join(worktree, 'uncommitted-work.txt'), 'not committed\n')
+      return { ok: true, gatesGreen: true, execplanPath: PARSER_PLAN, workItemsCompleted: 1, workItemsTotal: 1, summary: 'claims done' }
+    }
+    throw new Error(`unexpected label: ${opts.label}`)
+  }
+  const surface = await loadRecoverySurface({}, agentImpl)
+
+  const outcome = await surface.runImplementationStage(
+    { id: '1.2.3', title: 'Parser' },
+    worktree,
+    { execplanPath: PARSER_PLAN },
+  )
+
+  assert.ok(outcome.fail, 'a dirty worktree must fail the stage')
+  assert.equal(outcome.fail.stage, 'implement')
+  assert.match(outcome.fail.detail, /uncommitted state in the worktree/)
+  assert.match(outcome.fail.detail, /uncommitted-work\.txt/)
+})
+
+test('a green implementation with a committed clean worktree passes the durability gate', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'COMPLETE' })
+  const worktree = repo.parserWorktree
+  const surface = await loadRecoverySurface({}, async (prompt, opts = {}) => {
+    if (opts.label?.startsWith('implement:')) {
+      return { ok: true, gatesGreen: true, execplanPath: PARSER_PLAN, workItemsCompleted: 1, workItemsTotal: 1, summary: 'done' }
+    }
+    throw new Error(`unexpected label: ${opts.label}`)
+  })
+
+  const outcome = await surface.runImplementationStage(
+    { id: '1.2.3', title: 'Parser' },
+    worktree,
+    { execplanPath: PARSER_PLAN },
+  )
+
+  assert.ok(!outcome.fail, JSON.stringify(outcome.fail || {}))
+  assert.equal(outcome.impl.ok, true)
 })
 
 test('normal tasks and recovery resume share one review and integration implementation', async () => {

@@ -21,7 +21,7 @@ const DRIVER = fileURLToPath(new URL('./fixtures/run-odw-simulation.mjs', import
 // fixture repository; only agent() replies are scripted, keyed on labels.
 // `taskId: '9.9.9'` pins normal selection to a non-existent task so the pool
 // never opens ordinary work, keeping each combination focused on recovery.
-async function runSimulation({ repo, args = {}, pathPrefix = '', assessment = null }) {
+async function runSimulation({ repo, args = {}, pathPrefix = '', assessment = null, review = null, fix = null, failures = null }) {
   const scenarioDir = mkdtempSync(path.join(tmpdir(), 'df12-scenario-'))
   const scenarioPath = path.join(scenarioDir, 'scenario.json')
   writeFileSync(
@@ -35,6 +35,9 @@ async function runSimulation({ repo, args = {}, pathPrefix = '', assessment = nu
       },
       ...(pathPrefix ? { pathPrefix } : {}),
       ...(assessment ? { assessment } : {}),
+      ...(review ? { review } : {}),
+      ...(fix ? { fix } : {}),
+      ...(failures ? { failures } : {}),
     }),
   )
   const { stdout } = await execFileAsync(process.execPath, [DRIVER, scenarioPath], {
@@ -104,6 +107,17 @@ test('combination: assess-only recovery reports candidates and mutates nothing',
   assert.deepEqual(calls, ['recover-assess:1.2.3'])
   assert.ok(phases.includes('Recovery'))
   assert.match(result.summary, /recovery\(assess\): 1 assessed, 0 resumed/)
+  // Unintegrated survivors block the roadmap frontier, so an assess-only run
+  // that leaves them in place must end needs-operator-recovery, not as a
+  // clean stop indistinguishable from a dry frontier (issue #25).
+  assert.match(result.halted, /needs-operator-recovery: 2 recovery survivor branch\(es\)/)
+  assert.deepEqual(
+    result.recovery.unresolved.map((entry) => [entry.id, entry.action]),
+    [
+      ['1.2.3', 'reported'],
+      ['1.2.4', 'held'],
+    ],
+  )
   assert.deepEqual(repoStateSnapshot(repo), before)
 })
 
@@ -132,7 +146,62 @@ test('combination: review-mode resume integrates the clean adopt-complete branch
     'expert-review:1.2.3 r1',
     'integrate:1.2.3',
   ])
-  assert.equal(result.halted, null)
+  // 1.2.3 integrated, but roadmap-1-2-4 (missing worktree) is still an
+  // unresolved survivor holding its id out of selection.
+  assert.match(result.halted, /needs-operator-recovery: 1 recovery survivor branch\(es\).*1\.2\.4/)
+  assert.deepEqual(
+    result.recovery.unresolved.map((entry) => [entry.id, entry.action]),
+    [['1.2.4', 'held']],
+  )
+})
+
+test('combination: a failed review-mode resume halts the run with the blocking evidence', async () => {
+  const repo = makeRecoveryRepo()
+
+  const { result, calls } = await runSimulation({
+    repo,
+    args: { resumePartialBranches: true, resumeMode: 'review', maxReviewRounds: 2 },
+    review: {
+      verdict: 'changes-requested',
+      blocking: ['recovered slice misses the success criterion'],
+      summary: 'not shippable',
+    },
+    fix: {
+      gatesGreen: true,
+      commits: ['Fix review blockers'],
+      coderabbitRuns: 1,
+      resolved: ['tightened the success criterion coverage'],
+      openIssues: [],
+      summary: 'gates green at HEAD after fixes',
+    },
+  })
+
+  assert.equal(result.recovery.resumed, 0)
+  assert.deepEqual(
+    result.recovery.results.map((entry) => [entry.id, entry.action]),
+    [['1.2.3', 'resume-failed']],
+  )
+  // The resume failure is the run's terminal state, not a silent footnote.
+  assert.match(result.halted, /recovery resume of task 1\.2\.3 halted at review/)
+  assert.match(result.halted, /Final blocking items: recovered slice misses the success criterion/)
+  // The halted result carries the per-round review verdicts and the
+  // structured fix-round report as durable validation evidence (issue #24).
+  const haltedResult = result.results.find((entry) => entry.status === 'halted')
+  assert.ok(haltedResult, 'the halted resume result must be recorded')
+  assert.equal(haltedResult.reviewRounds.length, 2)
+  assert.equal(haltedResult.reviewRounds[0].codeReview.verdict, 'changes-requested')
+  assert.deepEqual(haltedResult.reviewRounds[0].fix, {
+    commits: ['Fix review blockers'],
+    gatesGreen: true,
+    coderabbitRuns: 1,
+    resolved: ['tightened the success criterion coverage'],
+    openIssues: [],
+    summary: 'gates green at HEAD after fixes',
+  })
+  assert.equal(haltedResult.reviewRounds[1].fix, null, 'no fix round after the final review round')
+  // The failed resume is re-assessed fresh, after the fix rounds ran.
+  assert.ok(calls.includes('assess:1.2.3'), 'a failed resume must get a fresh assessment')
+  assert.ok(!calls.some((label) => label.startsWith('integrate:')), 'no integration after a failed review')
 })
 
 test('combination: review-mode resume skips a dirty branch fail-closed', async () => {
@@ -158,6 +227,80 @@ test('combination: review-mode resume skips a dirty branch fail-closed', async (
   assert.deepEqual(result.processed, [])
   assert.deepEqual(calls, ['recover-assess:1.2.3'], 'no review or integration effort on a dirty branch')
   assert.deepEqual(repoStateSnapshot(repo), before)
+})
+
+test('combination: continue mode finishes a draft-plan survivor through the whole pipeline', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+
+  const { result, calls } = await runSimulation({
+    repo,
+    args: { resumePartialBranches: true, resumeMode: 'continue' },
+  })
+
+  assert.equal(result.recovery.mode, 'continue')
+  assert.equal(result.recovery.resumed, 1)
+  assert.deepEqual(
+    result.recovery.results.map((entry) => [entry.id, entry.action, entry.resumeStage, entry.planStatus]),
+    [['1.2.3', 'resumed', 'plan', 'draft']],
+  )
+  assert.deepEqual(result.processed, ['1.2.3'])
+  assert.ok(!calls.some((label) => label.startsWith('recover-assess:')), 'continue mode spawns no judgement agent')
+  assert.deepEqual(calls.slice(0, 2), ['write-probe:claude', 'write-probe:codex-medium'])
+  assert.deepEqual(calls.slice(2), [
+    'plan:1.2.3 r1',
+    'design-review:1.2.3 r1',
+    'implement:1.2.3',
+    'code-review:1.2.3 r1',
+    'expert-review:1.2.3 r1',
+    'integrate:1.2.3',
+  ])
+  // roadmap-1-2-4 (no worktree) is still an unresolved survivor.
+  assert.match(result.halted, /needs-operator-recovery: 1 recovery survivor branch\(es\).*1\.2\.4/)
+})
+
+test('combination: a transient infrastructure fault is retried in place and the pipeline completes', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+
+  const { result, calls } = await runSimulation({
+    repo,
+    args: { resumePartialBranches: true, resumeMode: 'continue' },
+    failures: {
+      'plan:1.2.3 r1': { error: "adapter 'claude' timed out", times: 1 },
+    },
+  })
+
+  // The hung/killed stage agent is re-run once (warm start from the committed
+  // ExecPlan) instead of failing the task; the pipeline then completes.
+  assert.equal(result.recovery.resumed, 1)
+  assert.equal(calls.filter((label) => label === 'plan:1.2.3 r1').length, 2)
+  assert.ok(!calls.some((label) => label.startsWith('assess:')), 'a retried infra fault must not spend an assessment agent')
+  assert.deepEqual(
+    result.recovery.results.map((entry) => [entry.id, entry.action]),
+    [['1.2.3', 'resumed']],
+  )
+})
+
+test('combination: a persistent infrastructure fault halts as infra-fault without an assessment', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+
+  const { result, calls } = await runSimulation({
+    repo,
+    args: { resumePartialBranches: true, resumeMode: 'continue' },
+    failures: {
+      'implement:1.2.3': { error: "adapter 'codex' timed out" },
+    },
+  })
+
+  // Both attempts fail -> infra-fault, a fault of the harness, not the
+  // branch: no assessment agent runs, and the terminal state names the fault
+  // so the operator relaunches instead of treating it as task evidence.
+  assert.equal(calls.filter((label) => label === 'implement:1.2.3').length, 2)
+  assert.ok(!calls.some((label) => label.startsWith('assess:')), 'infra faults must not be assessed')
+  assert.match(result.halted, /recovery infra-fault at infrastructure/)
+  assert.match(result.halted, /timed out/)
+  const fatal = result.results.find((entry) => entry.status === 'infra-fault')
+  assert.ok(fatal, 'the infra-fault result must be recorded')
+  assert.equal(fatal.stage, 'infrastructure')
 })
 
 test('combination: auth preflight failure blocks recovery entirely', async () => {

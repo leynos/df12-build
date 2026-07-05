@@ -52,6 +52,21 @@ const MAX_PLANNING_PARALLEL = Math.max(1, cfg.maxPlanningParallel || cfg.maxPlan
 const MAX_BUILD_PARALLEL = Math.max(1, cfg.maxBuildParallel || 8) // concurrent build-stage agents.
 const MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4 // plan <-> design-review exchanges before halting
 const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review cycles
+const STAGE_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2)) // total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, schema-retry exhaustion); product failures are never retried
+
+// Per-work-item build loop: the host reads the committed ExecPlan's Progress
+// checklist and dispatches ONE builder turn per unticked work item, verifying
+// committed progress after each turn. Small turns keep the build adapter on a
+// tight timeout and make a hung stream cheap. perWorkItemBuild=false restores
+// the single-turn whole-task build. Plans without a Progress checklist fall
+// back to the single-turn build automatically.
+const PER_WORK_ITEM_BUILD = cfg.perWorkItemBuild !== false
+const MAX_WORK_ITEM_ROUNDS = Math.max(1, Math.trunc(Number(cfg.maxWorkItemRounds) || 16)) // builder turns per task before failing closed
+
+// Bounded-cardinality fault counters, surfaced verbatim in the run result so
+// operators can see retry pressure and terminal fault classes without
+// scraping logs. Fixed keys only — never keyed by task id or error text.
+const faultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 }
 const AUTO_MERGE = cfg.autoMerge !== false // false => stop after review, leave branch for manual merge
 const DOCUMENT_AUDIT = cfg.documentAudit !== false // false => return audit findings only, write nothing
 const DRY_RUN = cfg.dryRun === true // plan/review/audit only; skip implement, merge, and doc writes
@@ -59,9 +74,9 @@ const AUTH_PREFLIGHT = cfg.authPreflight !== false // false => skip local CLI au
 const REQUIRE_CODERABBIT_AUTH = cfg.requireCoderabbitAuth !== false && !DRY_RUN // CodeRabbit is required once implementation/review can run
 const ASSESS_PARTIAL_BRANCHES = cfg.assessPartialBranches !== false // false => skip report-only assessment of failed task branches
 const RESUME_PARTIAL_BRANCHES = cfg.resumePartialBranches === true // opt-in: discover surviving roadmap-* branches on fresh launch before normal selection
-const RESUME_MODE = String(cfg.resumeMode || 'assess').toLowerCase() // maximum recovery action: "assess" reports only; "review" may route clean adopt-complete branches into review + integration
-if (!['assess', 'review'].includes(RESUME_MODE)) {
-  throw new Error(`Unsupported resumeMode: ${RESUME_MODE} (use "assess" or "review")`)
+const RESUME_MODE = String(cfg.resumeMode || 'assess').toLowerCase() // maximum recovery action: "assess" reports only; "review" may route clean adopt-complete branches into review + integration; "continue" dispatches on the committed ExecPlan Status (DRAFT->plan, APPROVED/IN PROGRESS->implement, COMPLETE->review) so partial work is finished through the ordinary gates instead of parked
+if (!['assess', 'review', 'continue'].includes(RESUME_MODE)) {
+  throw new Error(`Unsupported resumeMode: ${RESUME_MODE} (use "assess", "review", or "continue")`)
 }
 const RESUME_TASK_ID = cfg.resumeTaskId ? String(cfg.resumeTaskId) : null // limit recovery discovery to one roadmap id (separate from taskId, which selects normal roadmap work)
 const RESUME_MAX_CANDIDATES_RAW = Number(cfg.resumeMaxCandidates ?? 4)
@@ -92,12 +107,45 @@ const AUTH_REQUIRED_ADAPTERS = new Set([
   ASSESSMENT_ADAPTER,
 ].map((adapter) => String(adapter || '').toLowerCase()))
 const CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || 'coderabbit review --agent'
-const CODERABBIT_REVIEW_GUIDANCE =
-  'Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that `make all`, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.'
+// Host-run CodeRabbit review: the control loop invokes the CLI against
+// committed work, absorbs rate-limit backoff in host wall-clock instead of
+// agent tokens, and feeds actionable findings back into the fix rounds.
+// coderabbitHostReview=false restores the legacy agent-run flow.
+const CODERABBIT_HOST_REVIEW = cfg.coderabbitHostReview !== false
+const CODERABBIT_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.coderabbitAttempts) || 3)) // total attempts per host review when rate limited
+const CODERABBIT_BACKOFF_MINUTES = (() => {
+  const range = Array.isArray(cfg.coderabbitBackoffMinutes) ? cfg.coderabbitBackoffMinutes : []
+  const low = Math.max(1, Math.trunc(Number(range[0]) || 45))
+  const high = Math.max(low, Math.trunc(Number(range[1]) || 90))
+  return [low, high]
+})()
+// Optional durable JSONL sink for every CodeRabbit finding, so recurring
+// finding classes can be tuned into deterministic lint rules over time.
+const CODERABBIT_FINDINGS_FILE = String(cfg.coderabbitFindingsFile || '')
+// The deterministic commit-gate command set for the target project. `make all`
+// is the df12 house default, but it is NOT universal: some projects alias
+// `all` to a release build, so operators must be able to name the authoritative
+// gate targets (e.g. sequential check-fmt/typecheck/lint/test) via args.
+const COMMIT_GATES = (Array.isArray(cfg.commitGates) && cfg.commitGates.length
+  ? cfg.commitGates
+  : ['make all']).map((command) => String(command))
+const COMMIT_GATE_TEXT = COMMIT_GATES.map((command) => `\`${command}\``).join(' then ')
+// Host-run commit gates: the control loop re-runs the configured gate
+// commands against committed HEAD before review and integration, so a
+// gatesGreen claim is verified, never trusted. hostCommitGates=false
+// restores the trust-the-agent flow.
+const HOST_COMMIT_GATES = cfg.hostCommitGates !== false
+const COMMIT_GATE_TIMEOUT_SECONDS = Math.max(1, Math.trunc(Number(cfg.commitGateTimeoutSeconds) || 3600))
+const COMMIT_GATE_GUIDANCE =
+  `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well — NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.${HOST_COMMIT_GATES ? ' The workflow host independently re-runs the configured gates against your committed HEAD before review and integration; a gatesGreen claim the host cannot reproduce fails the stage with the host gate log as evidence.' : ''}`
+const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW
+  ? 'Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work — only committed changes reach the host review.'
+  : 'Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.'
 const SPARK_DELEGATION_GUIDANCE =
   "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
-const SCRUTINEER_DELEGATION_GUIDANCE =
-  `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`
+const SCRUTINEER_DELEGATION_GUIDANCE = CODERABBIT_HOST_REVIEW
+  ? `Delegate deterministic gate execution to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until the gates are green. ${CODERABBIT_REVIEW_GUIDANCE}`
+  : `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`
 
 function buildAgentOptions(options = {}) {
   return { adapter: BUILD_ADAPTER, model: BUILD_MODEL, ...options }
@@ -119,12 +167,35 @@ function assessmentAgentOptions(options = {}) {
   return { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL, ...options }
 }
 
+// Bounded in-run retry for stage agents. An infrastructure fault (a hung or
+// killed adapter stream, schema-retry exhaustion) says nothing about the task
+// branch, and the committed-ExecPlan durability contract makes a warm re-run
+// cheap — the retried agent finds the committed plan and any committed work
+// already on disk. Product failures (review verdicts, gate failures) are
+// never retried here; they flow through the ordinary failure paths.
+async function withInfraRetry(run, label) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await run()
+    } catch (error) {
+      const message = (error && error.message) || String(error)
+      if (attempt >= STAGE_ATTEMPTS || !infrastructureFailureDetail(message)) throw error
+      faultMetrics.infraRetries += 1
+      log(`[${label}] infrastructure fault (${message}); retrying the stage agent (attempt ${attempt + 1} of ${STAGE_ATTEMPTS})`)
+    }
+  }
+}
+
 function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`
 }
 
-async function fileExists(pathValue, baseDir = process.cwd()) {
-  if (!pathValue) return false
+// Distinguish "the file is absent" from "the filesystem would not answer":
+// ENOENT/ENOTDIR mean absent; anything else (permissions, I/O) is a fault the
+// caller must surface rather than conflate with a missing file. Returns
+// { ok, exists, detail }.
+async function fileState(pathValue, baseDir = process.cwd()) {
+  if (!pathValue) return { ok: true, exists: false, detail: '' }
   const path = process.getBuiltinModule('node:path')
   const candidate = path.isAbsolute(String(pathValue))
     ? String(pathValue)
@@ -132,9 +203,12 @@ async function fileExists(pathValue, baseDir = process.cwd()) {
   const fs = process.getBuiltinModule('node:fs/promises')
   try {
     const stat = await fs.stat(candidate)
-    return stat.isFile()
-  } catch {
-    return false
+    return { ok: true, exists: stat.isFile(), detail: '' }
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
+      return { ok: true, exists: false, detail: '' }
+    }
+    return { ok: false, exists: false, detail: `stat failed for ${candidate}: ${(error && error.message) || String(error)}` }
   }
 }
 
@@ -179,6 +253,7 @@ function preamble(worktree) {
     '- Use `sem` for codebase history navigation (semantic, entity-level diffs and blame) instead of raw git log/blame.',
     '- Load the appropriate language router skill for any code you touch: python-router for Python, rust-router for Rust, and the matching router for other languages. Follow the smaller skills it routes you to.',
     `- Treat docs/ as the source of truth: ${DESIGN_DOCS}, the developers guide, any users guide present, the coding/scripting standards, and AGENTS.md. Obey AGENTS.md quality gates and the en-GB Oxford-spelling ("-ize"/"-yse"/"-our") convention in all prose, comments, and commits.`,
+    `- ${COMMIT_GATE_GUIDANCE}`,
     `- The integration branch is "${BASE}"; treat origin/${BASE} as canonical. The roadmap lives at ${ROADMAP}.`,
     '- Format ONLY the files you changed: run the markdown formatter on the specific paths you touched (`mdtablefix … <files>` then `markdownlint-cli2 --fix <files>`), then gate. Do NOT run a repo-global format such as `make fmt` / `mdformat-all` that reformats unrelated files — that churn only has to be parked and discarded.',
     '- Never `git stash` with a bare or default message. Name every stash so a deterministic sweeper can tie it to a task and clear it safely: `df12-stash v1 task=<this roadmap id> kind=<discard|park|keep> reason="<short>"`. Formatter or build churn you park is kind=discard; anything you must re-apply later is kind=keep.',
@@ -220,12 +295,12 @@ const IMPL_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    ok: { type: 'boolean', description: 'true when every work item is implemented, committed, and make all is green' },
+    ok: { type: 'boolean', description: 'true when every work item is implemented, committed, and every project commit gate is green' },
     execplanPath: { type: 'string' },
     workItemsCompleted: { type: 'integer' },
     workItemsTotal: { type: 'integer' },
     commits: { type: 'array', items: { type: 'string' } },
-    gatesGreen: { type: 'boolean', description: 'make all (plus markdownlint/nixie where markdown changed) passes at HEAD' },
+    gatesGreen: { type: 'boolean', description: 'every project commit gate (plus markdownlint/nixie where markdown changed) passes at HEAD' },
     coderabbitRuns: { type: 'integer' },
     openIssues: { type: 'array', items: { type: 'string' }, description: 'anything left unresolved, with reason' },
     summary: { type: 'string' },
@@ -263,6 +338,24 @@ const REVIEW_SCHEMA = {
     summary: { type: 'string' },
   },
   required: ['verdict', 'blocking', 'summary'],
+}
+
+// Structured return contract for review-fix rounds. Without it, the gate and
+// CodeRabbit evidence a fix agent produces evaporates with its transcript, and
+// a later assessment of the branch cannot see that the workflow already
+// re-validated the current tip (issue #24).
+const FIX_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    commits: { type: 'array', items: { type: 'string' }, description: 'commit subjects added in this fix round' },
+    gatesGreen: { type: 'boolean', description: 'every project commit gate (plus markdownlint/nixie where markdown changed) passes at HEAD after the fixes' },
+    coderabbitRuns: { type: 'integer' },
+    resolved: { type: 'array', items: { type: 'string' }, description: 'how each blocking item was resolved' },
+    openIssues: { type: 'array', items: { type: 'string' }, description: 'anything left unresolved, with reason' },
+    summary: { type: 'string' },
+  },
+  required: ['gatesGreen', 'summary'],
 }
 
 const INTEGRATE_SCHEMA = {
@@ -372,10 +465,10 @@ const REQUIRES_LINE_RE = /^\s*-\s+Requires\s+(.+?)\.?\s*$/
 const STEP_RANGE_RE = /\bsteps?\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)\b/gi
 const ROADMAP_ID_RE = /\b\d+(?:\.\d+)+\b/g
 
-async function execFileText(command, commandArgs) {
+async function execFileText(command, commandArgs, options = {}) {
   const { execFile } = process.getBuiltinModule('node:child_process')
   return await new Promise((resolve, reject) => {
-    execFile(command, commandArgs, { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile(command, commandArgs, { cwd: options.cwd || process.cwd(), maxBuffer: 16 * 1024 * 1024, ...(options.timeoutMs ? { timeout: options.timeoutMs } : {}) }, (error, stdout, stderr) => {
       if (error) {
         error.stdout = stdout
         error.stderr = stderr
@@ -387,15 +480,19 @@ async function execFileText(command, commandArgs) {
   })
 }
 
-async function execFileStatus(command, commandArgs) {
+async function execFileStatus(command, commandArgs, options = {}) {
   try {
-    return { ok: true, stdout: await execFileText(command, commandArgs), stderr: '' }
+    return { ok: true, stdout: await execFileText(command, commandArgs, options), stderr: '' }
   } catch (error) {
     return {
       ok: false,
       stdout: error?.stdout || '',
       stderr: error?.stderr || '',
       message: (error && error.message) || String(error),
+      // Set when the child was killed (e.g. by the timeoutMs option); the
+      // message alone does not say so.
+      killed: Boolean(error?.killed),
+      signal: error?.signal || '',
     }
   }
 }
@@ -432,9 +529,27 @@ function providerFailureDetail(value) {
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
 }
 
+// ODW-level infrastructure faults: the agent process died or its reply
+// channel failed, so the error carries no evidence about the task branch.
+// The patterns pin ODW's own stable error strings (bridge.ts
+// cliFailureMessage and the schema-retry exhaustion message).
+function infrastructureFailureDetail(value) {
+  const text = String(value || '')
+  const patterns = [
+    /\badapter '[^']*' timed out\b/i,
+    /\badapter '[^']*' exited with code \d+/i,
+    /\bAdapterExecutionError\b/,
+    /\bSchemaValidationError\b/,
+    /did not satisfy the schema after \d+ attempt/i,
+    /\bno JSON value found in the reply\b/i,
+  ]
+  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
+}
+
 function resultFromUnhandledAgentError(id, detail, extra = {}) {
   const authDetail = authFailureDetail(detail)
   if (authDetail) {
+    faultMetrics.authFaults += 1
     return {
       id,
       status: 'fatal-auth',
@@ -446,10 +561,23 @@ function resultFromUnhandledAgentError(id, detail, extra = {}) {
   }
   const providerDetail = providerFailureDetail(detail)
   if (providerDetail) {
+    faultMetrics.providerFaults += 1
     return {
       id,
       status: 'provider-fault',
       stage: 'provider',
+      detail,
+      proposals: [],
+      ...extra,
+    }
+  }
+  const infraDetail = infrastructureFailureDetail(detail)
+  if (infraDetail) {
+    faultMetrics.infraFaults += 1
+    return {
+      id,
+      status: 'infra-fault',
+      stage: 'infrastructure',
       detail,
       proposals: [],
       ...extra,
@@ -463,6 +591,186 @@ function resultFromUnhandledAgentError(id, detail, extra = {}) {
     proposals: [],
     ...extra,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Host-run CodeRabbit review. The CLI's --agent mode emits NDJSON events on
+// stdout and exits 0 even on fatal errors, so classification parses events,
+// never exit codes. Wire contract pinned against coderabbit CLI internals:
+//   {"type":"review_context"|"status"|"heartbeat"} — progress events
+//   {"type":"finding", severity: critical|major|minor|trivial|info,
+//    fileName, comment?, suggestions?, codegenInstructions?}
+//   {"type":"complete", status, findings: N, message?}
+//   {"type":"error", errorType ("rate_limit" for quota), message,
+//    recoverable, details?/metadata?{waitTime}}
+// ---------------------------------------------------------------------------
+function parseCoderabbitAgentOutput(stdout) {
+  const events = []
+  const rawLines = []
+  for (const line of String(stdout || '').split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    try {
+      const event = JSON.parse(trimmed)
+      if (event && typeof event === 'object') {
+        events.push(event)
+        continue
+      }
+    } catch {
+      // fall through: keep the raw line as evidence
+    }
+    rawLines.push(trimmed)
+  }
+  return {
+    events,
+    rawLines,
+    findings: events.filter((event) => event.type === 'finding'),
+    complete: events.find((event) => event.type === 'complete') || null,
+    error: events.find((event) => event.type === 'error') || null,
+  }
+}
+
+const CODERABBIT_BLOCKING_SEVERITIES = new Set(['critical', 'major'])
+
+// One of: 'clean' | 'findings' | 'rate-limited' | 'auth' | 'error'.
+function classifyCoderabbitOutcome(execResult, parsed) {
+  const errorText = [parsed.error?.message || '', execResult.stderr || '', execResult.message || ''].join('\n')
+  if (parsed.error?.errorType === 'rate_limit' || /\brate.?limit|review limit reached/i.test(errorText)) return 'rate-limited'
+  if (authFailureDetail(errorText)) return 'auth'
+  if (parsed.error || (!execResult.ok && !parsed.complete)) return 'error'
+  if (parsed.findings.length) return 'findings'
+  if (parsed.complete) return 'clean'
+  return 'error'
+}
+
+// Deterministic jitter in [low, high] minutes: Math.random() is banned for
+// Claude Code workflow dual-compatibility (ODW scanDualCompat), and a seeded
+// spread keeps sibling tasks from hammering the quota in lockstep.
+function coderabbitBackoffMinutes(seed) {
+  let hash = 5381
+  for (const ch of String(seed)) hash = ((hash * 33) ^ ch.codePointAt(0)) >>> 0
+  const [low, high] = CODERABBIT_BACKOFF_MINUTES
+  return low + (hash % (high - low + 1))
+}
+
+async function hostSleepMinutes(minutes) {
+  await new Promise((resolve) => setTimeout(resolve, minutes * 60000))
+}
+
+// Run one host review against the worktree's COMMITTED changes, absorbing
+// rate-limit backoff in host wall-clock (zero agent tokens). Returns
+// { outcome, attempts, findings, detail }. deps are injectable for tests.
+async function runCoderabbitHostReview(worktree, label, deps = {}) {
+  const exec = deps.exec || execFileStatus
+  const sleep = deps.sleep || hostSleepMinutes
+  const commandArgs = ['review', '--agent', '--type', 'committed', '--base', BASE]
+  for (let attempt = 1; ; attempt++) {
+    log(`[${label}] CodeRabbit host review attempt ${attempt} of ${CODERABBIT_ATTEMPTS}`)
+    const result = await exec('coderabbit', commandArgs, { cwd: worktree })
+    const parsed = parseCoderabbitAgentOutput(result.stdout)
+    const outcome = classifyCoderabbitOutcome(result, parsed)
+    if (outcome === 'rate-limited' && attempt < CODERABBIT_ATTEMPTS) {
+      const minutes = coderabbitBackoffMinutes(`${label}#${attempt}`)
+      log(`[${label}] CodeRabbit rate limited; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${CODERABBIT_ATTEMPTS} (wall-clock only, no agent tokens)`)
+      await sleep(minutes)
+      continue
+    }
+    const detail = outcome === 'clean' || outcome === 'findings'
+      ? ''
+      : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join('; ') || 'coderabbit produced no parsable outcome').trim()
+    return { outcome, attempts: attempt, findings: parsed.findings, detail }
+  }
+}
+
+// Bounded-cardinality run-result aggregate plus the optional durable JSONL
+// sink for linter tuning.
+const coderabbitCapture = { reviews: 0, findings: 0, rateLimitedRuns: 0, deferred: 0, bySeverity: {}, sinkError: '' }
+
+async function recordCoderabbitReview(label, review) {
+  coderabbitCapture.reviews += 1
+  if (review.outcome === 'rate-limited') coderabbitCapture.rateLimitedRuns += 1
+  for (const finding of review.findings) {
+    coderabbitCapture.findings += 1
+    const severity = String(finding.severity || 'unknown').toLowerCase()
+    coderabbitCapture.bySeverity[severity] = (coderabbitCapture.bySeverity[severity] || 0) + 1
+  }
+  if (!CODERABBIT_FINDINGS_FILE || !review.findings.length) return
+  // Wall-clock stamp shelled out to `date`: Date.now()/new Date() are banned
+  // for Claude Code workflow dual-compatibility (ODW scanDualCompat).
+  const stamp = await execFileStatus('date', ['-u', '+%Y-%m-%dT%H:%M:%SZ'])
+  const ts = stamp.ok ? stamp.stdout.trim() : ''
+  const lines = review.findings.map((finding) => JSON.stringify({
+    ts,
+    label,
+    severity: String(finding.severity || ''),
+    file: String(finding.fileName || ''),
+    comment: String(finding.comment || '').slice(0, 2000),
+    codegenInstructions: String(finding.codegenInstructions || '').slice(0, 2000),
+    suggestions: Array.isArray(finding.suggestions) ? finding.suggestions.length : 0,
+  }))
+  try {
+    const fs = process.getBuiltinModule('node:fs/promises')
+    await fs.appendFile(CODERABBIT_FINDINGS_FILE, `${lines.join('\n')}\n`, 'utf8')
+  } catch (error) {
+    coderabbitCapture.sinkError = (error && error.message) || String(error)
+    log(`[${label}] could not append CodeRabbit findings to ${CODERABBIT_FINDINGS_FILE}: ${coderabbitCapture.sinkError}`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Host-run commit gates. The control loop executes the configured gate
+// commands itself against the worktree's committed HEAD — deterministic,
+// zero agent tokens, and uniform across adapters — so a red branch never
+// spends reviewer agents and a false gatesGreen claim is caught with the
+// host's own log as evidence. Full output is teed to a /tmp log per gate;
+// the returned detail carries a bounded tail.
+// ---------------------------------------------------------------------------
+const hostGateMetrics = { runs: 0, failures: 0 }
+
+function hostGateLogPath(tag, roundLabel, index, command) {
+  const slug = (value) => String(value).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
+  return `/tmp/df12-gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}-${slug(command)}.out`
+}
+
+async function runHostCommitGates(worktree, tag, roundLabel, deps = {}) {
+  const exec = deps.exec || execFileStatus
+  const fs = process.getBuiltinModule('node:fs/promises')
+  const results = []
+  for (const [index, command] of COMMIT_GATES.entries()) {
+    hostGateMetrics.runs += 1
+    log(`[task ${tag}] host gate ${index + 1}/${COMMIT_GATES.length} (${roundLabel}): ${command}`)
+    const result = await exec('sh', ['-c', command], { cwd: worktree, timeoutMs: COMMIT_GATE_TIMEOUT_SECONDS * 1000 })
+    const output = `${result.stdout || ''}${result.stderr ? `\n--- stderr ---\n${result.stderr}` : ''}`
+    const logFile = hostGateLogPath(tag, roundLabel, index, command)
+    try {
+      await fs.writeFile(logFile, output, 'utf8')
+    } catch {
+      // the log file is best-effort evidence; the tail below still lands
+    }
+    if (!result.ok) {
+      hostGateMetrics.failures += 1
+      const timedOut = result.killed || /SIGTERM|timed? ?out/i.test(result.message || '')
+        ? ` (killed after the ${COMMIT_GATE_TIMEOUT_SECONDS}s gate timeout)`
+        : ''
+      const tail = output.trim().split(/\r?\n/).slice(-12).join('\n')
+      results.push({ command, ok: false, logFile })
+      return {
+        green: false,
+        results,
+        detail: `host gate \`${command}\` failed${timedOut}; full log: ${logFile}; output tail:\n${tail}`,
+      }
+    }
+    results.push({ command, ok: true, logFile })
+  }
+  return { green: true, results, detail: '' }
+}
+
+// Blocking severities become fix-round items; the rest are captured for the
+// findings sink and linter tuning but never gate integration.
+function coderabbitBlockingItems(findings) {
+  return (findings || [])
+    .filter((finding) => CODERABBIT_BLOCKING_SEVERITIES.has(String(finding.severity || '').toLowerCase()))
+    .map((finding) => `CodeRabbit (${finding.severity}) ${finding.fileName || 'unknown file'}: ${String(finding.comment || finding.codegenInstructions || 'see the recorded suggestions').slice(0, 500)}`)
 }
 
 function parseNameStatus(output) {
@@ -885,7 +1193,7 @@ function selectRoadmapTask(roadmapText, taken) {
 // ---------------------------------------------------------------------------
 // Prompt builders
 // ---------------------------------------------------------------------------
-function planPrompt(task, worktree, priorVerdict, round) {
+function planPrompt(task, worktree, priorVerdict, round, opts = {}) {
   const revision =
     round === 1
       ? 'This is the first planning round.'
@@ -897,17 +1205,24 @@ function planPrompt(task, worktree, priorVerdict, round) {
     preamble(worktree),
     `TASK: Produce (or revise) a self-contained ExecPlan for roadmap task ${task.id} — "${task.title}".`,
     '',
+    ...(opts.resume
+      ? [
+          'RESUME: this branch survived a previous run. A committed ExecPlan draft may already exist at docs/execplans/<branch-leaf>.md, and the branch may already carry commits. Read the existing draft (Status, Progress, Decision Log) and the branch history FIRST, then complete or revise the plan IN PLACE rather than starting over. Account for any work already committed on the branch.',
+          '',
+        ]
+      : []),
     SPARK_DELEGATION_GUIDANCE,
     '',
     'Use the `execplans` skill and follow it exactly. Name the plan docs/execplans/<branch-leaf>.md within the worktree (branch leaf = the part after the last "/").',
     'The plan must:',
     '- Decompose the task into ordered, atomic work items, each independently committable and gate-passable.',
+    '- Record the work items in the `## Progress` section as one checklist line each, `- [ ] WI-<n>: <imperative title>`, in execution order. The workflow host reads this checklist to dispatch the build one work item at a time, so every implementable work item must appear as its own unticked line — preparation notes that are not build work must not be checklist lines.',
     `- Adhere to the design documents (${DESIGN_DOCS}), the developers guide, the coding standards, and AGENTS.md. Cite the exact sections/ADRs each work item implements.`,
     '- Signpost, per work item, the documentation to read and the skills to load (router skills, hypothesis/crosshair/mutmut for verification, etc.).',
     '- Specify the tests (unit, behavioural, property, snapshot, e2e) each work item must add or update, per the AGENTS.md testing rules.',
     '- The ExecPlan must be implementable as written. Do NOT set Status: BLOCKED merely because Memtrace, GrepAI, Leta, Firecrawl, sem, or another advisory tool is unavailable in your agent session. Record the failed command and use bounded local docs/source/tests as fallback evidence. Only mark blocked for a true product/design ambiguity or missing requirement that cannot be resolved from the repository.',
-    '- State the validation commands (`make all`; plus `make markdownlint` and `make nixie` for markdown changes). `make all` includes the `typecheck` target on current `origin/main`.',
-    '- VALIDATION COMMANDS MUST BE PATH-SAFE: prefer repository gates such as `make all`, `make markdownlint`, and `make nixie` over hand-written file lists. If a work item lists direct formatter/linter commands, every listed path must definitely exist at that point in the work item. Do not include a file that the same work item may delete, an optional file such as an optional snapshot, or a file that the work item does not edit. If a path is conditional, make the command conditional (`test -e path && …`) or omit that path and rely on the repository gate. This is a blocking design-review requirement.',
+    `- State the validation commands (${COMMIT_GATE_TEXT}; plus \`make markdownlint\` and \`make nixie\` for markdown changes). ${COMMIT_GATE_GUIDANCE}`,
+    `- VALIDATION COMMANDS MUST BE PATH-SAFE: prefer repository gates such as ${COMMIT_GATE_TEXT}, \`make markdownlint\`, and \`make nixie\` over hand-written file lists. If a work item lists direct formatter/linter commands, every listed path must definitely exist at that point in the work item. Do not include a file that the same work item may delete, an optional file such as an optional snapshot, or a file that the work item does not edit. If a path is conditional, make the command conditional (\`test -e path && …\`) or omit that path and rely on the repository gate. This is a blocking design-review requirement.`,
     '',
     'RESEARCH before you commit to any mechanism — do not leave the implementer a menu of unverified workarounds:',
     '- For every external or locked library the plan leans on, verify its REAL behaviour before relying on it: read the actual source (a vendored or sibling checkout if the project has one) and the official docs (use the `firecrawl` skill / firecrawl_* tools). Pin every load-bearing API to what the LOCKED version genuinely supports and cite the file/symbol or doc you verified against. If the library cannot express what a work item needs, say so explicitly and specify the justified, scoped alternative rather than hedging.',
@@ -916,7 +1231,9 @@ function planPrompt(task, worktree, priorVerdict, round) {
     '',
     revision,
     '',
-    'Write/update the execplan file on disk in the worktree. Return its path, the ordered work-item titles, the docs and skills cited, and a short summary. Do NOT begin implementation.',
+    'EXECPLAN DURABILITY CONTRACT: the committed ExecPlan is the durable source of truth for where this task stands — an uncommitted plan is lost when the run dies. COMMIT the ExecPlan on the task branch as soon as it is first written, and commit again after EVERY revision (en-GB imperative subject). Keep the header Status field accurate: it stays `DRAFT` while planning; the design reviewer flips it to `APPROVED`. Never return with the ExecPlan uncommitted or the worktree dirty.',
+    '',
+    'Write/update the execplan file on disk in the worktree and COMMIT it. Return its path, the ordered work-item titles, the docs and skills cited, and a short summary. Do NOT begin implementation.',
   ].join('\n')
 }
 
@@ -926,36 +1243,82 @@ function designReviewPrompt(task, worktree, plan, round) {
     `TASK: Conduct an ADVERSARIAL Logisphere DESIGN review of the ExecPlan for roadmap task ${task.id} at ${plan.execplanPath}. Round ${round}.`,
     '',
     'Invoke the `logisphere-design-review` skill and run the plan past the full crew (Pandalump structural integrity, Wafflecat alternatives, Buzzy Bee scaling, Telefono contracts, Doggylump failure modes, Dinolump long-term viability), plus the pre-mortem and alternatives checkpoint.',
-    'Be genuinely adversarial: assume the plan is flawed until proven otherwise. Check it against the design documents, ADRs, developers guide, and AGENTS.md. Verify the work items are atomic, ordered, testable, and complete; that validation includes `make all` (which includes `typecheck` on current `origin/main`) plus markdown gates when markdown changes; that direct formatter/linter file lists only name files guaranteed to exist and changed by that work item; that no standalone red-test commit is required; and that nothing contradicts the deterministic/judgemental boundary or the established contracts.',
+    `Be genuinely adversarial: assume the plan is flawed until proven otherwise. Check it against the design documents, ADRs, developers guide, and AGENTS.md. Verify the work items are atomic, ordered, testable, and complete; that validation includes the project commit gates (${COMMIT_GATE_TEXT}, cross-checked against the gate targets AGENTS.md actually names) plus markdown gates when markdown changes; that direct formatter/linter file lists only name files guaranteed to exist and changed by that work item; that no standalone red-test commit is required; and that nothing contradicts the deterministic/judgemental boundary or the established contracts.`,
     '',
     'Read the execplan from disk yourself — do not trust the planner\'s summary. You may leave review notes in the execplan or an adjacent review file, but do NOT implement anything and do NOT relax the design to make it pass.',
     'Where the plan asserts any external or locked-library behaviour, verify it against the REAL source (a vendored or sibling checkout if the project has one) and the official docs. Treat any uncited memory-based claim about library behaviour as a blocking defect: the plan must verify and cite official docs when tools permit, or pin the behaviour with a test. Do not reject an otherwise implementable plan solely because Memtrace, GrepAI, Leta, Firecrawl, or sem was unavailable in the planner session; reject it if that unavailability was turned into a hard blocker instead of a documented fallback.',
     '',
     'Set satisfied=true ONLY when you would stake your name on the plan being implementable and design-conformant as written. Otherwise list precise, addressable blocking defects (these go straight back to the planner).',
+    '',
+    'STATUS TRANSITION: when you set satisfied=true, the workflow itself records the `APPROVED` status flip as a deterministic commit — you do not need to edit the plan header. If you are NOT satisfied, leave Status as `DRAFT`, and commit any review notes you chose to leave in the worktree so nothing is lost if the run dies.',
   ].join('\n')
 }
 
-function implementPrompt(task, worktree, plan) {
+function implementPrompt(task, worktree, plan, opts = {}) {
   return [
     preamble(worktree),
     `TASK: Implement roadmap task ${task.id} ("${task.title}") by executing the approved ExecPlan at ${plan.execplanPath}, work item by work item, in order.`,
     '',
+    ...(opts.resume
+      ? [
+          'RESUME: this branch survived a previous run, and the committed ExecPlan is the source of truth for where the build stands. Read its Status, Progress checkboxes, and Decision Log FIRST. Verify already-ticked work items briefly (their commits exist on the branch and gates still pass) rather than redoing them, then continue from the first unticked work item.',
+          '',
+        ]
+      : []),
     SPARK_DELEGATION_GUIDANCE,
     '',
     SCRUTINEER_DELEGATION_GUIDANCE,
     '',
     'For EACH execplan work item, in this exact order:',
     '  1. Implement the work item (code + tests + docs) per the plan and AGENTS.md.',
-    '  2. DETERMINISTIC GATE FIRST: summon `scrutineer` to run `make all` (which includes typecheck on current `origin/main`). If it reports failures, fix them yourself (format, lint, typecheck, tests, audit) and summon `scrutineer` again until green. For any markdown you touched, also have `scrutineer` run `make markdownlint` and `make nixie` and fix failures. Do not proceed to coderabbit until the deterministic gates are green.',
-    `  3. THEN summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. Address actionable feedback yourself (highest severity first). After applying fixes, summon \`scrutineer\` again to re-run \`make all\` and confirm the deterministic gates are still green.`,
-    `     - ${CODERABBIT_REVIEW_GUIDANCE}`,
+    `  2. DETERMINISTIC GATE FIRST: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT}, plus any further gate targets AGENTS.md names). If it reports failures, fix them yourself (format, lint, typecheck, tests, audit) and summon \`scrutineer\` again until green. For any markdown you touched, also have \`scrutineer\` run \`make markdownlint\` and \`make nixie\` and fix failures.`,
+    ...(CODERABBIT_HOST_REVIEW
+      ? [`  3. ${CODERABBIT_REVIEW_GUIDANCE}`]
+      : [
+          `  3. THEN summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. Address actionable feedback yourself (highest severity first). After applying fixes, summon \`scrutineer\` again to re-run the commit gates and confirm they are still green.`,
+          `     - ${CODERABBIT_REVIEW_GUIDANCE}`,
+        ]),
     '  4. Update the execplan IN PLACE with findings, progress (tick the work item), and any decisions or deviations, with rationale.',
     '  5. Commit the work item and the execplan update together as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).',
+    '',
+    'EXECPLAN DURABILITY CONTRACT: the committed ExecPlan (Status + Progress checkboxes) is the durable source of truth for where this task stands. Before starting the first work item, set the header Status to `IN PROGRESS` and commit it. When every work item is complete and the gates are green, set Status to `COMPLETE` together with the Outcomes & Retrospective update, and commit. Never leave the ExecPlan stale or uncommitted at any stopping point — if you must stop early, commit the plan reflecting exactly what is done and what remains.',
     '',
     'Use leta for navigation, sem for history, and the language router skill for the languages you touch. Follow the per-work-item skill and documentation signposts in the plan.',
     '',
     `${DRY_RUN ? 'DRY RUN: do not run this step — it is skipped by the orchestrator.' : ''}`,
-    'When all work items are done, ensure `make all` is green at HEAD. Return the completion counts, commit subjects, whether gates are green, the number of coderabbit runs, and any open issues.',
+    `When all work items are done, ensure the project commit gates (${COMMIT_GATE_TEXT}) are green at HEAD. Return the completion counts, commit subjects, whether gates are green, the number of coderabbit runs, and any open issues.`,
+  ].join('\n')
+}
+
+// One builder turn, one work item. The host owns the loop: it picks the
+// first unticked Progress item from the committed plan, dispatches this
+// prompt, and verifies committed progress before dispatching the next.
+function implementWorkItemPrompt(task, worktree, plan, item, opts = {}) {
+  return [
+    preamble(worktree),
+    `TASK: Implement EXACTLY ONE work item of roadmap task ${task.id} ("${task.title}") from the approved ExecPlan at ${plan.execplanPath}.`,
+    '',
+    'THE WORK ITEM (the first unticked entry in the plan\'s ## Progress checklist):',
+    `  ${item.text}`,
+    '',
+    'Read the ExecPlan first: it carries the design citations, signposted docs and skills, and the tests this work item must add. Implement THIS work item completely (code + tests + docs per the plan) and NOTHING ELSE — do not start later work items and do not refactor beyond this item; the next builder turn continues from the committed state you leave.',
+    ...(opts.noProgressNote ? ['', `PREVIOUS TURN DEFECT: ${opts.noProgressNote}`] : []),
+    '',
+    SPARK_DELEGATION_GUIDANCE,
+    '',
+    SCRUTINEER_DELEGATION_GUIDANCE,
+    '',
+    'Then, in this exact order:',
+    `  1. DETERMINISTIC GATE: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT}, plus any further gate targets AGENTS.md names; \`make markdownlint\` and \`make nixie\` for any markdown you touched). Fix failures yourself and re-run until green. ${COMMIT_GATE_GUIDANCE}`,
+    CODERABBIT_HOST_REVIEW
+      ? `  2. ${CODERABBIT_REVIEW_GUIDANCE}`
+      : `  2. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to confirm the gates are still green. ${CODERABBIT_REVIEW_GUIDANCE}`,
+    '  3. Update the ExecPlan IN PLACE: tick this work item in ## Progress and record findings, decisions, and deviations. If this was the first work item, also set the header Status to `IN PROGRESS`; if it was the LAST unticked item, set Status to `COMPLETE` together with the Outcomes & Retrospective update.',
+    '  4. Commit the work item and the ExecPlan update together as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).',
+    '',
+    'EXECPLAN DURABILITY CONTRACT: never return with the worktree dirty or the Progress tick uncommitted — the host verifies both after every turn and bounces the defect back to you.',
+    '',
+    'Return using the IMPL schema: ok=true only when this work item is complete, every gate is green at HEAD, and the tick is committed. Set workItemsCompleted/workItemsTotal to the plan\'s ticked/total counts after your commit.',
   ].join('\n')
 }
 
@@ -971,7 +1334,11 @@ function fixPrompt(task, worktree, plan, blocking, round) {
     'The dual review returned the following BLOCKING items. Resolve every one:',
     ...blocking.map((b, i) => `  ${i + 1}. ${b}`),
     '',
-    `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gate (\`make all\`, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND}\`, then an atomic commit, then update the execplan with what changed and why. ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
+    CODERABBIT_HOST_REVIEW
+      ? `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT}, plus markdownlint/nixie for markdown) first and green, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth — never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`
+      : `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT}, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND}\`, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth — never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
+    '',
+    'Return the commit subjects you added, whether every deterministic gate is green at HEAD after your fixes, the number of CodeRabbit runs you completed, how each blocking item was resolved, any open issues with reasons, and a short summary. This structured report is durable validation evidence for the branch — be precise about which gates ran and at which commit.',
   ].join('\n')
 }
 
@@ -986,7 +1353,7 @@ function codeReviewPrompt(task, worktree, plan) {
     '- documentation coverage (docstrings, developers/users guide, ADR/design updates per AGENTS.md),',
     '- validation coverage (unit, behavioural, property, snapshot, e2e per AGENTS.md; do the gates actually exercise the new behaviour?).',
     '',
-    'Use leta to inspect the code and sem to inspect the change history. Use `make all` output as evidence but do not rely on it alone.',
+    `Use leta to inspect the code and sem to inspect the change history. Use the commit-gate output (${COMMIT_GATE_TEXT}) as evidence but do not rely on it alone.`,
     'Return verdict=pass only if you would ship it. List precise blocking items otherwise. Any follow-up ideas go in proposedRoadmapItems (PROPOSAL ONLY — do not touch the roadmap).',
   ].join('\n')
 }
@@ -1045,12 +1412,14 @@ function implementAddendumPrompt(task, worktree) {
     '',
     'For EACH open sub-task, in id order:',
     '  1. Make ONLY the change the Addenda item describes. Do not expand scope.',
-    '  2. DETERMINISTIC GATE: summon `scrutineer` to run `make all` (which includes typecheck on current `origin/main`). For any Markdown you touched, also have it run `make markdownlint` and `make nixie`. Fix until green.',
-    `  3. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to re-run \`make all\` and confirm green. ${CODERABBIT_REVIEW_GUIDANCE}`,
+    `  2. DETERMINISTIC GATE: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT}, plus any further gate targets AGENTS.md names). For any Markdown you touched, also have it run \`make markdownlint\` and \`make nixie\`. Fix until green.`,
+    CODERABBIT_HOST_REVIEW
+      ? `  3. ${CODERABBIT_REVIEW_GUIDANCE}`
+      : `  3. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to re-run the commit gates and confirm green. ${CODERABBIT_REVIEW_GUIDANCE}`,
     `  4. Tick the sub-task in the Addenda checklist of its execplan (\`- [ ] ${task.id}.<n>\` → \`- [x] …\`).`,
     '  5. Commit the sub-task and Addenda tick together as one atomic commit (en-GB imperative subject).',
     '',
-    'Use leta for navigation, sem for history, and the language router skill for the languages you touch. Do NOT edit the roadmap — integration ticks the roadmap sub-tasks. When all listed sub-tasks are done, ensure `make all` is green at HEAD. Return using the IMPL schema (execplanPath = the parent execplan): completion counts, commit subjects, gatesGreen, coderabbit run count, and any open issues.',
+    `Use leta for navigation, sem for history, and the language router skill for the languages you touch. Do NOT edit the roadmap — integration ticks the roadmap sub-tasks. When all listed sub-tasks are done, ensure the project commit gates (${COMMIT_GATE_TEXT}) are green at HEAD. Return using the IMPL schema (execplanPath = the parent execplan): completion counts, commit subjects, gatesGreen, coderabbit run count, and any open issues.`,
   ].join('\n')
 }
 
@@ -1058,6 +1427,10 @@ function isDeferredReviewIssue(issue) {
   const text = String(issue || '').toLowerCase()
   const deferredReviewMarkers = [
     'rate limit',
+    'rate_limit',
+    'rate-limit',
+    'ratelimit',
+    '429',
     'retry after',
     'waittime',
     'wait time',
@@ -1079,9 +1452,16 @@ function implementationAuthFailureDetail(impl) {
   return authFailureDetail(detail)
 }
 
+// A complete, gate-green addendum whose builder did not set ok=true is an
+// operator handoff, not an assessment case. Open issues are tolerated only
+// when every one is a deferred/recoverable review fault (e.g. a CodeRabbit
+// 429): that exact missing evidence is bounded and mechanical — retry the
+// review, verify, integrate — so spending an unbounded judgement agent on it
+// burns tokens without adding operator information (issue #27).
 function addendumImplementationNeedsManualMerge(impl) {
   if (!impl || impl.ok || !impl.gatesGreen) return false
-  if ((impl.openIssues || []).length > 0) return false
+  const openIssues = impl.openIssues || []
+  if (openIssues.length > 0 && !hasOnlyDeferredReviewIssues(openIssues)) return false
   const completed = Number(impl.workItemsCompleted)
   const total = Number(impl.workItemsTotal)
   return Number.isFinite(completed) && Number.isFinite(total) && total > 0 && completed >= total
@@ -1100,7 +1480,7 @@ function integratePrompt(task, worktree) {
     `Steps, in order, from inside the worktree:`,
     `  1. ${markStep}`,
     `  2. Fetch and rebase the branch onto the current origin/${BASE} (\`git fetch origin ${BASE}\` then rebase). Use the \`rebase\` skill for functionality-aware conflict resolution: resolve each conflict by preserving the INTENT of both sides (favour the design docs and existing contracts), not by blindly taking one side. If a conflict genuinely cannot be resolved safely, set ok=false, describe it in conflicts, and STOP without merging.`,
-    `  3. Re-run \`make all\` after the rebase to confirm the branch is still green.`,
+    `  3. Re-run the project commit gates (${COMMIT_GATE_TEXT}) after the rebase to confirm the branch is still green.`,
     `  4. Land the squash ENTIRELY inside this worktree. NEVER \`git switch ${BASE}\` and never touch the control/root worktree or its checked-out ${BASE}: that switch fails when ${BASE} is checked out elsewhere, and it pollutes the control worktree (the root of recurring detritus). Step 2 left the task branch rebased on the current origin/${BASE}; from here, create a fresh temp branch there (\`git switch -c integrate-${task.id.replace(/[^0-9a-zA-Z]+/g, '-')} origin/${BASE}\`), squash-merge the task branch onto it (\`git merge --squash <task-branch>\` then \`git commit\` with a clear squash message summarising the task), and push it straight to the integration branch with \`git push origin HEAD:${BASE}\`. If the push is rejected non-fast-forward (a sibling advanced origin/${BASE} since step 2), go back to step 2 — re-fetch and re-rebase the task branch onto the new origin/${BASE} — then redo this step. Retry until it lands.`,
     '',
     'Return what you actually did (roadmapMarkedDone, rebased, squashMerged, mergeSha, pushed) and any conflict notes. Do not delete the worktree unless git donkey expects you to; leave the repo in a clean state.',
@@ -1153,6 +1533,11 @@ function assessmentPromptLines(taskHeader, worktreePath, evidence, contextTitle,
     '- missing validation or review evidence;',
     '- safety risks and recommended operator next actions.',
     '',
+    'Evidence freshness rules:',
+    '- Judge the branch at the CURRENT commit recorded in the host-collected evidence below. ExecPlan prose, earlier assessments, and logs that predate later commits are historical context, not the current validation state.',
+    '- When the failure context includes `reviewRounds`, those review verdicts and structured fix-round reports were produced by this workflow AFTER any earlier snapshot: treat the latest fix round\'s gate and CodeRabbit report, together with the host-collected git evidence, as the branch\'s current validation state. Do not list evidence as missing when the latest fix round reports the named gates green at the current tip — cite that report instead.',
+    '- Gate logs under /tmp are not durable; their absence is not, by itself, missing evidence when a structured fix-round or implementation report records the gates that ran and their outcomes.',
+    '',
     'Host-collected git evidence:',
     '```json',
     JSON.stringify(evidence, null, 2),
@@ -1194,11 +1579,12 @@ async function assessRecoveryCandidate(candidate) {
   const wt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit }
   const evidence = await collectAssessmentEvidence(task, wt)
   try {
-    const assessment = await agent(recoveryAssessmentPrompt(task, candidate, evidence), assessmentAgentOptions({
+    const label = `recover-assess:${candidate.taskId}${candidate.isAddendum ? '-addendum' : ''}`
+    const assessment = await withInfraRetry(() => agent(recoveryAssessmentPrompt(task, candidate, evidence), assessmentAgentOptions({
       phase: 'Recovery',
-      label: `recover-assess:${candidate.taskId}${candidate.isAddendum ? '-addendum' : ''}`,
+      label,
       schema: ASSESSMENT_SCHEMA,
-    }))
+    })), label)
     if (!assessment) {
       return { evidence, assessment: null, assessmentError: 'assessment agent returned no structured output' }
     }
@@ -1212,9 +1598,9 @@ function shouldAssessFailure(result, wt) {
   if (!ASSESS_PARTIAL_BRANCHES) return false
   if (!wt?.branch || !wt?.worktreePath) return false
   if (!result || !['failed', 'halted'].includes(result.status)) return false
-  if (result.stage === 'worktree' || result.stage === 'worktree-write' || result.stage === 'auth' || result.stage === 'provider' || result.status === 'fatal-auth' || result.status === 'provider-fault') return false
+  if (result.stage === 'worktree' || result.stage === 'worktree-write' || result.stage === 'auth' || result.stage === 'provider' || result.stage === 'infrastructure' || result.status === 'fatal-auth' || result.status === 'provider-fault' || result.status === 'infra-fault') return false
   const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
-  return !authFailureDetail(detail) && !providerFailureDetail(detail)
+  return !authFailureDetail(detail) && !providerFailureDetail(detail) && !infrastructureFailureDetail(detail)
 }
 
 async function attachAssessment(task, wt, result) {
@@ -1222,11 +1608,11 @@ async function attachAssessment(task, wt, result) {
   phase('Assess')
   const evidence = await collectAssessmentEvidence(task, wt)
   try {
-    const assessment = await agent(assessmentPrompt(task, wt, result, evidence), assessmentAgentOptions({
+    const assessment = await withInfraRetry(() => agent(assessmentPrompt(task, wt, result, evidence), assessmentAgentOptions({
       phase: 'Assess',
       label: `assess:${task.id}`,
       schema: ASSESSMENT_SCHEMA,
-    }))
+    })), `assess:${task.id}`)
     if (!assessment) {
       return { ...result, assessmentError: 'assessment agent returned no structured output', assessmentEvidence: evidence }
     }
@@ -1399,6 +1785,9 @@ const RECOVERY_SKIP_REASONS = [
   'not-task-scoped',
   'missing-validation-evidence',
   'missing-execplan',
+  'plan-blocked',
+  'plan-unreadable',
+  'execplan-stat-error',
   'dry-run',
 ]
 
@@ -1437,6 +1826,98 @@ function recoveryDecision(candidate, evidence, assessment, mode, flags = {}) {
   return { action: 'resume', classification, reason: '', skip: false }
 }
 
+// ---------------------------------------------------------------------------
+// Continue-mode dispatch (failure resume, phase 3) — the committed ExecPlan is
+// the durable source of truth for where a task stands. Agents commit the plan
+// after every change and keep its Status field accurate, so a fresh run can
+// dispatch a survivor branch deterministically, with no judgement agent:
+//   Status DRAFT (or missing/unfilled) -> re-enter the plan/design-review loop
+//   Status APPROVED or IN PROGRESS     -> re-enter implementation
+//   Status COMPLETE                    -> re-enter dual review + integration
+//   Status BLOCKED                     -> report for the operator
+// Safety comes from the downstream gates the resumed branch still has to pass
+// (design review, deterministic gates, dual review, serialized integration),
+// not from an up-front classification.
+// ---------------------------------------------------------------------------
+const EXECPLAN_STATUS_MAP = {
+  draft: 'draft',
+  approved: 'approved',
+  'in progress': 'in-progress',
+  blocked: 'blocked',
+  complete: 'complete',
+}
+
+// Parse the durable state out of a committed ExecPlan: the Status field and
+// the Progress checkbox tallies (informational — dispatch keys on Status
+// alone). An unfilled skeleton line ("Status: DRAFT | APPROVED | …") or an
+// unrecognized value parses as 'unknown', which dispatches to planning.
+function parseExecplanState(text) {
+  const source = String(text || '')
+  let status = 'unknown'
+  const statusMatch = source.match(/^Status:\s*([A-Za-z ]+?)\s*$/m)
+  if (statusMatch) {
+    const value = statusMatch[1].trim().toLowerCase().replace(/\s+/g, ' ')
+    status = EXECPLAN_STATUS_MAP[value] || 'unknown'
+  }
+  let ticked = 0
+  let unticked = 0
+  const items = []
+  const progressSection = source.split(/^##\s+/m).find((section) => /^progress\b/i.test(section)) || ''
+  for (const line of progressSection.split(/\r?\n/)) {
+    const match = line.match(/^\s*-\s+\[([ xX])\]\s*(.*)$/)
+    if (!match) continue
+    const isTicked = match[1] !== ' '
+    if (isTicked) ticked += 1
+    else unticked += 1
+    items.push({ text: match[2].trim(), ticked: isTicked })
+  }
+  return { status, ticked, unticked, items }
+}
+
+async function readExecplanState(candidate) {
+  if (!candidate?.execplanPath) return { status: 'missing', ticked: 0, unticked: 0, items: [] }
+  const path = process.getBuiltinModule('node:path')
+  try {
+    const text = await readFileText(path.join(candidate.worktreePath, candidate.execplanPath))
+    return parseExecplanState(text)
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
+      return { status: 'missing', ticked: 0, unticked: 0, items: [] }
+    }
+    // A plan that cannot be read is NOT a missing plan: dispatching to the
+    // planning stage on an I/O or permission fault could overwrite durable
+    // work. Surface the fault; the continue boundary reports it.
+    return {
+      status: 'unreadable',
+      ticked: 0,
+      unticked: 0,
+      items: [],
+      error: `${candidate.execplanPath}: ${(error && error.message) || String(error)}`,
+    }
+  }
+}
+
+// The continue-mode decision table. Purely deterministic: hygiene checks from
+// host-collected evidence, then a stage keyed on the committed ExecPlan
+// Status. Returns { action: 'report'|'resume', stage, reason, skip }.
+function recoveryContinueDecision(candidate, evidence, planState, flags = {}) {
+  const report = (reason) => ({ action: 'report', stage: null, reason, skip: true })
+  if (candidate?.isAddendum) return report('addendum-branch')
+  if ((evidence?.collectionErrors || []).length) return report('evidence-collection-error')
+  if (evidence?.dirtyState !== 'clean') return report('dirty-worktree')
+  if (planState.status === 'unreadable') return report('plan-unreadable')
+  if (planState.status === 'blocked') return report('plan-blocked')
+  const stage =
+    planState.status === 'approved' || planState.status === 'in-progress'
+      ? 'implement'
+      : planState.status === 'complete'
+        ? 'review'
+        : 'plan' // missing, draft, or unknown: (re-)enter planning
+  if (stage === 'review' && !(evidence?.recentCommits || []).length) return report('no-committed-work')
+  if (flags.dryRun) return { action: 'report', stage, reason: 'dry-run', skip: true }
+  return { action: 'resume', stage, reason: '', skip: false }
+}
+
 // Skip reasons whose branch still exists and still maps to a selectable
 // roadmap id — normal selection must not re-open these this run, because
 // `git worktree add -b` would collide with the surviving branch.
@@ -1452,32 +1933,80 @@ const RECOVERY_HOLD_REASONS = new Set(['missing-worktree', 'candidate-cap', 'unr
 // substitute the canonical path back in after this check has failed.
 async function recoveryExecplanPath(candidate) {
   const canonicalPlan = `docs/execplans/${candidate.branchName}.md`
-  return (await fileExists(canonicalPlan, candidate.worktreePath)) ? canonicalPlan : ''
+  const state = await fileState(canonicalPlan, candidate.worktreePath)
+  if (!state.ok) return { execplanPath: '', error: state.detail }
+  return { execplanPath: state.exists ? canonicalPlan : '', error: '' }
 }
 
 async function syntheticRecoveryImpl(candidate, evidence) {
-  const execplanPath =
+  const resolved =
     typeof candidate.execplanPath === 'string'
-      ? candidate.execplanPath
+      ? { execplanPath: candidate.execplanPath, error: '' }
       : await recoveryExecplanPath(candidate)
   return {
     ok: true,
     gatesGreen: true,
-    execplanPath,
+    execplanPath: resolved.execplanPath,
     workItemsCompleted: 0,
     workItemsTotal: 0,
     commits: evidence?.recentCommits || [],
     coderabbitRuns: 0,
-    openIssues: ['recovered branch requires fresh review'],
+    openIssues: [
+      'recovered branch requires fresh review',
+      ...(resolved.error ? [`could not verify the durable ExecPlan: ${resolved.error}`] : []),
+    ],
     summary: 'Recovered adopt-complete branch from durable git state.',
   }
 }
 
-// Fresh-run recovery pass: discover -> assess -> decide -> report or resume.
+// Execute a resume at the dispatched stage through the ordinary pipeline.
+// Every stage funnels into the SAME dual-review + merge-lock integration path
+// as fresh work; the host-verified write gate runs first because plan, build,
+// fix, and integration agents all write into the recovered worktree.
+async function executeResume(task, candidate, enriched, evidence, stage, mergeLock) {
+  const worktree = candidate.worktreePath
+  const extra = { kind: 'recovery-resume' }
+  const writeAccess = await ensureTaskAgentWriteAccess(worktree, candidate.taskId)
+  if (!writeAccess.ok) {
+    const detail = `task-agent writable-root preflight failed (launch/sandbox fault, not a task defect): ${writeAccess.failures.map((failure) => `${failure.adapter}: ${failure.detail}`).join('; ')}`
+    return { id: candidate.taskId, status: 'failed', stage: 'worktree-write', detail, worktree, proposals: [], ...extra }
+  }
+  try {
+    let plan
+    let impl
+    if (stage === 'plan') {
+      const planned = await runPlanDesignLoop(task, worktree, { resume: true, extra })
+      if (planned.fail) return planned.fail
+      plan = planned.plan
+    } else if (stage === 'implement') {
+      plan = {
+        execplanPath: enriched.execplanPath,
+        workItems: [],
+        summary: 'Resumed from the committed ExecPlan on the surviving branch.',
+      }
+    }
+    if (stage === 'plan' || stage === 'implement') {
+      const built = await runImplementationStage(task, worktree, plan, { resume: stage === 'implement', extra })
+      if (built.fail) return built.fail
+      impl = built.impl
+    } else {
+      impl = await syntheticRecoveryImpl(enriched, evidence)
+      plan = { execplanPath: impl.execplanPath, workItems: [], summary: impl.summary }
+    }
+    return await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock, { kind: 'recovery-resume' })
+  } catch (error) {
+    const detail = `unhandled agent error: ${(error && error.message) || String(error)}`
+    return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: 'recovery-resume' })
+  }
+}
+
+// Fresh-run recovery pass: discover -> decide -> report or resume.
 // Assess mode never mutates the target project: it reads Git state and spawns
 // read-only assessment agents. Review mode may route eligible adopt-complete
 // candidates through the SAME dual-review + merge-lock integration path as
-// ordinary tasks; nothing merges outside that path.
+// ordinary tasks. Continue mode dispatches deterministically on the committed
+// ExecPlan Status and re-enters the ordinary pipeline at the plan, implement,
+// or review stage; nothing merges outside that path in any mode.
 async function runRecovery(root, mergeLock = null) {
   const summary = {
     enabled: true,
@@ -1522,129 +2051,113 @@ async function runRecovery(root, mergeLock = null) {
 
   for (const candidate of discovery.candidates) {
     holdCandidate(candidate.branchName, candidate.taskId)
-    log(`[recovery] assessing ${candidate.branchName} (task ${candidate.taskId})`)
-    const { assessment, assessmentError } = await assessRecoveryCandidate(candidate)
-    if (!assessment) {
-      summary.results.push({
-        id: candidate.taskId,
-        branchName: candidate.branchName,
-        classification: '',
-        action: 'assessment-error',
-        assessmentError,
-      })
-      summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: 'assessment-error' })
-      if (authFailureDetail(assessmentError) || providerFailureDetail(assessmentError)) {
-        // Infrastructure faults during recovery poison every later agent call
-        // too — halt the run instead of pretending branches were assessed.
-        return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessmentError) }
-      }
-      continue
+    const task = {
+      id: candidate.taskId,
+      title: candidate.taskTitle,
+      requires: [],
+      rationale: `${RESUME_MODE}-mode recovery resume of a surviving task branch`,
+      isAddendum: false,
+      subtasks: [],
     }
-    summary.assessed += 1
-    const evidence = assessment.hostEvidence
-    // Resolve the durable ExecPlan before deciding: resume eligibility
-    // requires it, and its absence must stay visible as missing-execplan.
-    const enriched = { ...candidate, execplanPath: await recoveryExecplanPath(candidate) }
-    const decision = recoveryDecision(enriched, evidence, assessment, RESUME_MODE, { dryRun: DRY_RUN })
+    const resumeWt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit }
+
+    let decision
+    let evidence
+    let enriched
+    let assessment = null
+    let planState = null
+    if (RESUME_MODE === 'continue') {
+      // Deterministic dispatch: host git evidence plus the committed ExecPlan
+      // Status. No judgement agent — the downstream gates ARE the judgement.
+      log(`[recovery] dispatching ${candidate.branchName} (task ${candidate.taskId}) from its committed ExecPlan`)
+      evidence = await collectAssessmentEvidence(task, resumeWt)
+      const resolved = await recoveryExecplanPath(candidate)
+      enriched = { ...candidate, execplanPath: resolved.execplanPath }
+      // A plan the host cannot stat or read is a fault, never 'missing':
+      // treating it as missing would dispatch a fresh planner over durable
+      // work. Fold the stat fault into planState so the decision reports it.
+      planState = resolved.error
+        ? { status: 'unreadable', ticked: 0, unticked: 0, error: resolved.error }
+        : await readExecplanState(enriched)
+      decision = { classification: '', ...recoveryContinueDecision(enriched, evidence, planState, { dryRun: DRY_RUN }) }
+    } else {
+      log(`[recovery] assessing ${candidate.branchName} (task ${candidate.taskId})`)
+      const assessed = await assessRecoveryCandidate(candidate)
+      if (!assessed.assessment) {
+        summary.results.push({
+          id: candidate.taskId,
+          branchName: candidate.branchName,
+          classification: '',
+          action: 'assessment-error',
+          assessmentError: assessed.assessmentError,
+        })
+        summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: 'assessment-error' })
+        if (authFailureDetail(assessed.assessmentError) || providerFailureDetail(assessed.assessmentError)) {
+          // Infrastructure faults during recovery poison every later agent
+          // call too — halt the run instead of pretending branches were
+          // assessed.
+          return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessed.assessmentError) }
+        }
+        continue
+      }
+      assessment = assessed.assessment
+      summary.assessed += 1
+      evidence = assessment.hostEvidence
+      // Resolve the durable ExecPlan before deciding: resume eligibility
+      // requires it, and its absence must stay visible as missing-execplan.
+      // A stat FAULT is neither present nor absent — report it distinctly
+      // rather than resuming or classifying on unverifiable evidence.
+      const resolved = await recoveryExecplanPath(candidate)
+      enriched = { ...candidate, execplanPath: resolved.execplanPath }
+      decision = resolved.error
+        ? { classification: '', action: 'report', stage: null, reason: 'execplan-stat-error', skip: true }
+        : { stage: 'review', ...recoveryDecision(enriched, evidence, assessment, RESUME_MODE, { dryRun: DRY_RUN }) }
+    }
+
+    const resultBase = {
+      id: candidate.taskId,
+      branchName: candidate.branchName,
+      classification: decision.classification,
+      ...(planState ? { planStatus: planState.status } : {}),
+    }
+
     if (decision.action !== 'resume') {
       if (decision.skip) {
         summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: decision.reason })
       }
       summary.results.push({
-        id: candidate.taskId,
-        branchName: candidate.branchName,
-        classification: decision.classification,
+        ...resultBase,
         action: 'reported',
         ...(decision.reason ? { reason: decision.reason } : {}),
-        assessment,
+        ...(assessment ? { assessment } : {}),
       })
-      log(`[recovery] ${candidate.branchName}: ${decision.classification} (reported${decision.reason ? `; ${decision.reason}` : ''})`)
+      log(`[recovery] ${candidate.branchName}: ${decision.classification || planState?.status || 'reported'} (reported${decision.reason ? `; ${decision.reason}` : ''})`)
       continue
     }
 
-    // --- Review-mode resume: re-enter the ordinary review + integration path.
-    // No re-implementation: a synthetic result bridges the recovered branch
-    // into dual review, and integration ticks the roadmap under the merge lock.
-    log(`[recovery] resuming ${candidate.branchName} through the ordinary review and integration path`)
-    const task = {
-      id: candidate.taskId,
-      title: candidate.taskTitle,
-      requires: [],
-      rationale: 'review-mode recovery resume of a clean adopt-complete branch',
-      isAddendum: false,
-      subtasks: [],
-    }
-    const resumeWt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit }
-    // Same host-verified write gate as ordinary tasks: review fix rounds and
-    // integration write into the recovered worktree, so the sandbox boundary
-    // must be proven before any agent can touch it.
-    const writeAccess = await ensureTaskAgentWriteAccess(candidate.worktreePath, candidate.taskId)
-    if (!writeAccess.ok) {
-      const detail = `task-agent writable-root preflight failed (launch/sandbox fault, not a task defect): ${writeAccess.failures.map((failure) => `${failure.adapter}: ${failure.detail}`).join('; ')}`
-      taskResults.push({
-        task,
-        result: { id: candidate.taskId, status: 'failed', stage: 'worktree-write', detail, worktree: candidate.worktreePath, proposals: [], kind: 'recovery-resume' },
-      })
-      summary.results.push({
-        id: candidate.taskId,
-        branchName: candidate.branchName,
-        classification: decision.classification,
-        action: 'resume-failed',
-        reason: detail,
-      })
-      continue
-    }
-    const impl = await syntheticRecoveryImpl(enriched, evidence)
-    const plan = {
-      execplanPath: impl.execplanPath,
-      workItems: [],
-      summary: impl.summary,
-    }
-    let outcome
-    try {
-      outcome = await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock, { kind: 'recovery-resume' })
-    } catch (error) {
-      const detail = `unhandled agent error: ${(error && error.message) || String(error)}`
-      outcome = resultFromUnhandledAgentError(candidate.taskId, detail, { worktree: candidate.worktreePath, kind: 'recovery-resume' })
-    }
-    if (outcome.status === 'fatal-auth' || outcome.status === 'provider-fault') {
-      summary.results.push({
-        id: candidate.taskId,
-        branchName: candidate.branchName,
-        classification: decision.classification,
-        action: 'resume-failed',
-        reason: outcome.detail || outcome.status,
-      })
+    // --- Resume: re-enter the ordinary pipeline at the dispatched stage. The
+    // committed ExecPlan (continue mode) or the ADR 002 assessment (review
+    // mode) chose the entry point; the pipeline's own gates remain decisive,
+    // and integration ticks the roadmap under the merge lock.
+    const stage = decision.stage || 'review'
+    log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline`)
+    const outcome = await executeResume(task, candidate, enriched, evidence, stage, mergeLock)
+    if (outcome.status === 'fatal-auth' || outcome.status === 'provider-fault' || outcome.status === 'infra-fault') {
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status })
       return { summary, taskResults, held, fatal: outcome }
     }
     // A failed or halted resume gets a FRESH assessment through the same
-    // guard as ordinary task failures — the pre-resume assessment is stale
-    // once review rounds and fix agents have touched the branch.
+    // guard as ordinary task failures — any pre-resume snapshot is stale
+    // once later agents have touched the branch.
     taskResults.push({ task, result: outcome.status === 'done' ? outcome : await attachAssessment(task, resumeWt, outcome) })
     if (outcome.status === 'done') {
       summary.resumed += 1
-      summary.results.push({
-        id: candidate.taskId,
-        branchName: candidate.branchName,
-        classification: decision.classification,
-        action: 'resumed',
-      })
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resumed' })
       log(`[recovery] ${candidate.branchName}: resumed and integrated`)
     } else if (outcome.status === 'manual-merge-ready') {
-      summary.results.push({
-        id: candidate.taskId,
-        branchName: candidate.branchName,
-        classification: decision.classification,
-        action: 'manual-merge-ready',
-      })
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'manual-merge-ready' })
     } else {
-      summary.results.push({
-        id: candidate.taskId,
-        branchName: candidate.branchName,
-        classification: decision.classification,
-        action: 'resume-failed',
-        reason: outcome.detail || outcome.status,
-      })
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status })
       log(`[recovery] ${candidate.branchName}: resume ${outcome.status} at ${outcome.stage || 'unknown stage'}`)
     }
   }
@@ -1817,20 +2330,480 @@ function ensureTaskAgentWriteAccess(worktree, tag) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared pipeline stages — used by the normal task pipeline and by
+// continue-mode recovery resume, so a resumed branch runs through exactly the
+// same planning loop, design review, implementation contract, reviewers, and
+// integration path as ordinary work. Each helper returns { fail } (an
+// unassessed result object) or its stage product; callers decide whether to
+// attach an assessment.
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Host-enforced ExecPlan durability — prose alone does not hold: live runs
+// showed planners returning uncommitted drafts and reviewers approving
+// without committing the status flip. The control loop therefore verifies
+// durable state at every stage boundary, the same philosophy as the
+// write-probe: prompts request, the host verifies.
+// ---------------------------------------------------------------------------
+// Contain an agent-supplied ExecPlan path within the task worktree. Plan
+// paths come back from planner agents — untrusted, prompt-injectable data
+// under the documented threat model — so an absolute path outside the
+// worktree or a ../ escape must fail closed BEFORE any filesystem or git
+// access. Returns { ok, relPath, detail }.
+function execplanRelPath(worktree, planPath) {
+  const path = process.getBuiltinModule('node:path')
+  const raw = String(planPath || '')
+  const rel = path.isAbsolute(raw) ? path.relative(worktree, raw) : path.normalize(raw)
+  if (!raw || !rel || rel === '.' || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    return { ok: false, relPath: '', detail: `ExecPlan path escapes the assigned worktree: ${raw || '<empty>'}` }
+  }
+  return { ok: true, relPath: rel, detail: '' }
+}
+
+// A plan is durable only when it exists at HEAD with no uncommitted
+// modifications. Returns { ok, detail }.
+async function verifyExecplanCommitted(worktree, planPath) {
+  const contained = execplanRelPath(worktree, planPath)
+  if (!contained.ok) return { ok: false, detail: contained.detail }
+  const relPath = contained.relPath
+  const inHead = await execFileStatus('git', ['-C', worktree, 'cat-file', '-e', `HEAD:${relPath}`])
+  if (!inHead.ok) return { ok: false, detail: `the plan file ${relPath} is not committed at HEAD` }
+  const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1', '--', relPath])
+  if (!status.ok) {
+    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || '').trim()}` }
+  }
+  if (String(status.stdout).trim()) return { ok: false, detail: `the plan file ${relPath} has uncommitted modifications` }
+  return { ok: true, detail: '' }
+}
+
+// The APPROVED flip is deterministic bookkeeping, so the control loop owns
+// it: the design reviewer stays read-only, and the committed Status
+// transition can never be skipped by an agent ignoring prose. Commits ONLY
+// the plan path; idempotent when the committed status is already APPROVED.
+async function commitExecplanApproval(worktree, planPath, tag) {
+  const fs = process.getBuiltinModule('node:fs/promises')
+  const path = process.getBuiltinModule('node:path')
+  const contained = execplanRelPath(worktree, planPath)
+  if (!contained.ok) return { ok: false, detail: contained.detail }
+  const relPath = contained.relPath
+  const absPath = path.join(worktree, relPath)
+  try {
+    const text = await fs.readFile(absPath, 'utf8')
+    if (parseExecplanState(text).status !== 'approved') {
+      const updated = /^Status:.*$/m.test(text)
+        ? text.replace(/^Status:.*$/m, 'Status: APPROVED')
+        : `${text.trimEnd()}\n\nStatus: APPROVED\n`
+      await fs.writeFile(absPath, updated, 'utf8')
+    }
+  } catch (error) {
+    return { ok: false, detail: `could not update the plan status: ${(error && error.message) || String(error)}` }
+  }
+  const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1', '--', relPath])
+  if (!status.ok) {
+    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || '').trim()}` }
+  }
+  if (!String(status.stdout).trim()) return { ok: true, detail: 'already committed as APPROVED' }
+  const add = await execFileStatus('git', ['-C', worktree, 'add', '--', relPath])
+  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || '').trim()}` }
+  // Deterministic identity: this is a machine commit by the control loop, and
+  // it must succeed even on hosts with no global git identity configured.
+  const commit = await execFileStatus('git', [
+    '-C', worktree,
+    '-c', 'user.name=df12-build',
+    '-c', 'user.email=df12-build@workflow.invalid',
+    'commit', '-m', `Approve ExecPlan for task ${tag}`, '--', relPath,
+  ])
+  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || '').trim()}` }
+  return { ok: true, detail: '' }
+}
+
+// Live runs showed planners repeatedly returning with the drafted plan dirty
+// — each bounce burnt a 30–90 minute planner round on pure git bookkeeping.
+// Making the drafted plan durable is deterministic bookkeeping (the same
+// philosophy as the APPROVED flip), so when the plan file is the ONLY
+// uncommitted path the host commits it, path-scoped, and proceeds. Any other
+// dirty path still bounces to the planner: the plan may depend on work the
+// host must not guess at. A failed host commit surfaces the underlying git
+// error — the strongest evidence when the environment, not the agent, is
+// what blocks committing. Returns { ok, detail }.
+async function commitExecplanDraft(worktree, relPath, tag) {
+  const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1'])
+  if (!status.ok) return { ok: false, detail: `git status failed: ${(status.message || status.stderr || '').trim()}` }
+  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean)
+  if (!lines.length) return { ok: false, detail: 'nothing to commit: the worktree is already clean' }
+  const foreign = lines.filter((line) => line.slice(3).replace(/^"(.*)"$/, '$1') !== relPath)
+  if (foreign.length) {
+    const sample = foreign.slice(0, 8).map((line) => line.trim()).join('; ')
+    return { ok: false, detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? '; …' : ''})` }
+  }
+  const add = await execFileStatus('git', ['-C', worktree, 'add', '--', relPath])
+  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || '').trim()}` }
+  const commit = await execFileStatus('git', [
+    '-C', worktree,
+    '-c', 'user.name=df12-build',
+    '-c', 'user.email=df12-build@workflow.invalid',
+    'commit', '-m', `Draft ExecPlan for task ${tag}`, '--', relPath,
+  ])
+  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || '').trim()}` }
+  return { ok: true, detail: '' }
+}
+
+// Every path a successful implementation leaves uncommitted is unreviewable
+// (the dual review judges committed work) and is silently lost at the squash
+// merge. Returns { ok, detail } with a bounded path sample.
+async function verifyWorktreeCommitted(worktree) {
+  const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1'])
+  if (!status.ok) {
+    return { ok: false, detail: `git status failed: ${(status.message || status.stderr || '').trim()}` }
+  }
+  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean)
+  if (!lines.length) return { ok: true, detail: '' }
+  const sample = lines.slice(0, 8).map((line) => line.trim()).join('; ')
+  return { ok: false, detail: `${lines.length} uncommitted path(s): ${sample}${lines.length > 8 ? '; …' : ''}` }
+}
+
+async function runPlanDesignLoop(task, worktree, opts = {}) {
+  const tag = task.id
+  const extra = opts.extra || {}
+  let plan = null
+  let designVerdict = null
+  for (let round = 1; round <= MAX_DESIGN_ROUNDS; round++) {
+    phase('Plan')
+    plan = await planningLock(() => withInfraRetry(() => agent(planPrompt(task, worktree, designVerdict, round, opts), planAgentOptions({
+      phase: 'Plan',
+      label: `plan:${tag} r${round}`,
+      schema: PLAN_SCHEMA,
+    })), `plan:${tag} r${round}`))
+    if (!plan) return { fail: { id: tag, status: 'failed', stage: 'plan', detail: 'planner returned nothing', worktree, proposals: [], ...extra } }
+    // Containment before any filesystem access: the planner's path is
+    // untrusted data, and an escape fails the task closed.
+    const contained = execplanRelPath(worktree, plan.execplanPath)
+    if (!contained.ok) {
+      return { fail: { id: tag, status: 'failed', stage: 'plan', detail: `planner returned an unusable ExecPlan path: ${contained.detail}`, plan, worktree, proposals: [], ...extra } }
+    }
+    const planFile = await fileState(contained.relPath, worktree)
+    if (!planFile.ok) {
+      return { fail: { id: tag, status: 'failed', stage: 'plan', detail: `could not verify the ExecPlan path: ${planFile.detail}`, plan, worktree, proposals: [], ...extra } }
+    }
+    if (!planFile.exists) {
+      return {
+        fail: {
+          id: tag,
+          status: 'failed',
+          stage: 'plan',
+          detail: `planner returned missing ExecPlan path: ${plan.execplanPath || '<empty>'}`,
+          plan,
+          worktree,
+          proposals: [],
+          ...extra,
+        },
+      }
+    }
+    // Host-verified durability gate. Deterministic salvage first: when the
+    // plan file is the only uncommitted path, the host commits it rather
+    // than spending a 30–90 minute planner round on git bookkeeping. Only a
+    // declined or failed salvage bounces to the planner as a blocking item,
+    // carrying the salvage evidence (foreign dirty paths, or the git error
+    // when the environment itself blocks committing).
+    let durability = await verifyExecplanCommitted(worktree, plan.execplanPath)
+    let salvageNote = ''
+    if (!durability.ok) {
+      const salvage = await commitExecplanDraft(worktree, contained.relPath, tag)
+      if (salvage.ok) {
+        log(`[task ${tag}] plan round ${round}: ${durability.detail}; host committed the drafted plan`)
+        durability = await verifyExecplanCommitted(worktree, plan.execplanPath)
+      } else {
+        salvageNote = ` (host salvage declined: ${salvage.detail})`
+      }
+    }
+    if (!durability.ok) {
+      log(`[task ${tag}] plan round ${round}: ExecPlan not durable (${durability.detail})${salvageNote}`)
+      designVerdict = {
+        satisfied: false,
+        blocking: [
+          `EXECPLAN DURABILITY: ${durability.detail}${salvageNote}. The committed ExecPlan is the durable source of truth — COMMIT the plan (and every file you changed) on the task branch with an en-GB imperative subject, then return the same plan.`,
+        ],
+      }
+      continue
+    }
+
+    phase('Design Review')
+    designVerdict = await planningLock(() => withInfraRetry(() => agent(designReviewPrompt(task, worktree, plan, round), reviewAgentOptions({
+      phase: 'Design Review',
+      label: `design-review:${tag} r${round}`,
+      schema: DESIGN_VERDICT_SCHEMA,
+    })), `design-review:${tag} r${round}`))
+    if (designVerdict?.satisfied) {
+      log(`[task ${tag}] design approved in round ${round}`)
+      // Deterministic bookkeeping owned by the control loop: record the
+      // committed APPROVED transition the moment the reviewer is satisfied.
+      const approved = await commitExecplanApproval(worktree, plan.execplanPath, tag)
+      if (!approved.ok) {
+        return {
+          fail: {
+            id: tag,
+            status: 'failed',
+            stage: 'design-review',
+            detail: `failed to record the committed ExecPlan approval: ${approved.detail}`,
+            plan,
+            worktree,
+            proposals: [],
+            ...extra,
+          },
+        }
+      }
+      return { plan }
+    }
+    log(`[task ${tag}] design round ${round}: ${(designVerdict?.blocking || []).length} blocking point(s)`)
+  }
+  return {
+    fail: {
+      id: tag,
+      status: 'halted',
+      stage: 'design-review',
+      detail: `design review unsatisfied after ${MAX_DESIGN_ROUNDS} rounds: ${(designVerdict?.blocking || []).join('; ')}`,
+      worktree,
+      proposals: [],
+      ...extra,
+    },
+  }
+}
+
+// The host-driven build loop: one builder turn per unticked Progress item in
+// the committed ExecPlan, with committed progress verified after every turn.
+// The checklist — not the agent's say-so — decides when the build is done.
+// Returns null when the plan has no checklist (caller falls back to the
+// single-turn build), { fail } on failure, or { impl } with an aggregate
+// implementation report on success.
+async function runWorkItemBuildLoop(task, worktree, plan, opts = {}) {
+  const tag = task.id
+  const extra = opts.extra || {}
+  const fail = (detail, openIssues = []) => ({ fail: { id: tag, status: 'failed', stage: 'implement', detail, openIssues, worktree, proposals: [], ...extra } })
+  const contained = execplanRelPath(worktree, plan.execplanPath)
+  if (!contained.ok) return fail(contained.detail)
+  const planRef = { worktreePath: worktree, execplanPath: contained.relPath }
+  const initial = await readExecplanState(planRef)
+  if (initial.status === 'unreadable') return fail(`could not read the committed ExecPlan: ${initial.error}`)
+  if (initial.status === 'missing') return fail(`the ExecPlan disappeared before the build: ${contained.relPath}`)
+  if (!(initial.items || []).length) return null
+  const commits = []
+  const openIssues = []
+  let coderabbitRuns = 0
+  let lastImpl = null
+  let noProgressNote = ''
+  let strikes = 0
+  for (let round = 1; round <= MAX_WORK_ITEM_ROUNDS; round++) {
+    const before = await readExecplanState(planRef)
+    if (before.status === 'unreadable') return fail(`could not read the committed ExecPlan: ${before.error}`, openIssues)
+    const item = (before.items || []).find((entry) => !entry.ticked)
+    if (!item) break
+    const label = `implement:${tag} wi${round}`
+    const impl = await buildLock(() => withInfraRetry(() => agent(implementWorkItemPrompt(task, worktree, plan, item, { ...opts, noProgressNote }), buildAgentOptions({
+      phase: 'Implement',
+      label,
+      schema: IMPL_SCHEMA,
+    })), label))
+    lastImpl = impl
+    const authDetail = implementationAuthFailureDetail(impl)
+    if (authDetail) {
+      return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
+    }
+    if (!impl || !impl.ok || !impl.gatesGreen) {
+      return fail(impl?.summary || `work item did not reach a green state: ${item.text}`, impl?.openIssues || [])
+    }
+    if (Array.isArray(impl.commits)) commits.push(...impl.commits)
+    openIssues.push(...(impl.openIssues || []))
+    coderabbitRuns += Number(impl.coderabbitRuns) || 0
+    // Host-verified durability per turn: a dirty worktree or an uncommitted
+    // tick would silently stall the loop, so both are checked here.
+    const committed = await verifyWorktreeCommitted(worktree)
+    if (!committed.ok) {
+      return fail(`work item returned ok but left uncommitted state in the worktree (${committed.detail}); every work item must be committed before returning`, openIssues)
+    }
+    const after = await readExecplanState(planRef)
+    if (after.status === 'unreadable') return fail(`could not re-read the committed ExecPlan: ${after.error}`, openIssues)
+    if (after.unticked >= before.unticked) {
+      strikes += 1
+      noProgressNote = `your previous turn returned ok but the committed ExecPlan still shows ${after.unticked} unticked Progress item(s) (it had ${before.unticked} before the turn); tick the work item you completed in ## Progress and commit the plan update together with the work`
+      log(`[task ${tag}] work-item round ${round}: no committed Progress movement (strike ${strikes} of 2)`)
+      if (strikes >= 2) {
+        return fail(`the work-item build made no committed ExecPlan progress in two consecutive turns; ${after.unticked} Progress item(s) remain unticked`, openIssues)
+      }
+    } else {
+      strikes = 0
+      noProgressNote = ''
+      log(`[task ${tag}] work-item round ${round}: ${after.ticked}/${after.ticked + after.unticked} Progress item(s) committed`)
+    }
+  }
+  const final = await readExecplanState(planRef)
+  const remaining = (final.items || []).filter((entry) => !entry.ticked)
+  if (remaining.length) {
+    return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0].text}`, openIssues)
+  }
+  return {
+    impl: {
+      ok: true,
+      gatesGreen: true,
+      execplanPath: contained.relPath,
+      workItemsCompleted: final.ticked,
+      workItemsTotal: final.ticked + final.unticked,
+      commits: commits.slice(0, 50),
+      coderabbitRuns,
+      openIssues: [...new Set(openIssues)].slice(0, 20),
+      summary: lastImpl?.summary || 'work-item build completed from the committed ExecPlan checklist',
+    },
+  }
+}
+
+async function runImplementationStage(task, worktree, plan, opts = {}) {
+  const tag = task.id
+  const extra = opts.extra || {}
+  phase('Implement')
+  if (PER_WORK_ITEM_BUILD) {
+    const itemised = await runWorkItemBuildLoop(task, worktree, plan, opts)
+    // null means the plan carries no Progress checklist: fall back to the
+    // single-turn whole-task build below.
+    if (itemised) {
+      if (itemised.fail) return itemised
+      return finishImplementationStage(task, worktree, plan, itemised.impl, extra)
+    }
+    log(`[task ${tag}] the committed ExecPlan has no Progress checklist; falling back to the single-turn build`)
+  }
+  const impl = await buildLock(() => withInfraRetry(() => agent(implementPrompt(task, worktree, plan, opts), buildAgentOptions({
+    phase: 'Implement',
+    label: `implement:${tag}`,
+    schema: IMPL_SCHEMA,
+  })), `implement:${tag}`))
+  const authDetail = implementationAuthFailureDetail(impl)
+  if (authDetail) {
+    return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
+  }
+  if (!impl || !impl.ok || !impl.gatesGreen) {
+    return {
+      fail: {
+        id: tag,
+        status: 'failed',
+        stage: 'implement',
+        detail: impl?.summary || 'implementation did not reach a green state',
+        openIssues: impl?.openIssues || [],
+        worktree,
+        proposals: [],
+        ...extra,
+      },
+    }
+  }
+  return finishImplementationStage(task, worktree, plan, impl, extra)
+}
+
+// Shared tail of the implementation stage: the committed-worktree durability
+// gate and the plan-status advisory, identical for both build modes.
+async function finishImplementationStage(task, worktree, plan, impl, extra) {
+  const tag = task.id
+  // Host-verified durability gate: ok=true with a dirty worktree is a
+  // contract violation — uncommitted work is unreviewable and would be lost
+  // at the squash merge, so fail fast with the exact paths.
+  const committed = await verifyWorktreeCommitted(worktree)
+  if (!committed.ok) {
+    return {
+      fail: {
+        id: tag,
+        status: 'failed',
+        stage: 'implement',
+        detail: `implementation returned ok but left uncommitted state in the worktree (${committed.detail}); every work item must be committed before returning`,
+        openIssues: impl?.openIssues || [],
+        worktree,
+        proposals: [],
+        ...extra,
+      },
+    }
+  }
+  // Stale plan status costs a resumed run one redundant stage, never
+  // correctness — log it rather than failing a green implementation.
+  if (plan?.execplanPath) {
+    const contained = execplanRelPath(worktree, plan.execplanPath)
+    if (!contained.ok) {
+      log(`[task ${tag}] skipping the post-implementation plan-status check: ${contained.detail}`)
+    } else {
+      const planState = await readExecplanState({ worktreePath: worktree, execplanPath: contained.relPath })
+      if (planState.status !== 'complete') {
+        log(`[task ${tag}] implementation returned ok but the committed ExecPlan status is '${planState.status}' (expected COMPLETE)${planState.error ? `: ${planState.error}` : ''}`)
+      }
+    }
+  }
+  return { impl }
+}
+
+// ---------------------------------------------------------------------------
 // Dual review + serialized integration — shared by the normal task pipeline
 // and review-mode recovery resume, so a recovered branch can only land
 // through exactly the same reviewers, fix rounds, merge lock, and roadmap
 // update path as ordinary work.
 // ---------------------------------------------------------------------------
+// Bounded per-round records of what the reviewers and fix agents actually
+// reported, so a failed/halted outcome carries fresh validation evidence into
+// its assessment instead of leaving the assessor with only stale ExecPlan
+// text and non-durable /tmp gate logs (issue #24).
+function summarizeReviewVerdict(review) {
+  if (!review) return null
+  return {
+    verdict: review.verdict || '',
+    blocking: review.blocking || [],
+    summary: review.summary || '',
+  }
+}
+
+function summarizeFixReport(fix) {
+  if (!fix) return null
+  if (typeof fix === 'string') return { summary: fix }
+  return {
+    commits: fix.commits || [],
+    gatesGreen: fix.gatesGreen === true,
+    coderabbitRuns: Number(fix.coderabbitRuns) || 0,
+    resolved: fix.resolved || [],
+    openIssues: fix.openIssues || [],
+    summary: fix.summary || '',
+  }
+}
+
 async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock, options = {}) {
   const tag = task.id
   const kindExtra = options.kind ? { kind: options.kind } : {}
   const proposals = []
+  const reviewRounds = []
   let reviewsPass = false
+  const coderabbitDeferred = []
   for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
+    // parallel() resolves a thrown thunk to null, which would make an adapter
+    // timeout indistinguishable from a reviewer that returned nothing — so
+    // each reviewer retries infra faults and records any residual one here.
+    // Host-verified gates FIRST: deterministic, zero tokens, and a red
+    // branch must not spend reviewer agents. A red gate goes straight to a
+    // fix round carrying the host log evidence.
+    let hostGates = null
+    if (HOST_COMMIT_GATES) {
+      hostGates = await hostGateLock(() => runHostCommitGates(worktree, tag, `r${round}`))
+      if (!hostGates.green) {
+        log(`[task ${tag}] host commit gates red in round ${round}`)
+        const gateBlocking = [`HOST GATES RED: ${hostGates.detail} The agent-reported gate status was wrong or is stale — reproduce the failure from the log, fix it, re-run the gates to green, and commit.`]
+        reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: gateBlocking, hostGates: hostGates.results, fix: null })
+        if (round === MAX_REVIEW_ROUNDS) break
+        phase('Implement')
+        const gateFix = await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, gateBlocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`))
+        reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(gateFix)
+        continue
+      }
+    }
+    const reviewInfraFaults = []
+    const runReviewAgent = (promptText, reviewPhase, label) => () =>
+      withInfraRetry(() => agent(promptText, reviewAgentOptions({ phase: reviewPhase, label, schema: REVIEW_SCHEMA })), label)
+        .catch((error) => {
+          const message = (error && error.message) || String(error)
+          if (!infrastructureFailureDetail(message)) throw error
+          reviewInfraFaults.push(`${label}: ${message}`)
+          return null
+        })
     const [codeReview, expertReview] = await parallel([
-      () => agent(codeReviewPrompt(task, worktree, plan), reviewAgentOptions({ phase: 'Code Review', label: `code-review:${tag} r${round}`, schema: REVIEW_SCHEMA })),
-      () => agent(expertReviewPrompt(task, worktree, plan), reviewAgentOptions({ phase: 'Expert Review', label: `expert-review:${tag} r${round}`, schema: REVIEW_SCHEMA })),
+      runReviewAgent(codeReviewPrompt(task, worktree, plan), 'Code Review', `code-review:${tag} r${round}`),
+      runReviewAgent(expertReviewPrompt(task, worktree, plan), 'Expert Review', `expert-review:${tag} r${round}`),
     ])
     for (const r of [codeReview, expertReview]) {
       if (r?.proposedRoadmapItems?.length) proposals.push(...r.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
@@ -1840,20 +2813,59 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
         !codeReview ? 'code review' : null,
         !expertReview ? 'expert review' : null,
       ].filter(Boolean).join(' and ')
+      reviewRounds.push({ round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking: [], fix: null })
+      if (reviewInfraFaults.length) {
+        faultMetrics.infraFaults += 1
+        return {
+          id: tag,
+          status: 'infra-fault',
+          stage: 'review',
+          detail: `dual review interrupted by infrastructure fault(s): ${reviewInfraFaults.join('; ')}; the branch is untouched — relaunch with resumeMode: "continue" to re-run review from the committed state`,
+          reviewRounds,
+          worktree,
+          proposals,
+          ...kindExtra,
+        }
+      }
       return {
         id: tag,
         status: 'failed',
         stage: 'review',
         detail: `dual review failed to return a structured verdict from ${missing}; branch left unmerged for the root agent`,
+        reviewRounds,
         worktree,
         proposals,
         ...kindExtra,
       }
     }
+    // Host-run CodeRabbit review of the committed diff, sequential after the
+    // reviewer agents (its rate-limit backoff must never outlive the round).
+    // Blocking severities join the fix round; a persistent rate limit or CLI
+    // fault defers with a documented open issue, the same contract as the
+    // legacy agent-run flow — the dual reviewers remain decisive.
+    let coderabbitBlocking = []
+    if (CODERABBIT_HOST_REVIEW) {
+      const coderabbit = await runCoderabbitHostReview(worktree, `coderabbit:${tag} r${round}`)
+      await recordCoderabbitReview(`${tag} r${round}`, coderabbit)
+      if (coderabbit.outcome === 'auth') {
+        return { id: tag, status: 'fatal-auth', stage: 'review', detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, reviewRounds, worktree, proposals, ...kindExtra }
+      }
+      if (coderabbit.outcome === 'rate-limited' || coderabbit.outcome === 'error') {
+        coderabbitCapture.deferred += 1
+        coderabbitDeferred.push(`CodeRabbit review deferred in round ${round} (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`)
+        log(`[task ${tag}] CodeRabbit host review deferred in round ${round}: ${coderabbit.outcome} (${coderabbit.detail})`)
+      } else {
+        coderabbitBlocking = coderabbitBlockingItems(coderabbit.findings)
+        log(`[task ${tag}] CodeRabbit host review round ${round}: ${coderabbit.findings.length} finding(s), ${coderabbitBlocking.length} blocking`)
+      }
+    }
     const blocking = [
       ...(codeReview.blocking || []),
       ...(expertReview.blocking || []),
+      ...coderabbitBlocking,
     ]
+    const roundRecord = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, ...(hostGates ? { hostGates: hostGates.results } : {}), fix: null }
+    reviewRounds.push(roundRecord)
     if (blocking.length === 0 && codeReview?.verdict === 'pass' && expertReview?.verdict === 'pass') {
       reviewsPass = true
       log(`[task ${tag}] dual review passed in round ${round}`)
@@ -1862,11 +2874,23 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
     log(`[task ${tag}] review round ${round}: ${blocking.length} blocking item(s)`)
     if (round === MAX_REVIEW_ROUNDS) break
     phase('Implement')
-    await buildLock(() => agent(fixPrompt(task, worktree, plan, blocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}` })))
+    const fix = await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, blocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`))
+    roundRecord.fix = summarizeFixReport(fix)
   }
 
   if (!reviewsPass) {
-    return { id: tag, status: 'halted', stage: 'review', detail: 'reviewers not satisfied within cap; branch left unmerged for the root agent', worktree, proposals, ...kindExtra }
+    const lastRound = reviewRounds[reviewRounds.length - 1]
+    const finalBlocking = (lastRound?.blocking || []).slice(0, 6).join('; ')
+    return {
+      id: tag,
+      status: 'halted',
+      stage: 'review',
+      detail: `reviewers not satisfied within cap; branch left unmerged for the root agent${finalBlocking ? `. Final blocking items: ${finalBlocking}` : ''}`,
+      reviewRounds,
+      worktree,
+      proposals,
+      ...kindExtra,
+    }
   }
 
   // --- Integrate (serialized behind the merge queue) ----------------------
@@ -1877,17 +2901,36 @@ async function runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock
   if (AUTO_MERGE) {
     const doIntegrate = () => {
       phase('Integrate')
+      // Deliberately NOT wrapped in withInfraRetry: integration pushes to
+      // origin/BASE, so a hidden-success first attempt re-run after an
+      // adapter death could squash and push the same task twice. A fault
+      // here is terminal and hands verification to the operator.
       return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
     }
-    integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
+    try {
+      integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
+    } catch (error) {
+      const message = (error && error.message) || String(error)
+      if (!infrastructureFailureDetail(message)) throw error
+      faultMetrics.infraFaults += 1
+      return {
+        id: tag,
+        status: 'infra-fault',
+        stage: 'integrate',
+        detail: `integration agent died on an infrastructure fault (${message}); integration is never retried because the push to origin/${BASE} is not idempotent — inspect origin/${BASE} and the roadmap for a partial or hidden-success integration before relaunching with resumeMode: "continue"`,
+        worktree,
+        proposals,
+        ...kindExtra,
+      }
+    }
     if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
       return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, ...kindExtra }
     }
   } else {
-    return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals, ...kindExtra }
+    return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals, ...(coderabbitDeferred.length ? { openIssues: coderabbitDeferred } : {}), ...kindExtra }
   }
 
-  return { id: tag, status: 'done', plan, impl, integration, worktree, proposals, ...kindExtra }
+  return { id: tag, status: 'done', plan, impl, integration, worktree, proposals, ...(coderabbitDeferred.length ? { openIssues: coderabbitDeferred } : {}), ...kindExtra }
 }
 
 // ---------------------------------------------------------------------------
@@ -1937,7 +2980,7 @@ async function runTask(task, mergeLock) {
     }
 
     phase('Implement')
-    const impl = await buildLock(() => agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: 'Implement', label: `addendum:${tag}`, schema: IMPL_SCHEMA })))
+    const impl = await buildLock(() => withInfraRetry(() => agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: 'Implement', label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`))
     const authDetail = implementationAuthFailureDetail(impl)
     if (authDetail) {
       return {
@@ -1954,11 +2997,18 @@ async function runTask(task, mergeLock) {
     const openIssues = impl?.openIssues || []
     const onlyDeferredReviewIssues = hasOnlyDeferredReviewIssues(openIssues)
     if (addendumImplementationNeedsManualMerge(impl)) {
+      const deferredEvidence = openIssues.length
+        ? ` Outstanding deferred review evidence: ${openIssues.join('; ')}`
+        : ''
       return {
         id: tag,
         status: 'manual-merge-ready',
         stage: 'addendum',
-        detail: 'addendum implementation reported completed work, green gates, and no open issues, but did not set ok=true; branch left for operator verification before integration',
+        detail:
+          `addendum implementation reported completed work and green gates but did not set ok=true` +
+          `${openIssues.length ? ' and left only deferred/recoverable review issues open' : ' and no open issues'}; ` +
+          `branch left for operator verification before integration.${deferredEvidence}`,
+        openIssues,
         impl,
         worktree,
         proposals: [],
@@ -1969,10 +3019,40 @@ async function runTask(task, mergeLock) {
       return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: impl?.summary || 'addendum did not reach a green state or left open issues', openIssues: impl?.openIssues || [], worktree, proposals: [], kind: 'addendum' })
     }
     const proposals = []
+    const addendumOpenIssues = []
+    // Host-verified gates: addenda have no review rounds, so a gatesGreen
+    // claim the host cannot reproduce fails here, before any review spend.
+    if (HOST_COMMIT_GATES) {
+      const hostGates = await hostGateLock(() => runHostCommitGates(worktree, tag, 'addendum'))
+      if (!hostGates.green) {
+        return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: `addendum reported green gates but the host could not reproduce them: ${hostGates.detail}`, openIssues, worktree, proposals, kind: 'addendum' })
+      }
+    }
+    // Host-run CodeRabbit review of the committed addendum work. Blocking
+    // severities halt the addendum for assessment (addenda have no fix loop);
+    // a persistent rate limit or CLI fault defers with a documented open
+    // issue, mirroring the dual-review contract.
+    if (CODERABBIT_HOST_REVIEW) {
+      phase('Code Review')
+      const coderabbit = await runCoderabbitHostReview(worktree, `coderabbit:${tag} addendum`)
+      await recordCoderabbitReview(`${tag} addendum`, coderabbit)
+      if (coderabbit.outcome === 'auth') {
+        return { id: tag, status: 'fatal-auth', stage: 'auth', detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, worktree, proposals, kind: 'addendum' }
+      }
+      const blockingFindings = coderabbitBlockingItems(coderabbit.findings)
+      if (blockingFindings.length) {
+        return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: `CodeRabbit host review found blocking issue(s): ${blockingFindings.join('; ')}`, impl, worktree, proposals, kind: 'addendum' })
+      }
+      if (coderabbit.outcome === 'rate-limited' || coderabbit.outcome === 'error') {
+        coderabbitCapture.deferred += 1
+        addendumOpenIssues.push(`CodeRabbit review deferred (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`)
+        log(`[task ${tag}] CodeRabbit host review deferred for the addendum: ${coderabbit.outcome} (${coderabbit.detail})`)
+      }
+    }
     let addendumReview = null
     if (onlyDeferredReviewIssues) {
       phase('Code Review')
-      addendumReview = await agent(addendumReviewPrompt(task, worktree, impl), reviewAgentOptions({ phase: 'Code Review', label: `addendum-review:${tag}`, schema: REVIEW_SCHEMA }))
+      addendumReview = await withInfraRetry(() => agent(addendumReviewPrompt(task, worktree, impl), reviewAgentOptions({ phase: 'Code Review', label: `addendum-review:${tag}`, schema: REVIEW_SCHEMA })), `addendum-review:${tag}`)
       if (addendumReview?.proposedRoadmapItems?.length) {
         proposals.push(...addendumReview.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
       }
@@ -1986,63 +3066,39 @@ async function runTask(task, mergeLock) {
     if (AUTO_MERGE) {
       const doIntegrate = () => {
         phase('Integrate')
+        // Deliberately NOT wrapped in withInfraRetry: the push to origin/BASE
+        // is not idempotent (see the normal-pipeline integrate above).
         return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
       }
-      integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
+      try {
+        integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
+      } catch (error) {
+        const message = (error && error.message) || String(error)
+        if (!infrastructureFailureDetail(message)) throw error
+        faultMetrics.infraFaults += 1
+        return {
+          id: tag,
+          status: 'infra-fault',
+          stage: 'integrate',
+          detail: `integration agent died on an infrastructure fault (${message}); integration is never retried because the push to origin/${BASE} is not idempotent — inspect origin/${BASE} and the roadmap for a partial or hidden-success integration before relaunching with resumeMode: "continue"`,
+          worktree,
+          proposals,
+          kind: 'addendum',
+        }
+      }
       if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
         return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, kind: 'addendum' })
       }
     } else {
-      return { id: tag, status: 'manual-merge-ready', impl, addendumReview, integration, worktree, proposals, kind: 'addendum' }
+      return { id: tag, status: 'manual-merge-ready', impl, addendumReview, integration, worktree, proposals, ...(addendumOpenIssues.length ? { openIssues: addendumOpenIssues } : {}), kind: 'addendum' }
     }
-    return { id: tag, status: 'done', impl, addendumReview, integration, worktree, proposals, kind: 'addendum' }
+    return { id: tag, status: 'done', impl, addendumReview, integration, worktree, proposals, ...(addendumOpenIssues.length ? { openIssues: addendumOpenIssues } : {}), kind: 'addendum' }
   }
 
   // --- Plan <-> Design review (adversarial loop) --------------------------
-  let plan = null
-  let designVerdict = null
-  for (let round = 1; round <= MAX_DESIGN_ROUNDS; round++) {
-    phase('Plan')
-    plan = await planningLock(() => agent(planPrompt(task, worktree, designVerdict, round), planAgentOptions({
-      phase: 'Plan',
-      label: `plan:${tag} r${round}`,
-      schema: PLAN_SCHEMA,
-    })))
-    if (!plan) return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'plan', detail: 'planner returned nothing', worktree, proposals: [] })
-    if (!await fileExists(plan.execplanPath, worktree)) {
-      return await attachAssessment(task, wt, {
-        id: tag,
-        status: 'failed',
-        stage: 'plan',
-        detail: `planner returned missing ExecPlan path: ${plan.execplanPath || '<empty>'}`,
-        plan,
-        worktree,
-        proposals: [],
-      })
-    }
-
-    phase('Design Review')
-    designVerdict = await planningLock(() => agent(designReviewPrompt(task, worktree, plan, round), reviewAgentOptions({
-      phase: 'Design Review',
-      label: `design-review:${tag} r${round}`,
-      schema: DESIGN_VERDICT_SCHEMA,
-    })))
-    if (designVerdict?.satisfied) {
-      log(`[task ${tag}] design approved in round ${round}`)
-      break
-    }
-    log(`[task ${tag}] design round ${round}: ${(designVerdict?.blocking || []).length} blocking point(s)`)
-    if (round === MAX_DESIGN_ROUNDS) {
-      return await attachAssessment(task, wt, {
-        id: tag,
-        status: 'halted',
-        stage: 'design-review',
-        detail: `design review unsatisfied after ${MAX_DESIGN_ROUNDS} rounds: ${(designVerdict?.blocking || []).join('; ')}`,
-        worktree,
-        proposals: [],
-      })
-    }
-  }
+  const planned = await runPlanDesignLoop(task, worktree)
+  if (planned.fail) return await attachAssessment(task, wt, planned.fail)
+  const plan = planned.plan
 
   if (DRY_RUN) {
     return {
@@ -2057,35 +3113,11 @@ async function runTask(task, mergeLock) {
   }
 
   // --- Implement ----------------------------------------------------------
-  phase('Implement')
-  const impl = await buildLock(() => agent(implementPrompt(task, worktree, plan), buildAgentOptions({
-    phase: 'Implement',
-    label: `implement:${tag}`,
-    schema: IMPL_SCHEMA,
-  })))
-  const authDetail = implementationAuthFailureDetail(impl)
-  if (authDetail) {
-    return {
-      id: tag,
-      status: 'fatal-auth',
-      stage: 'auth',
-      detail: authDetail,
-      openIssues: impl?.openIssues || [],
-      worktree,
-      proposals: [],
-    }
+  const built = await runImplementationStage(task, worktree, plan)
+  if (built.fail) {
+    return built.fail.status === 'fatal-auth' ? built.fail : await attachAssessment(task, wt, built.fail)
   }
-  if (!impl || !impl.ok || !impl.gatesGreen) {
-    return await attachAssessment(task, wt, {
-      id: tag,
-      status: 'failed',
-      stage: 'implement',
-      detail: impl?.summary || 'implementation did not reach a green state',
-      openIssues: impl?.openIssues || [],
-      worktree,
-      proposals: [],
-    })
-  }
+  const impl = built.impl
 
   // --- Dual review + integration (shared with review-mode recovery resume) --
   const outcome = await runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock)
@@ -2265,6 +3297,10 @@ function semaphore(limit) {
 
 const planningLock = semaphore(MAX_PLANNING_PARALLEL)
 const buildLock = semaphore(MAX_BUILD_PARALLEL)
+// Host gate runs are serialized across the whole pool: the target project's
+// build cache rewards sequential execution, and concurrent gate runs from
+// sibling worktrees would contend for it.
+const hostGateLock = semaphore(1)
 
 let selectSeq = 0
 async function doSelect(taken) {
@@ -2431,12 +3467,19 @@ if (RESUME_PARTIAL_BRANCHES && !halted) {
         markProcessed(entry.task)
       } else if (entry.result.status === 'manual-merge-ready') {
         markManualMergeReady(entry.task)
+      } else if (['failed', 'halted'].includes(entry.result.status) && !halted) {
+        // A failed recovery resume is a task failure, not a footnote: halt the
+        // run (same first-failure semantics as the worker pool) so the
+        // terminal state is machine-actionable instead of a clean stop that
+        // is indistinguishable from a dry frontier (issue #25).
+        halted = `recovery resume of task ${entry.result.id} ${entry.result.status} at ${entry.result.stage}: ${entry.result.detail}`
+        stop = true
       }
     }
     if (outcome.fatal) {
       results.push(outcome.fatal)
       halted = `recovery ${outcome.fatal.status} at ${outcome.fatal.stage}: ${outcome.fatal.detail}`
-      if (outcome.fatal.status === 'provider-fault') providerFaultHalt = true
+      if (outcome.fatal.status === 'provider-fault' || outcome.fatal.status === 'infra-fault') providerFaultHalt = true
       stop = true
     }
   } catch (error) {
@@ -2491,6 +3534,14 @@ while (true) {
     halted = `task ${done.id} provider fault at ${result.stage}: ${result.detail}`
     providerFaultHalt = true
     stop = true
+  } else if (result.status === 'infra-fault') {
+    // The agent process died (hung stream, killed CLI, reply-channel failure)
+    // after in-run retries — no evidence about the branch, so no assessment
+    // and no roadmap triage writes. The committed ExecPlan makes the branch
+    // resumable: relaunch with resumeMode "continue" to pick up where it died.
+    halted = `task ${done.id} infrastructure fault at ${result.stage}: ${result.detail}; branch state is durable — relaunch with resumeMode: "continue" to resume from the committed ExecPlan`
+    providerFaultHalt = true
+    stop = true
   } else if (!halted) {
     // Record the failure, stop opening new work, and let in-flight siblings
     // finish rather than abandoning their (possibly mergeable) branches.
@@ -2509,6 +3560,39 @@ if (canFlush && !providerFaultHalt) {
     log(`[triage:end] failed (${(err && err.message) || String(err)}); ${[...pendingByStep.values()].flat().length} proposal(s) left pending`)
   }
 }
+// Recovery survivors the run reported but did not integrate still hold their
+// roadmap ids out of selection, so the frontier stays blocked until the
+// operator closes, resumes, splits, or hoovers each branch. A run that ends
+// with such survivors has NOT stopped cleanly, even when the selector reports
+// no unblocked tasks — surface it as an explicit operator-recovery terminal
+// state instead of `halted: null` (issue #25).
+const unresolvedRecovery = [
+  ...[...recoveryHeldNormal]
+    .filter((id) => !processedNormal.has(id) && !manualMergeReadyNormal.has(id))
+    .map((id) => ({ id, isAddendum: false })),
+  ...[...recoveryHeldAddendum]
+    .filter((id) => !processedAddendum.has(id) && !manualMergeReadyAddendum.has(id))
+    .map((id) => ({ id, isAddendum: true })),
+].sort((left, right) => left.id.localeCompare(right.id, 'en', { numeric: true }) || Number(left.isAddendum) - Number(right.isAddendum))
+recovery.unresolved = unresolvedRecovery.map((entry) => {
+  const reported = (recovery.results || []).filter((result) => result.id === entry.id)
+  const last = reported[reported.length - 1]
+  return {
+    id: entry.id,
+    isAddendum: entry.isAddendum,
+    branchName: last?.branchName || '',
+    classification: last?.classification || '',
+    action: last?.action || 'held',
+    ...(last?.reason ? { reason: last.reason } : {}),
+  }
+})
+if (!halted && unresolvedRecovery.length) {
+  halted =
+    `needs-operator-recovery: ${unresolvedRecovery.length} recovery survivor branch(es) still block the roadmap frontier ` +
+    `(${unresolvedRecovery.map((entry) => entry.id + (entry.isAddendum ? ' (addendum)' : '')).join(', ')}); ` +
+    'use recovery.results/recovery.unresolved to close, resume, split, or hoover each branch, then relaunch'
+}
+
 const pendingProposals = [...pendingByStep.values()].flat()
 const assessments = results
   .filter((result) => result.assessment || result.assessmentError)
@@ -2534,6 +3618,38 @@ return {
   maxParallel: MAX_PARALLEL,
   maxPlanningParallel: MAX_PLANNING_PARALLEL,
   maxBuildParallel: MAX_BUILD_PARALLEL,
+  // The exact deterministic gate set every branch agent was instructed to run
+  // (issue #28): operators can audit reported gate greenness against it.
+  commitGates: COMMIT_GATES,
+  // Host gate verification aggregate: whether the host re-ran the gates
+  // itself, the per-gate timeout, and bounded counters. Per-round pass/fail
+  // detail lives in each task's reviewRounds[].hostGates.
+  hostGates: {
+    enabled: HOST_COMMIT_GATES,
+    timeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
+    ...hostGateMetrics,
+  },
+  stageAttempts: STAGE_ATTEMPTS,
+  // Host-driven build loop configuration: one builder turn per unticked
+  // ExecPlan Progress item when enabled, with committed progress verified
+  // after every turn.
+  workItemBuild: { enabled: PER_WORK_ITEM_BUILD, maxRounds: MAX_WORK_ITEM_ROUNDS },
+  // Bounded-cardinality fault metrics (fixed keys): stage retries spent on
+  // infrastructure faults plus terminal fault counts per class, so operators
+  // can read retry pressure straight from the result instead of the logs.
+  faultMetrics: { ...faultMetrics },
+  // Host-run CodeRabbit review aggregate: effective configuration plus
+  // bounded counters (reviews run, findings by severity, rate-limited runs,
+  // deferred reviews). Per-finding detail goes to the JSONL sink when
+  // coderabbitFindingsFile is configured.
+  coderabbit: {
+    hostReview: CODERABBIT_HOST_REVIEW,
+    attempts: CODERABBIT_ATTEMPTS,
+    backoffMinutes: CODERABBIT_BACKOFF_MINUTES,
+    findingsFile: CODERABBIT_FINDINGS_FILE,
+    ...coderabbitCapture,
+    bySeverity: { ...coderabbitCapture.bySeverity },
+  },
   processed,
   results,
   assessments,

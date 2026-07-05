@@ -79,7 +79,12 @@ export const RECOVERY_ROADMAP = [
 // branches also carry a committed canonical ExecPlan (resume eligibility
 // requires one); pass withParserExecplan: false to model a branch that lost
 // its plan.
-export function makeRecoveryRepo({ withAddendumWorktree = false, withParserExecplan = true } = {}) {
+export function makeRecoveryRepo({
+  withAddendumWorktree = false,
+  withParserExecplan = true,
+  parserExecplanStatus = 'COMPLETE',
+  parserExecplanProgress = [],
+} = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'df12-recovery-'))
   FIXTURE_ROOTS.push(root)
   const dir = path.join(root, 'project')
@@ -106,9 +111,12 @@ export function makeRecoveryRepo({ withAddendumWorktree = false, withParserExecp
         writeFileSync(path.join(worktreePath, `${branch}.txt`), 'work\n')
         if (execplan) {
           mkdirSync(path.join(worktreePath, 'docs', 'execplans'), { recursive: true })
+          const progress = parserExecplanProgress.length
+            ? `\n## Progress\n\n${parserExecplanProgress.join('\n')}\n`
+            : ''
           writeFileSync(
             path.join(worktreePath, 'docs', 'execplans', `${branch}.md`),
-            `# ExecPlan for ${branch}\n\nStatus: COMPLETE\n`,
+            `# ExecPlan for ${branch}\n\nStatus: ${parserExecplanStatus}\n${progress}`,
           )
         }
         git(worktreePath, 'add', '.')

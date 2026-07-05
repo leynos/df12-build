@@ -80,9 +80,95 @@ Keep the ODW script contract intact:
   agent prose alone.
 - Keep the task-agent write preflight host-verified: the probe outcome is the
   bytes on disk, not the agent's claimed `ok`.
+- Contain agent-supplied paths before host filesystem or git access.
+  `execplanRelPath` rejects absolute paths outside the worktree and `../`
+  escapes and returns `{ ok, relPath, detail }`; every host read or write of
+  an ExecPlan must go through it and fail the task closed on escape. Planner
+  output is untrusted, prompt-injectable data.
+- Keep host I/O helpers honest about faults. `fileState` and
+  `readExecplanState` treat only `ENOENT`/`ENOTDIR` as "absent"; any other
+  stat or read error surfaces as `{ ok: false, detail }` or ExecPlan status
+  `unreadable`, and the continue/recovery boundary reports it
+  (`plan-unreadable`, `execplan-stat-error`) instead of dispatching over
+  durable work.
 
 Changes to workflow behaviour must update all relevant prompts, schemas, docs,
 and validation notes in the same branch.
+
+## Recovery, fault, and result contract
+
+Fresh-run recovery has three `resumeMode` levels. `assess` is report-only.
+`review` may route a clean, evidenced `adopt-complete` branch back into
+`runDualReviewAndIntegration`. `continue` skips judgement agents entirely:
+`recoveryContinueDecision` dispatches on host git evidence plus the committed
+ExecPlan `Status:` line (`DRAFT`/missing to plan, `APPROVED`/`IN PROGRESS` to
+implement, `COMPLETE` to review, `BLOCKED` and every hygiene failure to a
+report). The committed ExecPlan is the durable source of truth, and the host
+enforces that durability at stage boundaries (`verifyExecplanCommitted`,
+`verifyWorktreeCommitted`, `commitExecplanApproval`). A plan-only dirty
+worktree after a planner round is salvaged host-side (`commitExecplanDraft`
+commits just the plan path) instead of bouncing; any other dirty path still
+bounces to the planner with the salvage-refusal evidence.
+
+Failure classification is layered: `authFailureDetail` (fatal-auth), then
+`providerFailureDetail` (provider-fault), then `infrastructureFailureDetail`
+(infra-fault, pinned to ODW's own adapter-timeout / exit-code / schema-retry
+error strings), and only then ordinary `failed`. Infra faults are agent-process
+deaths carrying no branch evidence: `withInfraRetry` re-runs the stage agent up
+to `stageAttempts` total attempts (default 2), and a persistent fault
+terminates as `infra-fault` with no assessment agent and no remediation triage
+writes. Never wrap the integration agent in `withInfraRetry` — its push to
+`origin/<base>` is not idempotent, and a source-invariant test pins both call
+sites as unwrapped.
+
+Host-run CodeRabbit review (`coderabbitHostReview`, default on) moves the
+CLI invocation from agent prompts to the control loop: `coderabbit review
+--agent --type committed` runs per dual-review round and per addendum, its
+NDJSON events are parsed host-side (the CLI exits 0 even on fatal errors, so
+classification must read events, never exit codes), `critical`/`major`
+findings join the fix-round blocking items, and rate-limit backoff sleeps in
+host wall-clock with deterministic jitter (`Math.random()`, `Date.now()`, and
+arg-less `new Date()` are banned by ODW's `scanDualCompat` for Claude Code
+dual-compatibility — hash a seed instead, and shell out to `date` for
+timestamps). Test loaders and the simulation driver force
+`coderabbitHostReview: false` so fixture runs can never invoke the real CLI
+and burn review quota; the pipeline seam is covered by a fake NDJSON-emitting
+`coderabbit` on `PATH`.
+
+Host-run commit gates (`hostCommitGates`, default on) apply the same
+philosophy to gate greenness: `runHostCommitGates` executes the configured
+`commitGates` commands via `sh -c` in the task worktree, serialized pool-wide
+behind `hostGateLock` (width 1, for build-cache friendliness), with a
+per-command timeout (`commitGateTimeoutSeconds`) and full output teed to
+`/tmp/df12-gate-*` logs. In the dual-review loop the gates run FIRST each
+round — a red branch goes to a fix round with the host evidence without
+spending reviewer agents; in the addendum lane an unreproducible green claim
+fails the addendum before any review. Test loaders and the simulation driver
+force `hostCommitGates: false` (fixture repos have no `Makefile`); pipeline
+coverage uses a scripted fake gate command.
+
+The per-work-item build loop (`perWorkItemBuild`, default on) makes the
+committed ExecPlan's `## Progress` checklist the build's control surface:
+`parseExecplanState` returns the checklist as `items[]`, the planner prompt
+pins the `- [ ] WI-<n>: <title>` convention, and `runWorkItemBuildLoop`
+dispatches one `implement:<id> wi<n>` builder turn per unticked item,
+verifying `verifyWorktreeCommitted` plus committed checklist movement after
+every turn (one bounce with the defect named, two consecutive no-progress
+turns fail closed; `maxWorkItemRounds` bounds the loop). A plan with no
+checklist returns `null` from the loop and the stage falls back to the
+single-turn `implementPrompt` build. Test loaders and the simulation driver
+force `perWorkItemBuild: false` because scripted implement agents do not
+tick Progress items; loop coverage uses fixture plans with real ticks.
+
+The run result exposes the contract for operators and tests: `commitGates`
+(the effective deterministic gate list; agents must never assume `make all`
+aggregates a project's gates), `stageAttempts`, bounded-cardinality
+`faultMetrics` (`infraRetries`, `infraFaults`, `providerFaults`,
+`authFaults` — fixed keys only, never keyed by task id or error text),
+`recovery.unresolved`, and the `needs-operator-recovery` terminal `halted`
+state when survivor branches still block the roadmap frontier. See
+`docs/failure-resume-design.md` for the full design and
+`docs/users-guide.md` for the operator-facing description.
 
 Adapter and model routing are part of the workflow contract. The ODW workflow
 currently uses Codex defaults for build-side work, and Claude Code with
