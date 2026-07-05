@@ -14,7 +14,7 @@ import {
   recoveryContinueDecision,
   recoveryDecision,
   recoveryResumeEligibility,
-} from '../../src/workflows/df12-build-odw/recovery-decision.js'
+} from '../../src/workflows/df12-build-odw/recovery-decision.ts'
 
 const idParts = fc.array(fc.nat(99), { minLength: 1, maxLength: 5 })
 

@@ -4,7 +4,7 @@ import {
   parseExecplanState,
   recoveryDecision,
   recoveryContinueDecision,
-} from './recovery-decision.js'
+} from './recovery-decision.ts'
 
 // ---------------------------------------------------------------------------
 // Configuration (all overridable through the ODW `args` object).

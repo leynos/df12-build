@@ -32,7 +32,7 @@ export const meta = {
   ],
 }
 
-// src/workflows/df12-build-odw/recovery-decision.js
+// src/workflows/df12-build-odw/recovery-decision.ts
 var TASK_BRANCH_RE = /^roadmap-((?:\d+-)*\d+)(-addendum)?$/;
 function branchToRoadmapId(branch) {
   const match = TASK_BRANCH_RE.exec(String(branch || ""));

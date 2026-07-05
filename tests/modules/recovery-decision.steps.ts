@@ -10,7 +10,7 @@ import {
   parseExecplanState,
   recoveryContinueDecision,
   recoveryDecision,
-} from '../../src/workflows/df12-build-odw/recovery-decision.js'
+} from '../../src/workflows/df12-build-odw/recovery-decision.ts'
 
 interface Candidate {
   isAddendum: boolean

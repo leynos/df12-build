@@ -18,7 +18,7 @@
 // from the artifact, and the script fails closed on every loader-contract
 // hazard it can detect (module closure wrappers, import/export tokens,
 // duplicate or missing workflowMain, unparsable output).
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
@@ -62,6 +62,27 @@ for (const wrapper of ['__esm(', '__commonJS(', '__toESM(', '__require(']) {
 if (/^\s*(import|export)\b/m.test(bundle)) fail('bundle emitted an import/export statement')
 if (/\bimport\s*\(/.test(bundle) || bundle.includes('import.meta')) {
   fail('bundle contains dynamic import or import.meta, which the ODW loader rejects')
+}
+
+// esbuild renames top-level symbols on cross-module collision (foo -> foo2),
+// which would silently break the helper-surface tests that slice the artefact
+// and return helpers by name. Require every name a src module exports to
+// survive into the bundle as a top-level declaration under its own name.
+const moduleFiles = readdirSync(SRC_DIR).filter(
+  (name) =>
+    (name.endsWith('.js') || name.endsWith('.ts')) &&
+    !name.endsWith('.d.ts') &&
+    !['meta.js', 'main.js', 'main.ts'].includes(name),
+)
+for (const file of moduleFiles) {
+  const text = readFileSync(path.join(SRC_DIR, file), 'utf8')
+  for (const match of text.matchAll(/^export (?:async )?(?:function|const|let|var) ([A-Za-z_$][\w$]*)/gm)) {
+    const name = match[1]
+    const declared = new RegExp(`^(?:async )?(?:function|var|let|const) ${name}\\b`, 'm')
+    if (!declared.test(bundle)) {
+      fail(`top-level name '${name}' from ${file} is missing or was renamed in the bundle`)
+    }
+  }
 }
 
 const mainMatches = bundle.match(/^async function workflowMain\(\) \{$/gm) || []

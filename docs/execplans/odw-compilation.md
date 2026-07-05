@@ -5,7 +5,7 @@ This ExecPlan (execution plan) is a living document. The sections
 `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work
 proceeds.
 
-Status: DRAFT
+Status: IN PROGRESS
 
 ## Purpose / big picture
 
@@ -132,7 +132,16 @@ Completed before this plan (the spike this plan extends):
 
 Planned work:
 
-- [ ] Stage A / milestone 0: TypeScript infrastructure and pilot conversion.
+- [x] (2026-07-05 18:40Z) Stage A / milestone 0: TypeScript infrastructure
+  and pilot conversion. `typescript` 6.0.3 pinned; tsconfig gained
+  `erasableSyntaxOnly`, `verbatimModuleSyntax`, `isolatedModules`, and
+  `allowImportingTsExtensions`; `odw-globals.d.ts` declares the injected
+  primitives; `tsc --noEmit` wired into `make typecheck`;
+  `recovery-decision.js` converted to `.ts` with interface types; the
+  build script now fails when a module's exported top-level name is
+  missing or renamed in the bundle. Enforcement spot-checked in-tree: an
+  `enum` fails typecheck with TS1294, and reverts cleanly. `make all`
+  green including Dafny (4 verified, 0 errors).
 - [ ] Milestone 1: schemas and shared types (`schemas.ts`, `types.ts`).
 - [ ] Milestone 2: roadmap parsing and selection (`roadmap.ts`).
 - [ ] Milestone 3: process and failure-classification helpers
@@ -164,6 +173,21 @@ Planned work:
   artefact.
   Impact: source-invariant tests read the src tree; artefact tests key on
   names and behaviour only.
+- Observation: esbuild does not resolve a `./module.js` import to a
+  `module.ts` file on disk, so converting a module means updating its
+  importers to the `.ts` extension in the same commit
+  (`allowImportingTsExtensions` makes tsc accept this).
+  Evidence: milestone 0 pilot conversion.
+  Impact: each later conversion touches its importers' import lines; the
+  build fails loudly if one is missed, so this is churn, not risk.
+- Observation: `tsc` excess-property checking rejects object literals with
+  fields a narrow structural parameter type does not name, even though the
+  runtime ignores them.
+  Evidence: `recoveryContinueDecision(candidate, evidence, { status,
+  ticked: 0, unticked: 0 }, ...)` failed TS2353 against
+  `planState: { status: string }`.
+  Impact: peeled function signatures should name the full shape callers
+  actually pass, with optional fields, not just the fields the body reads.
 
 ## Decision log
 

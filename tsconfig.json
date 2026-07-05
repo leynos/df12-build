@@ -3,12 +3,16 @@
     "target": "esnext",
     "module": "esnext",
     "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
     "types": ["bun"],
     "strict": true,
     "noEmit": true,
     "allowJs": true,
     "checkJs": false,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true
   },
-  "include": ["tests/modules", "src", "scripts"]
+  "include": ["tests/modules", "src", "scripts", "verify"]
 }

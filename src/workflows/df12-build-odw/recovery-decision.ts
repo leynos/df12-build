@@ -3,17 +3,81 @@
 // and continue-mode decision tables, and committed-ExecPlan state parsing.
 // Everything here is deterministic and free of I/O, injected ODW primitives,
 // and run configuration, so it is unit-testable by direct import.
+
+export interface WorktreeEntry {
+  worktreePath: string
+  branch: string
+  head: string
+}
+
+// The hygiene-relevant slice of a recovery candidate: callers pass the full
+// discovery record, but the decision tables only dereference these fields.
+export interface RecoveryCandidateHygiene {
+  isAddendum?: boolean
+  execplanPath?: string
+}
+
+// Host-collected git evidence. The fields are optional because the tables
+// treat absent evidence as failing the corresponding hygiene check.
+export interface RecoveryEvidence {
+  collectionErrors?: readonly string[]
+  dirtyState?: string
+  recentCommits?: readonly string[]
+}
+
+// Agent-reported assessment fields the review-mode table consults. Host
+// evidence stays decisive; these can only disqualify, never force, a resume.
+export interface RecoveryAssessmentFields {
+  classification?: string
+  taskScoped?: boolean
+  validation?: string
+  missingEvidence?: readonly string[]
+}
+
+export type ExecplanStatus =
+  | 'draft'
+  | 'approved'
+  | 'in-progress'
+  | 'blocked'
+  | 'complete'
+  | 'missing'
+  | 'unreadable'
+  | 'unknown'
+
+export interface ExecplanState {
+  status: ExecplanStatus
+  ticked: number
+  unticked: number
+  error?: string
+}
+
+export type RecoveryStage = 'plan' | 'implement' | 'review'
+
+export interface ReviewDecision {
+  action: 'report' | 'resume'
+  classification: string
+  reason: string
+  skip: boolean
+}
+
+export interface ContinueDecision {
+  action: 'report' | 'resume'
+  stage: RecoveryStage | null
+  reason: string
+  skip: boolean
+}
+
 export const TASK_BRANCH_RE = /^roadmap-((?:\d+-)*\d+)(-addendum)?$/
 
-export function branchToRoadmapId(branch) {
+export function branchToRoadmapId(branch: unknown): { id: string; isAddendum: boolean } | null {
   const match = TASK_BRANCH_RE.exec(String(branch || ''))
   if (!match) return null
   return { id: match[1].replace(/-/g, '.'), isAddendum: Boolean(match[2]) }
 }
 
-export function parseWorktreeList(output) {
-  const entries = []
-  let current = null
+export function parseWorktreeList(output: unknown): WorktreeEntry[] {
+  const entries: WorktreeEntry[] = []
+  let current: WorktreeEntry | null = null
   for (const line of String(output || '').split(/\r?\n/)) {
     if (!line.trim()) {
       if (current) entries.push(current)
@@ -60,7 +124,11 @@ export const RECOVERY_SKIP_REASONS = [
 // adopt-complete branch with validation evidence may spend review and
 // integration effort. Returns '' when eligible, else the disqualifying skip
 // reason. Host-collected evidence is decisive over agent-reported fields.
-export function recoveryResumeEligibility(candidate, evidence, assessment) {
+export function recoveryResumeEligibility(
+  candidate: RecoveryCandidateHygiene | null | undefined,
+  evidence: RecoveryEvidence | null | undefined,
+  assessment: RecoveryAssessmentFields | null | undefined,
+): string {
   if (candidate?.isAddendum) return 'addendum-branch'
   if ((evidence?.collectionErrors || []).length) return 'evidence-collection-error'
   if (evidence?.dirtyState !== 'clean') return 'dirty-worktree'
@@ -76,7 +144,13 @@ export function recoveryResumeEligibility(candidate, evidence, assessment) {
 // assess mode; in review mode only eligible adopt-complete candidates may
 // resume, and an adopt-complete verdict that fails an eligibility check is
 // DOWNGRADED to continue-manual in the summary (fail closed).
-export function recoveryDecision(candidate, evidence, assessment, mode, flags = {}) {
+export function recoveryDecision(
+  candidate: RecoveryCandidateHygiene | null | undefined,
+  evidence: RecoveryEvidence | null | undefined,
+  assessment: RecoveryAssessmentFields | null | undefined,
+  mode: string,
+  flags: { dryRun?: boolean } = {},
+): ReviewDecision {
   const classification = assessment?.classification || ''
   if (mode !== 'review' || classification !== 'adopt-complete') {
     return { action: 'report', classification, reason: '', skip: false }
@@ -104,7 +178,7 @@ export function recoveryDecision(candidate, evidence, assessment, mode, flags = 
 // (design review, deterministic gates, dual review, serialized integration),
 // not from an up-front classification.
 // ---------------------------------------------------------------------------
-export const EXECPLAN_STATUS_MAP = {
+export const EXECPLAN_STATUS_MAP: Record<string, ExecplanStatus> = {
   draft: 'draft',
   approved: 'approved',
   'in progress': 'in-progress',
@@ -116,9 +190,9 @@ export const EXECPLAN_STATUS_MAP = {
 // the Progress checkbox tallies (informational — dispatch keys on Status
 // alone). An unfilled skeleton line ("Status: DRAFT | APPROVED | …") or an
 // unrecognized value parses as 'unknown', which dispatches to planning.
-export function parseExecplanState(text) {
+export function parseExecplanState(text: unknown): ExecplanState {
   const source = String(text || '')
-  let status = 'unknown'
+  let status: ExecplanStatus = 'unknown'
   const statusMatch = source.match(/^Status:\s*([A-Za-z ]+?)\s*$/m)
   if (statusMatch) {
     const value = statusMatch[1].trim().toLowerCase().replace(/\s+/g, ' ')
@@ -137,14 +211,19 @@ export function parseExecplanState(text) {
 // The continue-mode decision table. Purely deterministic: hygiene checks from
 // host-collected evidence, then a stage keyed on the committed ExecPlan
 // Status. Returns { action: 'report'|'resume', stage, reason, skip }.
-export function recoveryContinueDecision(candidate, evidence, planState, flags = {}) {
-  const report = (reason) => ({ action: 'report', stage: null, reason, skip: true })
+export function recoveryContinueDecision(
+  candidate: RecoveryCandidateHygiene | null | undefined,
+  evidence: RecoveryEvidence | null | undefined,
+  planState: { status: string; ticked?: number; unticked?: number },
+  flags: { dryRun?: boolean } = {},
+): ContinueDecision {
+  const report = (reason: string): ContinueDecision => ({ action: 'report', stage: null, reason, skip: true })
   if (candidate?.isAddendum) return report('addendum-branch')
   if ((evidence?.collectionErrors || []).length) return report('evidence-collection-error')
   if (evidence?.dirtyState !== 'clean') return report('dirty-worktree')
   if (planState.status === 'unreadable') return report('plan-unreadable')
   if (planState.status === 'blocked') return report('plan-blocked')
-  const stage =
+  const stage: RecoveryStage =
     planState.status === 'approved' || planState.status === 'in-progress'
       ? 'implement'
       : planState.status === 'complete'

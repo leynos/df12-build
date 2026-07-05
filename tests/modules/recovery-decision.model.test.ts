@@ -9,7 +9,7 @@ import fc from 'fast-check'
 import {
   recoveryContinueDecision,
   recoveryDecision,
-} from '../../src/workflows/df12-build-odw/recovery-decision.js'
+} from '../../src/workflows/df12-build-odw/recovery-decision.ts'
 import { decideContinue, decideReview } from '../../verify/recovery-decision.model'
 
 const CLASSIFICATION = {

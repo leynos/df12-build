@@ -23,7 +23,10 @@ check-fmt:
 
 lint: markdownlint workflow-parse
 
+# The src tree is TypeScript restricted to erasable syntax; tsc enforces the
+# restriction (erasableSyntaxOnly, verbatimModuleSyntax in tsconfig.json).
 typecheck: workflow-parse
+	node_modules/.bin/tsc -p tsconfig.json --noEmit
 
 markdownlint:
 	markdownlint-cli2 $(MARKDOWN_FILES)
