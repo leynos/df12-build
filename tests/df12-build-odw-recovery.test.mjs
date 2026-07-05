@@ -416,6 +416,8 @@ test('skip reasons are a stable published contract', async () => {
     'missing-validation-evidence',
     'missing-execplan',
     'plan-blocked',
+    'plan-unreadable',
+    'execplan-stat-error',
     'dry-run',
   ])
 })

@@ -384,7 +384,8 @@ Add a top-level `recovery` object to the workflow result:
       isAddendum: false,
       branchName: "roadmap-1-2-3",
       classification: "adopt-complete",
-      action: "reported"
+      action: "reported",
+      reason: "dirty-worktree"
     }
   ]
 }

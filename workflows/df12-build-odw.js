@@ -1786,6 +1786,8 @@ const RECOVERY_SKIP_REASONS = [
   'missing-validation-evidence',
   'missing-execplan',
   'plan-blocked',
+  'plan-unreadable',
+  'execplan-stat-error',
   'dry-run',
 ]
 
