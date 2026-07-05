@@ -141,156 +141,7 @@ function recoveryContinueDecision(candidate, evidence, planState, flags = {}) {
   return { action: "resume", stage, reason: "", skip: false };
 }
 
-// src/workflows/df12-build-odw/main.js
-var cfg = args || {};
-var PROJECT_ROOT = cfg.projectRoot || process.cwd();
-if (PROJECT_ROOT !== process.cwd()) {
-  const fs = process.getBuiltinModule("node:fs");
-  if (!fs.statSync(PROJECT_ROOT).isDirectory()) {
-    throw new Error(`Configured projectRoot is not a directory: ${PROJECT_ROOT}`);
-  }
-  process.chdir(PROJECT_ROOT);
-}
-var BASE = cfg.base || "main";
-var ROADMAP = cfg.roadmap || "docs/roadmap.md";
-var DESIGN_DOCS = cfg.designDocs || "the design document(s) and the ADRs (docs/adr-*.md) under docs/";
-var RESEARCH_NOTE = cfg.researchNote || null;
-var ONLY_TASK = cfg.taskId || null;
-var MAX_TASKS = ONLY_TASK ? 1 : cfg.maxTasks || 12;
-var MAX_PARALLEL = ONLY_TASK ? 1 : Math.max(1, cfg.maxParallel || 16);
-var MAX_PLANNING_PARALLEL = Math.max(1, cfg.maxPlanningParallel || cfg.maxPlanParallel || 8);
-var MAX_BUILD_PARALLEL = Math.max(1, cfg.maxBuildParallel || 8);
-var MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4;
-var MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3;
-var STAGE_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2));
-var faultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 };
-var AUTO_MERGE = cfg.autoMerge !== false;
-var DOCUMENT_AUDIT = cfg.documentAudit !== false;
-var DRY_RUN = cfg.dryRun === true;
-var AUTH_PREFLIGHT = cfg.authPreflight !== false;
-var REQUIRE_CODERABBIT_AUTH = cfg.requireCoderabbitAuth !== false && !DRY_RUN;
-var ASSESS_PARTIAL_BRANCHES = cfg.assessPartialBranches !== false;
-var RESUME_PARTIAL_BRANCHES = cfg.resumePartialBranches === true;
-var RESUME_MODE = String(cfg.resumeMode || "assess").toLowerCase();
-if (!["assess", "review", "continue"].includes(RESUME_MODE)) {
-  throw new Error(`Unsupported resumeMode: ${RESUME_MODE} (use "assess", "review", or "continue")`);
-}
-var RESUME_TASK_ID = cfg.resumeTaskId ? String(cfg.resumeTaskId) : null;
-var RESUME_MAX_CANDIDATES_RAW = Number(cfg.resumeMaxCandidates ?? 4);
-var RESUME_MAX_CANDIDATES = Number.isFinite(RESUME_MAX_CANDIDATES_RAW) ? Math.max(1, Math.floor(RESUME_MAX_CANDIDATES_RAW)) : 4;
-var WORKTREE_WRITE_PREFLIGHT = cfg.worktreeWritePreflight !== false;
-var BUDGET_RESERVE = 8e4;
-var SEARCH_BACKEND = String(cfg.searchBackend || cfg.codeSearchBackend || (cfg.memtraceRepoId ? "memtrace" : "grepai")).toLowerCase();
-var GREPAI_WORKSPACE = cfg.grepaiWorkspace || "Projects";
-var GREPAI_PROJECT = cfg.grepaiProject || (SEARCH_BACKEND === "grepai" ? cfg.project : null) || null;
-var MEMTRACE_REPO_ID = cfg.memtraceRepoId || (SEARCH_BACKEND === "memtrace" ? cfg.project : null) || null;
-var BUILD_ADAPTER = cfg.buildAdapter || "codex-medium";
-var PLAN_ADAPTER = cfg.planAdapter || "claude";
-var REVIEW_ADAPTER = cfg.reviewAdapter || "claude";
-var TRIAGE_ADAPTER = cfg.triageAdapter || "codex";
-var ASSESSMENT_ADAPTER = cfg.assessmentAdapter || REVIEW_ADAPTER;
-var BUILD_MODEL = cfg.buildModel || "gpt-5.5";
-var PLAN_MODEL = cfg.planModel || "claude-opus-4-8";
-var REVIEW_MODEL = cfg.reviewModel || "claude-opus-4-8";
-var TRIAGE_MODEL = cfg.triageModel || "gpt-5.5@high";
-var ASSESSMENT_MODEL = cfg.assessmentModel || REVIEW_MODEL;
-var AUTH_REQUIRED_ADAPTERS = new Set([
-  BUILD_ADAPTER,
-  PLAN_ADAPTER,
-  REVIEW_ADAPTER,
-  TRIAGE_ADAPTER,
-  ASSESSMENT_ADAPTER
-].map((adapter) => String(adapter || "").toLowerCase()));
-var CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || "coderabbit review --agent";
-var COMMIT_GATES = (Array.isArray(cfg.commitGates) && cfg.commitGates.length ? cfg.commitGates : ["make all"]).map((command) => String(command));
-var COMMIT_GATE_TEXT = COMMIT_GATES.map((command) => `\`${command}\``).join(" then ");
-var COMMIT_GATE_GUIDANCE = `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well \u2014 NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.`;
-var CODERABBIT_REVIEW_GUIDANCE = "Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.";
-var SPARK_DELEGATION_GUIDANCE = "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks.";
-var SCRUTINEER_DELEGATION_GUIDANCE = `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`;
-function buildAgentOptions(options = {}) {
-  return { adapter: BUILD_ADAPTER, model: BUILD_MODEL, ...options };
-}
-function planAgentOptions(options = {}) {
-  return { adapter: PLAN_ADAPTER, model: PLAN_MODEL, ...options };
-}
-function reviewAgentOptions(options = {}) {
-  return { adapter: REVIEW_ADAPTER, model: REVIEW_MODEL, ...options };
-}
-function triageAgentOptions(options = {}) {
-  return { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL, ...options };
-}
-function assessmentAgentOptions(options = {}) {
-  return { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL, ...options };
-}
-async function withInfraRetry(run, label) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await run();
-    } catch (error) {
-      const message = error && error.message || String(error);
-      if (attempt >= STAGE_ATTEMPTS || !infrastructureFailureDetail(message)) throw error;
-      faultMetrics.infraRetries += 1;
-      log(`[${label}] infrastructure fault (${message}); retrying the stage agent (attempt ${attempt + 1} of ${STAGE_ATTEMPTS})`);
-    }
-  }
-}
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, "'\\''")}'`;
-}
-async function fileState(pathValue, baseDir = process.cwd()) {
-  if (!pathValue) return { ok: true, exists: false, detail: "" };
-  const path = process.getBuiltinModule("node:path");
-  const candidate = path.isAbsolute(String(pathValue)) ? String(pathValue) : path.join(baseDir, String(pathValue));
-  const fs = process.getBuiltinModule("node:fs/promises");
-  try {
-    const stat = await fs.stat(candidate);
-    return { ok: true, exists: stat.isFile(), detail: "" };
-  } catch (error) {
-    if (error && (error.code === "ENOENT" || error.code === "ENOTDIR")) {
-      return { ok: true, exists: false, detail: "" };
-    }
-    return { ok: false, exists: false, detail: `stat failed for ${candidate}: ${error && error.message || String(error)}` };
-  }
-}
-function grepaiSearchCommand() {
-  const workspaceArg = shellQuote(GREPAI_WORKSPACE);
-  const projectArg = GREPAI_PROJECT ? shellQuote(GREPAI_PROJECT) : "$(get-project)";
-  return `grepai search --workspace ${workspaceArg} --project ${projectArg} "<English intent query>" --toon --compact`;
-}
-function memtraceRepoGuidance() {
-  return MEMTRACE_REPO_ID ? `Use repo_id ${shellQuote(MEMTRACE_REPO_ID)} for Memtrace calls after confirming it appears in list_indexed_repositories.` : "Call list_indexed_repositories first and select the repo_id for this project before using other Memtrace tools.";
-}
-function codeSearchGuidance() {
-  if (SEARCH_BACKEND === "memtrace") {
-    return `Use the Memtrace MCP server as the PRIMARY tool for canonical main-branch code search and graph context. ${memtraceRepoGuidance()} Use find_code for intent/concept search, find_symbol for exact identifiers, list_communities/find_central_symbols for orientation, get_symbol_context/get_impact/get_timeline before changing load-bearing symbols, and get_source_window only for bounded source reads. Treat Memtrace's committed/main view as canonical context, not branch-local evidence; verify every branch-local or newly changed fact directly inside your worktree with \`leta\`, exact text search, or file inspection before acting. If a Memtrace MCP call is unavailable because the host session rejects, cancels, or lacks the tool, record that exact tooling failure in the ExecPlan and continue with bounded branch-local evidence; do not make the plan impossible to execute solely because Memtrace was unavailable in the planning session. Memtrace unavailability is not a valid reason to set ExecPlan status to BLOCKED.`;
-  }
-  if (SEARCH_BACKEND !== "grepai") {
-    throw new Error(`Unsupported searchBackend: ${SEARCH_BACKEND}`);
-  }
-  return `Use \`${grepaiSearchCommand()}\` as the PRIMARY tool for intent/concept code search against the canonical main-branch index. The grepai index reflects \`main\` only: never treat it as evidence for branch-local or newly changed code. Verify every branch-local fact directly inside your worktree with \`leta\`, exact text search, or file inspection before acting. If GrepAI is unavailable in the agent session, record the exact tooling failure in the ExecPlan and continue with bounded branch-local evidence; do not make the plan impossible to execute solely because GrepAI was unavailable.`;
-}
-function preamble(worktree) {
-  const loc = worktree ? `Work EXCLUSIVELY inside the git-donkey worktree at ${worktree}. cd into it before doing anything. Never read-modify-write any file in the root/control worktree; it is off-limits for edits.` : `This is a read-only / setup step. Do not edit any file in the root/control worktree.`;
-  return [
-    "You are a sub-agent in the df12-build roadmap workflow. Your final message IS your return value \u2014 return data, not chat.",
-    "",
-    "Standing rules (apply to every step, no exceptions):",
-    `- ${loc}`,
-    "- File edits must target the assigned git-donkey worktree. When using an edit tool whose target is not scoped by shell `cd` or command `workdir`, use absolute paths under the assigned worktree; never let relative edit paths hit the root/control worktree.",
-    `- ${codeSearchGuidance()}`,
-    "- Use `leta` for symbol navigation, references, call graphs, and branch-local verification (leta show / refs / grep / files) instead of ad-hoc ripgrep or read-file. If Leta is unavailable because its daemon or workspace tooling fails, record the exact failure and fall back to precise file inspection for the current task; do not add a hard implementation blocker solely for a transient Leta startup failure. Leta unavailability is not a valid reason to set ExecPlan status to BLOCKED.",
-    "- Use `sem` for codebase history navigation (semantic, entity-level diffs and blame) instead of raw git log/blame.",
-    "- Load the appropriate language router skill for any code you touch: python-router for Python, rust-router for Rust, and the matching router for other languages. Follow the smaller skills it routes you to.",
-    `- Treat docs/ as the source of truth: ${DESIGN_DOCS}, the developers guide, any users guide present, the coding/scripting standards, and AGENTS.md. Obey AGENTS.md quality gates and the en-GB Oxford-spelling ("-ize"/"-yse"/"-our") convention in all prose, comments, and commits.`,
-    `- ${COMMIT_GATE_GUIDANCE}`,
-    `- The integration branch is "${BASE}"; treat origin/${BASE} as canonical. The roadmap lives at ${ROADMAP}.`,
-    "- Format ONLY the files you changed: run the markdown formatter on the specific paths you touched (`mdtablefix \u2026 <files>` then `markdownlint-cli2 --fix <files>`), then gate. Do NOT run a repo-global format such as `make fmt` / `mdformat-all` that reformats unrelated files \u2014 that churn only has to be parked and discarded.",
-    '- Never `git stash` with a bare or default message. Name every stash so a deterministic sweeper can tie it to a task and clear it safely: `df12-stash v1 task=<this roadmap id> kind=<discard|park|keep> reason="<short>"`. Formatter or build churn you park is kind=discard; anything you must re-apply later is kind=keep.',
-    "- Signpost the documentation and skills you relied on in your output so the next agent can follow the same trail.",
-    ""
-  ].join("\n");
-}
+// src/workflows/df12-build-odw/schemas.ts
 var PLAN_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -470,6 +321,157 @@ var ASSESSMENT_SCHEMA = {
     "nextActions"
   ]
 };
+
+// src/workflows/df12-build-odw/main.js
+var cfg = args || {};
+var PROJECT_ROOT = cfg.projectRoot || process.cwd();
+if (PROJECT_ROOT !== process.cwd()) {
+  const fs = process.getBuiltinModule("node:fs");
+  if (!fs.statSync(PROJECT_ROOT).isDirectory()) {
+    throw new Error(`Configured projectRoot is not a directory: ${PROJECT_ROOT}`);
+  }
+  process.chdir(PROJECT_ROOT);
+}
+var BASE = cfg.base || "main";
+var ROADMAP = cfg.roadmap || "docs/roadmap.md";
+var DESIGN_DOCS = cfg.designDocs || "the design document(s) and the ADRs (docs/adr-*.md) under docs/";
+var RESEARCH_NOTE = cfg.researchNote || null;
+var ONLY_TASK = cfg.taskId || null;
+var MAX_TASKS = ONLY_TASK ? 1 : cfg.maxTasks || 12;
+var MAX_PARALLEL = ONLY_TASK ? 1 : Math.max(1, cfg.maxParallel || 16);
+var MAX_PLANNING_PARALLEL = Math.max(1, cfg.maxPlanningParallel || cfg.maxPlanParallel || 8);
+var MAX_BUILD_PARALLEL = Math.max(1, cfg.maxBuildParallel || 8);
+var MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4;
+var MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3;
+var STAGE_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2));
+var faultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 };
+var AUTO_MERGE = cfg.autoMerge !== false;
+var DOCUMENT_AUDIT = cfg.documentAudit !== false;
+var DRY_RUN = cfg.dryRun === true;
+var AUTH_PREFLIGHT = cfg.authPreflight !== false;
+var REQUIRE_CODERABBIT_AUTH = cfg.requireCoderabbitAuth !== false && !DRY_RUN;
+var ASSESS_PARTIAL_BRANCHES = cfg.assessPartialBranches !== false;
+var RESUME_PARTIAL_BRANCHES = cfg.resumePartialBranches === true;
+var RESUME_MODE = String(cfg.resumeMode || "assess").toLowerCase();
+if (!["assess", "review", "continue"].includes(RESUME_MODE)) {
+  throw new Error(`Unsupported resumeMode: ${RESUME_MODE} (use "assess", "review", or "continue")`);
+}
+var RESUME_TASK_ID = cfg.resumeTaskId ? String(cfg.resumeTaskId) : null;
+var RESUME_MAX_CANDIDATES_RAW = Number(cfg.resumeMaxCandidates ?? 4);
+var RESUME_MAX_CANDIDATES = Number.isFinite(RESUME_MAX_CANDIDATES_RAW) ? Math.max(1, Math.floor(RESUME_MAX_CANDIDATES_RAW)) : 4;
+var WORKTREE_WRITE_PREFLIGHT = cfg.worktreeWritePreflight !== false;
+var BUDGET_RESERVE = 8e4;
+var SEARCH_BACKEND = String(cfg.searchBackend || cfg.codeSearchBackend || (cfg.memtraceRepoId ? "memtrace" : "grepai")).toLowerCase();
+var GREPAI_WORKSPACE = cfg.grepaiWorkspace || "Projects";
+var GREPAI_PROJECT = cfg.grepaiProject || (SEARCH_BACKEND === "grepai" ? cfg.project : null) || null;
+var MEMTRACE_REPO_ID = cfg.memtraceRepoId || (SEARCH_BACKEND === "memtrace" ? cfg.project : null) || null;
+var BUILD_ADAPTER = cfg.buildAdapter || "codex-medium";
+var PLAN_ADAPTER = cfg.planAdapter || "claude";
+var REVIEW_ADAPTER = cfg.reviewAdapter || "claude";
+var TRIAGE_ADAPTER = cfg.triageAdapter || "codex";
+var ASSESSMENT_ADAPTER = cfg.assessmentAdapter || REVIEW_ADAPTER;
+var BUILD_MODEL = cfg.buildModel || "gpt-5.5";
+var PLAN_MODEL = cfg.planModel || "claude-opus-4-8";
+var REVIEW_MODEL = cfg.reviewModel || "claude-opus-4-8";
+var TRIAGE_MODEL = cfg.triageModel || "gpt-5.5@high";
+var ASSESSMENT_MODEL = cfg.assessmentModel || REVIEW_MODEL;
+var AUTH_REQUIRED_ADAPTERS = new Set([
+  BUILD_ADAPTER,
+  PLAN_ADAPTER,
+  REVIEW_ADAPTER,
+  TRIAGE_ADAPTER,
+  ASSESSMENT_ADAPTER
+].map((adapter) => String(adapter || "").toLowerCase()));
+var CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || "coderabbit review --agent";
+var COMMIT_GATES = (Array.isArray(cfg.commitGates) && cfg.commitGates.length ? cfg.commitGates : ["make all"]).map((command) => String(command));
+var COMMIT_GATE_TEXT = COMMIT_GATES.map((command) => `\`${command}\``).join(" then ");
+var COMMIT_GATE_GUIDANCE = `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well \u2014 NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.`;
+var CODERABBIT_REVIEW_GUIDANCE = "Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.";
+var SPARK_DELEGATION_GUIDANCE = "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks.";
+var SCRUTINEER_DELEGATION_GUIDANCE = `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`;
+function buildAgentOptions(options = {}) {
+  return { adapter: BUILD_ADAPTER, model: BUILD_MODEL, ...options };
+}
+function planAgentOptions(options = {}) {
+  return { adapter: PLAN_ADAPTER, model: PLAN_MODEL, ...options };
+}
+function reviewAgentOptions(options = {}) {
+  return { adapter: REVIEW_ADAPTER, model: REVIEW_MODEL, ...options };
+}
+function triageAgentOptions(options = {}) {
+  return { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL, ...options };
+}
+function assessmentAgentOptions(options = {}) {
+  return { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL, ...options };
+}
+async function withInfraRetry(run, label) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await run();
+    } catch (error) {
+      const message = error && error.message || String(error);
+      if (attempt >= STAGE_ATTEMPTS || !infrastructureFailureDetail(message)) throw error;
+      faultMetrics.infraRetries += 1;
+      log(`[${label}] infrastructure fault (${message}); retrying the stage agent (attempt ${attempt + 1} of ${STAGE_ATTEMPTS})`);
+    }
+  }
+}
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+async function fileState(pathValue, baseDir = process.cwd()) {
+  if (!pathValue) return { ok: true, exists: false, detail: "" };
+  const path = process.getBuiltinModule("node:path");
+  const candidate = path.isAbsolute(String(pathValue)) ? String(pathValue) : path.join(baseDir, String(pathValue));
+  const fs = process.getBuiltinModule("node:fs/promises");
+  try {
+    const stat = await fs.stat(candidate);
+    return { ok: true, exists: stat.isFile(), detail: "" };
+  } catch (error) {
+    if (error && (error.code === "ENOENT" || error.code === "ENOTDIR")) {
+      return { ok: true, exists: false, detail: "" };
+    }
+    return { ok: false, exists: false, detail: `stat failed for ${candidate}: ${error && error.message || String(error)}` };
+  }
+}
+function grepaiSearchCommand() {
+  const workspaceArg = shellQuote(GREPAI_WORKSPACE);
+  const projectArg = GREPAI_PROJECT ? shellQuote(GREPAI_PROJECT) : "$(get-project)";
+  return `grepai search --workspace ${workspaceArg} --project ${projectArg} "<English intent query>" --toon --compact`;
+}
+function memtraceRepoGuidance() {
+  return MEMTRACE_REPO_ID ? `Use repo_id ${shellQuote(MEMTRACE_REPO_ID)} for Memtrace calls after confirming it appears in list_indexed_repositories.` : "Call list_indexed_repositories first and select the repo_id for this project before using other Memtrace tools.";
+}
+function codeSearchGuidance() {
+  if (SEARCH_BACKEND === "memtrace") {
+    return `Use the Memtrace MCP server as the PRIMARY tool for canonical main-branch code search and graph context. ${memtraceRepoGuidance()} Use find_code for intent/concept search, find_symbol for exact identifiers, list_communities/find_central_symbols for orientation, get_symbol_context/get_impact/get_timeline before changing load-bearing symbols, and get_source_window only for bounded source reads. Treat Memtrace's committed/main view as canonical context, not branch-local evidence; verify every branch-local or newly changed fact directly inside your worktree with \`leta\`, exact text search, or file inspection before acting. If a Memtrace MCP call is unavailable because the host session rejects, cancels, or lacks the tool, record that exact tooling failure in the ExecPlan and continue with bounded branch-local evidence; do not make the plan impossible to execute solely because Memtrace was unavailable in the planning session. Memtrace unavailability is not a valid reason to set ExecPlan status to BLOCKED.`;
+  }
+  if (SEARCH_BACKEND !== "grepai") {
+    throw new Error(`Unsupported searchBackend: ${SEARCH_BACKEND}`);
+  }
+  return `Use \`${grepaiSearchCommand()}\` as the PRIMARY tool for intent/concept code search against the canonical main-branch index. The grepai index reflects \`main\` only: never treat it as evidence for branch-local or newly changed code. Verify every branch-local fact directly inside your worktree with \`leta\`, exact text search, or file inspection before acting. If GrepAI is unavailable in the agent session, record the exact tooling failure in the ExecPlan and continue with bounded branch-local evidence; do not make the plan impossible to execute solely because GrepAI was unavailable.`;
+}
+function preamble(worktree) {
+  const loc = worktree ? `Work EXCLUSIVELY inside the git-donkey worktree at ${worktree}. cd into it before doing anything. Never read-modify-write any file in the root/control worktree; it is off-limits for edits.` : `This is a read-only / setup step. Do not edit any file in the root/control worktree.`;
+  return [
+    "You are a sub-agent in the df12-build roadmap workflow. Your final message IS your return value \u2014 return data, not chat.",
+    "",
+    "Standing rules (apply to every step, no exceptions):",
+    `- ${loc}`,
+    "- File edits must target the assigned git-donkey worktree. When using an edit tool whose target is not scoped by shell `cd` or command `workdir`, use absolute paths under the assigned worktree; never let relative edit paths hit the root/control worktree.",
+    `- ${codeSearchGuidance()}`,
+    "- Use `leta` for symbol navigation, references, call graphs, and branch-local verification (leta show / refs / grep / files) instead of ad-hoc ripgrep or read-file. If Leta is unavailable because its daemon or workspace tooling fails, record the exact failure and fall back to precise file inspection for the current task; do not add a hard implementation blocker solely for a transient Leta startup failure. Leta unavailability is not a valid reason to set ExecPlan status to BLOCKED.",
+    "- Use `sem` for codebase history navigation (semantic, entity-level diffs and blame) instead of raw git log/blame.",
+    "- Load the appropriate language router skill for any code you touch: python-router for Python, rust-router for Rust, and the matching router for other languages. Follow the smaller skills it routes you to.",
+    `- Treat docs/ as the source of truth: ${DESIGN_DOCS}, the developers guide, any users guide present, the coding/scripting standards, and AGENTS.md. Obey AGENTS.md quality gates and the en-GB Oxford-spelling ("-ize"/"-yse"/"-our") convention in all prose, comments, and commits.`,
+    `- ${COMMIT_GATE_GUIDANCE}`,
+    `- The integration branch is "${BASE}"; treat origin/${BASE} as canonical. The roadmap lives at ${ROADMAP}.`,
+    "- Format ONLY the files you changed: run the markdown formatter on the specific paths you touched (`mdtablefix \u2026 <files>` then `markdownlint-cli2 --fix <files>`), then gate. Do NOT run a repo-global format such as `make fmt` / `mdformat-all` that reformats unrelated files \u2014 that churn only has to be parked and discarded.",
+    '- Never `git stash` with a bare or default message. Name every stash so a deterministic sweeper can tie it to a task and clear it safely: `df12-stash v1 task=<this roadmap id> kind=<discard|park|keep> reason="<short>"`. Formatter or build churn you park is kind=discard; anything you must re-apply later is kind=keep.',
+    "- Signpost the documentation and skills you relied on in your output so the next agent can follow the same trail.",
+    ""
+  ].join("\n");
+}
 var TASK_LINE_RE = /^(\s*)-\s+\[([ xX])\]\s+(\d+(?:\.\d+)+)\.\s*(.*)$/;
 var REQUIRES_LINE_RE = /^\s*-\s+Requires\s+(.+?)\.?\s*$/;
 var STEP_RANGE_RE = /\bsteps?\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)\b/gi;

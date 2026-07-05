@@ -142,7 +142,14 @@ Planned work:
   missing or renamed in the bundle. Enforcement spot-checked in-tree: an
   `enum` fails typecheck with TS1294, and reverts cleanly. `make all`
   green including Dafny (4 verified, 0 errors).
-- [ ] Milestone 1: schemas and shared types (`schemas.ts`, `types.ts`).
+- [x] (2026-07-05 20:10Z) Milestone 1: schemas and shared types. All eight
+  agent schema constants plus `ASSESSMENT_CLASSIFICATIONS` peeled to
+  `schemas.ts`; `types.ts` names `RoadmapTask`, `SelectedTask`,
+  `RecoveryCandidate`, and `FaultMetrics`. New direct-import contract
+  suite `tests/modules/schemas.test.ts` (red-then-green): closed-object
+  and required-exists checks over every schema, enum ↔ ADR 002
+  classification, mock-satisfiability of `dirtyState`. Milestone 0's
+  CodeRabbit review returned zero findings before this milestone began.
 - [ ] Milestone 2: roadmap parsing and selection (`roadmap.ts`).
 - [ ] Milestone 3: process and failure-classification helpers
   (`exec.ts`, `faults.ts`).
