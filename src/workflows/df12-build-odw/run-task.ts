@@ -24,6 +24,8 @@ import {
   hasOnlyDeferredReviewIssues,
   implementationAuthFailureDetail,
 } from './assessment.ts'
+import { coderabbitBlockingItems, coderabbitCapture } from './host-review.ts'
+import type { CoderabbitReview, HostGateRun } from './host-review.ts'
 import { readExecplanState } from './recovery-discovery.ts'
 import {
   DESIGN_VERDICT_SCHEMA,
@@ -78,12 +80,17 @@ type AgentOptions = (options: Record<string, unknown>) => Record<string, unknown
 export interface TaskPipelineDeps {
   MAX_DESIGN_ROUNDS: number
   MAX_REVIEW_ROUNDS: number
+  MAX_WORK_ITEM_ROUNDS: number
+  PER_WORK_ITEM_BUILD: boolean
+  HOST_COMMIT_GATES: boolean
+  CODERABBIT_HOST_REVIEW: boolean
   DRY_RUN: boolean
   AUTO_MERGE: boolean
   BASE: string
   planPrompt: (task: SelectedTask, worktree: string, priorVerdict: DesignVerdict | null, round: number, opts?: Record<string, unknown>) => string
   designReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, round: number) => string
   implementPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, opts?: Record<string, unknown>) => string
+  implementWorkItemPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, item: { text: string }, opts?: Record<string, unknown>) => string
   fixPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, blocking: string[], round: number) => string
   codeReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan) => string
   expertReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan) => string
@@ -95,9 +102,13 @@ export interface TaskPipelineDeps {
   buildAgentOptions: AgentOptions
   planningLock: Lock
   buildLock: Lock
+  hostGateLock: Lock
   withInfraRetry: <T>(run: () => Promise<T>, label: string) => Promise<T>
   attachAssessment: (task: SelectedTask, wt: { branch?: string; worktreePath?: string; baseSha?: string }, result: StageResult) => Promise<StageResult>
   ensureTaskAgentWriteAccess: (worktree: string, tag: string) => Promise<{ ok: boolean; failures: Array<{ adapter: string; detail: string }> }>
+  runHostCommitGates: (worktree: string, tag: string, roundLabel: string) => Promise<HostGateRun>
+  runCoderabbitHostReview: (worktree: string, label: string) => Promise<CoderabbitReview>
+  recordCoderabbitReview: (label: string, review: CoderabbitReview) => Promise<void>
   createWorktree: (task: SelectedTask) => Promise<{ ok?: boolean; worktreePath?: string; branch?: string; baseSha?: string; notes?: string } | null>
 }
 
@@ -131,12 +142,17 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
   const {
     MAX_DESIGN_ROUNDS,
     MAX_REVIEW_ROUNDS,
+    MAX_WORK_ITEM_ROUNDS,
+    PER_WORK_ITEM_BUILD,
+    HOST_COMMIT_GATES,
+    CODERABBIT_HOST_REVIEW,
     DRY_RUN,
     AUTO_MERGE,
     BASE,
     planPrompt,
     designReviewPrompt,
     implementPrompt,
+    implementWorkItemPrompt,
     fixPrompt,
     codeReviewPrompt,
     expertReviewPrompt,
@@ -148,10 +164,14 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     buildAgentOptions,
     planningLock,
     buildLock,
+    hostGateLock,
     withInfraRetry,
     attachAssessment,
     ensureTaskAgentWriteAccess,
     createWorktree,
+    runHostCommitGates,
+    runCoderabbitHostReview,
+    recordCoderabbitReview,
   } = deps
 
   async function runPlanDesignLoop(task: SelectedTask, worktree: string, opts: Record<string, unknown> = {}): Promise<{ plan?: StagePlan; fail?: StageResult }> {
@@ -261,10 +281,106 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     }
   }
 
+  // The host-driven build loop: one builder turn per unticked Progress item in
+  // the committed ExecPlan, with committed progress verified after every turn.
+  // The checklist — not the agent's say-so — decides when the build is done.
+  // Returns null when the plan has no checklist (caller falls back to the
+  // single-turn build), { fail } on failure, or { impl } with an aggregate
+  // implementation report on success.
+  async function runWorkItemBuildLoop(task: SelectedTask, worktree: string, plan: StagePlan, opts: Record<string, unknown> = {}): Promise<{ impl?: StageImpl; fail?: StageResult } | null> {
+    const tag = task.id
+    const extra = (opts.extra as Record<string, unknown>) || {}
+    const fail = (detail: string, openIssues: string[] = []) => ({ fail: { id: tag, status: 'failed', stage: 'implement', detail, openIssues, worktree, proposals: [], ...extra } })
+    const contained = execplanRelPath(worktree, plan.execplanPath)
+    if (!contained.ok) return fail(contained.detail)
+    const planRef = { worktreePath: worktree, execplanPath: contained.relPath }
+    const initial = await readExecplanState(planRef)
+    if (initial.status === 'unreadable') return fail(`could not read the committed ExecPlan: ${initial.error}`)
+    if (initial.status === 'missing') return fail(`the ExecPlan disappeared before the build: ${contained.relPath}`)
+    if (!(initial.items || []).length) return null
+    const commits: string[] = []
+    const openIssues: string[] = []
+    let coderabbitRuns = 0
+    let lastImpl: StageImpl | null = null
+    let noProgressNote = ''
+    let strikes = 0
+    for (let round = 1; round <= MAX_WORK_ITEM_ROUNDS; round++) {
+      const before = await readExecplanState(planRef)
+      if (before.status === 'unreadable') return fail(`could not read the committed ExecPlan: ${before.error}`, openIssues)
+      const item = (before.items || []).find((entry) => !entry.ticked)
+      if (!item) break
+      const label = `implement:${tag} wi${round}`
+      const impl = (await buildLock(() => withInfraRetry(() => agent(implementWorkItemPrompt(task, worktree, plan, item, { ...opts, noProgressNote }), buildAgentOptions({
+        phase: 'Implement',
+        label,
+        schema: IMPL_SCHEMA,
+      })), label))) as StageImpl | null
+      lastImpl = impl
+      const authDetail = implementationAuthFailureDetail(impl)
+      if (authDetail) {
+        return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
+      }
+      if (!impl || !impl.ok || !impl.gatesGreen) {
+        return fail(impl?.summary || `work item did not reach a green state: ${item.text}`, impl?.openIssues || [])
+      }
+      if (Array.isArray(impl.commits)) commits.push(...(impl.commits as string[]))
+      openIssues.push(...(impl.openIssues || []))
+      coderabbitRuns += Number(impl.coderabbitRuns) || 0
+      // Host-verified durability per turn: a dirty worktree or an uncommitted
+      // tick would silently stall the loop, so both are checked here.
+      const committed = await verifyWorktreeCommitted(worktree)
+      if (!committed.ok) {
+        return fail(`work item returned ok but left uncommitted state in the worktree (${committed.detail}); every work item must be committed before returning`, openIssues)
+      }
+      const after = await readExecplanState(planRef)
+      if (after.status === 'unreadable') return fail(`could not re-read the committed ExecPlan: ${after.error}`, openIssues)
+      if (after.unticked >= before.unticked) {
+        strikes += 1
+        noProgressNote = `your previous turn returned ok but the committed ExecPlan still shows ${after.unticked} unticked Progress item(s) (it had ${before.unticked} before the turn); tick the work item you completed in ## Progress and commit the plan update together with the work`
+        log(`[task ${tag}] work-item round ${round}: no committed Progress movement (strike ${strikes} of 2)`)
+        if (strikes >= 2) {
+          return fail(`the work-item build made no committed ExecPlan progress in two consecutive turns; ${after.unticked} Progress item(s) remain unticked`, openIssues)
+        }
+      } else {
+        strikes = 0
+        noProgressNote = ''
+        log(`[task ${tag}] work-item round ${round}: ${after.ticked}/${after.ticked + after.unticked} Progress item(s) committed`)
+      }
+    }
+    const final = await readExecplanState(planRef)
+    const remaining = (final.items || []).filter((entry) => !entry.ticked)
+    if (remaining.length) {
+      return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0].text}`, openIssues)
+    }
+    return {
+      impl: {
+        ok: true,
+        gatesGreen: true,
+        execplanPath: contained.relPath,
+        workItemsCompleted: final.ticked,
+        workItemsTotal: final.ticked + final.unticked,
+        commits: commits.slice(0, 50),
+        coderabbitRuns,
+        openIssues: [...new Set(openIssues)].slice(0, 20),
+        summary: lastImpl?.summary || 'work-item build completed from the committed ExecPlan checklist',
+      },
+    }
+  }
+
   async function runImplementationStage(task: SelectedTask, worktree: string, plan: StagePlan, opts: Record<string, unknown> = {}): Promise<{ impl?: StageImpl; fail?: StageResult }> {
     const tag = task.id
     const extra = (opts.extra as Record<string, unknown>) || {}
     phase('Implement')
+    if (PER_WORK_ITEM_BUILD) {
+      const itemised = await runWorkItemBuildLoop(task, worktree, plan, opts)
+      // null means the plan carries no Progress checklist: fall back to the
+      // single-turn whole-task build below.
+      if (itemised) {
+        if (itemised.fail) return itemised
+        return finishImplementationStage(task, worktree, plan, itemised.impl as StageImpl, extra)
+      }
+      log(`[task ${tag}] the committed ExecPlan has no Progress checklist; falling back to the single-turn build`)
+    }
     const impl = (await buildLock(() => withInfraRetry(() => agent(implementPrompt(task, worktree, plan, opts), buildAgentOptions({
       phase: 'Implement',
       label: `implement:${tag}`,
@@ -288,6 +404,13 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         },
       }
     }
+    return finishImplementationStage(task, worktree, plan, impl, extra)
+  }
+
+  // Shared tail of the implementation stage: the committed-worktree durability
+  // gate and the plan-status advisory, identical for both build modes.
+  async function finishImplementationStage(task: SelectedTask, worktree: string, plan: StagePlan, impl: StageImpl, extra: Record<string, unknown>): Promise<{ impl?: StageImpl; fail?: StageResult }> {
+    const tag = task.id
     // Host-verified durability gate: ok=true with a dirty worktree is a
     // contract violation — uncommitted work is unreviewable and would be lost
     // at the squash merge, so fail fast with the exact paths.
@@ -328,7 +451,25 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     const proposals: Array<Record<string, unknown>> = []
     const reviewRounds: Array<Record<string, unknown>> = []
     let reviewsPass = false
+    const coderabbitDeferred: string[] = []
     for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
+      // Host-verified gates FIRST: deterministic, zero tokens, and a red
+      // branch must not spend reviewer agents. A red gate goes straight to a
+      // fix round carrying the host log evidence.
+      let hostGates: HostGateRun | null = null
+      if (HOST_COMMIT_GATES) {
+        hostGates = await hostGateLock(() => runHostCommitGates(worktree, tag, `r${round}`))
+        if (!hostGates.green) {
+          log(`[task ${tag}] host commit gates red in round ${round}`)
+          const gateBlocking = [`HOST GATES RED: ${hostGates.detail} The agent-reported gate status was wrong or is stale — reproduce the failure from the log, fix it, re-run the gates to green, and commit.`]
+          reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: gateBlocking, hostGates: hostGates.results, fix: null })
+          if (round === MAX_REVIEW_ROUNDS) break
+          phase('Implement')
+          const gateFix = await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, gateBlocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`))
+          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(gateFix as Record<string, unknown> | null)
+          continue
+        }
+      }
       // parallel() resolves a thrown thunk to null, which would make an adapter
       // timeout indistinguishable from a reviewer that returned nothing — so
       // each reviewer retries infra faults and records any residual one here.
@@ -378,11 +519,33 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
           ...kindExtra,
         }
       }
+      // Host-run CodeRabbit review of the committed diff, sequential after the
+      // reviewer agents (its rate-limit backoff must never outlive the round).
+      // Blocking severities join the fix round; a persistent rate limit or CLI
+      // fault defers with a documented open issue, the same contract as the
+      // legacy agent-run flow — the dual reviewers remain decisive.
+      let coderabbitBlocking: string[] = []
+      if (CODERABBIT_HOST_REVIEW) {
+        const coderabbit = await runCoderabbitHostReview(worktree, `coderabbit:${tag} r${round}`)
+        await recordCoderabbitReview(`${tag} r${round}`, coderabbit)
+        if (coderabbit.outcome === 'auth') {
+          return { id: tag, status: 'fatal-auth', stage: 'review', detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, reviewRounds, worktree, proposals, ...kindExtra }
+        }
+        if (coderabbit.outcome === 'rate-limited' || coderabbit.outcome === 'error') {
+          coderabbitCapture.deferred += 1
+          coderabbitDeferred.push(`CodeRabbit review deferred in round ${round} (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`)
+          log(`[task ${tag}] CodeRabbit host review deferred in round ${round}: ${coderabbit.outcome} (${coderabbit.detail})`)
+        } else {
+          coderabbitBlocking = coderabbitBlockingItems(coderabbit.findings)
+          log(`[task ${tag}] CodeRabbit host review round ${round}: ${coderabbit.findings.length} finding(s), ${coderabbitBlocking.length} blocking`)
+        }
+      }
       const blocking = [
         ...(codeReview.blocking || []),
         ...(expertReview.blocking || []),
+        ...coderabbitBlocking,
       ]
-      const roundRecord: Record<string, unknown> = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, fix: null }
+      const roundRecord: Record<string, unknown> = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, ...(hostGates ? { hostGates: hostGates.results } : {}), fix: null }
       reviewRounds.push(roundRecord)
       if (blocking.length === 0 && codeReview?.verdict === 'pass' && expertReview?.verdict === 'pass') {
         reviewsPass = true
@@ -445,10 +608,10 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, ...kindExtra }
       }
     } else {
-      return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals, ...kindExtra }
+      return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals, ...(coderabbitDeferred.length ? { openIssues: coderabbitDeferred } : {}), ...kindExtra }
     }
 
-    return { id: tag, status: 'done', plan, impl, integration, worktree, proposals, ...kindExtra }
+    return { id: tag, status: 'done', plan, impl, integration, worktree, proposals, ...(coderabbitDeferred.length ? { openIssues: coderabbitDeferred } : {}), ...kindExtra }
   }
 
   async function runTask(task: SelectedTask, mergeLock: MergeLock): Promise<StageResult> {
@@ -534,6 +697,36 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: impl?.summary || 'addendum did not reach a green state or left open issues', openIssues: impl?.openIssues || [], worktree, proposals: [], kind: 'addendum' })
       }
       const proposals: Array<Record<string, unknown>> = []
+      const addendumOpenIssues: string[] = []
+      // Host-verified gates: addenda have no review rounds, so a gatesGreen
+      // claim the host cannot reproduce fails here, before any review spend.
+      if (HOST_COMMIT_GATES) {
+        const hostGates = await hostGateLock(() => runHostCommitGates(worktree, tag, 'addendum'))
+        if (!hostGates.green) {
+          return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: `addendum reported green gates but the host could not reproduce them: ${hostGates.detail}`, openIssues, worktree, proposals, kind: 'addendum' })
+        }
+      }
+      // Host-run CodeRabbit review of the committed addendum work. Blocking
+      // severities halt the addendum for assessment (addenda have no fix loop);
+      // a persistent rate limit or CLI fault defers with a documented open
+      // issue, mirroring the dual-review contract.
+      if (CODERABBIT_HOST_REVIEW) {
+        phase('Code Review')
+        const coderabbit = await runCoderabbitHostReview(worktree, `coderabbit:${tag} addendum`)
+        await recordCoderabbitReview(`${tag} addendum`, coderabbit)
+        if (coderabbit.outcome === 'auth') {
+          return { id: tag, status: 'fatal-auth', stage: 'auth', detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, worktree, proposals, kind: 'addendum' }
+        }
+        const blockingFindings = coderabbitBlockingItems(coderabbit.findings)
+        if (blockingFindings.length) {
+          return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: `CodeRabbit host review found blocking issue(s): ${blockingFindings.join('; ')}`, impl, worktree, proposals, kind: 'addendum' })
+        }
+        if (coderabbit.outcome === 'rate-limited' || coderabbit.outcome === 'error') {
+          coderabbitCapture.deferred += 1
+          addendumOpenIssues.push(`CodeRabbit review deferred (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`)
+          log(`[task ${tag}] CodeRabbit host review deferred for the addendum: ${coderabbit.outcome} (${coderabbit.detail})`)
+        }
+      }
       let addendumReview: StageReview | null = null
       if (onlyDeferredReviewIssues) {
         phase('Code Review')
@@ -575,9 +768,9 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
           return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, kind: 'addendum' })
         }
       } else {
-        return { id: tag, status: 'manual-merge-ready', impl, addendumReview, integration, worktree, proposals, kind: 'addendum' }
+        return { id: tag, status: 'manual-merge-ready', impl, addendumReview, integration, worktree, proposals, ...(addendumOpenIssues.length ? { openIssues: addendumOpenIssues } : {}), kind: 'addendum' }
       }
-      return { id: tag, status: 'done', impl, addendumReview, integration, worktree, proposals, kind: 'addendum' }
+      return { id: tag, status: 'done', impl, addendumReview, integration, worktree, proposals, ...(addendumOpenIssues.length ? { openIssues: addendumOpenIssues } : {}), kind: 'addendum' }
     }
 
     // --- Plan <-> Design review (adversarial loop) --------------------------
@@ -617,5 +810,5 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     }
   }
 
-  return { runPlanDesignLoop, runImplementationStage, runDualReviewAndIntegration, runTask }
+  return { runPlanDesignLoop, runWorkItemBuildLoop, runImplementationStage, runDualReviewAndIntegration, runTask }
 }

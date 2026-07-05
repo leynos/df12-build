@@ -77,6 +77,8 @@ var RECOVERY_SKIP_REASONS = [
   "missing-validation-evidence",
   "missing-execplan",
   "plan-blocked",
+  "plan-unreadable",
+  "execplan-stat-error",
   "dry-run"
 ];
 function recoveryResumeEligibility(candidate, evidence, assessment) {
@@ -121,12 +123,17 @@ function parseExecplanState(text) {
   }
   let ticked = 0;
   let unticked = 0;
+  const items = [];
   const progressSection = source.split(/^##\s+/m).find((section) => /^progress\b/i.test(section)) || "";
   for (const line of progressSection.split(/\r?\n/)) {
-    if (/^\s*-\s+\[[xX]\]/.test(line)) ticked += 1;
-    else if (/^\s*-\s+\[ \]/.test(line)) unticked += 1;
+    const match = line.match(/^\s*-\s+\[([ xX])\]\s*(.*)$/);
+    if (!match) continue;
+    const isTicked = match[1] !== " ";
+    if (isTicked) ticked += 1;
+    else unticked += 1;
+    items.push({ text: match[2].trim(), ticked: isTicked });
   }
-  return { status, ticked, unticked };
+  return { status, ticked, unticked, items };
 }
 function recoveryContinueDecision(candidate, evidence, planState, flags = {}) {
   const report = (reason) => ({ action: "report", stage: null, reason, skip: true });
@@ -501,10 +508,10 @@ function candidateRoadmapComplete(task, isAddendum) {
 }
 
 // src/workflows/df12-build-odw/exec.ts
-async function execFileText(command, commandArgs) {
+async function execFileText(command, commandArgs, options = {}) {
   const { execFile } = process.getBuiltinModule("node:child_process");
   return await new Promise((resolve, reject) => {
-    execFile(command, [...commandArgs], { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile(command, [...commandArgs], { cwd: options.cwd || process.cwd(), maxBuffer: 16 * 1024 * 1024, ...options.timeoutMs ? { timeout: options.timeoutMs } : {} }, (error, stdout, stderr) => {
       if (error) {
         const failure = error;
         failure.stdout = stdout;
@@ -516,16 +523,20 @@ async function execFileText(command, commandArgs) {
     });
   });
 }
-async function execFileStatus(command, commandArgs) {
+async function execFileStatus(command, commandArgs, options = {}) {
   try {
-    return { ok: true, stdout: await execFileText(command, commandArgs), stderr: "" };
+    return { ok: true, stdout: await execFileText(command, commandArgs, options), stderr: "" };
   } catch (error) {
     const failure = error;
     return {
       ok: false,
       stdout: failure?.stdout || "",
       stderr: failure?.stderr || "",
-      message: failure && failure.message || String(error)
+      message: failure && failure.message || String(error),
+      // Set when the child was killed (e.g. by the timeoutMs option); the
+      // message alone does not say so.
+      killed: Boolean(failure?.killed),
+      signal: failure?.signal || ""
     };
   }
 }
@@ -811,7 +822,7 @@ function makeRecoveryDiscovery(limits) {
   };
 }
 async function readExecplanState(candidate) {
-  if (!candidate?.execplanPath) return { status: "missing", ticked: 0, unticked: 0 };
+  if (!candidate?.execplanPath) return { status: "missing", ticked: 0, unticked: 0, items: [] };
   const path = process.getBuiltinModule("node:path");
   try {
     const text = await readFileText(path.join(candidate.worktreePath || "", candidate.execplanPath));
@@ -819,12 +830,13 @@ async function readExecplanState(candidate) {
   } catch (error) {
     const failure = error;
     if (failure && (failure.code === "ENOENT" || failure.code === "ENOTDIR")) {
-      return { status: "missing", ticked: 0, unticked: 0 };
+      return { status: "missing", ticked: 0, unticked: 0, items: [] };
     }
     return {
       status: "unreadable",
       ticked: 0,
       unticked: 0,
+      items: [],
       error: `${candidate.execplanPath}: ${failure && failure.message || String(error)}`
     };
   }
@@ -870,6 +882,8 @@ function makeConfig(rawArgs) {
   const MAX_DESIGN_ROUNDS2 = cfg.maxDesignRounds || 4;
   const MAX_REVIEW_ROUNDS2 = cfg.maxReviewRounds || 3;
   const STAGE_ATTEMPTS2 = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2));
+  const PER_WORK_ITEM_BUILD2 = cfg.perWorkItemBuild !== false;
+  const MAX_WORK_ITEM_ROUNDS2 = Math.max(1, Math.trunc(Number(cfg.maxWorkItemRounds) || 16));
   const AUTO_MERGE2 = cfg.autoMerge !== false;
   const DOCUMENT_AUDIT2 = cfg.documentAudit !== false;
   const DRY_RUN2 = cfg.dryRun === true;
@@ -908,12 +922,23 @@ function makeConfig(rawArgs) {
     ASSESSMENT_ADAPTER2
   ].map((adapter) => String(adapter || "").toLowerCase()));
   const CODERABBIT_REVIEW_COMMAND2 = cfg.coderabbitReviewCommand || "coderabbit review --agent";
+  const CODERABBIT_HOST_REVIEW2 = cfg.coderabbitHostReview !== false;
+  const CODERABBIT_ATTEMPTS2 = Math.max(1, Math.trunc(Number(cfg.coderabbitAttempts) || 3));
+  const CODERABBIT_BACKOFF_MINUTES2 = (() => {
+    const range = Array.isArray(cfg.coderabbitBackoffMinutes) ? cfg.coderabbitBackoffMinutes : [];
+    const low = Math.max(1, Math.trunc(Number(range[0]) || 45));
+    const high = Math.max(low, Math.trunc(Number(range[1]) || 90));
+    return [low, high];
+  })();
+  const CODERABBIT_FINDINGS_FILE2 = String(cfg.coderabbitFindingsFile || "");
   const COMMIT_GATES2 = (Array.isArray(cfg.commitGates) && cfg.commitGates.length ? cfg.commitGates : ["make all"]).map((command) => String(command));
   const COMMIT_GATE_TEXT2 = COMMIT_GATES2.map((command) => `\`${command}\``).join(" then ");
-  const COMMIT_GATE_GUIDANCE = `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT2}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well \u2014 NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.`;
-  const CODERABBIT_REVIEW_GUIDANCE = "Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.";
+  const HOST_COMMIT_GATES2 = cfg.hostCommitGates !== false;
+  const COMMIT_GATE_TIMEOUT_SECONDS2 = Math.max(1, Math.trunc(Number(cfg.commitGateTimeoutSeconds) || 3600));
+  const COMMIT_GATE_GUIDANCE2 = `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT2}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well \u2014 NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.${HOST_COMMIT_GATES2 ? " The workflow host independently re-runs the configured gates against your committed HEAD before review and integration; a gatesGreen claim the host cannot reproduce fails the stage with the host gate log as evidence." : ""}`;
+  const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? "Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work \u2014 only committed changes reach the host review." : "Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.";
   const SPARK_DELEGATION_GUIDANCE = "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks.";
-  const SCRUTINEER_DELEGATION_GUIDANCE = `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND2}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`;
+  const SCRUTINEER_DELEGATION_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? `Delegate deterministic gate execution to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until the gates are green. ${CODERABBIT_REVIEW_GUIDANCE}` : `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND2}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`;
   return {
     PROJECT_ROOT: PROJECT_ROOT2,
     BASE: BASE2,
@@ -928,6 +953,8 @@ function makeConfig(rawArgs) {
     MAX_DESIGN_ROUNDS: MAX_DESIGN_ROUNDS2,
     MAX_REVIEW_ROUNDS: MAX_REVIEW_ROUNDS2,
     STAGE_ATTEMPTS: STAGE_ATTEMPTS2,
+    PER_WORK_ITEM_BUILD: PER_WORK_ITEM_BUILD2,
+    MAX_WORK_ITEM_ROUNDS: MAX_WORK_ITEM_ROUNDS2,
     AUTO_MERGE: AUTO_MERGE2,
     DOCUMENT_AUDIT: DOCUMENT_AUDIT2,
     DRY_RUN: DRY_RUN2,
@@ -956,9 +983,15 @@ function makeConfig(rawArgs) {
     ASSESSMENT_MODEL: ASSESSMENT_MODEL2,
     AUTH_REQUIRED_ADAPTERS: AUTH_REQUIRED_ADAPTERS2,
     CODERABBIT_REVIEW_COMMAND: CODERABBIT_REVIEW_COMMAND2,
+    CODERABBIT_HOST_REVIEW: CODERABBIT_HOST_REVIEW2,
+    CODERABBIT_ATTEMPTS: CODERABBIT_ATTEMPTS2,
+    CODERABBIT_BACKOFF_MINUTES: CODERABBIT_BACKOFF_MINUTES2,
+    CODERABBIT_FINDINGS_FILE: CODERABBIT_FINDINGS_FILE2,
+    HOST_COMMIT_GATES: HOST_COMMIT_GATES2,
+    COMMIT_GATE_TIMEOUT_SECONDS: COMMIT_GATE_TIMEOUT_SECONDS2,
     COMMIT_GATES: COMMIT_GATES2,
     COMMIT_GATE_TEXT: COMMIT_GATE_TEXT2,
-    COMMIT_GATE_GUIDANCE,
+    COMMIT_GATE_GUIDANCE: COMMIT_GATE_GUIDANCE2,
     CODERABBIT_REVIEW_GUIDANCE,
     SPARK_DELEGATION_GUIDANCE,
     SCRUTINEER_DELEGATION_GUIDANCE
@@ -979,8 +1012,9 @@ function makePrompts(config) {
     GREPAI_PROJECT,
     MEMTRACE_REPO_ID,
     COMMIT_GATE_TEXT: COMMIT_GATE_TEXT2,
-    COMMIT_GATE_GUIDANCE,
+    COMMIT_GATE_GUIDANCE: COMMIT_GATE_GUIDANCE2,
     CODERABBIT_REVIEW_COMMAND: CODERABBIT_REVIEW_COMMAND2,
+    CODERABBIT_HOST_REVIEW: CODERABBIT_HOST_REVIEW2,
     CODERABBIT_REVIEW_GUIDANCE,
     SPARK_DELEGATION_GUIDANCE,
     SCRUTINEER_DELEGATION_GUIDANCE
@@ -1015,7 +1049,7 @@ function makePrompts(config) {
       "- Use `sem` for codebase history navigation (semantic, entity-level diffs and blame) instead of raw git log/blame.",
       "- Load the appropriate language router skill for any code you touch: python-router for Python, rust-router for Rust, and the matching router for other languages. Follow the smaller skills it routes you to.",
       `- Treat docs/ as the source of truth: ${DESIGN_DOCS}, the developers guide, any users guide present, the coding/scripting standards, and AGENTS.md. Obey AGENTS.md quality gates and the en-GB Oxford-spelling ("-ize"/"-yse"/"-our") convention in all prose, comments, and commits.`,
-      `- ${COMMIT_GATE_GUIDANCE}`,
+      `- ${COMMIT_GATE_GUIDANCE2}`,
       `- The integration branch is "${BASE2}"; treat origin/${BASE2} as canonical. The roadmap lives at ${ROADMAP2}.`,
       "- Format ONLY the files you changed: run the markdown formatter on the specific paths you touched (`mdtablefix \u2026 <files>` then `markdownlint-cli2 --fix <files>`), then gate. Do NOT run a repo-global format such as `make fmt` / `mdformat-all` that reformats unrelated files \u2014 that churn only has to be parked and discarded.",
       '- Never `git stash` with a bare or default message. Name every stash so a deterministic sweeper can tie it to a task and clear it safely: `df12-stash v1 task=<this roadmap id> kind=<discard|park|keep> reason="<short>"`. Formatter or build churn you park is kind=discard; anything you must re-apply later is kind=keep.',
@@ -1041,11 +1075,12 @@ function makePrompts(config) {
       'Use the `execplans` skill and follow it exactly. Name the plan docs/execplans/<branch-leaf>.md within the worktree (branch leaf = the part after the last "/").',
       "The plan must:",
       "- Decompose the task into ordered, atomic work items, each independently committable and gate-passable.",
+      "- Record the work items in the `## Progress` section as one checklist line each, `- [ ] WI-<n>: <imperative title>`, in execution order. The workflow host reads this checklist to dispatch the build one work item at a time, so every implementable work item must appear as its own unticked line \u2014 preparation notes that are not build work must not be checklist lines.",
       `- Adhere to the design documents (${DESIGN_DOCS}), the developers guide, the coding standards, and AGENTS.md. Cite the exact sections/ADRs each work item implements.`,
       "- Signpost, per work item, the documentation to read and the skills to load (router skills, hypothesis/crosshair/mutmut for verification, etc.).",
       "- Specify the tests (unit, behavioural, property, snapshot, e2e) each work item must add or update, per the AGENTS.md testing rules.",
       "- The ExecPlan must be implementable as written. Do NOT set Status: BLOCKED merely because Memtrace, GrepAI, Leta, Firecrawl, sem, or another advisory tool is unavailable in your agent session. Record the failed command and use bounded local docs/source/tests as fallback evidence. Only mark blocked for a true product/design ambiguity or missing requirement that cannot be resolved from the repository.",
-      `- State the validation commands (${COMMIT_GATE_TEXT2}; plus \`make markdownlint\` and \`make nixie\` for markdown changes). ${COMMIT_GATE_GUIDANCE}`,
+      `- State the validation commands (${COMMIT_GATE_TEXT2}; plus \`make markdownlint\` and \`make nixie\` for markdown changes). ${COMMIT_GATE_GUIDANCE2}`,
       `- VALIDATION COMMANDS MUST BE PATH-SAFE: prefer repository gates such as ${COMMIT_GATE_TEXT2}, \`make markdownlint\`, and \`make nixie\` over hand-written file lists. If a work item lists direct formatter/linter commands, every listed path must definitely exist at that point in the work item. Do not include a file that the same work item may delete, an optional file such as an optional snapshot, or a file that the work item does not edit. If a path is conditional, make the command conditional (\`test -e path && \u2026\`) or omit that path and rely on the repository gate. This is a blocking design-review requirement.`,
       "",
       "RESEARCH before you commit to any mechanism \u2014 do not leave the implementer a menu of unverified workarounds:",
@@ -1091,9 +1126,11 @@ function makePrompts(config) {
       "",
       "For EACH execplan work item, in this exact order:",
       "  1. Implement the work item (code + tests + docs) per the plan and AGENTS.md.",
-      `  2. DETERMINISTIC GATE FIRST: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT2}, plus any further gate targets AGENTS.md names). If it reports failures, fix them yourself (format, lint, typecheck, tests, audit) and summon \`scrutineer\` again until green. For any markdown you touched, also have \`scrutineer\` run \`make markdownlint\` and \`make nixie\` and fix failures. Do not proceed to coderabbit until the deterministic gates are green.`,
-      `  3. THEN summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND2}\` from inside the worktree. Address actionable feedback yourself (highest severity first). After applying fixes, summon \`scrutineer\` again to re-run the commit gates and confirm they are still green.`,
-      `     - ${CODERABBIT_REVIEW_GUIDANCE}`,
+      `  2. DETERMINISTIC GATE FIRST: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT2}, plus any further gate targets AGENTS.md names). If it reports failures, fix them yourself (format, lint, typecheck, tests, audit) and summon \`scrutineer\` again until green. For any markdown you touched, also have \`scrutineer\` run \`make markdownlint\` and \`make nixie\` and fix failures.`,
+      ...CODERABBIT_HOST_REVIEW2 ? [`  3. ${CODERABBIT_REVIEW_GUIDANCE}`] : [
+        `  3. THEN summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND2}\` from inside the worktree. Address actionable feedback yourself (highest severity first). After applying fixes, summon \`scrutineer\` again to re-run the commit gates and confirm they are still green.`,
+        `     - ${CODERABBIT_REVIEW_GUIDANCE}`
+      ],
       "  4. Update the execplan IN PLACE with findings, progress (tick the work item), and any decisions or deviations, with rationale.",
       "  5. Commit the work item and the execplan update together as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).",
       "",
@@ -1103,6 +1140,32 @@ function makePrompts(config) {
       "",
       `${DRY_RUN2 ? "DRY RUN: do not run this step \u2014 it is skipped by the orchestrator." : ""}`,
       `When all work items are done, ensure the project commit gates (${COMMIT_GATE_TEXT2}) are green at HEAD. Return the completion counts, commit subjects, whether gates are green, the number of coderabbit runs, and any open issues.`
+    ].join("\n");
+  }
+  function implementWorkItemPrompt2(task, worktree, plan, item, opts = {}) {
+    return [
+      preamble2(worktree),
+      `TASK: Implement EXACTLY ONE work item of roadmap task ${task.id} ("${task.title}") from the approved ExecPlan at ${plan.execplanPath}.`,
+      "",
+      "THE WORK ITEM (the first unticked entry in the plan's ## Progress checklist):",
+      `  ${item.text}`,
+      "",
+      "Read the ExecPlan first: it carries the design citations, signposted docs and skills, and the tests this work item must add. Implement THIS work item completely (code + tests + docs per the plan) and NOTHING ELSE \u2014 do not start later work items and do not refactor beyond this item; the next builder turn continues from the committed state you leave.",
+      ...opts.noProgressNote ? ["", `PREVIOUS TURN DEFECT: ${opts.noProgressNote}`] : [],
+      "",
+      SPARK_DELEGATION_GUIDANCE,
+      "",
+      SCRUTINEER_DELEGATION_GUIDANCE,
+      "",
+      "Then, in this exact order:",
+      `  1. DETERMINISTIC GATE: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT2}, plus any further gate targets AGENTS.md names; \`make markdownlint\` and \`make nixie\` for any markdown you touched). Fix failures yourself and re-run until green. ${COMMIT_GATE_GUIDANCE2}`,
+      CODERABBIT_HOST_REVIEW2 ? `  2. ${CODERABBIT_REVIEW_GUIDANCE}` : `  2. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND2}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to confirm the gates are still green. ${CODERABBIT_REVIEW_GUIDANCE}`,
+      "  3. Update the ExecPlan IN PLACE: tick this work item in ## Progress and record findings, decisions, and deviations. If this was the first work item, also set the header Status to `IN PROGRESS`; if it was the LAST unticked item, set Status to `COMPLETE` together with the Outcomes & Retrospective update.",
+      "  4. Commit the work item and the ExecPlan update together as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).",
+      "",
+      "EXECPLAN DURABILITY CONTRACT: never return with the worktree dirty or the Progress tick uncommitted \u2014 the host verifies both after every turn and bounces the defect back to you.",
+      "",
+      "Return using the IMPL schema: ok=true only when this work item is complete, every gate is green at HEAD, and the tick is committed. Set workItemsCompleted/workItemsTotal to the plan's ticked/total counts after your commit."
     ].join("\n");
   }
   function fixPrompt2(task, worktree, plan, blocking, round) {
@@ -1117,7 +1180,7 @@ function makePrompts(config) {
       "The dual review returned the following BLOCKING items. Resolve every one:",
       ...blocking.map((b, i) => `  ${i + 1}. ${b}`),
       "",
-      `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT2}, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND2}\`, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth \u2014 never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
+      CODERABBIT_HOST_REVIEW2 ? `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT2}, plus markdownlint/nixie for markdown) first and green, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth \u2014 never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.` : `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT2}, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND2}\`, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth \u2014 never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
       "",
       "Return the commit subjects you added, whether every deterministic gate is green at HEAD after your fixes, the number of CodeRabbit runs you completed, how each blocking item was resolved, any open issues with reasons, and a short summary. This structured report is durable validation evidence for the branch \u2014 be precise about which gates ran and at which commit."
     ].join("\n");
@@ -1190,7 +1253,7 @@ function makePrompts(config) {
       "For EACH open sub-task, in id order:",
       "  1. Make ONLY the change the Addenda item describes. Do not expand scope.",
       `  2. DETERMINISTIC GATE: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT2}, plus any further gate targets AGENTS.md names). For any Markdown you touched, also have it run \`make markdownlint\` and \`make nixie\`. Fix until green.`,
-      `  3. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND2}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to re-run the commit gates and confirm green. ${CODERABBIT_REVIEW_GUIDANCE}`,
+      CODERABBIT_HOST_REVIEW2 ? `  3. ${CODERABBIT_REVIEW_GUIDANCE}` : `  3. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND2}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to re-run the commit gates and confirm green. ${CODERABBIT_REVIEW_GUIDANCE}`,
       `  4. Tick the sub-task in the Addenda checklist of its execplan (\`- [ ] ${task.id}.<n>\` \u2192 \`- [x] \u2026\`).`,
       "  5. Commit the sub-task and Addenda tick together as one atomic commit (en-GB imperative subject).",
       "",
@@ -1238,6 +1301,7 @@ function makePrompts(config) {
     planPrompt: planPrompt2,
     designReviewPrompt: designReviewPrompt2,
     implementPrompt: implementPrompt2,
+    implementWorkItemPrompt: implementWorkItemPrompt2,
     fixPrompt: fixPrompt2,
     codeReviewPrompt: codeReviewPrompt2,
     expertReviewPrompt: expertReviewPrompt2,
@@ -1582,6 +1646,151 @@ function makeRemediation({ preamble: preamble2, base, roadmap, triageAgentOption
   return { triagePrompt: triagePrompt2, runTriage: runTriage2 };
 }
 
+// src/workflows/df12-build-odw/host-review.ts
+function parseCoderabbitAgentOutput(stdout) {
+  const events = [];
+  const rawLines = [];
+  for (const line of String(stdout || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const event = JSON.parse(trimmed);
+      if (event && typeof event === "object") {
+        events.push(event);
+        continue;
+      }
+    } catch {
+    }
+    rawLines.push(trimmed);
+  }
+  return {
+    events,
+    rawLines,
+    findings: events.filter((event) => event.type === "finding"),
+    complete: events.find((event) => event.type === "complete") || null,
+    error: events.find((event) => event.type === "error") || null
+  };
+}
+var CODERABBIT_BLOCKING_SEVERITIES = /* @__PURE__ */ new Set(["critical", "major"]);
+function classifyCoderabbitOutcome(execResult, parsed) {
+  const errorText = [parsed.error?.message || "", execResult.stderr || "", execResult.message || ""].join("\n");
+  if (parsed.error?.errorType === "rate_limit" || /\brate.?limit|review limit reached/i.test(errorText)) return "rate-limited";
+  if (authFailureDetail(errorText)) return "auth";
+  if (parsed.error || !execResult.ok && !parsed.complete) return "error";
+  if (parsed.findings.length) return "findings";
+  if (parsed.complete) return "clean";
+  return "error";
+}
+async function hostSleepMinutes(minutes) {
+  await new Promise((resolve) => setTimeout(resolve, minutes * 6e4));
+}
+function coderabbitBlockingItems(findings) {
+  return (findings || []).filter((finding) => CODERABBIT_BLOCKING_SEVERITIES.has(String(finding.severity || "").toLowerCase())).map((finding) => `CodeRabbit (${finding.severity}) ${finding.fileName || "unknown file"}: ${String(finding.comment || finding.codegenInstructions || "see the recorded suggestions").slice(0, 500)}`);
+}
+var coderabbitCapture = { reviews: 0, findings: 0, rateLimitedRuns: 0, deferred: 0, bySeverity: {}, sinkError: "" };
+var hostGateMetrics = { runs: 0, failures: 0 };
+function hostGateLogPath(tag, roundLabel, index, command) {
+  const slug = (value) => String(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+  return `/tmp/df12-gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}-${slug(command)}.out`;
+}
+function makeHostReview(config) {
+  const {
+    base,
+    coderabbitAttempts,
+    coderabbitBackoffMinutes: backoffRange,
+    coderabbitFindingsFile,
+    commitGates,
+    commitGateTimeoutSeconds
+  } = config;
+  function coderabbitBackoffMinutes2(seed) {
+    let hash = 5381;
+    for (const ch of String(seed)) hash = (hash * 33 ^ ch.codePointAt(0)) >>> 0;
+    const [low, high] = backoffRange;
+    return low + hash % (high - low + 1);
+  }
+  async function runCoderabbitHostReview2(worktree, label, deps = {}) {
+    const exec = deps.exec || execFileStatus;
+    const sleep = deps.sleep || hostSleepMinutes;
+    const commandArgs = ["review", "--agent", "--type", "committed", "--base", base];
+    for (let attempt = 1; ; attempt++) {
+      log(`[${label}] CodeRabbit host review attempt ${attempt} of ${coderabbitAttempts}`);
+      const result = await exec("coderabbit", commandArgs, { cwd: worktree });
+      const parsed = parseCoderabbitAgentOutput(result.stdout);
+      const outcome = classifyCoderabbitOutcome(result, parsed);
+      if (outcome === "rate-limited" && attempt < coderabbitAttempts) {
+        const minutes = coderabbitBackoffMinutes2(`${label}#${attempt}`);
+        log(`[${label}] CodeRabbit rate limited; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${coderabbitAttempts} (wall-clock only, no agent tokens)`);
+        await sleep(minutes);
+        continue;
+      }
+      const detail = outcome === "clean" || outcome === "findings" ? "" : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join("; ") || "coderabbit produced no parsable outcome").trim();
+      return { outcome, attempts: attempt, findings: parsed.findings, detail };
+    }
+  }
+  async function recordCoderabbitReview2(label, review) {
+    coderabbitCapture.reviews += 1;
+    if (review.outcome === "rate-limited") coderabbitCapture.rateLimitedRuns += 1;
+    for (const finding of review.findings) {
+      coderabbitCapture.findings += 1;
+      const severity = String(finding.severity || "unknown").toLowerCase();
+      coderabbitCapture.bySeverity[severity] = (coderabbitCapture.bySeverity[severity] || 0) + 1;
+    }
+    if (!coderabbitFindingsFile || !review.findings.length) return;
+    const stamp = await execFileStatus("date", ["-u", "+%Y-%m-%dT%H:%M:%SZ"]);
+    const ts = stamp.ok ? stamp.stdout.trim() : "";
+    const lines = review.findings.map((finding) => JSON.stringify({
+      ts,
+      label,
+      severity: String(finding.severity || ""),
+      file: String(finding.fileName || ""),
+      comment: String(finding.comment || "").slice(0, 2e3),
+      codegenInstructions: String(finding.codegenInstructions || "").slice(0, 2e3),
+      suggestions: Array.isArray(finding.suggestions) ? finding.suggestions.length : 0
+    }));
+    try {
+      const fs = process.getBuiltinModule("node:fs/promises");
+      await fs.appendFile(coderabbitFindingsFile, `${lines.join("\n")}
+`, "utf8");
+    } catch (error) {
+      coderabbitCapture.sinkError = error && error.message || String(error);
+      log(`[${label}] could not append CodeRabbit findings to ${coderabbitFindingsFile}: ${coderabbitCapture.sinkError}`);
+    }
+  }
+  async function runHostCommitGates2(worktree, tag, roundLabel, deps = {}) {
+    const exec = deps.exec || execFileStatus;
+    const fs = process.getBuiltinModule("node:fs/promises");
+    const results2 = [];
+    for (const [index, command] of commitGates.entries()) {
+      hostGateMetrics.runs += 1;
+      log(`[task ${tag}] host gate ${index + 1}/${commitGates.length} (${roundLabel}): ${command}`);
+      const result = await exec("sh", ["-c", command], { cwd: worktree, timeoutMs: commitGateTimeoutSeconds * 1e3 });
+      const output = `${result.stdout || ""}${result.stderr ? `
+--- stderr ---
+${result.stderr}` : ""}`;
+      const logFile = hostGateLogPath(tag, roundLabel, index, command);
+      try {
+        await fs.writeFile(logFile, output, "utf8");
+      } catch {
+      }
+      if (!result.ok) {
+        hostGateMetrics.failures += 1;
+        const timedOut = result.killed || /SIGTERM|timed? ?out/i.test(result.message || "") ? ` (killed after the ${commitGateTimeoutSeconds}s gate timeout)` : "";
+        const tail = output.trim().split(/\r?\n/).slice(-12).join("\n");
+        results2.push({ command, ok: false, logFile });
+        return {
+          green: false,
+          results: results2,
+          detail: `host gate \`${command}\` failed${timedOut}; full log: ${logFile}; output tail:
+${tail}`
+        };
+      }
+      results2.push({ command, ok: true, logFile });
+    }
+    return { green: true, results: results2, detail: "" };
+  }
+  return { coderabbitBackoffMinutes: coderabbitBackoffMinutes2, runCoderabbitHostReview: runCoderabbitHostReview2, recordCoderabbitReview: recordCoderabbitReview2, runHostCommitGates: runHostCommitGates2 };
+}
+
 // src/workflows/df12-build-odw/execplan-durability.ts
 function execplanRelPath(worktree, planPath) {
   const path = process.getBuiltinModule("node:path");
@@ -1711,12 +1920,17 @@ function makeTaskPipeline(deps) {
   const {
     MAX_DESIGN_ROUNDS: MAX_DESIGN_ROUNDS2,
     MAX_REVIEW_ROUNDS: MAX_REVIEW_ROUNDS2,
+    MAX_WORK_ITEM_ROUNDS: MAX_WORK_ITEM_ROUNDS2,
+    PER_WORK_ITEM_BUILD: PER_WORK_ITEM_BUILD2,
+    HOST_COMMIT_GATES: HOST_COMMIT_GATES2,
+    CODERABBIT_HOST_REVIEW: CODERABBIT_HOST_REVIEW2,
     DRY_RUN: DRY_RUN2,
     AUTO_MERGE: AUTO_MERGE2,
     BASE: BASE2,
     planPrompt: planPrompt2,
     designReviewPrompt: designReviewPrompt2,
     implementPrompt: implementPrompt2,
+    implementWorkItemPrompt: implementWorkItemPrompt2,
     fixPrompt: fixPrompt2,
     codeReviewPrompt: codeReviewPrompt2,
     expertReviewPrompt: expertReviewPrompt2,
@@ -1728,10 +1942,14 @@ function makeTaskPipeline(deps) {
     buildAgentOptions: buildAgentOptions2,
     planningLock: planningLock2,
     buildLock: buildLock2,
+    hostGateLock: hostGateLock2,
     withInfraRetry: withInfraRetry2,
     attachAssessment: attachAssessment2,
     ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2,
-    createWorktree: createWorktree2
+    createWorktree: createWorktree2,
+    runHostCommitGates: runHostCommitGates2,
+    runCoderabbitHostReview: runCoderabbitHostReview2,
+    recordCoderabbitReview: recordCoderabbitReview2
   } = deps;
   async function runPlanDesignLoop2(task, worktree, opts = {}) {
     const tag = task.id;
@@ -1828,10 +2046,95 @@ function makeTaskPipeline(deps) {
       }
     };
   }
+  async function runWorkItemBuildLoop2(task, worktree, plan, opts = {}) {
+    const tag = task.id;
+    const extra = opts.extra || {};
+    const fail = (detail, openIssues2 = []) => ({ fail: { id: tag, status: "failed", stage: "implement", detail, openIssues: openIssues2, worktree, proposals: [], ...extra } });
+    const contained = execplanRelPath(worktree, plan.execplanPath);
+    if (!contained.ok) return fail(contained.detail);
+    const planRef = { worktreePath: worktree, execplanPath: contained.relPath };
+    const initial = await readExecplanState(planRef);
+    if (initial.status === "unreadable") return fail(`could not read the committed ExecPlan: ${initial.error}`);
+    if (initial.status === "missing") return fail(`the ExecPlan disappeared before the build: ${contained.relPath}`);
+    if (!(initial.items || []).length) return null;
+    const commits = [];
+    const openIssues = [];
+    let coderabbitRuns = 0;
+    let lastImpl = null;
+    let noProgressNote = "";
+    let strikes = 0;
+    for (let round = 1; round <= MAX_WORK_ITEM_ROUNDS2; round++) {
+      const before = await readExecplanState(planRef);
+      if (before.status === "unreadable") return fail(`could not read the committed ExecPlan: ${before.error}`, openIssues);
+      const item = (before.items || []).find((entry) => !entry.ticked);
+      if (!item) break;
+      const label = `implement:${tag} wi${round}`;
+      const impl = await buildLock2(() => withInfraRetry2(() => agent(implementWorkItemPrompt2(task, worktree, plan, item, { ...opts, noProgressNote }), buildAgentOptions2({
+        phase: "Implement",
+        label,
+        schema: IMPL_SCHEMA
+      })), label));
+      lastImpl = impl;
+      const authDetail = implementationAuthFailureDetail(impl);
+      if (authDetail) {
+        return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
+      }
+      if (!impl || !impl.ok || !impl.gatesGreen) {
+        return fail(impl?.summary || `work item did not reach a green state: ${item.text}`, impl?.openIssues || []);
+      }
+      if (Array.isArray(impl.commits)) commits.push(...impl.commits);
+      openIssues.push(...impl.openIssues || []);
+      coderabbitRuns += Number(impl.coderabbitRuns) || 0;
+      const committed = await verifyWorktreeCommitted(worktree);
+      if (!committed.ok) {
+        return fail(`work item returned ok but left uncommitted state in the worktree (${committed.detail}); every work item must be committed before returning`, openIssues);
+      }
+      const after = await readExecplanState(planRef);
+      if (after.status === "unreadable") return fail(`could not re-read the committed ExecPlan: ${after.error}`, openIssues);
+      if (after.unticked >= before.unticked) {
+        strikes += 1;
+        noProgressNote = `your previous turn returned ok but the committed ExecPlan still shows ${after.unticked} unticked Progress item(s) (it had ${before.unticked} before the turn); tick the work item you completed in ## Progress and commit the plan update together with the work`;
+        log(`[task ${tag}] work-item round ${round}: no committed Progress movement (strike ${strikes} of 2)`);
+        if (strikes >= 2) {
+          return fail(`the work-item build made no committed ExecPlan progress in two consecutive turns; ${after.unticked} Progress item(s) remain unticked`, openIssues);
+        }
+      } else {
+        strikes = 0;
+        noProgressNote = "";
+        log(`[task ${tag}] work-item round ${round}: ${after.ticked}/${after.ticked + after.unticked} Progress item(s) committed`);
+      }
+    }
+    const final = await readExecplanState(planRef);
+    const remaining = (final.items || []).filter((entry) => !entry.ticked);
+    if (remaining.length) {
+      return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS2}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0].text}`, openIssues);
+    }
+    return {
+      impl: {
+        ok: true,
+        gatesGreen: true,
+        execplanPath: contained.relPath,
+        workItemsCompleted: final.ticked,
+        workItemsTotal: final.ticked + final.unticked,
+        commits: commits.slice(0, 50),
+        coderabbitRuns,
+        openIssues: [...new Set(openIssues)].slice(0, 20),
+        summary: lastImpl?.summary || "work-item build completed from the committed ExecPlan checklist"
+      }
+    };
+  }
   async function runImplementationStage2(task, worktree, plan, opts = {}) {
     const tag = task.id;
     const extra = opts.extra || {};
     phase("Implement");
+    if (PER_WORK_ITEM_BUILD2) {
+      const itemised = await runWorkItemBuildLoop2(task, worktree, plan, opts);
+      if (itemised) {
+        if (itemised.fail) return itemised;
+        return finishImplementationStage(task, worktree, plan, itemised.impl, extra);
+      }
+      log(`[task ${tag}] the committed ExecPlan has no Progress checklist; falling back to the single-turn build`);
+    }
     const impl = await buildLock2(() => withInfraRetry2(() => agent(implementPrompt2(task, worktree, plan, opts), buildAgentOptions2({
       phase: "Implement",
       label: `implement:${tag}`,
@@ -1855,6 +2158,10 @@ function makeTaskPipeline(deps) {
         }
       };
     }
+    return finishImplementationStage(task, worktree, plan, impl, extra);
+  }
+  async function finishImplementationStage(task, worktree, plan, impl, extra) {
+    const tag = task.id;
     const committed = await verifyWorktreeCommitted(worktree);
     if (!committed.ok) {
       return {
@@ -1889,7 +2196,22 @@ function makeTaskPipeline(deps) {
     const proposals = [];
     const reviewRounds = [];
     let reviewsPass = false;
+    const coderabbitDeferred = [];
     for (let round = 1; round <= MAX_REVIEW_ROUNDS2; round++) {
+      let hostGates = null;
+      if (HOST_COMMIT_GATES2) {
+        hostGates = await hostGateLock2(() => runHostCommitGates2(worktree, tag, `r${round}`));
+        if (!hostGates.green) {
+          log(`[task ${tag}] host commit gates red in round ${round}`);
+          const gateBlocking = [`HOST GATES RED: ${hostGates.detail} The agent-reported gate status was wrong or is stale \u2014 reproduce the failure from the log, fix it, re-run the gates to green, and commit.`];
+          reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: gateBlocking, hostGates: hostGates.results, fix: null });
+          if (round === MAX_REVIEW_ROUNDS2) break;
+          phase("Implement");
+          const gateFix = await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, gateBlocking, round), buildAgentOptions2({ phase: "Implement", label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`));
+          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(gateFix);
+          continue;
+        }
+      }
       const reviewInfraFaults = [];
       const runReviewAgent = (promptText, reviewPhase, label) => () => withInfraRetry2(() => agent(promptText, reviewAgentOptions2({ phase: reviewPhase, label, schema: REVIEW_SCHEMA })), label).catch((error) => {
         const message = error && error.message || String(error);
@@ -1934,11 +2256,28 @@ function makeTaskPipeline(deps) {
           ...kindExtra
         };
       }
+      let coderabbitBlocking = [];
+      if (CODERABBIT_HOST_REVIEW2) {
+        const coderabbit = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} r${round}`);
+        await recordCoderabbitReview2(`${tag} r${round}`, coderabbit);
+        if (coderabbit.outcome === "auth") {
+          return { id: tag, status: "fatal-auth", stage: "review", detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, reviewRounds, worktree, proposals, ...kindExtra };
+        }
+        if (coderabbit.outcome === "rate-limited" || coderabbit.outcome === "error") {
+          coderabbitCapture.deferred += 1;
+          coderabbitDeferred.push(`CodeRabbit review deferred in round ${round} (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`);
+          log(`[task ${tag}] CodeRabbit host review deferred in round ${round}: ${coderabbit.outcome} (${coderabbit.detail})`);
+        } else {
+          coderabbitBlocking = coderabbitBlockingItems(coderabbit.findings);
+          log(`[task ${tag}] CodeRabbit host review round ${round}: ${coderabbit.findings.length} finding(s), ${coderabbitBlocking.length} blocking`);
+        }
+      }
       const blocking = [
         ...codeReview.blocking || [],
-        ...expertReview.blocking || []
+        ...expertReview.blocking || [],
+        ...coderabbitBlocking
       ];
-      const roundRecord = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, fix: null };
+      const roundRecord = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null };
       reviewRounds.push(roundRecord);
       if (blocking.length === 0 && codeReview?.verdict === "pass" && expertReview?.verdict === "pass") {
         reviewsPass = true;
@@ -1991,9 +2330,9 @@ function makeTaskPipeline(deps) {
         return { id: tag, status: "halted", stage: "integrate", detail: integration?.conflicts || integration?.summary || "integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)", worktree, proposals, ...kindExtra };
       }
     } else {
-      return { id: tag, status: "manual-merge-ready", plan, impl, integration, worktree, proposals, ...kindExtra };
+      return { id: tag, status: "manual-merge-ready", plan, impl, integration, worktree, proposals, ...coderabbitDeferred.length ? { openIssues: coderabbitDeferred } : {}, ...kindExtra };
     }
-    return { id: tag, status: "done", plan, impl, integration, worktree, proposals, ...kindExtra };
+    return { id: tag, status: "done", plan, impl, integration, worktree, proposals, ...coderabbitDeferred.length ? { openIssues: coderabbitDeferred } : {}, ...kindExtra };
   }
   async function runTask2(task, mergeLock2) {
     const tag = `${task.id}`;
@@ -2064,6 +2403,30 @@ function makeTaskPipeline(deps) {
           return await attachAssessment2(task, wt, { id: tag, status: "failed", stage: "addendum", detail: impl2?.summary || "addendum did not reach a green state or left open issues", openIssues: impl2?.openIssues || [], worktree, proposals: [], kind: "addendum" });
         }
         const proposals = [];
+        const addendumOpenIssues = [];
+        if (HOST_COMMIT_GATES2) {
+          const hostGates = await hostGateLock2(() => runHostCommitGates2(worktree, tag, "addendum"));
+          if (!hostGates.green) {
+            return await attachAssessment2(task, wt, { id: tag, status: "failed", stage: "addendum", detail: `addendum reported green gates but the host could not reproduce them: ${hostGates.detail}`, openIssues, worktree, proposals, kind: "addendum" });
+          }
+        }
+        if (CODERABBIT_HOST_REVIEW2) {
+          phase("Code Review");
+          const coderabbit = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} addendum`);
+          await recordCoderabbitReview2(`${tag} addendum`, coderabbit);
+          if (coderabbit.outcome === "auth") {
+            return { id: tag, status: "fatal-auth", stage: "auth", detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, worktree, proposals, kind: "addendum" };
+          }
+          const blockingFindings = coderabbitBlockingItems(coderabbit.findings);
+          if (blockingFindings.length) {
+            return await attachAssessment2(task, wt, { id: tag, status: "halted", stage: "addendum-review", detail: `CodeRabbit host review found blocking issue(s): ${blockingFindings.join("; ")}`, impl: impl2, worktree, proposals, kind: "addendum" });
+          }
+          if (coderabbit.outcome === "rate-limited" || coderabbit.outcome === "error") {
+            coderabbitCapture.deferred += 1;
+            addendumOpenIssues.push(`CodeRabbit review deferred (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`);
+            log(`[task ${tag}] CodeRabbit host review deferred for the addendum: ${coderabbit.outcome} (${coderabbit.detail})`);
+          }
+        }
         let addendumReview = null;
         if (onlyDeferredReviewIssues) {
           phase("Code Review");
@@ -2103,9 +2466,9 @@ function makeTaskPipeline(deps) {
             return await attachAssessment2(task, wt, { id: tag, status: "halted", stage: "integrate", detail: integration?.conflicts || integration?.summary || "integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)", worktree, proposals, kind: "addendum" });
           }
         } else {
-          return { id: tag, status: "manual-merge-ready", impl: impl2, addendumReview, integration, worktree, proposals, kind: "addendum" };
+          return { id: tag, status: "manual-merge-ready", impl: impl2, addendumReview, integration, worktree, proposals, ...addendumOpenIssues.length ? { openIssues: addendumOpenIssues } : {}, kind: "addendum" };
         }
-        return { id: tag, status: "done", impl: impl2, addendumReview, integration, worktree, proposals, kind: "addendum" };
+        return { id: tag, status: "done", impl: impl2, addendumReview, integration, worktree, proposals, ...addendumOpenIssues.length ? { openIssues: addendumOpenIssues } : {}, kind: "addendum" };
       }
       const planned = await runPlanDesignLoop2(task, worktree);
       if (planned.fail) return await attachAssessment2(task, wt, planned.fail);
@@ -2137,7 +2500,7 @@ function makeTaskPipeline(deps) {
       return await attachAssessment2(task, wt, result);
     }
   }
-  return { runPlanDesignLoop: runPlanDesignLoop2, runImplementationStage: runImplementationStage2, runDualReviewAndIntegration: runDualReviewAndIntegration2, runTask: runTask2 };
+  return { runPlanDesignLoop: runPlanDesignLoop2, runWorkItemBuildLoop: runWorkItemBuildLoop2, runImplementationStage: runImplementationStage2, runDualReviewAndIntegration: runDualReviewAndIntegration2, runTask: runTask2 };
 }
 
 // src/workflows/df12-build-odw/main.ts
@@ -2154,6 +2517,8 @@ var {
   MAX_DESIGN_ROUNDS,
   MAX_REVIEW_ROUNDS,
   STAGE_ATTEMPTS,
+  PER_WORK_ITEM_BUILD,
+  MAX_WORK_ITEM_ROUNDS,
   AUTO_MERGE,
   DOCUMENT_AUDIT,
   DRY_RUN,
@@ -2178,8 +2543,15 @@ var {
   ASSESSMENT_MODEL,
   AUTH_REQUIRED_ADAPTERS,
   CODERABBIT_REVIEW_COMMAND,
+  CODERABBIT_HOST_REVIEW,
+  CODERABBIT_ATTEMPTS,
+  CODERABBIT_BACKOFF_MINUTES,
+  CODERABBIT_FINDINGS_FILE,
+  HOST_COMMIT_GATES,
+  COMMIT_GATE_TIMEOUT_SECONDS,
   COMMIT_GATES,
-  COMMIT_GATE_TEXT
+  COMMIT_GATE_TEXT,
+  COMMIT_GATE_GUIDANCE
 } = CONFIG;
 if (PROJECT_ROOT !== process.cwd()) {
   const fs = process.getBuiltinModule("node:fs");
@@ -2215,6 +2587,7 @@ var {
   planPrompt,
   designReviewPrompt,
   implementPrompt,
+  implementWorkItemPrompt,
   fixPrompt,
   codeReviewPrompt,
   expertReviewPrompt,
@@ -2244,6 +2617,19 @@ var { triagePrompt, runTriage } = makeRemediation({
   base: BASE,
   roadmap: ROADMAP,
   triageAgentOptions
+});
+var {
+  coderabbitBackoffMinutes,
+  runCoderabbitHostReview,
+  recordCoderabbitReview,
+  runHostCommitGates
+} = makeHostReview({
+  base: BASE,
+  coderabbitAttempts: CODERABBIT_ATTEMPTS,
+  coderabbitBackoffMinutes: CODERABBIT_BACKOFF_MINUTES,
+  coderabbitFindingsFile: CODERABBIT_FINDINGS_FILE,
+  commitGates: COMMIT_GATES,
+  commitGateTimeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS
 });
 async function runAuthPreflight() {
   if (!AUTH_PREFLIGHT) return [];
@@ -2459,7 +2845,7 @@ async function runRecovery(root, mergeLock2 = null) {
       evidence = await collectAssessmentEvidence(task, resumeWt);
       const resolved = await recoveryExecplanPath(candidate);
       enriched = { ...candidate, execplanPath: resolved.execplanPath };
-      planState = resolved.error ? { status: "unreadable", ticked: 0, unticked: 0, error: resolved.error } : await readExecplanState(enriched);
+      planState = resolved.error ? { status: "unreadable", ticked: 0, unticked: 0, items: [], error: resolved.error } : await readExecplanState(enriched);
       decision = { classification: "", ...recoveryContinueDecision(enriched, evidence, planState, { dryRun: DRY_RUN }) };
     } else {
       log(`[recovery] assessing ${candidate.branchName} (task ${candidate.taskId})`);
@@ -2603,20 +2989,27 @@ function semaphore(limit) {
 }
 var planningLock = semaphore(MAX_PLANNING_PARALLEL);
 var buildLock = semaphore(MAX_BUILD_PARALLEL);
+var hostGateLock = semaphore(1);
 var {
   runPlanDesignLoop,
+  runWorkItemBuildLoop,
   runImplementationStage,
   runDualReviewAndIntegration,
   runTask
 } = makeTaskPipeline({
   MAX_DESIGN_ROUNDS,
   MAX_REVIEW_ROUNDS,
+  MAX_WORK_ITEM_ROUNDS,
+  PER_WORK_ITEM_BUILD,
+  HOST_COMMIT_GATES,
+  CODERABBIT_HOST_REVIEW,
   DRY_RUN,
   AUTO_MERGE,
   BASE,
   planPrompt,
   designReviewPrompt,
   implementPrompt,
+  implementWorkItemPrompt,
   fixPrompt,
   codeReviewPrompt,
   expertReviewPrompt,
@@ -2628,10 +3021,14 @@ var {
   buildAgentOptions,
   planningLock,
   buildLock,
+  hostGateLock,
   withInfraRetry,
   attachAssessment,
   ensureTaskAgentWriteAccess,
-  createWorktree
+  createWorktree,
+  runHostCommitGates,
+  runCoderabbitHostReview,
+  recordCoderabbitReview
 });
 var selectSeq = 0;
 async function doSelect(taken) {
@@ -2889,11 +3286,35 @@ async function workflowMain() {
     // The exact deterministic gate set every branch agent was instructed to run
     // (issue #28): operators can audit reported gate greenness against it.
     commitGates: COMMIT_GATES,
+    // Host gate verification aggregate: whether the host re-ran the gates
+    // itself, the per-gate timeout, and bounded counters. Per-round pass/fail
+    // detail lives in each task's reviewRounds[].hostGates.
+    hostGates: {
+      enabled: HOST_COMMIT_GATES,
+      timeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
+      ...hostGateMetrics
+    },
     stageAttempts: STAGE_ATTEMPTS,
+    // Host-driven build loop configuration: one builder turn per unticked
+    // ExecPlan Progress item when enabled, with committed progress verified
+    // after every turn.
+    workItemBuild: { enabled: PER_WORK_ITEM_BUILD, maxRounds: MAX_WORK_ITEM_ROUNDS },
     // Bounded-cardinality fault metrics (fixed keys): stage retries spent on
     // infrastructure faults plus terminal fault counts per class, so operators
     // can read retry pressure straight from the result instead of the logs.
     faultMetrics: { ...faultMetrics },
+    // Host-run CodeRabbit review aggregate: effective configuration plus
+    // bounded counters (reviews run, findings by severity, rate-limited runs,
+    // deferred reviews). Per-finding detail goes to the JSONL sink when
+    // coderabbitFindingsFile is configured.
+    coderabbit: {
+      hostReview: CODERABBIT_HOST_REVIEW,
+      attempts: CODERABBIT_ATTEMPTS,
+      backoffMinutes: CODERABBIT_BACKOFF_MINUTES,
+      findingsFile: CODERABBIT_FINDINGS_FILE,
+      ...coderabbitCapture,
+      bySeverity: { ...coderabbitCapture.bySeverity }
+    },
     processed,
     results,
     assessments,

@@ -114,7 +114,12 @@ describe('parseExecplanState', () => {
           ...Array.from({ length: unticked }, (_, i) => `- [ ] step t${i}`),
         ].join('\n')
         const text = `# Plan\n\nStatus: DRAFT\n\n## Notes\n\n- [x] not progress\n\n## Progress\n\n${progress}\n`
-        expect(parseExecplanState(text)).toEqual({ status: 'draft', ticked, unticked })
+        const state = parseExecplanState(text)
+        expect(state.status).toBe('draft')
+        expect(state.ticked).toBe(ticked)
+        expect(state.unticked).toBe(unticked)
+        expect(state.items).toHaveLength(ticked + unticked)
+        expect(state.items.filter((item) => item.ticked)).toHaveLength(ticked)
       }),
     )
   })

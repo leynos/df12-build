@@ -59,12 +59,22 @@ function subject(worktree: string, overrides: Record<string, unknown> = {}) {
   return makeTaskPipeline({
     MAX_DESIGN_ROUNDS: 2,
     MAX_REVIEW_ROUNDS: 2,
+    // The upstream defaults for these are ON, but the module tests drive the
+    // pipeline against fixture repos: host gates would run real gate
+    // commands, host review would exec the real coderabbit CLI, and the
+    // work-item loop expects ticked Progress items — so they default OFF
+    // here, mirroring the artefact simulation suites.
+    MAX_WORK_ITEM_ROUNDS: 4,
+    PER_WORK_ITEM_BUILD: false,
+    HOST_COMMIT_GATES: false,
+    CODERABBIT_HOST_REVIEW: false,
     DRY_RUN: false,
     AUTO_MERGE: true,
     BASE: 'main',
     planPrompt: () => 'PLAN',
     designReviewPrompt: () => 'DESIGN',
     implementPrompt: () => 'IMPLEMENT',
+    implementWorkItemPrompt: (_task, _worktree, _plan, item) => `WORK-ITEM ${item.text}`,
     fixPrompt: () => 'FIX',
     codeReviewPrompt: () => 'CODE-REVIEW',
     expertReviewPrompt: () => 'EXPERT-REVIEW',
@@ -76,10 +86,14 @@ function subject(worktree: string, overrides: Record<string, unknown> = {}) {
     buildAgentOptions: (options) => options,
     planningLock: (fn) => fn(),
     buildLock: (fn) => fn(),
+    hostGateLock: (fn) => fn(),
     withInfraRetry: (run) => run(),
     attachAssessment: async (_task, _wt, result) => ({ ...result, assessed: true }),
     ensureTaskAgentWriteAccess: async () => ({ ok: true, failures: [] }),
     createWorktree: async () => ({ ok: true, worktreePath: worktree, branch: 'roadmap-1-2-3', baseSha: git(worktree, 'rev-parse', 'HEAD'), notes: '' }),
+    runHostCommitGates: async () => ({ green: true, results: [], detail: '' }),
+    runCoderabbitHostReview: async () => ({ outcome: 'clean' as const, attempts: 1, findings: [], detail: '' }),
+    recordCoderabbitReview: async () => {},
     ...overrides,
   })
 }

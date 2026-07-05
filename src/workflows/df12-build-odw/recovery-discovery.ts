@@ -110,7 +110,7 @@ export function makeRecoveryDiscovery(limits: RecoveryDiscoveryLimits) {
 export async function readExecplanState(
   candidate: { worktreePath?: string; execplanPath?: string } | null | undefined,
 ): Promise<ExecplanState> {
-  if (!candidate?.execplanPath) return { status: 'missing', ticked: 0, unticked: 0 }
+  if (!candidate?.execplanPath) return { status: 'missing', ticked: 0, unticked: 0, items: [] }
   const path = process.getBuiltinModule('node:path')
   try {
     const text = await readFileText(path.join(candidate.worktreePath || '', candidate.execplanPath))
@@ -118,7 +118,7 @@ export async function readExecplanState(
   } catch (error) {
     const failure = error as (Error & { code?: string }) | null
     if (failure && (failure.code === 'ENOENT' || failure.code === 'ENOTDIR')) {
-      return { status: 'missing', ticked: 0, unticked: 0 }
+      return { status: 'missing', ticked: 0, unticked: 0, items: [] }
     }
     // A plan that cannot be read is NOT a missing plan: dispatching to the
     // planning stage on an I/O or permission fault could overwrite durable
@@ -127,6 +127,7 @@ export async function readExecplanState(
       status: 'unreadable',
       ticked: 0,
       unticked: 0,
+      items: [],
       error: `${candidate.execplanPath}: ${(failure && failure.message) || String(error)}`,
     }
   }

@@ -52,6 +52,14 @@ import {
   makeAssessment,
 } from './assessment.ts'
 import { TRIAGE_SCHEMA, makeRemediation, stepOf } from './remediation.ts'
+import {
+  coderabbitBlockingItems,
+  coderabbitCapture,
+  classifyCoderabbitOutcome,
+  hostGateMetrics,
+  makeHostReview,
+  parseCoderabbitAgentOutput,
+} from './host-review.ts'
 import { makeTaskPipeline, summarizeFixReport, summarizeReviewVerdict } from './run-task.ts'
 import type { AssessmentEvidence } from './git-evidence.ts'
 import type { ExecplanState, RecoveryAssessmentFields } from './recovery-decision.ts'
@@ -113,6 +121,8 @@ const {
   MAX_DESIGN_ROUNDS,
   MAX_REVIEW_ROUNDS,
   STAGE_ATTEMPTS,
+  PER_WORK_ITEM_BUILD,
+  MAX_WORK_ITEM_ROUNDS,
   AUTO_MERGE,
   DOCUMENT_AUDIT,
   DRY_RUN,
@@ -137,8 +147,15 @@ const {
   ASSESSMENT_MODEL,
   AUTH_REQUIRED_ADAPTERS,
   CODERABBIT_REVIEW_COMMAND,
+  CODERABBIT_HOST_REVIEW,
+  CODERABBIT_ATTEMPTS,
+  CODERABBIT_BACKOFF_MINUTES,
+  CODERABBIT_FINDINGS_FILE,
+  HOST_COMMIT_GATES,
+  COMMIT_GATE_TIMEOUT_SECONDS,
   COMMIT_GATES,
   COMMIT_GATE_TEXT,
+  COMMIT_GATE_GUIDANCE,
 } = CONFIG
 if (PROJECT_ROOT !== process.cwd()) {
   const fs = process.getBuiltinModule('node:fs')
@@ -185,6 +202,7 @@ const {
   planPrompt,
   designReviewPrompt,
   implementPrompt,
+  implementWorkItemPrompt,
   fixPrompt,
   codeReviewPrompt,
   expertReviewPrompt,
@@ -221,6 +239,22 @@ const { triagePrompt, runTriage } = makeRemediation({
   base: BASE,
   roadmap: ROADMAP,
   triageAgentOptions,
+})
+
+// Host-run CodeRabbit review and host commit gates with the run wiring bound
+// once (see host-review.ts).
+const {
+  coderabbitBackoffMinutes,
+  runCoderabbitHostReview,
+  recordCoderabbitReview,
+  runHostCommitGates,
+} = makeHostReview({
+  base: BASE,
+  coderabbitAttempts: CODERABBIT_ATTEMPTS,
+  coderabbitBackoffMinutes: CODERABBIT_BACKOFF_MINUTES,
+  coderabbitFindingsFile: CODERABBIT_FINDINGS_FILE,
+  commitGates: COMMIT_GATES,
+  commitGateTimeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
 })
 
 // ---------------------------------------------------------------------------
@@ -486,7 +520,7 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
       // treating it as missing would dispatch a fresh planner over durable
       // work. Fold the stat fault into planState so the decision reports it.
       planState = resolved.error
-        ? { status: 'unreadable', ticked: 0, unticked: 0, error: resolved.error }
+        ? { status: 'unreadable', ticked: 0, unticked: 0, items: [], error: resolved.error }
         : await readExecplanState(enriched)
       decision = { classification: '', ...recoveryContinueDecision(enriched, evidence, planState, { dryRun: DRY_RUN }) }
     } else {
@@ -673,23 +707,33 @@ function semaphore(limit: number) {
 
 const planningLock = semaphore(MAX_PLANNING_PARALLEL)
 const buildLock = semaphore(MAX_BUILD_PARALLEL)
+// Host gate runs are serialized across the whole pool: the target project's
+// build cache rewards sequential execution, and concurrent gate runs from
+// sibling worktrees would contend for it.
+const hostGateLock = semaphore(1)
 
 // Shared pipeline stages and the per-task pipeline with the run wiring bound
 // once (see run-task.ts).
 const {
   runPlanDesignLoop,
+  runWorkItemBuildLoop,
   runImplementationStage,
   runDualReviewAndIntegration,
   runTask,
 } = makeTaskPipeline({
   MAX_DESIGN_ROUNDS,
   MAX_REVIEW_ROUNDS,
+  MAX_WORK_ITEM_ROUNDS,
+  PER_WORK_ITEM_BUILD,
+  HOST_COMMIT_GATES,
+  CODERABBIT_HOST_REVIEW,
   DRY_RUN,
   AUTO_MERGE,
   BASE,
   planPrompt,
   designReviewPrompt,
   implementPrompt,
+  implementWorkItemPrompt,
   fixPrompt,
   codeReviewPrompt,
   expertReviewPrompt,
@@ -701,10 +745,14 @@ const {
   buildAgentOptions,
   planningLock,
   buildLock,
+  hostGateLock,
   withInfraRetry,
   attachAssessment,
   ensureTaskAgentWriteAccess,
   createWorktree,
+  runHostCommitGates,
+  runCoderabbitHostReview,
+  recordCoderabbitReview,
 })
 
 let selectSeq = 0
@@ -1027,11 +1075,35 @@ return {
   // The exact deterministic gate set every branch agent was instructed to run
   // (issue #28): operators can audit reported gate greenness against it.
   commitGates: COMMIT_GATES,
+  // Host gate verification aggregate: whether the host re-ran the gates
+  // itself, the per-gate timeout, and bounded counters. Per-round pass/fail
+  // detail lives in each task's reviewRounds[].hostGates.
+  hostGates: {
+    enabled: HOST_COMMIT_GATES,
+    timeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
+    ...hostGateMetrics,
+  },
   stageAttempts: STAGE_ATTEMPTS,
+  // Host-driven build loop configuration: one builder turn per unticked
+  // ExecPlan Progress item when enabled, with committed progress verified
+  // after every turn.
+  workItemBuild: { enabled: PER_WORK_ITEM_BUILD, maxRounds: MAX_WORK_ITEM_ROUNDS },
   // Bounded-cardinality fault metrics (fixed keys): stage retries spent on
   // infrastructure faults plus terminal fault counts per class, so operators
   // can read retry pressure straight from the result instead of the logs.
   faultMetrics: { ...faultMetrics },
+  // Host-run CodeRabbit review aggregate: effective configuration plus
+  // bounded counters (reviews run, findings by severity, rate-limited runs,
+  // deferred reviews). Per-finding detail goes to the JSONL sink when
+  // coderabbitFindingsFile is configured.
+  coderabbit: {
+    hostReview: CODERABBIT_HOST_REVIEW,
+    attempts: CODERABBIT_ATTEMPTS,
+    backoffMinutes: CODERABBIT_BACKOFF_MINUTES,
+    findingsFile: CODERABBIT_FINDINGS_FILE,
+    ...coderabbitCapture,
+    bySeverity: { ...coderabbitCapture.bySeverity },
+  },
   processed,
   results,
   assessments,

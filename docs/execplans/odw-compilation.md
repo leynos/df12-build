@@ -654,3 +654,20 @@ deviations: milestone 9 shipped a single `run-task.ts` module, and the
 artefact-slicing suites were retained as shipped-artefact coverage. The
 Surprises entry about the `checkJs: false` blind spot is resolved by the
 milestone 10 entry conversion.
+
+2026-07-06 (post-completion): upstream `assessment-issues` — the branch this
+work forked from mid-way, at e755141 — gained eight further commits and was
+squash-merged to `origin/main`. The delta was ported into the decomposed
+tree via `git merge --squash assessment-issues` (the true 3-way base; a
+merge against `origin/main` would have re-conflicted the already-included
+half). New subsystem module `host-review.ts` (host-run CodeRabbit review
+NDJSON parsing/classification/backoff, host-run commit gates) plus surface
+changes to `config.ts`, `exec.ts` (exec options and kill metadata),
+`prompts.ts` (host-review conditionals, `implementWorkItemPrompt`),
+`recovery-decision.ts` (ExecPlan Progress `items`, two new skip reasons),
+`recovery-discovery.ts`, `run-task.ts` (per-work-item build loop,
+`finishImplementationStage` split, host gates and host review in the
+review rounds and addendum lane), and `main.ts` (`hostGateLock`,
+host-review factory binding, result aggregates). All 114 artefact tests
+(18 new upstream suites included), 231 module tests, and `make all` green;
+the branch was then rebased onto `origin/main`.

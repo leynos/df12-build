@@ -44,10 +44,16 @@ export type ExecplanStatus =
   | 'unreadable'
   | 'unknown'
 
+export interface ExecplanProgressItem {
+  text: string
+  ticked: boolean
+}
+
 export interface ExecplanState {
   status: ExecplanStatus
   ticked: number
   unticked: number
+  items: ExecplanProgressItem[]
   error?: string
 }
 
@@ -117,6 +123,8 @@ export const RECOVERY_SKIP_REASONS = [
   'missing-validation-evidence',
   'missing-execplan',
   'plan-blocked',
+  'plan-unreadable',
+  'execplan-stat-error',
   'dry-run',
 ]
 
@@ -200,12 +208,17 @@ export function parseExecplanState(text: unknown): ExecplanState {
   }
   let ticked = 0
   let unticked = 0
+  const items: ExecplanProgressItem[] = []
   const progressSection = source.split(/^##\s+/m).find((section) => /^progress\b/i.test(section)) || ''
   for (const line of progressSection.split(/\r?\n/)) {
-    if (/^\s*-\s+\[[xX]\]/.test(line)) ticked += 1
-    else if (/^\s*-\s+\[ \]/.test(line)) unticked += 1
+    const match = line.match(/^\s*-\s+\[([ xX])\]\s*(.*)$/)
+    if (!match) continue
+    const isTicked = match[1] !== ' '
+    if (isTicked) ticked += 1
+    else unticked += 1
+    items.push({ text: match[2].trim(), ticked: isTicked })
   }
-  return { status, ticked, unticked }
+  return { status, ticked, unticked, items }
 }
 
 // The continue-mode decision table. Purely deterministic: hygiene checks from

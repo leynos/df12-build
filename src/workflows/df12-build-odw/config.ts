@@ -20,6 +20,8 @@ export interface RawWorkflowArgs {
   maxDesignRounds?: number
   maxReviewRounds?: number
   stageAttempts?: number | string
+  perWorkItemBuild?: boolean
+  maxWorkItemRounds?: number | string
   autoMerge?: boolean
   documentAudit?: boolean
   dryRun?: boolean
@@ -48,6 +50,12 @@ export interface RawWorkflowArgs {
   triageModel?: string
   assessmentModel?: string
   coderabbitReviewCommand?: string
+  coderabbitHostReview?: boolean
+  coderabbitAttempts?: number | string
+  coderabbitBackoffMinutes?: unknown
+  coderabbitFindingsFile?: string
+  hostCommitGates?: boolean
+  commitGateTimeoutSeconds?: number | string
   commitGates?: unknown
 }
 
@@ -65,6 +73,8 @@ export interface WorkflowConfig {
   MAX_DESIGN_ROUNDS: number
   MAX_REVIEW_ROUNDS: number
   STAGE_ATTEMPTS: number
+  PER_WORK_ITEM_BUILD: boolean
+  MAX_WORK_ITEM_ROUNDS: number
   AUTO_MERGE: boolean
   DOCUMENT_AUDIT: boolean
   DRY_RUN: boolean
@@ -93,6 +103,12 @@ export interface WorkflowConfig {
   ASSESSMENT_MODEL: string
   AUTH_REQUIRED_ADAPTERS: Set<string>
   CODERABBIT_REVIEW_COMMAND: string
+  CODERABBIT_HOST_REVIEW: boolean
+  CODERABBIT_ATTEMPTS: number
+  CODERABBIT_BACKOFF_MINUTES: [number, number]
+  CODERABBIT_FINDINGS_FILE: string
+  HOST_COMMIT_GATES: boolean
+  COMMIT_GATE_TIMEOUT_SECONDS: number
   COMMIT_GATES: string[]
   COMMIT_GATE_TEXT: string
   COMMIT_GATE_GUIDANCE: string
@@ -116,6 +132,15 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   const MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4 // plan <-> design-review exchanges before halting
   const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review cycles
   const STAGE_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2)) // total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, schema-retry exhaustion); product failures are never retried
+
+  // Per-work-item build loop: the host reads the committed ExecPlan's Progress
+  // checklist and dispatches ONE builder turn per unticked work item, verifying
+  // committed progress after each turn. Small turns keep the build adapter on a
+  // tight timeout and make a hung stream cheap. perWorkItemBuild=false restores
+  // the single-turn whole-task build. Plans without a Progress checklist fall
+  // back to the single-turn build automatically.
+  const PER_WORK_ITEM_BUILD = cfg.perWorkItemBuild !== false
+  const MAX_WORK_ITEM_ROUNDS = Math.max(1, Math.trunc(Number(cfg.maxWorkItemRounds) || 16)) // builder turns per task before failing closed
 
   const AUTO_MERGE = cfg.autoMerge !== false // false => stop after review, leave branch for manual merge
   const DOCUMENT_AUDIT = cfg.documentAudit !== false // false => return audit findings only, write nothing
@@ -157,6 +182,21 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     ASSESSMENT_ADAPTER,
   ].map((adapter) => String(adapter || '').toLowerCase()))
   const CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || 'coderabbit review --agent'
+  // Host-run CodeRabbit review: the control loop invokes the CLI against
+  // committed work, absorbs rate-limit backoff in host wall-clock instead of
+  // agent tokens, and feeds actionable findings back into the fix rounds.
+  // coderabbitHostReview=false restores the legacy agent-run flow.
+  const CODERABBIT_HOST_REVIEW = cfg.coderabbitHostReview !== false
+  const CODERABBIT_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.coderabbitAttempts) || 3)) // total attempts per host review when rate limited
+  const CODERABBIT_BACKOFF_MINUTES: [number, number] = (() => {
+    const range = Array.isArray(cfg.coderabbitBackoffMinutes) ? cfg.coderabbitBackoffMinutes : []
+    const low = Math.max(1, Math.trunc(Number(range[0]) || 45))
+    const high = Math.max(low, Math.trunc(Number(range[1]) || 90))
+    return [low, high]
+  })()
+  // Optional durable JSONL sink for every CodeRabbit finding, so recurring
+  // finding classes can be tuned into deterministic lint rules over time.
+  const CODERABBIT_FINDINGS_FILE = String(cfg.coderabbitFindingsFile || '')
   // The deterministic commit-gate command set for the target project. `make all`
   // is the df12 house default, but it is NOT universal: some projects alias
   // `all` to a release build, so operators must be able to name the authoritative
@@ -165,14 +205,22 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     ? cfg.commitGates
     : ['make all']).map((command) => String(command))
   const COMMIT_GATE_TEXT = COMMIT_GATES.map((command) => `\`${command}\``).join(' then ')
+  // Host-run commit gates: the control loop re-runs the configured gate
+  // commands against committed HEAD before review and integration, so a
+  // gatesGreen claim is verified, never trusted. hostCommitGates=false
+  // restores the trust-the-agent flow.
+  const HOST_COMMIT_GATES = cfg.hostCommitGates !== false
+  const COMMIT_GATE_TIMEOUT_SECONDS = Math.max(1, Math.trunc(Number(cfg.commitGateTimeoutSeconds) || 3600))
   const COMMIT_GATE_GUIDANCE =
-    `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well — NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.`
-  const CODERABBIT_REVIEW_GUIDANCE =
-    'Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.'
+    `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well — NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.${HOST_COMMIT_GATES ? ' The workflow host independently re-runs the configured gates against your committed HEAD before review and integration; a gatesGreen claim the host cannot reproduce fails the stage with the host gate log as evidence.' : ''}`
+  const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW
+    ? 'Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work — only committed changes reach the host review.'
+    : 'Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.'
   const SPARK_DELEGATION_GUIDANCE =
     "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
-  const SCRUTINEER_DELEGATION_GUIDANCE =
-    `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`
+  const SCRUTINEER_DELEGATION_GUIDANCE = CODERABBIT_HOST_REVIEW
+    ? `Delegate deterministic gate execution to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until the gates are green. ${CODERABBIT_REVIEW_GUIDANCE}`
+    : `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`
 
   return {
     PROJECT_ROOT,
@@ -188,6 +236,8 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     MAX_DESIGN_ROUNDS,
     MAX_REVIEW_ROUNDS,
     STAGE_ATTEMPTS,
+    PER_WORK_ITEM_BUILD,
+    MAX_WORK_ITEM_ROUNDS,
     AUTO_MERGE,
     DOCUMENT_AUDIT,
     DRY_RUN,
@@ -216,6 +266,12 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     ASSESSMENT_MODEL,
     AUTH_REQUIRED_ADAPTERS,
     CODERABBIT_REVIEW_COMMAND,
+    CODERABBIT_HOST_REVIEW,
+    CODERABBIT_ATTEMPTS,
+    CODERABBIT_BACKOFF_MINUTES,
+    CODERABBIT_FINDINGS_FILE,
+    HOST_COMMIT_GATES,
+    COMMIT_GATE_TIMEOUT_SECONDS,
     COMMIT_GATES,
     COMMIT_GATE_TEXT,
     COMMIT_GATE_GUIDANCE,

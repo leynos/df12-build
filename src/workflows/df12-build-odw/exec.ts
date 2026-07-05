@@ -8,6 +8,15 @@ export interface ExecStatus {
   stdout: string
   stderr: string
   message?: string
+  // Set when the child was killed (e.g. by the timeoutMs option); the
+  // message alone does not say so.
+  killed?: boolean
+  signal?: string
+}
+
+export interface ExecOptions {
+  cwd?: string
+  timeoutMs?: number
 }
 
 export interface FileState {
@@ -18,10 +27,10 @@ export interface FileState {
 
 type ExecError = Error & { stdout?: string; stderr?: string }
 
-export async function execFileText(command: string, commandArgs: readonly string[]): Promise<string> {
+export async function execFileText(command: string, commandArgs: readonly string[], options: ExecOptions = {}): Promise<string> {
   const { execFile } = process.getBuiltinModule('node:child_process')
   return await new Promise((resolve, reject) => {
-    execFile(command, [...commandArgs], { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile(command, [...commandArgs], { cwd: options.cwd || process.cwd(), maxBuffer: 16 * 1024 * 1024, ...(options.timeoutMs ? { timeout: options.timeoutMs } : {}) }, (error, stdout, stderr) => {
       if (error) {
         const failure = error as ExecError
         failure.stdout = stdout
@@ -34,16 +43,20 @@ export async function execFileText(command: string, commandArgs: readonly string
   })
 }
 
-export async function execFileStatus(command: string, commandArgs: readonly string[]): Promise<ExecStatus> {
+export async function execFileStatus(command: string, commandArgs: readonly string[], options: ExecOptions = {}): Promise<ExecStatus> {
   try {
-    return { ok: true, stdout: await execFileText(command, commandArgs), stderr: '' }
+    return { ok: true, stdout: await execFileText(command, commandArgs, options), stderr: '' }
   } catch (error) {
-    const failure = error as ExecError | null
+    const failure = error as (ExecError & { killed?: boolean; signal?: string }) | null
     return {
       ok: false,
       stdout: failure?.stdout || '',
       stderr: failure?.stderr || '',
       message: (failure && failure.message) || String(error),
+      // Set when the child was killed (e.g. by the timeoutMs option); the
+      // message alone does not say so.
+      killed: Boolean(failure?.killed),
+      signal: failure?.signal || '',
     }
   }
 }

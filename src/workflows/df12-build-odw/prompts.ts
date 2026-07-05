@@ -38,6 +38,7 @@ export function makePrompts(config: WorkflowConfig) {
     COMMIT_GATE_TEXT,
     COMMIT_GATE_GUIDANCE,
     CODERABBIT_REVIEW_COMMAND,
+    CODERABBIT_HOST_REVIEW,
     CODERABBIT_REVIEW_GUIDANCE,
     SPARK_DELEGATION_GUIDANCE,
     SCRUTINEER_DELEGATION_GUIDANCE,
@@ -117,6 +118,7 @@ export function makePrompts(config: WorkflowConfig) {
       'Use the `execplans` skill and follow it exactly. Name the plan docs/execplans/<branch-leaf>.md within the worktree (branch leaf = the part after the last "/").',
       'The plan must:',
       '- Decompose the task into ordered, atomic work items, each independently committable and gate-passable.',
+      '- Record the work items in the `## Progress` section as one checklist line each, `- [ ] WI-<n>: <imperative title>`, in execution order. The workflow host reads this checklist to dispatch the build one work item at a time, so every implementable work item must appear as its own unticked line — preparation notes that are not build work must not be checklist lines.',
       `- Adhere to the design documents (${DESIGN_DOCS}), the developers guide, the coding standards, and AGENTS.md. Cite the exact sections/ADRs each work item implements.`,
       '- Signpost, per work item, the documentation to read and the skills to load (router skills, hypothesis/crosshair/mutmut for verification, etc.).',
       '- Specify the tests (unit, behavioural, property, snapshot, e2e) each work item must add or update, per the AGENTS.md testing rules.',
@@ -171,9 +173,13 @@ export function makePrompts(config: WorkflowConfig) {
       '',
       'For EACH execplan work item, in this exact order:',
       '  1. Implement the work item (code + tests + docs) per the plan and AGENTS.md.',
-      `  2. DETERMINISTIC GATE FIRST: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT}, plus any further gate targets AGENTS.md names). If it reports failures, fix them yourself (format, lint, typecheck, tests, audit) and summon \`scrutineer\` again until green. For any markdown you touched, also have \`scrutineer\` run \`make markdownlint\` and \`make nixie\` and fix failures. Do not proceed to coderabbit until the deterministic gates are green.`,
-      `  3. THEN summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. Address actionable feedback yourself (highest severity first). After applying fixes, summon \`scrutineer\` again to re-run the commit gates and confirm they are still green.`,
-      `     - ${CODERABBIT_REVIEW_GUIDANCE}`,
+      `  2. DETERMINISTIC GATE FIRST: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT}, plus any further gate targets AGENTS.md names). If it reports failures, fix them yourself (format, lint, typecheck, tests, audit) and summon \`scrutineer\` again until green. For any markdown you touched, also have \`scrutineer\` run \`make markdownlint\` and \`make nixie\` and fix failures.`,
+      ...(CODERABBIT_HOST_REVIEW
+        ? [`  3. ${CODERABBIT_REVIEW_GUIDANCE}`]
+        : [
+            `  3. THEN summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. Address actionable feedback yourself (highest severity first). After applying fixes, summon \`scrutineer\` again to re-run the commit gates and confirm they are still green.`,
+            `     - ${CODERABBIT_REVIEW_GUIDANCE}`,
+          ]),
       '  4. Update the execplan IN PLACE with findings, progress (tick the work item), and any decisions or deviations, with rationale.',
       '  5. Commit the work item and the execplan update together as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).',
       '',
@@ -183,6 +189,38 @@ export function makePrompts(config: WorkflowConfig) {
       '',
       `${DRY_RUN ? 'DRY RUN: do not run this step — it is skipped by the orchestrator.' : ''}`,
       `When all work items are done, ensure the project commit gates (${COMMIT_GATE_TEXT}) are green at HEAD. Return the completion counts, commit subjects, whether gates are green, the number of coderabbit runs, and any open issues.`,
+    ].join('\n')
+  }
+
+  // One builder turn, one work item. The host owns the loop: it picks the
+  // first unticked Progress item from the committed plan, dispatches this
+  // prompt, and verifies committed progress before dispatching the next.
+  function implementWorkItemPrompt(task: PromptTask, worktree: string, plan: PromptPlan, item: { text: string }, opts: { noProgressNote?: string } = {}) {
+    return [
+      preamble(worktree),
+      `TASK: Implement EXACTLY ONE work item of roadmap task ${task.id} ("${task.title}") from the approved ExecPlan at ${plan.execplanPath}.`,
+      '',
+      'THE WORK ITEM (the first unticked entry in the plan\'s ## Progress checklist):',
+      `  ${item.text}`,
+      '',
+      'Read the ExecPlan first: it carries the design citations, signposted docs and skills, and the tests this work item must add. Implement THIS work item completely (code + tests + docs per the plan) and NOTHING ELSE — do not start later work items and do not refactor beyond this item; the next builder turn continues from the committed state you leave.',
+      ...(opts.noProgressNote ? ['', `PREVIOUS TURN DEFECT: ${opts.noProgressNote}`] : []),
+      '',
+      SPARK_DELEGATION_GUIDANCE,
+      '',
+      SCRUTINEER_DELEGATION_GUIDANCE,
+      '',
+      'Then, in this exact order:',
+      `  1. DETERMINISTIC GATE: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT}, plus any further gate targets AGENTS.md names; \`make markdownlint\` and \`make nixie\` for any markdown you touched). Fix failures yourself and re-run until green. ${COMMIT_GATE_GUIDANCE}`,
+      CODERABBIT_HOST_REVIEW
+        ? `  2. ${CODERABBIT_REVIEW_GUIDANCE}`
+        : `  2. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to confirm the gates are still green. ${CODERABBIT_REVIEW_GUIDANCE}`,
+      '  3. Update the ExecPlan IN PLACE: tick this work item in ## Progress and record findings, decisions, and deviations. If this was the first work item, also set the header Status to `IN PROGRESS`; if it was the LAST unticked item, set Status to `COMPLETE` together with the Outcomes & Retrospective update.',
+      '  4. Commit the work item and the ExecPlan update together as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).',
+      '',
+      'EXECPLAN DURABILITY CONTRACT: never return with the worktree dirty or the Progress tick uncommitted — the host verifies both after every turn and bounces the defect back to you.',
+      '',
+      'Return using the IMPL schema: ok=true only when this work item is complete, every gate is green at HEAD, and the tick is committed. Set workItemsCompleted/workItemsTotal to the plan\'s ticked/total counts after your commit.',
     ].join('\n')
   }
 
@@ -198,7 +236,9 @@ export function makePrompts(config: WorkflowConfig) {
       'The dual review returned the following BLOCKING items. Resolve every one:',
       ...blocking.map((b, i) => `  ${i + 1}. ${b}`),
       '',
-      `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT}, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND}\`, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth — never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
+      CODERABBIT_HOST_REVIEW
+        ? `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT}, plus markdownlint/nixie for markdown) first and green, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth — never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`
+        : `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT}, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND}\`, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth — never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
       '',
       'Return the commit subjects you added, whether every deterministic gate is green at HEAD after your fixes, the number of CodeRabbit runs you completed, how each blocking item was resolved, any open issues with reasons, and a short summary. This structured report is durable validation evidence for the branch — be precise about which gates ran and at which commit.',
     ].join('\n')
@@ -275,7 +315,9 @@ export function makePrompts(config: WorkflowConfig) {
       'For EACH open sub-task, in id order:',
       '  1. Make ONLY the change the Addenda item describes. Do not expand scope.',
       `  2. DETERMINISTIC GATE: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT}, plus any further gate targets AGENTS.md names). For any Markdown you touched, also have it run \`make markdownlint\` and \`make nixie\`. Fix until green.`,
-      `  3. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to re-run the commit gates and confirm green. ${CODERABBIT_REVIEW_GUIDANCE}`,
+      CODERABBIT_HOST_REVIEW
+        ? `  3. ${CODERABBIT_REVIEW_GUIDANCE}`
+        : `  3. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to re-run the commit gates and confirm green. ${CODERABBIT_REVIEW_GUIDANCE}`,
       `  4. Tick the sub-task in the Addenda checklist of its execplan (\`- [ ] ${task.id}.<n>\` → \`- [x] …\`).`,
       '  5. Commit the sub-task and Addenda tick together as one atomic commit (en-GB imperative subject).',
       '',
@@ -330,6 +372,7 @@ export function makePrompts(config: WorkflowConfig) {
     planPrompt,
     designReviewPrompt,
     implementPrompt,
+    implementWorkItemPrompt,
     fixPrompt,
     codeReviewPrompt,
     expertReviewPrompt,
