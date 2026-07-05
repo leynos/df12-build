@@ -1366,6 +1366,110 @@ function makeWritePreflight({ enabled, targets }) {
   return { runTaskAgentWritePreflight: runTaskAgentWritePreflight2, ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2 };
 }
 
+// src/workflows/df12-build-odw/execplan-durability.ts
+function execplanRelPath(worktree, planPath) {
+  const path = process.getBuiltinModule("node:path");
+  const raw = String(planPath || "");
+  const rel = path.isAbsolute(raw) ? path.relative(worktree, raw) : path.normalize(raw);
+  if (!raw || !rel || rel === "." || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    return { ok: false, relPath: "", detail: `ExecPlan path escapes the assigned worktree: ${raw || "<empty>"}` };
+  }
+  return { ok: true, relPath: rel, detail: "" };
+}
+async function verifyExecplanCommitted(worktree, planPath) {
+  const contained = execplanRelPath(worktree, planPath);
+  if (!contained.ok) return { ok: false, detail: contained.detail };
+  const relPath = contained.relPath;
+  const inHead = await execFileStatus("git", ["-C", worktree, "cat-file", "-e", `HEAD:${relPath}`]);
+  if (!inHead.ok) return { ok: false, detail: `the plan file ${relPath} is not committed at HEAD` };
+  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1", "--", relPath]);
+  if (!status.ok) {
+    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || "").trim()}` };
+  }
+  if (String(status.stdout).trim()) return { ok: false, detail: `the plan file ${relPath} has uncommitted modifications` };
+  return { ok: true, detail: "" };
+}
+async function commitExecplanApproval(worktree, planPath, tag) {
+  const fs = process.getBuiltinModule("node:fs/promises");
+  const path = process.getBuiltinModule("node:path");
+  const contained = execplanRelPath(worktree, planPath);
+  if (!contained.ok) return { ok: false, detail: contained.detail };
+  const relPath = contained.relPath;
+  const absPath = path.join(worktree, relPath);
+  try {
+    const text = await fs.readFile(absPath, "utf8");
+    if (parseExecplanState(text).status !== "approved") {
+      const updated = /^Status:.*$/m.test(text) ? text.replace(/^Status:.*$/m, "Status: APPROVED") : `${text.trimEnd()}
+
+Status: APPROVED
+`;
+      await fs.writeFile(absPath, updated, "utf8");
+    }
+  } catch (error) {
+    return { ok: false, detail: `could not update the plan status: ${error && error.message || String(error)}` };
+  }
+  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1", "--", relPath]);
+  if (!status.ok) {
+    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || "").trim()}` };
+  }
+  if (!String(status.stdout).trim()) return { ok: true, detail: "already committed as APPROVED" };
+  const add = await execFileStatus("git", ["-C", worktree, "add", "--", relPath]);
+  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
+  const commit = await execFileStatus("git", [
+    "-C",
+    worktree,
+    "-c",
+    "user.name=df12-build",
+    "-c",
+    "user.email=df12-build@workflow.invalid",
+    "commit",
+    "-m",
+    `Approve ExecPlan for task ${tag}`,
+    "--",
+    relPath
+  ]);
+  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
+  return { ok: true, detail: "" };
+}
+async function commitExecplanDraft(worktree, relPath, tag) {
+  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
+  if (!status.ok) return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
+  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return { ok: false, detail: "nothing to commit: the worktree is already clean" };
+  const foreign = lines.filter((line) => line.slice(3).replace(/^"(.*)"$/, "$1") !== relPath);
+  if (foreign.length) {
+    const sample = foreign.slice(0, 8).map((line) => line.trim()).join("; ");
+    return { ok: false, detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? "; \u2026" : ""})` };
+  }
+  const add = await execFileStatus("git", ["-C", worktree, "add", "--", relPath]);
+  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
+  const commit = await execFileStatus("git", [
+    "-C",
+    worktree,
+    "-c",
+    "user.name=df12-build",
+    "-c",
+    "user.email=df12-build@workflow.invalid",
+    "commit",
+    "-m",
+    `Draft ExecPlan for task ${tag}`,
+    "--",
+    relPath
+  ]);
+  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
+  return { ok: true, detail: "" };
+}
+async function verifyWorktreeCommitted(worktree) {
+  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
+  if (!status.ok) {
+    return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
+  }
+  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return { ok: true, detail: "" };
+  const sample = lines.slice(0, 8).map((line) => line.trim()).join("; ");
+  return { ok: false, detail: `${lines.length} uncommitted path(s): ${sample}${lines.length > 8 ? "; \u2026" : ""}` };
+}
+
 // src/workflows/df12-build-odw/main.js
 var CONFIG = makeConfig(args);
 var {
@@ -1883,108 +1987,6 @@ function writeProbeTargets() {
     seen.add(target.adapter);
     return true;
   });
-}
-function execplanRelPath(worktree, planPath) {
-  const path = process.getBuiltinModule("node:path");
-  const raw = String(planPath || "");
-  const rel = path.isAbsolute(raw) ? path.relative(worktree, raw) : path.normalize(raw);
-  if (!raw || !rel || rel === "." || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
-    return { ok: false, relPath: "", detail: `ExecPlan path escapes the assigned worktree: ${raw || "<empty>"}` };
-  }
-  return { ok: true, relPath: rel, detail: "" };
-}
-async function verifyExecplanCommitted(worktree, planPath) {
-  const contained = execplanRelPath(worktree, planPath);
-  if (!contained.ok) return { ok: false, detail: contained.detail };
-  const relPath = contained.relPath;
-  const inHead = await execFileStatus("git", ["-C", worktree, "cat-file", "-e", `HEAD:${relPath}`]);
-  if (!inHead.ok) return { ok: false, detail: `the plan file ${relPath} is not committed at HEAD` };
-  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1", "--", relPath]);
-  if (!status.ok) {
-    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || "").trim()}` };
-  }
-  if (String(status.stdout).trim()) return { ok: false, detail: `the plan file ${relPath} has uncommitted modifications` };
-  return { ok: true, detail: "" };
-}
-async function commitExecplanApproval(worktree, planPath, tag) {
-  const fs = process.getBuiltinModule("node:fs/promises");
-  const path = process.getBuiltinModule("node:path");
-  const contained = execplanRelPath(worktree, planPath);
-  if (!contained.ok) return { ok: false, detail: contained.detail };
-  const relPath = contained.relPath;
-  const absPath = path.join(worktree, relPath);
-  try {
-    const text = await fs.readFile(absPath, "utf8");
-    if (parseExecplanState(text).status !== "approved") {
-      const updated = /^Status:.*$/m.test(text) ? text.replace(/^Status:.*$/m, "Status: APPROVED") : `${text.trimEnd()}
-
-Status: APPROVED
-`;
-      await fs.writeFile(absPath, updated, "utf8");
-    }
-  } catch (error) {
-    return { ok: false, detail: `could not update the plan status: ${error && error.message || String(error)}` };
-  }
-  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1", "--", relPath]);
-  if (!status.ok) {
-    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || "").trim()}` };
-  }
-  if (!String(status.stdout).trim()) return { ok: true, detail: "already committed as APPROVED" };
-  const add = await execFileStatus("git", ["-C", worktree, "add", "--", relPath]);
-  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
-  const commit = await execFileStatus("git", [
-    "-C",
-    worktree,
-    "-c",
-    "user.name=df12-build",
-    "-c",
-    "user.email=df12-build@workflow.invalid",
-    "commit",
-    "-m",
-    `Approve ExecPlan for task ${tag}`,
-    "--",
-    relPath
-  ]);
-  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
-  return { ok: true, detail: "" };
-}
-async function commitExecplanDraft(worktree, relPath, tag) {
-  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
-  if (!status.ok) return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
-  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
-  if (!lines.length) return { ok: false, detail: "nothing to commit: the worktree is already clean" };
-  const foreign = lines.filter((line) => line.slice(3).replace(/^"(.*)"$/, "$1") !== relPath);
-  if (foreign.length) {
-    const sample = foreign.slice(0, 8).map((line) => line.trim()).join("; ");
-    return { ok: false, detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? "; \u2026" : ""})` };
-  }
-  const add = await execFileStatus("git", ["-C", worktree, "add", "--", relPath]);
-  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
-  const commit = await execFileStatus("git", [
-    "-C",
-    worktree,
-    "-c",
-    "user.name=df12-build",
-    "-c",
-    "user.email=df12-build@workflow.invalid",
-    "commit",
-    "-m",
-    `Draft ExecPlan for task ${tag}`,
-    "--",
-    relPath
-  ]);
-  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
-  return { ok: true, detail: "" };
-}
-async function verifyWorktreeCommitted(worktree) {
-  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
-  if (!status.ok) {
-    return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
-  }
-  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
-  if (!lines.length) return { ok: true, detail: "" };
-  const sample = lines.slice(0, 8).map((line) => line.trim()).join("; ");
-  return { ok: false, detail: `${lines.length} uncommitted path(s): ${sample}${lines.length > 8 ? "; \u2026" : ""}` };
 }
 async function runPlanDesignLoop(task, worktree, opts = {}) {
   const tag = task.id;

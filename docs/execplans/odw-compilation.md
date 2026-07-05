@@ -217,8 +217,16 @@ Planned work:
   claim-without-write failing on host evidence, and one-probe-per-run
   memoization. Milestone 5's CodeRabbit review returned zero findings
   first.
-- [ ] Milestone 7: ExecPlan durability and containment
-  (`execplan-durability.ts`).
+- [x] (2026-07-06 01:15Z) Milestone 7: `execplan-durability.ts` —
+  `execplanRelPath` containment, `verifyExecplanCommitted`,
+  `commitExecplanApproval`, `commitExecplanDraft`, and
+  `verifyWorktreeCommitted`, all direct exports (no config coupling).
+  The red suite covered the escape shapes first (`../` variants,
+  absolute paths outside the worktree, empty/`.`/`..`), plus durability
+  verdicts against real repos: committed-clean, dirty, missing-at-HEAD,
+  the idempotent APPROVED flip (including the append-when-absent path),
+  plan-only draft salvage vs foreign-dirty bounce, and the bounded dirty
+  sample. Milestone 6's CodeRabbit review returned zero findings first.
 - [ ] Milestone 8: assessment and remediation triage (`assessment.ts`,
   `remediation.ts`).
 - [ ] Milestone 9: dual review, integration, and the per-task pipeline
