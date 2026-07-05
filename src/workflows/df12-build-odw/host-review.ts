@@ -94,6 +94,13 @@ export function parseCoderabbitAgentOutput(stdout: unknown): CoderabbitParsedOut
 
 export const CODERABBIT_BLOCKING_SEVERITIES = new Set(['critical', 'major'])
 
+// The success sentinels a `complete` event's status may carry. Both spellings
+// are observed from the real CLI: 'review_completed' in the captured live
+// sessions (docs/coderabbit-wire-contract.md) and 'reviewed' in the CLI output
+// the host-review tests were written against. Any other terminal status (a
+// cancelled or aborted review) must NOT read as clean.
+export const CODERABBIT_SUCCESS_STATUSES = new Set(['review_completed', 'reviewed'])
+
 // One of: 'clean' | 'findings' | 'rate-limited' | 'auth' | 'error'.
 export function classifyCoderabbitOutcome(
   execResult: { ok?: boolean; stderr?: string; message?: string },
@@ -104,7 +111,10 @@ export function classifyCoderabbitOutcome(
   if (authFailureDetail(errorText)) return 'auth'
   if (parsed.error || (!execResult.ok && !parsed.complete)) return 'error'
   if (parsed.findings.length) return 'findings'
-  if (parsed.complete) return 'clean'
+  // A complete event is success only when its status is a known success
+  // sentinel (see CODERABBIT_SUCCESS_STATUSES); a non-success terminal
+  // completion (e.g. a cancelled/aborted review) must not read as clean.
+  if (parsed.complete) return CODERABBIT_SUCCESS_STATUSES.has(String(parsed.complete.status)) ? 'clean' : 'error'
   return 'error'
 }
 

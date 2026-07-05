@@ -113,7 +113,7 @@ export async function readExecplanState(
   if (!candidate?.execplanPath) return { status: 'missing', ticked: 0, unticked: 0, items: [] }
   const path = process.getBuiltinModule('node:path')
   try {
-    const text = await readFileText(path.join(candidate.worktreePath || '', candidate.execplanPath))
+    const text = await readFileText(path.join(candidate.worktreePath || '', candidate.execplanPath), candidate.worktreePath || undefined)
     return parseExecplanState(text)
   } catch (error) {
     const failure = error as (Error & { code?: string }) | null

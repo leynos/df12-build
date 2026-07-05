@@ -307,6 +307,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     for (let round = 1; round <= MAX_WORK_ITEM_ROUNDS; round++) {
       const before = await readExecplanState(planRef)
       if (before.status === 'unreadable') return fail(`could not read the committed ExecPlan: ${before.error}`, openIssues)
+      if (before.status === 'missing') return fail(`the committed ExecPlan disappeared mid-build: ${contained.relPath}`, openIssues)
       const item = (before.items || []).find((entry) => !entry.ticked)
       if (!item) break
       const label = `implement:${tag} wi${round}`
@@ -334,6 +335,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       }
       const after = await readExecplanState(planRef)
       if (after.status === 'unreadable') return fail(`could not re-read the committed ExecPlan: ${after.error}`, openIssues)
+      if (after.status === 'missing') return fail(`the committed ExecPlan disappeared mid-build: ${contained.relPath}`, openIssues)
       if (after.unticked >= before.unticked) {
         strikes += 1
         noProgressNote = `your previous turn returned ok but the committed ExecPlan still shows ${after.unticked} unticked Progress item(s) (it had ${before.unticked} before the turn); tick the work item you completed in ## Progress and commit the plan update together with the work`
@@ -348,6 +350,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       }
     }
     const final = await readExecplanState(planRef)
+    if (final.status === 'unreadable') return fail(`could not read the committed ExecPlan after the build: ${final.error}`, openIssues)
+    if (final.status === 'missing') return fail(`the committed ExecPlan is absent after the build: ${contained.relPath}`, openIssues)
     const remaining = (final.items || []).filter((entry) => !entry.ticked)
     if (remaining.length) {
       return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0].text}`, openIssues)

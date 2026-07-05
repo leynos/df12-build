@@ -22,6 +22,9 @@ const globals = globalThis as Record<string, unknown>
 
 beforeEach(() => {
   globals.log = () => {}
+  // bun test shares one process across suites: start each test with no
+  // leftover agent mock from a sibling file (matches remediation.test.ts).
+  delete globals.agent
 })
 
 function tmp() {

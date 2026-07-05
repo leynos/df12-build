@@ -135,4 +135,20 @@ describe('small readers', () => {
     symlinkSync(path.join(dir, 'README.md'), link)
     await expect(readFileText(link)).rejects.toThrow()
   })
+
+  test('with a worktree root, a symlinked parent directory escape is rejected', async () => {
+    const { dir } = makeRepo()
+    // docs/ is a symlink to a sibling tree outside the worktree; the plan
+    // path resolves through it, so realpath containment must reject it even
+    // though the final component is a real file.
+    const outsideRoot = mkdtempSync(path.join(tmpdir(), 'outside-'))
+    writeFileSync(path.join(outsideRoot, 'plan.md'), '# outside\n')
+    symlinkSync(outsideRoot, path.join(dir, 'docs'))
+    await expect(readFileText(path.join(dir, 'docs', 'plan.md'), dir)).rejects.toThrow(/escapes the worktree/)
+  })
+
+  test('with a worktree root, an in-worktree read still succeeds', async () => {
+    const { dir } = makeRepo()
+    expect(await readFileText(path.join(dir, 'README.md'), dir)).toBe('# Fixture\n')
+  })
 })

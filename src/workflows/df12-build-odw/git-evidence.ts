@@ -139,14 +139,26 @@ export async function collectAssessmentEvidence(
   }
 }
 
-// Read a worktree file without following a symlink at the final component:
-// worktrees are untrusted content (see write-preflight.ts), so a committed
-// symlink at the read path must fail (ELOOP) instead of redirecting the read
-// outside the worktree. Callers treat the failure as an unreadable file.
-export async function readFileText(path: string): Promise<string> {
+// Read a worktree file without letting untrusted content redirect the read
+// outside the checkout (see write-preflight.ts). O_NOFOLLOW rejects a symlink
+// at the FINAL component; when a worktree root is given, realpath containment
+// additionally rejects a symlinked PARENT directory that would resolve the
+// ancestry outside the root. Callers treat any failure as an unreadable file.
+export async function readFileText(filePath: string, rootDir?: string): Promise<string> {
   const fs = process.getBuiltinModule('node:fs/promises')
+  const path = process.getBuiltinModule('node:path')
   const { constants } = process.getBuiltinModule('node:fs')
-  const handle = await fs.open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  if (rootDir) {
+    // Resolve every symlink in the parent chain and require it to stay inside
+    // the (also-resolved) worktree root. realpath throws ENOENT for a missing
+    // parent, which the caller maps to an absent plan.
+    const realRoot = await fs.realpath(rootDir)
+    const realParent = await fs.realpath(path.dirname(filePath))
+    if (realParent !== realRoot && !realParent.startsWith(`${realRoot}${path.sep}`)) {
+      throw new Error(`ExecPlan path escapes the worktree via a parent symlink: ${filePath}`)
+    }
+  }
+  const handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
     return await handle.readFile({ encoding: 'utf8' })
   } finally {

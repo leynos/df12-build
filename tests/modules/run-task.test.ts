@@ -245,6 +245,31 @@ describe('runTask', () => {
     expect(outcome.kind).toBe('addendum')
   })
 
+  test('per-work-item build fails when the committed plan disappears mid-build', async () => {
+    const worktree = makeWorktree()
+    // A committed plan with one unticked Progress item, so the work-item loop
+    // has an item to dispatch.
+    writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: IN PROGRESS\n\n## Progress\n\n- [ ] WI-1: build the thing\n')
+    git(worktree, 'add', '.')
+    git(worktree, 'commit', '-m', 'Add a Progress checklist')
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('implement:')) {
+        // A builder that removes the committed plan and returns a green
+        // report — the host must re-read the plan and reject the false done.
+        git(worktree, 'rm', '-q', PLAN_PATH)
+        git(worktree, 'commit', '-m', 'Delete the plan mid-build')
+        return { ok: true, gatesGreen: true, workItemsCompleted: 1, workItemsTotal: 1, commits: ['x'], coderabbitRuns: 0, openIssues: [], summary: 'claimed done' }
+      }
+      // Reuse the happy plan/design so the pipeline reaches the work-item loop.
+      return happyScript()(label, prompt)
+    })
+    const outcome = await subject(worktree, { PER_WORK_ITEM_BUILD: true }).runTask(task, null)
+    expect(outcome.status).toBe('failed')
+    expect(outcome.stage).toBe('implement')
+    expect(outcome.detail).toMatch(/ExecPlan (disappeared|is absent)/)
+    expect(labels.filter((label) => label.startsWith('implement:'))).toHaveLength(1)
+  })
+
   test('recovery resume shares the same integration path, tagged recovery-resume', async () => {
     const worktree = makeWorktree()
     scriptAgent(happyScript())

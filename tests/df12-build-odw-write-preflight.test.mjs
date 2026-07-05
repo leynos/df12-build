@@ -8,28 +8,13 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { readWorkflowSource } from './support/workflow-source.mjs'
 
 import { makeRecoveryRepo, probeDetailsFromPrompt as parseProbeDetails } from './fixtures/recovery-repo.mjs'
 
 const WORKFLOW_PATH = new URL('../workflows/df12-build-odw.js', import.meta.url)
 const CONTROL_LOOP_MARKER = '// --- Worker-pool control loop'
 
-// Source-invariant regexes read the src tree verbatim: the bundler reprints
-// the built artifact (normalized quotes, stripped comments), and `make
-// workflow-freshness` ties the artifact back to this text.
-const WORKFLOW_SRC_DIR = new URL('../src/workflows/df12-build-odw/', import.meta.url)
-async function readWorkflowSource() {
-  // Concatenate the whole src tree (meta banner first, entry last) so the
-  // invariants keep matching as helpers migrate between modules.
-  const { readdir } = await import('node:fs/promises')
-  const names = (await readdir(WORKFLOW_SRC_DIR)).filter(
-    (name) => (name.endsWith('.js') || name.endsWith('.ts')) && !name.endsWith('.d.ts') && !['meta.js', 'main.ts'].includes(name),
-  ).sort()
-  const parts = [await readFile(new URL('meta.js', WORKFLOW_SRC_DIR), 'utf8')]
-  for (const name of names) parts.push(await readFile(new URL(name, WORKFLOW_SRC_DIR), 'utf8'))
-  parts.push(await readFile(new URL('main.ts', WORKFLOW_SRC_DIR), 'utf8'))
-  return parts.join('\n')
-}
 
 async function loadPreflightSurface(args = {}, agentImpl = async () => null) {
   let source = await readFile(WORKFLOW_PATH, 'utf8')

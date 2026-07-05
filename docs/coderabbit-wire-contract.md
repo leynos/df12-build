@@ -82,6 +82,15 @@ Always carries `status` and a numeric `findings` count:
 {"type":"complete","status":"review_completed","findings":12}
 ```
 
+The success sentinel varies by CLI build: the live captures above use
+`review_completed`, while other CLI versions emit `reviewed` (the value the
+host-review test fixtures were recorded against). `classifyCoderabbitOutcome`
+therefore treats a `complete` event as clean only when its `status` is in
+`CODERABBIT_SUCCESS_STATUSES` (`review_completed` or `reviewed`); any other
+terminal completion status — a cancelled or aborted review — falls through to
+`error` rather than being mistaken for a clean pass. Extend that set here and
+in `host-review.ts` if a new success spelling is observed.
+
 ## `error` (rate limit)
 
 The quota error is `errorType: "rate_limit"` with `recoverable: true` and a

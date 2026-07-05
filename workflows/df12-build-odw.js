@@ -750,10 +750,18 @@ async function collectAssessmentEvidence(task, wt) {
     collectionErrors: errors.filter(Boolean)
   };
 }
-async function readFileText(path) {
+async function readFileText(filePath, rootDir) {
   const fs = process.getBuiltinModule("node:fs/promises");
+  const path = process.getBuiltinModule("node:path");
   const { constants } = process.getBuiltinModule("node:fs");
-  const handle = await fs.open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  if (rootDir) {
+    const realRoot = await fs.realpath(rootDir);
+    const realParent = await fs.realpath(path.dirname(filePath));
+    if (realParent !== realRoot && !realParent.startsWith(`${realRoot}${path.sep}`)) {
+      throw new Error(`ExecPlan path escapes the worktree via a parent symlink: ${filePath}`);
+    }
+  }
+  const handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     return await handle.readFile({ encoding: "utf8" });
   } finally {
@@ -843,7 +851,7 @@ async function readExecplanState(candidate) {
   if (!candidate?.execplanPath) return { status: "missing", ticked: 0, unticked: 0, items: [] };
   const path = process.getBuiltinModule("node:path");
   try {
-    const text = await readFileText(path.join(candidate.worktreePath || "", candidate.execplanPath));
+    const text = await readFileText(path.join(candidate.worktreePath || "", candidate.execplanPath), candidate.worktreePath || void 0);
     return parseExecplanState(text);
   } catch (error) {
     const failure = error;
@@ -954,7 +962,7 @@ function makeConfig(rawArgs) {
   const HOST_COMMIT_GATES2 = cfg.hostCommitGates !== false;
   const COMMIT_GATE_TIMEOUT_SECONDS2 = Math.max(1, Math.trunc(Number(cfg.commitGateTimeoutSeconds) || 3600));
   const COMMIT_GATE_GUIDANCE2 = `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT2}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well \u2014 NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.${HOST_COMMIT_GATES2 ? " The workflow host independently re-runs the configured gates against your committed HEAD before review and integration; a gatesGreen claim the host cannot reproduce fails the stage with the host gate log as evidence." : ""}`;
-  const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? "Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work \u2014 only committed changes reach the host review." : "Use `coderabbit review --agent` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the `vsleep` command) for `$(shuf -i 45-90 -n 1)` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.";
+  const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? "Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work \u2014 only committed changes reach the host review." : `Use \`coderabbit review --agent\` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the \`vsleep\` command) for \`$(shuf -i ${CODERABBIT_BACKOFF_MINUTES2[0]}-${CODERABBIT_BACKOFF_MINUTES2[1]} -n 1)\` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.`;
   const SPARK_DELEGATION_GUIDANCE = "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks.";
   const SCRUTINEER_DELEGATION_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? `Delegate deterministic gate execution to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until the gates are green. ${CODERABBIT_REVIEW_GUIDANCE}` : `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND2}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`;
   return {
@@ -1690,13 +1698,14 @@ function parseCoderabbitAgentOutput(stdout) {
   };
 }
 var CODERABBIT_BLOCKING_SEVERITIES = /* @__PURE__ */ new Set(["critical", "major"]);
+var CODERABBIT_SUCCESS_STATUSES = /* @__PURE__ */ new Set(["review_completed", "reviewed"]);
 function classifyCoderabbitOutcome(execResult, parsed) {
   const errorText = [parsed.error?.message || "", execResult.stderr || "", execResult.message || ""].join("\n");
   if (parsed.error?.errorType === "rate_limit" || /\brate.?limit|review limit reached/i.test(errorText)) return "rate-limited";
   if (authFailureDetail(errorText)) return "auth";
   if (parsed.error || !execResult.ok && !parsed.complete) return "error";
   if (parsed.findings.length) return "findings";
-  if (parsed.complete) return "clean";
+  if (parsed.complete) return CODERABBIT_SUCCESS_STATUSES.has(String(parsed.complete.status)) ? "clean" : "error";
   return "error";
 }
 async function hostSleepMinutes(minutes) {
@@ -2096,6 +2105,7 @@ function makeTaskPipeline(deps) {
     for (let round = 1; round <= MAX_WORK_ITEM_ROUNDS2; round++) {
       const before = await readExecplanState(planRef);
       if (before.status === "unreadable") return fail(`could not read the committed ExecPlan: ${before.error}`, openIssues);
+      if (before.status === "missing") return fail(`the committed ExecPlan disappeared mid-build: ${contained.relPath}`, openIssues);
       const item = (before.items || []).find((entry) => !entry.ticked);
       if (!item) break;
       const label = `implement:${tag} wi${round}`;
@@ -2121,6 +2131,7 @@ function makeTaskPipeline(deps) {
       }
       const after = await readExecplanState(planRef);
       if (after.status === "unreadable") return fail(`could not re-read the committed ExecPlan: ${after.error}`, openIssues);
+      if (after.status === "missing") return fail(`the committed ExecPlan disappeared mid-build: ${contained.relPath}`, openIssues);
       if (after.unticked >= before.unticked) {
         strikes += 1;
         noProgressNote = `your previous turn returned ok but the committed ExecPlan still shows ${after.unticked} unticked Progress item(s) (it had ${before.unticked} before the turn); tick the work item you completed in ## Progress and commit the plan update together with the work`;
@@ -2135,6 +2146,8 @@ function makeTaskPipeline(deps) {
       }
     }
     const final = await readExecplanState(planRef);
+    if (final.status === "unreadable") return fail(`could not read the committed ExecPlan after the build: ${final.error}`, openIssues);
+    if (final.status === "missing") return fail(`the committed ExecPlan is absent after the build: ${contained.relPath}`, openIssues);
     const remaining = (final.items || []).filter((entry) => !entry.ticked);
     if (remaining.length) {
       return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS2}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0].text}`, openIssues);

@@ -655,6 +655,29 @@ artefact-slicing suites were retained as shipped-artefact coverage. The
 Surprises entry about the `checkJs: false` blind spot is resolved by the
 milestone 10 entry conversion.
 
+2026-07-06 (review remediation, batch 2): a second findings batch was
+triaged by a wyvern verification team, with firecrawl used to settle the
+Bun-capability question authoritatively — Bun issue #12161 was closed as
+completed in PR #18266 (release bun-v1.2.6), so `process.getBuiltinModule`
+has been supported since v1.2.6 and the three "Bun breaks on
+getBuiltinModule" findings are stale (this repo runs 1.3.14, verified by
+direct invocation; the CodeRabbit note derives from a pre-1.2.6 doc
+snapshot, and the proposed static-import fix would break the loader's
+no-import constraint). Confirmed and fixed: config.ts interpolates the
+configured backoff window into the legacy CodeRabbit guidance instead of a
+hardcoded 45-90; `classifyCoderabbitOutcome` now treats a `complete` event
+as clean only for a known success status (`review_completed`/`reviewed`,
+set-based since the CLI spelling varies by build) so a cancelled review
+cannot read as clean; the per-work-item build loop treats a plan that
+disappears mid-build as fatal at every re-read (it was fatal only at the
+initial guard); `readFileText` gained realpath parent-directory-symlink
+containment threaded from the worktree root, deepening last round's
+final-component-only guard; three duplicated `readWorkflowSource` copies
+were extracted to `tests/support/workflow-source.mjs`; and the
+developers-guide dependency list was completed (via scribe). Both docs
+findings from the first batch's SKILL.md/failure-resume concern were
+already correct and stayed skipped.
+
 2026-07-06 (review remediation): a findings batch was triaged by a wyvern
 verification team; 12 code and 6 test findings were confirmed and fixed,
 and 8 were skipped as stale or wrong (both docs findings already correct;

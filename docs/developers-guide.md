@@ -28,7 +28,8 @@ Read these before changing launch or workflow behaviour:
 The repository contains workflow scripts, skill documentation, docs, operator
 scripts, focused test suites, a project roadmap with ExecPlans, and a small
 validation `Makefile`. Development dependencies (esbuild, fast-check,
-bun-test-cucumber, LemmaScript) are managed with `bun` via `package.json`.
+bun-test-cucumber, LemmaScript, TypeScript, and Bun's type definitions) are
+managed with `bun` via `package.json`.
 
 Relevant paths:
 
