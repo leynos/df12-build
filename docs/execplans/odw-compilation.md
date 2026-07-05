@@ -173,8 +173,22 @@ Planned work:
   never-retry-product behaviour, error-routing, `shellQuote` reverse
   property, and `fileState` absent-vs-fault cases. Milestone 2's
   CodeRabbit review returned zero findings first.
-- [ ] Milestone 4: git evidence and recovery discovery (`git-evidence.ts`,
-  `recovery-discovery.ts`).
+- [x] (2026-07-05 23:00Z) Milestone 4: `git-evidence.ts` (name-status and
+  porcelain parsers, `gitEvidence`, `collectAssessmentEvidence`,
+  `readFileText`, `directoryExists`) and `recovery-discovery.ts`
+  (`makeRecoveryDiscovery`, `readExecplanState`,
+  `RECOVERY_HOLD_REASONS`, `recoveryExecplanPath`,
+  `syntheticRecoveryImpl`). The planned refactor-in-place commit was
+  superseded: discovery limits bind through the
+  `makeRecoveryDiscovery({ base, resumeTaskId, resumeMaxCandidates })`
+  factory (the milestone 3 pattern), preserving the artefact test at
+  `tests/df12-build-odw-recovery.test.mjs:218` that drives
+  `discoverRecoveryCandidates(text, dir)` with config flowing from the
+  factory args. Red-then-green suites reuse the shared recovery fixture
+  repo: discovery mapping/skip reasons, resumeTaskId filter, candidate
+  cap, broken-root error path, ExecPlan missing-vs-unreadable, canonical
+  plan resolution, and the synthetic implementation bridge. Milestone 3's
+  CodeRabbit review returned zero findings first.
 - [ ] Milestone 5: configuration record and prompt builders (`config.ts`,
   `prompts.ts`).
 - [ ] Milestone 6: write preflight (`write-preflight.ts`).
@@ -397,10 +411,10 @@ them.
 4. Milestone 4 — `git-evidence.ts` and `recovery-discovery.ts`: the
    evidence collectors and `discoverRecoveryCandidates` plus
    `readExecplanState`. These reference configuration constants
-   (`RESUME_TASK_ID`, `RESUME_MAX_CANDIDATES`, `BASE`); the peel makes them
-   explicit parameters — a shape change, so it lands as its own
-   refactor-in-place commit first (see Constraints), gated green, then the
-   move.
+   (`RESUME_TASK_ID`, `RESUME_MAX_CANDIDATES`, `BASE`); rather than the
+   originally planned explicit-parameter refactor, the limits bind once
+   through a `makeRecoveryDiscovery` factory (see Decision Log), keeping
+   existing call sites and artefact tests intact.
 5. Milestone 5 — `config.ts` and `prompts.ts`: introduce
    `makeConfig(args)` returning a frozen configuration record with today's
    defaulting logic; `main.js` computes `const cfg = makeConfig(args)` at

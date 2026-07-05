@@ -654,6 +654,206 @@ function resultFromUnhandledAgentError(id, detail, extra = {}) {
   };
 }
 
+// src/workflows/df12-build-odw/git-evidence.ts
+function parseNameStatus(output) {
+  return String(output || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const [status, firstPath, secondPath] = line.split(/\t+/);
+    return secondPath ? { status, path: secondPath, oldPath: firstPath } : { status, path: firstPath || "" };
+  }).filter((entry) => entry.path);
+}
+function parsePorcelainDirty(output) {
+  return String(output || "").split(/\r?\n/).filter(Boolean).flatMap((line) => {
+    const status = line.slice(0, 2);
+    const pathText = line.slice(3).trim();
+    if (!pathText) return [];
+    if (status === "??") return [{ status, path: pathText }];
+    if (status[1] && status[1] !== " ") return [{ status: status[1], path: pathText }];
+    return [];
+  });
+}
+async function gitEvidence(worktreePath, commandArgs, parse = ((text) => String(text || "").trim())) {
+  const result = await execFileStatus("git", ["-C", worktreePath, ...commandArgs]);
+  if (result.ok) {
+    return { ok: true, value: parse(result.stdout) };
+  }
+  return {
+    ok: false,
+    value: parse(result.stdout),
+    error: [result.message, result.stderr, result.stdout].filter(Boolean).join("\n").trim()
+  };
+}
+async function collectAssessmentEvidence(task, wt) {
+  const worktreePath = wt?.worktreePath || "";
+  const baseCommit = wt?.baseSha || "";
+  const branchName = wt?.branch || "";
+  const errors = [];
+  const current = await gitEvidence(worktreePath, ["rev-parse", "HEAD"]);
+  if (!current.ok) errors.push(`rev-parse HEAD: ${current.error}`);
+  const branch = branchName ? { ok: true, value: branchName } : await gitEvidence(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (!branch.ok) errors.push(`rev-parse --abbrev-ref HEAD: ${branch.error}`);
+  const status = await gitEvidence(worktreePath, ["status", "--porcelain=v1"]);
+  if (!status.ok) errors.push(`status --porcelain=v1: ${status.error}`);
+  const committed = baseCommit ? await gitEvidence(worktreePath, ["diff", "--name-status", `${baseCommit}...HEAD`], parseNameStatus) : { ok: false, value: [], error: "missing base commit" };
+  if (!committed.ok) errors.push(`diff base...HEAD: ${committed.error}`);
+  const dirty = await gitEvidence(worktreePath, ["diff", "--name-status"], parseNameStatus);
+  if (!dirty.ok) errors.push(`diff --name-status: ${dirty.error}`);
+  const staged = await gitEvidence(worktreePath, ["diff", "--cached", "--name-status"], parseNameStatus);
+  if (!staged.ok) errors.push(`diff --cached --name-status: ${staged.error}`);
+  const commits = baseCommit ? await gitEvidence(worktreePath, ["log", "--oneline", "--max-count=20", `${baseCommit}..HEAD`], (text) => String(text || "").trim().split(/\r?\n/).filter(Boolean)) : { ok: false, value: [], error: "missing base commit" };
+  if (!commits.ok) errors.push(`log base..HEAD: ${commits.error}`);
+  const untrackedOrModified = parsePorcelainDirty(status.value);
+  const dirtyChanges = [
+    ...dirty.value,
+    ...untrackedOrModified.filter((entry) => !dirty.value.some((item) => item.path === entry.path))
+  ];
+  const allChanged = /* @__PURE__ */ new Set([
+    ...committed.value.map((entry) => entry.path),
+    ...dirtyChanges.map((entry) => entry.path),
+    ...staged.value.map((entry) => entry.path)
+  ]);
+  return {
+    taskId: task?.id || "",
+    taskTitle: task?.title || "",
+    branchName: branch.value || branchName,
+    worktreePath,
+    baseCommit,
+    currentCommit: current.value || "",
+    dirtyState: status.ok ? String(status.value || "").trim() ? "dirty" : "clean" : "unknown",
+    changedFiles: [...allChanged].sort(),
+    committedChanges: committed.value,
+    dirtyChanges,
+    stagedChanges: staged.value,
+    recentCommits: commits.value,
+    collectionErrors: errors.filter(Boolean)
+  };
+}
+async function readFileText(path) {
+  const { readFile } = process.getBuiltinModule("node:fs/promises");
+  return await readFile(path, "utf8");
+}
+async function directoryExists(pathValue) {
+  if (!pathValue) return false;
+  const fs = process.getBuiltinModule("node:fs/promises");
+  try {
+    const stat = await fs.stat(String(pathValue));
+    return stat.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+// src/workflows/df12-build-odw/recovery-discovery.ts
+function makeRecoveryDiscovery(limits) {
+  return async function discoverRecoveryCandidates2(roadmapText, gitRoot) {
+    const root = gitRoot || process.cwd();
+    const skipped = [];
+    const errors = [];
+    const branchList = await execFileStatus("git", ["-C", root, "for-each-ref", "--format=%(refname:short)", "refs/heads/roadmap-*"]);
+    if (!branchList.ok) {
+      errors.push(`for-each-ref failed: ${[branchList.message, branchList.stderr].filter(Boolean).join("; ")}`);
+      return { candidates: [], skipped, errors };
+    }
+    const branches = branchList.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const worktreeList = await execFileStatus("git", ["-C", root, "worktree", "list", "--porcelain"]);
+    if (!worktreeList.ok) {
+      errors.push(`worktree list failed: ${[worktreeList.message, worktreeList.stderr].filter(Boolean).join("; ")}`);
+    }
+    const worktreeByBranch = new Map(
+      parseWorktreeList(worktreeList.stdout).filter((entry) => entry.branch).map((entry) => [entry.branch, entry.worktreePath])
+    );
+    const byId = roadmapTaskIndex(roadmapText);
+    const mapped = [];
+    for (const branch of branches) {
+      const parsed = branchToRoadmapId(branch);
+      const task = parsed ? byId.get(parsed.id) : null;
+      if (!parsed || !task) {
+        skipped.push({ id: parsed?.id || "", branchName: branch, reason: "unmapped-branch" });
+        continue;
+      }
+      if (candidateRoadmapComplete(task, parsed.isAddendum)) {
+        skipped.push({ id: parsed.id, branchName: branch, reason: "already-complete" });
+        continue;
+      }
+      const commit = await execFileStatus("git", ["-C", root, "rev-parse", "--verify", `${branch}^{commit}`]);
+      if (!commit.ok) {
+        skipped.push({ id: parsed.id, branchName: branch, reason: "unreadable-commit" });
+        continue;
+      }
+      const mergeBase = await execFileStatus("git", ["-C", root, "merge-base", `origin/${limits.base}`, branch]);
+      const worktreePath = worktreeByBranch.get(branch) || "";
+      mapped.push({
+        taskId: parsed.id,
+        taskTitle: task.title || "",
+        branchName: branch,
+        worktreePath: await directoryExists(worktreePath) ? worktreePath : "",
+        baseCommit: mergeBase.ok ? mergeBase.stdout.trim() : "",
+        currentCommit: commit.stdout.trim(),
+        roadmapComplete: false,
+        isAddendum: parsed.isAddendum,
+        line: task.line || Number.MAX_SAFE_INTEGER
+      });
+    }
+    mapped.sort((left, right) => left.line - right.line || left.branchName.localeCompare(right.branchName));
+    const candidates = [];
+    for (const candidate of mapped) {
+      if (limits.resumeTaskId && candidate.taskId !== limits.resumeTaskId) continue;
+      if (!candidate.worktreePath) {
+        skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: "missing-worktree" });
+        continue;
+      }
+      if (candidates.length >= limits.resumeMaxCandidates) {
+        skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: "candidate-cap" });
+        continue;
+      }
+      candidates.push(candidate);
+    }
+    return { candidates, skipped, errors };
+  };
+}
+async function readExecplanState(candidate) {
+  if (!candidate?.execplanPath) return { status: "missing", ticked: 0, unticked: 0 };
+  const path = process.getBuiltinModule("node:path");
+  try {
+    const text = await readFileText(path.join(candidate.worktreePath || "", candidate.execplanPath));
+    return parseExecplanState(text);
+  } catch (error) {
+    const failure = error;
+    if (failure && (failure.code === "ENOENT" || failure.code === "ENOTDIR")) {
+      return { status: "missing", ticked: 0, unticked: 0 };
+    }
+    return {
+      status: "unreadable",
+      ticked: 0,
+      unticked: 0,
+      error: `${candidate.execplanPath}: ${failure && failure.message || String(error)}`
+    };
+  }
+}
+var RECOVERY_HOLD_REASONS = /* @__PURE__ */ new Set(["missing-worktree", "candidate-cap", "unreadable-commit", "assessment-error"]);
+async function recoveryExecplanPath(candidate) {
+  const canonicalPlan = `docs/execplans/${candidate.branchName}.md`;
+  const state = await fileState(canonicalPlan, candidate.worktreePath);
+  if (!state.ok) return { execplanPath: "", error: state.detail };
+  return { execplanPath: state.exists ? canonicalPlan : "", error: "" };
+}
+async function syntheticRecoveryImpl(candidate, evidence) {
+  const resolved = typeof candidate.execplanPath === "string" ? { execplanPath: candidate.execplanPath, error: "" } : await recoveryExecplanPath(candidate);
+  return {
+    ok: true,
+    gatesGreen: true,
+    execplanPath: resolved.execplanPath,
+    workItemsCompleted: 0,
+    workItemsTotal: 0,
+    commits: evidence?.recentCommits || [],
+    coderabbitRuns: 0,
+    openIssues: [
+      "recovered branch requires fresh review",
+      ...resolved.error ? [`could not verify the durable ExecPlan: ${resolved.error}`] : []
+    ],
+    summary: "Recovered adopt-complete branch from durable git state."
+  };
+}
+
 // src/workflows/df12-build-odw/main.js
 var cfg = args || {};
 var PROJECT_ROOT = cfg.projectRoot || process.cwd();
@@ -736,6 +936,11 @@ function assessmentAgentOptions(options = {}) {
   return { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL, ...options };
 }
 var withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS);
+var discoverRecoveryCandidates = makeRecoveryDiscovery({
+  base: BASE,
+  resumeTaskId: RESUME_TASK_ID,
+  resumeMaxCandidates: RESUME_MAX_CANDIDATES
+});
 function grepaiSearchCommand() {
   const workspaceArg = shellQuote(GREPAI_WORKSPACE);
   const projectArg = GREPAI_PROJECT ? shellQuote(GREPAI_PROJECT) : "$(get-project)";
@@ -773,78 +978,6 @@ function preamble(worktree) {
     "- Signpost the documentation and skills you relied on in your output so the next agent can follow the same trail.",
     ""
   ].join("\n");
-}
-function parseNameStatus(output) {
-  return String(output || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-    const [status, firstPath, secondPath] = line.split(/\t+/);
-    return secondPath ? { status, path: secondPath, oldPath: firstPath } : { status, path: firstPath || "" };
-  }).filter((entry) => entry.path);
-}
-function parsePorcelainDirty(output) {
-  return String(output || "").split(/\r?\n/).filter(Boolean).flatMap((line) => {
-    const status = line.slice(0, 2);
-    const pathText = line.slice(3).trim();
-    if (!pathText) return [];
-    if (status === "??") return [{ status, path: pathText }];
-    if (status[1] && status[1] !== " ") return [{ status: status[1], path: pathText }];
-    return [];
-  });
-}
-async function gitEvidence(worktreePath, commandArgs, parse = (text) => String(text || "").trim()) {
-  const result = await execFileStatus("git", ["-C", worktreePath, ...commandArgs]);
-  if (result.ok) {
-    return { ok: true, value: parse(result.stdout) };
-  }
-  return {
-    ok: false,
-    value: parse(result.stdout),
-    error: [result.message, result.stderr, result.stdout].filter(Boolean).join("\n").trim()
-  };
-}
-async function collectAssessmentEvidence(task, wt) {
-  const worktreePath = wt?.worktreePath || "";
-  const baseCommit = wt?.baseSha || "";
-  const branchName = wt?.branch || "";
-  const errors = [];
-  const current = await gitEvidence(worktreePath, ["rev-parse", "HEAD"]);
-  if (!current.ok) errors.push(`rev-parse HEAD: ${current.error}`);
-  const branch = branchName ? { ok: true, value: branchName } : await gitEvidence(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"]);
-  if (!branch.ok) errors.push(`rev-parse --abbrev-ref HEAD: ${branch.error}`);
-  const status = await gitEvidence(worktreePath, ["status", "--porcelain=v1"]);
-  if (!status.ok) errors.push(`status --porcelain=v1: ${status.error}`);
-  const committed = baseCommit ? await gitEvidence(worktreePath, ["diff", "--name-status", `${baseCommit}...HEAD`], parseNameStatus) : { ok: false, value: [], error: "missing base commit" };
-  if (!committed.ok) errors.push(`diff base...HEAD: ${committed.error}`);
-  const dirty = await gitEvidence(worktreePath, ["diff", "--name-status"], parseNameStatus);
-  if (!dirty.ok) errors.push(`diff --name-status: ${dirty.error}`);
-  const staged = await gitEvidence(worktreePath, ["diff", "--cached", "--name-status"], parseNameStatus);
-  if (!staged.ok) errors.push(`diff --cached --name-status: ${staged.error}`);
-  const commits = baseCommit ? await gitEvidence(worktreePath, ["log", "--oneline", "--max-count=20", `${baseCommit}..HEAD`], (text) => String(text || "").trim().split(/\r?\n/).filter(Boolean)) : { ok: false, value: [], error: "missing base commit" };
-  if (!commits.ok) errors.push(`log base..HEAD: ${commits.error}`);
-  const untrackedOrModified = parsePorcelainDirty(status.value);
-  const dirtyChanges = [
-    ...dirty.value,
-    ...untrackedOrModified.filter((entry) => !dirty.value.some((item) => item.path === entry.path))
-  ];
-  const allChanged = /* @__PURE__ */ new Set([
-    ...committed.value.map((entry) => entry.path),
-    ...dirtyChanges.map((entry) => entry.path),
-    ...staged.value.map((entry) => entry.path)
-  ]);
-  return {
-    taskId: task?.id || "",
-    taskTitle: task?.title || "",
-    branchName: branch.value || branchName,
-    worktreePath,
-    baseCommit,
-    currentCommit: current.value || "",
-    dirtyState: status.ok ? String(status.value || "").trim() ? "dirty" : "clean" : "unknown",
-    changedFiles: [...allChanged].sort(),
-    committedChanges: committed.value,
-    dirtyChanges,
-    stagedChanges: staged.value,
-    recentCommits: commits.value,
-    collectionErrors: errors.filter(Boolean)
-  };
 }
 async function runAuthPreflight() {
   if (!AUTH_PREFLIGHT) return [];
@@ -944,10 +1077,6 @@ async function createWorktree(task) {
       notes: details
     };
   }
-}
-async function readFileText(path) {
-  const { readFile } = process.getBuiltinModule("node:fs/promises");
-  return await readFile(path, "utf8");
 }
 async function readRoadmapForSelection(root = process.cwd()) {
   const canonicalRef = `origin/${BASE}:${ROADMAP}`;
@@ -1314,123 +1443,6 @@ async function attachAssessment(task, wt, result) {
       assessmentEvidence: evidence
     };
   }
-}
-async function directoryExists(pathValue) {
-  if (!pathValue) return false;
-  const fs = process.getBuiltinModule("node:fs/promises");
-  try {
-    const stat = await fs.stat(String(pathValue));
-    return stat.isDirectory();
-  } catch {
-    return false;
-  }
-}
-async function discoverRecoveryCandidates(roadmapText, gitRoot) {
-  const root = gitRoot || process.cwd();
-  const skipped = [];
-  const errors = [];
-  const branchList = await execFileStatus("git", ["-C", root, "for-each-ref", "--format=%(refname:short)", "refs/heads/roadmap-*"]);
-  if (!branchList.ok) {
-    errors.push(`for-each-ref failed: ${[branchList.message, branchList.stderr].filter(Boolean).join("; ")}`);
-    return { candidates: [], skipped, errors };
-  }
-  const branches = branchList.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const worktreeList = await execFileStatus("git", ["-C", root, "worktree", "list", "--porcelain"]);
-  if (!worktreeList.ok) {
-    errors.push(`worktree list failed: ${[worktreeList.message, worktreeList.stderr].filter(Boolean).join("; ")}`);
-  }
-  const worktreeByBranch = new Map(
-    parseWorktreeList(worktreeList.stdout).filter((entry) => entry.branch).map((entry) => [entry.branch, entry.worktreePath])
-  );
-  const byId = roadmapTaskIndex(roadmapText);
-  const mapped = [];
-  for (const branch of branches) {
-    const parsed = branchToRoadmapId(branch);
-    const task = parsed ? byId.get(parsed.id) : null;
-    if (!parsed || !task) {
-      skipped.push({ id: parsed?.id || "", branchName: branch, reason: "unmapped-branch" });
-      continue;
-    }
-    if (candidateRoadmapComplete(task, parsed.isAddendum)) {
-      skipped.push({ id: parsed.id, branchName: branch, reason: "already-complete" });
-      continue;
-    }
-    const commit = await execFileStatus("git", ["-C", root, "rev-parse", "--verify", `${branch}^{commit}`]);
-    if (!commit.ok) {
-      skipped.push({ id: parsed.id, branchName: branch, reason: "unreadable-commit" });
-      continue;
-    }
-    const mergeBase = await execFileStatus("git", ["-C", root, "merge-base", `origin/${BASE}`, branch]);
-    const worktreePath = worktreeByBranch.get(branch) || "";
-    mapped.push({
-      taskId: parsed.id,
-      taskTitle: task.title || "",
-      branchName: branch,
-      worktreePath: await directoryExists(worktreePath) ? worktreePath : "",
-      baseCommit: mergeBase.ok ? mergeBase.stdout.trim() : "",
-      currentCommit: commit.stdout.trim(),
-      roadmapComplete: false,
-      isAddendum: parsed.isAddendum,
-      line: task.line || Number.MAX_SAFE_INTEGER
-    });
-  }
-  mapped.sort((left, right) => left.line - right.line || left.branchName.localeCompare(right.branchName));
-  const candidates = [];
-  for (const candidate of mapped) {
-    if (RESUME_TASK_ID && candidate.taskId !== RESUME_TASK_ID) continue;
-    if (!candidate.worktreePath) {
-      skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: "missing-worktree" });
-      continue;
-    }
-    if (candidates.length >= RESUME_MAX_CANDIDATES) {
-      skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: "candidate-cap" });
-      continue;
-    }
-    candidates.push(candidate);
-  }
-  return { candidates, skipped, errors };
-}
-async function readExecplanState(candidate) {
-  if (!candidate?.execplanPath) return { status: "missing", ticked: 0, unticked: 0 };
-  const path = process.getBuiltinModule("node:path");
-  try {
-    const text = await readFileText(path.join(candidate.worktreePath, candidate.execplanPath));
-    return parseExecplanState(text);
-  } catch (error) {
-    if (error && (error.code === "ENOENT" || error.code === "ENOTDIR")) {
-      return { status: "missing", ticked: 0, unticked: 0 };
-    }
-    return {
-      status: "unreadable",
-      ticked: 0,
-      unticked: 0,
-      error: `${candidate.execplanPath}: ${error && error.message || String(error)}`
-    };
-  }
-}
-var RECOVERY_HOLD_REASONS = /* @__PURE__ */ new Set(["missing-worktree", "candidate-cap", "unreadable-commit", "assessment-error"]);
-async function recoveryExecplanPath(candidate) {
-  const canonicalPlan = `docs/execplans/${candidate.branchName}.md`;
-  const state = await fileState(canonicalPlan, candidate.worktreePath);
-  if (!state.ok) return { execplanPath: "", error: state.detail };
-  return { execplanPath: state.exists ? canonicalPlan : "", error: "" };
-}
-async function syntheticRecoveryImpl(candidate, evidence) {
-  const resolved = typeof candidate.execplanPath === "string" ? { execplanPath: candidate.execplanPath, error: "" } : await recoveryExecplanPath(candidate);
-  return {
-    ok: true,
-    gatesGreen: true,
-    execplanPath: resolved.execplanPath,
-    workItemsCompleted: 0,
-    workItemsTotal: 0,
-    commits: evidence?.recentCommits || [],
-    coderabbitRuns: 0,
-    openIssues: [
-      "recovered branch requires fresh review",
-      ...resolved.error ? [`could not verify the durable ExecPlan: ${resolved.error}`] : []
-    ],
-    summary: "Recovered adopt-complete branch from durable git state."
-  };
 }
 async function executeResume(task, candidate, enriched, evidence, stage, mergeLock2) {
   const worktree = candidate.worktreePath;
