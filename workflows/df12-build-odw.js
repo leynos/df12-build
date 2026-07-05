@@ -2140,7 +2140,7 @@ function makeTaskPipeline(deps) {
   return { runPlanDesignLoop: runPlanDesignLoop2, runImplementationStage: runImplementationStage2, runDualReviewAndIntegration: runDualReviewAndIntegration2, runTask: runTask2 };
 }
 
-// src/workflows/df12-build-odw/main.js
+// src/workflows/df12-build-odw/main.ts
 var CONFIG = makeConfig(args);
 var {
   PROJECT_ROOT,
@@ -2329,10 +2329,11 @@ async function createWorktree(task) {
       notes: "created deterministically by the ODW control loop; no setup agent required"
     };
   } catch (error) {
+    const failure = error;
     const details = [
-      error && error.message || String(error),
-      error?.stderr ? `stderr: ${error.stderr.trim()}` : "",
-      error?.stdout ? `stdout: ${error.stdout.trim()}` : ""
+      failure && failure.message || String(error),
+      failure?.stderr ? `stderr: ${failure.stderr.trim()}` : "",
+      failure?.stdout ? `stdout: ${failure.stdout.trim()}` : ""
     ].filter(Boolean).join("; ");
     return {
       ok: false,
@@ -2353,10 +2354,11 @@ async function readRoadmapForSelection(root = process.cwd()) {
       fallbackReason: ""
     };
   } catch (error) {
+    const failure = error;
     const details = [
-      error && error.message || String(error),
-      error?.stderr ? `stderr: ${error.stderr.trim()}` : "",
-      error?.stdout ? `stdout: ${error.stdout.trim()}` : ""
+      failure && failure.message || String(error),
+      failure?.stderr ? `stderr: ${failure.stderr.trim()}` : "",
+      failure?.stdout ? `stdout: ${failure.stdout.trim()}` : ""
     ].filter(Boolean).join("; ");
     throw new Error(`Failed to read canonical roadmap ref ${canonicalRef}: ${details}`);
   }
@@ -2388,8 +2390,9 @@ async function executeResume(task, candidate, enriched, evidence, stage, mergeLo
       if (built.fail) return built.fail;
       impl = built.impl;
     } else {
-      impl = await syntheticRecoveryImpl(enriched, evidence);
-      plan = { execplanPath: impl.execplanPath, workItems: [], summary: impl.summary };
+      const synthetic = await syntheticRecoveryImpl(enriched, evidence);
+      impl = synthetic;
+      plan = { execplanPath: synthetic.execplanPath, workItems: [], summary: synthetic.summary };
     }
     return await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock2, { kind: "recovery-resume" });
   } catch (error) {
@@ -2490,7 +2493,7 @@ async function runRecovery(root, mergeLock2 = null) {
     };
     if (decision.action !== "resume") {
       if (decision.skip) {
-        summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: decision.reason });
+        summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: decision.reason || "" });
       }
       summary.results.push({
         ...resultBase,
@@ -2585,6 +2588,7 @@ function semaphore(limit) {
   const drain = () => {
     while (active < max && queue.length) {
       const item = queue.shift();
+      if (!item) break;
       active += 1;
       Promise.resolve().then(item.fn).then(item.resolve, item.reject).finally(() => {
         active -= 1;

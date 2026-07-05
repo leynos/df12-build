@@ -201,11 +201,11 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     return !authFailureDetail(detail) && !providerFailureDetail(detail) && !infrastructureFailureDetail(detail)
   }
 
-  async function attachAssessment(
+  async function attachAssessment<T extends AssessableResult>(
     task: { id: string; title?: string },
     wt: AssessmentWorktree,
-    result: AssessableResult,
-  ): Promise<AssessableResult & { assessment?: Record<string, unknown>; assessmentError?: string; assessmentEvidence?: AssessmentEvidence }> {
+    result: T,
+  ): Promise<T & { assessment?: Record<string, unknown>; assessmentError?: string; assessmentEvidence?: AssessmentEvidence }> {
     if (!shouldAssessFailure(result, wt)) return result
     phase('Assess')
     const evidence = await collectAssessmentEvidence(task, wt)

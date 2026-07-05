@@ -25,7 +25,7 @@ import { build } from 'esbuild'
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const SRC_DIR = path.join(ROOT, 'src', 'workflows', 'df12-build-odw')
-const ENTRY = path.join(SRC_DIR, 'main.js')
+const ENTRY = path.join(SRC_DIR, 'main.ts')
 const BANNER = path.join(SRC_DIR, 'meta.js')
 const OUT = path.join(ROOT, 'workflows', 'df12-build-odw.js')
 const MARKER = '// --- Worker-pool control loop -----------------------------------------------'

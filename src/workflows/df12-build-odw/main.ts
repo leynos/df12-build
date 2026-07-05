@@ -53,6 +53,42 @@ import {
 } from './assessment.ts'
 import { TRIAGE_SCHEMA, makeRemediation, stepOf } from './remediation.ts'
 import { makeTaskPipeline, summarizeFixReport, summarizeReviewVerdict } from './run-task.ts'
+import type { AssessmentEvidence } from './git-evidence.ts'
+import type { ExecplanState, RecoveryAssessmentFields } from './recovery-decision.ts'
+import type { SelectionResult } from './roadmap.ts'
+import type { StagePlan, StageResult } from './run-task.ts'
+import type { RecoveryCandidate, SelectedTask } from './types.ts'
+
+type AnyRecord = Record<string, unknown>
+type MergeLockFn = (<T>(fn: () => Promise<T>) => Promise<T>) | null
+
+// The result record a drained task contributes to the run summary. The
+// integration slice is typed because the control loop keys processed-ness on
+// `integration?.pushed`.
+interface TaskOutcome extends AnyRecord {
+  id: string
+  status: string
+  stage?: string
+  detail?: string
+  integration?: { pushed?: boolean } | null
+  kind?: string
+  proposals?: AnyRecord[]
+  assessment?: AnyRecord
+  assessmentError?: string
+}
+
+interface RecoveryRunSummary {
+  enabled: boolean
+  mode: string
+  candidates: number
+  assessed: number
+  resumed: number
+  skipped: Array<{ id: string; branchName?: string; reason: string }>
+  results: AnyRecord[]
+  errors: string[]
+  blocked?: string
+  unresolved?: AnyRecord[]
+}
 import {
   commitExecplanApproval,
   commitExecplanDraft,
@@ -193,7 +229,7 @@ const { triagePrompt, runTriage } = makeRemediation({
 async function runAuthPreflight() {
   if (!AUTH_PREFLIGHT) return []
   phase('Auth Preflight')
-  const failures = []
+  const failures: Array<{ tool: string; command: string; detail: string }> = []
 
   const codex = await execFileStatus('codex', ['login', 'status'])
   const codexOutput = [codex.stdout, codex.stderr, codex.message].filter(Boolean).join('\n')
@@ -241,7 +277,7 @@ async function runAuthPreflight() {
   return failures
 }
 
-function slugForTask(task) {
+function slugForTask(task: SelectedTask): string {
   return `roadmap-${task.id.replace(/[^0-9a-zA-Z]+/g, '-')}${task.isAddendum ? '-addendum' : ''}`
 }
 
@@ -251,7 +287,7 @@ function worktreeParentPath() {
   return path.join(path.dirname(cwd), `${path.basename(cwd)}.worktrees`)
 }
 
-async function createWorktree(task) {
+async function createWorktree(task: SelectedTask) {
   const fs = process.getBuiltinModule('node:fs/promises')
   const path = process.getBuiltinModule('node:path')
   const branch = slugForTask(task)
@@ -283,10 +319,11 @@ async function createWorktree(task) {
       notes: 'created deterministically by the ODW control loop; no setup agent required',
     }
   } catch (error) {
+    const failure = error as (Error & { stderr?: string; stdout?: string }) | null
     const details = [
-      (error && error.message) || String(error),
-      error?.stderr ? `stderr: ${error.stderr.trim()}` : '',
-      error?.stdout ? `stdout: ${error.stdout.trim()}` : '',
+      (failure && failure.message) || String(error),
+      failure?.stderr ? `stderr: ${failure.stderr.trim()}` : '',
+      failure?.stdout ? `stdout: ${failure.stdout.trim()}` : '',
     ].filter(Boolean).join('; ')
     return {
       ok: false,
@@ -299,7 +336,7 @@ async function createWorktree(task) {
   }
 }
 
-async function readRoadmapForSelection(root = process.cwd()) {
+async function readRoadmapForSelection(root: string = process.cwd()) {
   const canonicalRef = `origin/${BASE}:${ROADMAP}`
   try {
     return {
@@ -308,10 +345,11 @@ async function readRoadmapForSelection(root = process.cwd()) {
       fallbackReason: '',
     }
   } catch (error) {
+    const failure = error as (Error & { stderr?: string; stdout?: string }) | null
     const details = [
-      (error && error.message) || String(error),
-      error?.stderr ? `stderr: ${error.stderr.trim()}` : '',
-      error?.stdout ? `stdout: ${error.stdout.trim()}` : '',
+      (failure && failure.message) || String(error),
+      failure?.stderr ? `stderr: ${failure.stderr.trim()}` : '',
+      failure?.stdout ? `stdout: ${failure.stdout.trim()}` : '',
     ].filter(Boolean).join('; ')
     throw new Error(`Failed to read canonical roadmap ref ${canonicalRef}: ${details}`)
   }
@@ -321,7 +359,14 @@ async function readRoadmapForSelection(root = process.cwd()) {
 // Every stage funnels into the SAME dual-review + merge-lock integration path
 // as fresh work; the host-verified write gate runs first because plan, build,
 // fix, and integration agents all write into the recovered worktree.
-async function executeResume(task, candidate, enriched, evidence, stage, mergeLock) {
+async function executeResume(
+  task: SelectedTask,
+  candidate: RecoveryCandidate,
+  enriched: RecoveryCandidate,
+  evidence: AssessmentEvidence | AnyRecord | undefined,
+  stage: string,
+  mergeLock: MergeLockFn,
+): Promise<StageResult> {
   const worktree = candidate.worktreePath
   const extra = { kind: 'recovery-resume' }
   const writeAccess = await ensureTaskAgentWriteAccess(worktree, candidate.taskId)
@@ -330,8 +375,8 @@ async function executeResume(task, candidate, enriched, evidence, stage, mergeLo
     return { id: candidate.taskId, status: 'failed', stage: 'worktree-write', detail, worktree, proposals: [], ...extra }
   }
   try {
-    let plan
-    let impl
+    let plan: StagePlan | undefined
+    let impl: AnyRecord | undefined
     if (stage === 'plan') {
       const planned = await runPlanDesignLoop(task, worktree, { resume: true, extra })
       if (planned.fail) return planned.fail
@@ -344,16 +389,17 @@ async function executeResume(task, candidate, enriched, evidence, stage, mergeLo
       }
     }
     if (stage === 'plan' || stage === 'implement') {
-      const built = await runImplementationStage(task, worktree, plan, { resume: stage === 'implement', extra })
+      const built = await runImplementationStage(task, worktree, plan as StagePlan, { resume: stage === 'implement', extra })
       if (built.fail) return built.fail
       impl = built.impl
     } else {
-      impl = await syntheticRecoveryImpl(enriched, evidence)
-      plan = { execplanPath: impl.execplanPath, workItems: [], summary: impl.summary }
+      const synthetic = await syntheticRecoveryImpl(enriched, evidence)
+      impl = synthetic
+      plan = { execplanPath: synthetic.execplanPath, workItems: [], summary: synthetic.summary }
     }
-    return await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock, { kind: 'recovery-resume' })
+    return await runDualReviewAndIntegration(task, candidate.worktreePath, plan as StagePlan, impl as AnyRecord, mergeLock, { kind: 'recovery-resume' })
   } catch (error) {
-    const detail = `unhandled agent error: ${(error && error.message) || String(error)}`
+    const detail = `unhandled agent error: ${((error as Error | null) && (error as Error).message) || String(error)}`
     return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: 'recovery-resume' })
   }
 }
@@ -365,8 +411,13 @@ async function executeResume(task, candidate, enriched, evidence, stage, mergeLo
 // ordinary tasks. Continue mode dispatches deterministically on the committed
 // ExecPlan Status and re-enters the ordinary pipeline at the plan, implement,
 // or review stage; nothing merges outside that path in any mode.
-async function runRecovery(root, mergeLock = null) {
-  const summary = {
+async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise<{
+  summary: RecoveryRunSummary
+  taskResults: Array<{ task: SelectedTask; result: TaskOutcome }>
+  held: { normal: Set<string>; addendum: Set<string> }
+  fatal: TaskOutcome | null
+}> {
+  const summary: RecoveryRunSummary = {
     enabled: true,
     mode: RESUME_MODE,
     candidates: 0,
@@ -376,8 +427,8 @@ async function runRecovery(root, mergeLock = null) {
     results: [],
     errors: [],
   }
-  const held = { normal: new Set(), addendum: new Set() }
-  const taskResults = []
+  const held = { normal: new Set<string>(), addendum: new Set<string>() }
+  const taskResults: Array<{ task: SelectedTask; result: TaskOutcome }> = []
   phase('Recovery')
 
   const fetched = await execFileStatus('git', ['-C', root, 'fetch', 'origin', BASE])
@@ -388,7 +439,7 @@ async function runRecovery(root, mergeLock = null) {
   try {
     roadmap = await readRoadmapForSelection(root)
   } catch (error) {
-    summary.errors.push((error && error.message) || String(error))
+    summary.errors.push(((error as Error | null) && (error as Error).message) || String(error))
     log('[recovery] cannot read the canonical roadmap; skipping recovery discovery')
     return { summary, taskResults, held, fatal: null }
   }
@@ -398,7 +449,7 @@ async function runRecovery(root, mergeLock = null) {
   summary.skipped.push(...discovery.skipped)
   summary.errors.push(...discovery.errors)
 
-  const holdCandidate = (branchName, taskId) => {
+  const holdCandidate = (branchName: string, taskId?: string) => {
     const parsed = branchToRoadmapId(branchName)
     if (!parsed) return
     ;(parsed.isAddendum ? held.addendum : held.normal).add(taskId || parsed.id)
@@ -419,11 +470,11 @@ async function runRecovery(root, mergeLock = null) {
     }
     const resumeWt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit }
 
-    let decision
-    let evidence
-    let enriched
-    let assessment = null
-    let planState = null
+    let decision: { classification?: string; action: string; stage?: string | null; reason?: string; skip?: boolean }
+    let evidence: AssessmentEvidence | AnyRecord | undefined
+    let enriched: RecoveryCandidate
+    let assessment: AnyRecord | null = null
+    let planState: ExecplanState | null = null
     if (RESUME_MODE === 'continue') {
       // Deterministic dispatch: host git evidence plus the committed ExecPlan
       // Status. No judgement agent — the downstream gates ARE the judgement.
@@ -454,13 +505,13 @@ async function runRecovery(root, mergeLock = null) {
           // Infrastructure faults during recovery poison every later agent
           // call too — halt the run instead of pretending branches were
           // assessed.
-          return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessed.assessmentError) }
+          return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessed.assessmentError) as TaskOutcome }
         }
         continue
       }
       assessment = assessed.assessment
       summary.assessed += 1
-      evidence = assessment.hostEvidence
+      evidence = assessment.hostEvidence as AssessmentEvidence
       // Resolve the durable ExecPlan before deciding: resume eligibility
       // requires it, and its absence must stay visible as missing-execplan.
       // A stat FAULT is neither present nor absent — report it distinctly
@@ -469,7 +520,7 @@ async function runRecovery(root, mergeLock = null) {
       enriched = { ...candidate, execplanPath: resolved.execplanPath }
       decision = resolved.error
         ? { classification: '', action: 'report', stage: null, reason: 'execplan-stat-error', skip: true }
-        : { stage: 'review', ...recoveryDecision(enriched, evidence, assessment, RESUME_MODE, { dryRun: DRY_RUN }) }
+        : { stage: 'review', ...recoveryDecision(enriched, evidence, assessment as RecoveryAssessmentFields, RESUME_MODE, { dryRun: DRY_RUN }) }
     }
 
     const resultBase = {
@@ -481,7 +532,7 @@ async function runRecovery(root, mergeLock = null) {
 
     if (decision.action !== 'resume') {
       if (decision.skip) {
-        summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: decision.reason })
+        summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: decision.reason || '' })
       }
       summary.results.push({
         ...resultBase,
@@ -499,7 +550,7 @@ async function runRecovery(root, mergeLock = null) {
     // and integration ticks the roadmap under the merge lock.
     const stage = decision.stage || 'review'
     log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline`)
-    const outcome = await executeResume(task, candidate, enriched, evidence, stage, mergeLock)
+    const outcome = (await executeResume(task, candidate, enriched, evidence, stage, mergeLock)) as TaskOutcome
     if (outcome.status === 'fatal-auth' || outcome.status === 'provider-fault' || outcome.status === 'infra-fault') {
       summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status })
       return { summary, taskResults, held, fatal: outcome }
@@ -539,7 +590,7 @@ function writeProbeTargets() {
 // ---------------------------------------------------------------------------
 // Post-step audit
 // ---------------------------------------------------------------------------
-async function runAudit(task) {
+async function runAudit(task: { id: string }) {
   phase('Audit')
   const audit = await agent(auditPrompt(task, null), reviewAgentOptions({ phase: 'Audit', label: `audit:after-${task.id}`, schema: AUDIT_SCHEMA }))
   return audit
@@ -551,16 +602,16 @@ async function runAudit(task) {
 // remediation flush in the control loop. Runs until the frontier is dry, the
 // task ceiling or budget reserve is hit, or a task fails (then drain + stop).
 // ---------------------------------------------------------------------------
-const processed = [] // task ids pushed to BASE this run
-const processedNormal = new Set()
-const processedAddendum = new Set()
-const manualMergeReadyNormal = new Set()
-const manualMergeReadyAddendum = new Set()
-const dryRunNormal = new Set()
-const dryRunAddendum = new Set()
-const recoveryHeldNormal = new Set() // ids with surviving branches recovery reported but did not integrate this run
-const recoveryHeldAddendum = new Set()
-let recovery = {
+const processed: string[] = [] // task ids pushed to BASE this run
+const processedNormal = new Set<string>()
+const processedAddendum = new Set<string>()
+const manualMergeReadyNormal = new Set<string>()
+const manualMergeReadyAddendum = new Set<string>()
+const dryRunNormal = new Set<string>()
+const dryRunAddendum = new Set<string>()
+const recoveryHeldNormal = new Set<string>() // ids with surviving branches recovery reported but did not integrate this run
+const recoveryHeldAddendum = new Set<string>()
+let recovery: RecoveryRunSummary = {
   enabled: RESUME_PARTIAL_BRANCHES,
   mode: RESUME_MODE,
   candidates: 0,
@@ -570,14 +621,14 @@ let recovery = {
   results: [],
   errors: [],
 }
-const results = []
-const audits = []
-const triages = []
-const pendingByStep = new Map() // step prefix -> accrued review/audit proposals awaiting that step's flush
-const inflight = new Map() // task id -> Promise<{id, task, result}> for tasks currently being built
-const inflightNormal = new Set()
-const inflightAddendum = new Set()
-let halted = null
+const results: TaskOutcome[] = []
+const audits: AnyRecord[] = []
+const triages: Array<AnyRecord & { step: string; decisions?: Array<{ lane: string }> }> = []
+const pendingByStep = new Map<string, AnyRecord[]>() // step prefix -> accrued review/audit proposals awaiting that step's flush
+const inflight = new Map<string, Promise<{ id: string; task: SelectedTask; result: TaskOutcome }>>() // task id -> Promise<{id, task, result}> for tasks currently being built
+const inflightNormal = new Set<string>()
+const inflightAddendum = new Set<string>()
+let halted: string | null = null
 
 // Only fold remediation into the roadmap when we are actually advancing BASE.
 const canFlush = AUTO_MERGE && !DRY_RUN
@@ -585,8 +636,8 @@ const canFlush = AUTO_MERGE && !DRY_RUN
 // Minimal async mutex: serialize callers through a promise chain. Used as a
 // merge queue so only one task rebases + squash-merges + pushes BASE at a time.
 function mutex() {
-  let tail = Promise.resolve()
-  return (fn) => {
+  let tail: Promise<unknown> = Promise.resolve()
+  return <T>(fn: () => Promise<T>): Promise<T> => {
     const result = tail.then(() => fn())
     tail = result.then(() => {}, () => {}) // keep the queue alive regardless of outcome
     return result
@@ -594,14 +645,15 @@ function mutex() {
 }
 const mergeLock = mutex()
 
-function semaphore(limit) {
+function semaphore(limit: number) {
   const max = Math.max(1, limit)
-  const queue = []
+  const queue: Array<{ fn: () => Promise<unknown>; resolve: (value: unknown) => void; reject: (reason: unknown) => void }> = []
   let active = 0
 
   const drain = () => {
     while (active < max && queue.length) {
       const item = queue.shift()
+      if (!item) break
       active += 1
       Promise.resolve()
         .then(item.fn)
@@ -613,8 +665,8 @@ function semaphore(limit) {
     }
   }
 
-  return (fn) => new Promise((resolve, reject) => {
-    queue.push({ fn, resolve, reject })
+  return <T>(fn: () => Promise<T>): Promise<T> => new Promise<T>((resolve, reject) => {
+    queue.push({ fn, resolve: resolve as (value: unknown) => void, reject })
     drain()
   })
 }
@@ -656,7 +708,7 @@ const {
 })
 
 let selectSeq = 0
-async function doSelect(taken) {
+async function doSelect(taken: { normal: string[]; addendum: string[] }) {
   phase('Select')
   const label = `select#${++selectSeq}`
   const roadmap = await readRoadmapForSelection()
@@ -679,7 +731,7 @@ function takenSnapshot() {
   }
 }
 
-function isAlreadyTaken(task) {
+function isAlreadyTaken(task: SelectedTask) {
   const processedSet = task?.isAddendum ? processedAddendum : processedNormal
   const manualMergeReadySet = task?.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal
   const dryRunSet = task?.isAddendum ? dryRunAddendum : dryRunNormal
@@ -687,36 +739,36 @@ function isAlreadyTaken(task) {
   return processedSet.has(task.id) || manualMergeReadySet.has(task.id) || dryRunSet.has(task.id) || recoveryHeldSet.has(task.id) || inflightNormal.has(task.id) || inflightAddendum.has(task.id)
 }
 
-function markInflight(task) {
+function markInflight(task: SelectedTask) {
   const inflightSet = task?.isAddendum ? inflightAddendum : inflightNormal
   inflightSet.add(task.id)
 }
 
-function unmarkInflight(task) {
+function unmarkInflight(task: SelectedTask) {
   const inflightSet = task?.isAddendum ? inflightAddendum : inflightNormal
   inflightSet.delete(task.id)
 }
 
-function markProcessed(task) {
+function markProcessed(task: SelectedTask) {
   const processedSet = task?.isAddendum ? processedAddendum : processedNormal
   processedSet.add(task.id)
   processed.push(task.id)
 }
 
-function markManualMergeReady(task) {
+function markManualMergeReady(task: SelectedTask) {
   const manualMergeReadySet = task?.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal
   manualMergeReadySet.add(task.id)
 }
 
-function markDryRun(task) {
+function markDryRun(task: SelectedTask) {
   const dryRunSet = task?.isAddendum ? dryRunAddendum : dryRunNormal
   dryRunSet.add(task.id)
 }
 
-function addPending(step, items) {
+function addPending(step: string, items: AnyRecord[] | undefined) {
   if (!items || !items.length) return
   if (!pendingByStep.has(step)) pendingByStep.set(step, [])
-  pendingByStep.get(step).push(...items)
+  pendingByStep.get(step)!.push(...items)
 }
 
 // Fold a step's accrued remediation into the roadmap once no in-flight task
@@ -729,13 +781,13 @@ async function flushSettledSteps() {
   const inflightSteps = new Set([...inflight.keys()].map(stepOf))
   for (const [step, items] of [...pendingByStep.entries()]) {
     if (!items.length || inflightSteps.has(step)) continue
-    const tr = await mergeLock(() => runTriage(step, items))
+    const tr = (await mergeLock(() => runTriage(step, items))) as { ok?: boolean; pushed?: boolean; decisions?: Array<{ lane: string }> } | null
     triages.push({ step, ...(tr || {}) })
     if (!tr?.ok || !tr.pushed) {
       log(`[step ${step}] triage did not land; keeping ${items.length} proposal(s) pending`)
       continue
     }
-    const lanes = (tr?.decisions || []).reduce((m, d) => ((m[d.lane] = (m[d.lane] || 0) + 1), m), {})
+    const lanes = (tr?.decisions || []).reduce((m: Record<string, number>, d) => ((m[d.lane] = (m[d.lane] || 0) + 1), m), {})
     log(`[step ${step}] triaged ${items.length} proposal(s): ${Object.entries(lanes).map(([k, v]) => `${v} ${k}`).join(', ') || 'none recorded'}`)
     pendingByStep.delete(step)
   }
@@ -754,8 +806,8 @@ async function fillPool() {
     try {
       sel = await doSelect(takenSnapshot())
     } catch (err) {
-      log(`[pool] select agent failed (${(err && err.message) || String(err)}); stop opening new work, drain in-flight`)
-      if (!halted) halted = `select agent error: ${(err && err.message) || String(err)}`
+      log(`[pool] select agent failed (${((err as Error | null) && (err as Error).message) || String(err)}); stop opening new work, drain in-flight`)
+      if (!halted) halted = `select agent error: ${((err as Error | null) && (err as Error).message) || String(err)}`
       return
     }
     if (!sel || !sel.hasTask || !sel.task) {
@@ -775,13 +827,13 @@ async function fillPool() {
       // structured output) must NOT reject through Promise.race and crash the
       // whole run — convert it to a failed result the control loop drains.
       runTask(task, mergeLock).then(
-        (result) => ({ id: task.id, task, result }),
+        (result) => ({ id: task.id, task, result: result as TaskOutcome }),
         (err) => {
-          const detail = `unhandled agent error: ${(err && err.message) || String(err)}`
+          const detail = `unhandled agent error: ${((err as Error | null) && (err as Error).message) || String(err)}`
           return {
             id: task.id,
             task,
-            result: resultFromUnhandledAgentError(task.id, detail),
+            result: resultFromUnhandledAgentError(task.id, detail) as TaskOutcome,
           }
         },
       ),
@@ -837,7 +889,7 @@ if (RESUME_PARTIAL_BRANCHES && !halted) {
       stop = true
     }
   } catch (error) {
-    const detail = (error && error.message) || String(error)
+    const detail = ((error as Error | null) && (error as Error).message) || String(error)
     recovery.errors.push(`recovery pass failed: ${detail}`)
     log(`[recovery] failed (${detail}); continuing with normal roadmap selection`)
   }
@@ -848,7 +900,7 @@ while (true) {
     try {
       await flushSettledSteps()
     } catch (err) {
-      log(`[triage] failed (${(err && err.message) || String(err)}); proposals stay pending for a later sweep`)
+      log(`[triage] failed (${((err as Error | null) && (err as Error).message) || String(err)}); proposals stay pending for a later sweep`)
     }
     await fillPool()
   }
@@ -866,11 +918,11 @@ while (true) {
       // Addendum passes deliberately generate no audit and no proposals — that
       // is what breaks the remediation-of-remediation recursion.
       addPending(stepOf(done.id), result.proposals)
-      let audit = null
+      let audit: (AnyRecord & { proposedRoadmapItems?: AnyRecord[] }) | null = null
       try {
-        audit = await mergeLock(() => runAudit({ id: done.id }))
+        audit = (await mergeLock(() => runAudit({ id: done.id }))) as (AnyRecord & { proposedRoadmapItems?: AnyRecord[] }) | null
       } catch (err) {
-        log(`[audit ${done.id}] failed (${(err && err.message) || String(err)}); skipping (task already merged)`)
+        log(`[audit ${done.id}] failed (${((err as Error | null) && (err as Error).message) || String(err)}); skipping (task already merged)`)
       }
       if (audit) {
         audits.push({ afterTask: done.id, ...audit })
@@ -911,7 +963,7 @@ if (canFlush && !providerFaultHalt) {
   try {
     await flushSettledSteps()
   } catch (err) {
-    log(`[triage:end] failed (${(err && err.message) || String(err)}); ${[...pendingByStep.values()].flat().length} proposal(s) left pending`)
+    log(`[triage:end] failed (${((err as Error | null) && (err as Error).message) || String(err)}); ${[...pendingByStep.values()].flat().length} proposal(s) left pending`)
   }
 }
 // Recovery survivors the run reported but did not integrate still hold their

@@ -33,11 +33,11 @@ async function readWorkflowSource() {
   // invariants keep matching as helpers migrate between modules.
   const { readdir } = await import('node:fs/promises')
   const names = (await readdir(WORKFLOW_SRC_DIR)).filter(
-    (name) => (name.endsWith('.js') || name.endsWith('.ts')) && !name.endsWith('.d.ts') && !['meta.js', 'main.js'].includes(name),
+    (name) => (name.endsWith('.js') || name.endsWith('.ts')) && !name.endsWith('.d.ts') && !['meta.js', 'main.ts'].includes(name),
   ).sort()
   const parts = [await readFile(new URL('meta.js', WORKFLOW_SRC_DIR), 'utf8')]
   for (const name of names) parts.push(await readFile(new URL(name, WORKFLOW_SRC_DIR), 'utf8'))
-  parts.push(await readFile(new URL('main.js', WORKFLOW_SRC_DIR), 'utf8'))
+  parts.push(await readFile(new URL('main.ts', WORKFLOW_SRC_DIR), 'utf8'))
   return parts.join('\n')
 }
 
@@ -1576,7 +1576,9 @@ test('normal tasks and recovery resume share one review and integration implemen
   )
   assert.match(
     source,
-    /runDualReviewAndIntegration\(task, candidate\.worktreePath, plan, impl, mergeLock, \{ kind: 'recovery-resume' \}\)/,
+    // The optional `as …` groups tolerate TypeScript casts on the plan and
+    // implementation arguments in the src tree.
+    /runDualReviewAndIntegration\(task, candidate\.worktreePath, plan(?: as \w+)?, impl(?: as \w+)?, mergeLock, \{ kind: 'recovery-resume' \}\)/,
     'recovery resume must delegate to the same shared path',
   )
 })

@@ -9,13 +9,13 @@ import { shellQuote } from './exec.ts'
 // The slices of task / plan / implementation records the prompts read.
 export interface PromptTask {
   id: string
-  title: string
+  title?: string
   isAddendum?: boolean
   subtasks?: readonly string[]
 }
 
 export interface PromptPlan {
-  execplanPath: string
+  execplanPath?: string
 }
 
 export interface PromptImpl {
@@ -303,7 +303,7 @@ export function makePrompts(config: WorkflowConfig) {
     ].join('\n')
   }
 
-  function auditPrompt(task: PromptTask, worktree: string) {
+  function auditPrompt(task: PromptTask, worktree: string | null) {
     const writeClause = DOCUMENT_AUDIT
       ? `Record your findings as a structured markdown file at docs/issues/audit-${task.id}.md (create docs/issues/ if absent), one section per finding with location and a concrete proposed fix. Run \`make markdownlint\` and \`make nixie\` on it, then commit it on your own worktree branch and push it straight to the integration branch with \`git push origin HEAD:${BASE}\` (re-fetch and rebase on a non-fast-forward reject, then retry). NEVER \`git switch ${BASE}\` or touch the control/root worktree.`
       : `Do NOT write any file; return findings only.`

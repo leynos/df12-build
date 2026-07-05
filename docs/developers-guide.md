@@ -33,8 +33,16 @@ bun-test-cucumber, LemmaScript) are managed with `bun` via `package.json`.
 Relevant paths:
 
 - `src/workflows/df12-build-odw/`: source of truth for the ODW workflow — a
-  literal `meta.js` banner, the `main.js` entry, and peeled pure modules such
-  as `recovery-decision.js`.
+  literal `meta.js` banner (plain JavaScript, concatenated verbatim), the
+  typed `main.ts` entry (configuration unpacking, factory bindings, and the
+  worker-pool control loop), and one TypeScript module per subsystem:
+  `config.ts`, `schemas.ts`, `types.ts`, `roadmap.ts`, `exec.ts`,
+  `faults.ts`, `git-evidence.ts`, `recovery-decision.ts`,
+  `recovery-discovery.ts`, `prompts.ts`, `write-preflight.ts`,
+  `execplan-durability.ts`, `assessment.ts`, `remediation.ts`, and
+  `run-task.ts`, with the injected ODW primitives declared in
+  `odw-globals.d.ts`. TypeScript is restricted to erasable syntax by
+  compiler flags (`erasableSyntaxOnly`, `verbatimModuleSyntax`).
 - `workflows/df12-build-odw.js`: GENERATED ODW/Codex workflow artefact, built
   by `make workflow-build` (see `scripts/build-workflow.mjs`); this is the
   single file the sidecar copies and ODW loads.
@@ -72,7 +80,7 @@ branch lands planned work.
 module, and it is generated: edit `src/workflows/df12-build-odw/` and run
 `make workflow-build` (the `workflow-freshness` gate fails a stale artefact).
 The build frames the artefact from a verbatim `meta.js` banner, a flat
-esbuild bundle of `main.js` and its imports, and a generated
+esbuild bundle of `main.ts` and its imports, and a generated
 `return await workflowMain()` footer, and it fails closed on anything the
 ODW loader would reject. Within the src tree, keep the ODW script contract
 intact:

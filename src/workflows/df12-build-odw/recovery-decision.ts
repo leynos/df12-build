@@ -214,7 +214,7 @@ export function parseExecplanState(text: unknown): ExecplanState {
 export function recoveryContinueDecision(
   candidate: RecoveryCandidateHygiene | null | undefined,
   evidence: RecoveryEvidence | null | undefined,
-  planState: { status: string; ticked?: number; unticked?: number },
+  planState: { status: string; ticked?: number; unticked?: number; error?: string },
   flags: { dryRun?: boolean } = {},
 ): ContinueDecision {
   const report = (reason: string): ContinueDecision => ({ action: 'report', stage: null, reason, skip: true })

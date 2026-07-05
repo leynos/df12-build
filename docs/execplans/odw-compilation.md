@@ -5,7 +5,7 @@ This ExecPlan (execution plan) is a living document. The sections
 `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work
 proceeds.
 
-Status: IN PROGRESS
+Status: COMPLETE
 
 ## Purpose / big picture
 
@@ -260,8 +260,17 @@ Planned work:
   main.js is down to 1,006 lines (config unpacking, bindings, auth
   preflight, worktree creation, recovery glue, control loop).
   Milestone 8's CodeRabbit review returned zero findings first.
-- [ ] Milestone 10: convert `main.js` to `main.ts`; retire artefact slicing
-  from tests that can now import modules; close out the plan.
+- [x] (2026-07-06 04:20Z) Milestone 10: `main.js` renamed to `main.ts` and
+  fully annotated under strict + erasableSyntaxOnly (typed control-loop
+  state, generic mutex/semaphore, `TaskOutcome`/`RecoveryRunSummary`
+  records, error narrowing in every catch). The tsc blind spot recorded
+  in Surprises is closed: the entry is now checked. Two invariant regexes
+  gained optional `as …` groups to tolerate result casts. The artefact
+  slicing suites were deliberately retained rather than retired (see
+  Decision Log). Final acceptance: the real ODW loader accepts the
+  artefact (13 phases, compiled `run`, zero dual-compat warnings), 231
+  module tests, 96 artefact tests, 21 operator-script tests, `make all`
+  green including Dafny.
 
 ## Surprises & discoveries
 
@@ -334,6 +343,20 @@ Planned work:
   Rationale: observed during milestone 3; this is fail-closed in the right
   direction — an orphaned module is a mistake, not a state to preserve.
   Date/Author: 2026-07-05, Claude.
+- Decision: milestone 9 delivered one module (`run-task.ts`) instead of the
+  drafted `integration.ts` + `run-task.ts` split.
+  Rationale: `runDualReviewAndIntegration` is interleaved with the stage
+  helpers and `runTask` through shared summarizers, locks, and result
+  shapes; splitting them would have created a circular seam for no
+  testing or readability gain.
+  Date/Author: 2026-07-06, Claude.
+- Decision: the artefact-slicing suites are retained, not retired, at
+  milestone 10.
+  Rationale: they exercise the GENERATED artefact — the single file the
+  sidecar ships and ODW loads — so they are end-to-end evidence the
+  module suites cannot replace; retiring them would lose coverage, not
+  remove duplication.
+  Date/Author: 2026-07-06, Claude.
 - Decision: `meta.js` stays JavaScript permanently.
   Rationale: it is concatenated verbatim into the artefact without any
   transpilation step, so it must be loader-dialect JS as written.
@@ -341,7 +364,32 @@ Planned work:
 
 ## Outcomes & retrospective
 
-To be completed as milestones land.
+Delivered in full, eleven milestones over one continuous run, every
+milestone gated green deterministically before a CodeRabbit review that
+returned zero findings each time. The ODW workflow is now built from
+eleven typed modules plus a 1,000-line typed entry; every subsystem is
+unit-tested by direct import (231 bun tests: Gherkin scenarios,
+fast-check properties, fixture-repo suites, a scripted-primitive
+pipeline harness, and a Dafny-verified decision-table twin pinned by
+differential testing), while the 96 artefact tests and the mock-adapter
+smoke run keep validating the single generated file that ships.
+
+What worked well: the factory-binding pattern (`makeX(deps)` bound once
+in the entry) absorbed every configuration coupling without touching
+call sites or source-invariant regexes; content-anchored extraction
+scripts made verbatim relocation safe; and the artefact suites caught
+the one real slip (the `COMMIT_GATES` under-destructure) that the
+type-checker could not see while the entry was still JavaScript.
+
+What would be done differently: widening `readWorkflowSource()` to the
+whole src tree should have happened at milestone 0 rather than
+milestone 9 — the invariants were coupled to file layout from the
+start. Type the entry earlier if repeating this: the `checkJs: false`
+window (milestones 1–9) was the only period with a real blind spot.
+
+Deviation from the drafted plan, both logged in the Decision Log:
+milestone 9 produced one module (`run-task.ts`) instead of two, and the
+artefact-slicing suites were retained rather than retired.
 
 ## Context and orientation
 
@@ -599,3 +647,10 @@ and `agentType`. Signatures must match ODW's `src/primitives.ts` semantics
 
 2026-07-05: initial draft, written after the build-pipeline spike landed on
 this branch (see Progress for what that spike already delivered).
+
+2026-07-06: plan complete. All eleven milestones landed with deterministic
+gates and a zero-finding CodeRabbit review per milestone. Two logged
+deviations: milestone 9 shipped a single `run-task.ts` module, and the
+artefact-slicing suites were retained as shipped-artefact coverage. The
+Surprises entry about the `checkJs: false` blind spot is resolved by the
+milestone 10 entry conversion.
