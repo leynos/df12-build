@@ -67,7 +67,7 @@ Minimal sidecar `odw.config.json` shape for the Claude/Codex split:
   "concurrency": 16,
   "maxAgents": 1000,
   "workspaceMode": "inplace",
-  "timeout": 21600,
+  "timeout": 5400,
   "schemaRetries": 2,
   "runsRoot": "~/.odw/runs",
   "workflowsRoot": "~/.odw/workflows",
@@ -89,6 +89,7 @@ Minimal sidecar `odw.config.json` shape for the Claude/Codex split:
     },
     "codex-medium": {
       "label": "Codex GPT 5.5 medium",
+      "timeout": 3600,
       "command": [
         "codex",
         "--ask-for-approval",
@@ -439,6 +440,7 @@ Example `args.json`:
   "maxPlanningParallel": 4,
   "maxBuildParallel": 4,
   "maxTasks": 12,
+  "coderabbitFindingsFile": "/home/example/Projects/example-project.workshop/df12-build-run/coderabbit-findings.jsonl",
   "buildAdapter": "codex-medium",
   "buildModel": "gpt-5.5",
   "planAdapter": "claude",

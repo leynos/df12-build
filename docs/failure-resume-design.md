@@ -298,7 +298,7 @@ so a fresh run can dispatch a survivor branch from durable state alone:
 | Committed ExecPlan `Status` | Continue-mode action |
 | - | - |
 | file missing, `DRAFT`, or unrecognized | Re-enter the plan/design-review loop; the planner completes or revises the existing draft in place. |
-| `APPROVED` or `IN PROGRESS` | Re-enter implementation; the builder verifies ticked work items briefly and continues from the first unticked one. |
+| `APPROVED` or `IN PROGRESS` | Re-enter implementation; with the per-work-item build loop (the default) the host itself dispatches from the first unticked Progress item, so resume needs no builder judgement at all. |
 | `COMPLETE` | Re-enter dual review and integration via the synthetic implementation bridge. |
 | `BLOCKED` | Report for the operator (`plan-blocked` skip reason). |
 
