@@ -1,3 +1,11 @@
+import {
+  branchToRoadmapId,
+  parseWorktreeList,
+  parseExecplanState,
+  recoveryDecision,
+  recoveryContinueDecision,
+} from './recovery-decision.js'
+
 // ---------------------------------------------------------------------------
 // Configuration (all overridable through the ODW `args` object).
 // ---------------------------------------------------------------------------
@@ -1344,38 +1352,6 @@ async function attachAssessment(task, wt, result) {
 // live worktrees, and the canonical roadmap. Discovery never mutates the
 // target project; it only reads refs, worktree metadata, and commit ids.
 // ---------------------------------------------------------------------------
-const TASK_BRANCH_RE = /^roadmap-((?:\d+-)*\d+)(-addendum)?$/
-
-function branchToRoadmapId(branch) {
-  const match = TASK_BRANCH_RE.exec(String(branch || ''))
-  if (!match) return null
-  return { id: match[1].replace(/-/g, '.'), isAddendum: Boolean(match[2]) }
-}
-
-function parseWorktreeList(output) {
-  const entries = []
-  let current = null
-  for (const line of String(output || '').split(/\r?\n/)) {
-    if (!line.trim()) {
-      if (current) entries.push(current)
-      current = null
-      continue
-    }
-    const spaceIndex = line.indexOf(' ')
-    const key = spaceIndex === -1 ? line : line.slice(0, spaceIndex)
-    const value = spaceIndex === -1 ? '' : line.slice(spaceIndex + 1)
-    if (key === 'worktree') {
-      current = { worktreePath: value, branch: '', head: '' }
-    } else if (current && key === 'HEAD') {
-      current.head = value
-    } else if (current && key === 'branch') {
-      current.branch = value.replace(/^refs\/heads\//, '')
-    }
-  }
-  if (current) entries.push(current)
-  return entries
-}
-
 async function directoryExists(pathValue) {
   if (!pathValue) return false
   const fs = process.getBuiltinModule('node:fs/promises')
@@ -1480,105 +1456,6 @@ async function discoverRecoveryCandidates(roadmapText, gitRoot) {
   return { candidates, skipped, errors }
 }
 
-// Reasons a discovered branch is recorded in recovery.skipped instead of
-// proceeding to its mode's maximum action. Discovery emits the first five;
-// the assessment and resume-decision stages emit the rest.
-const RECOVERY_SKIP_REASONS = [
-  'unmapped-branch',
-  'already-complete',
-  'unreadable-commit',
-  'missing-worktree',
-  'candidate-cap',
-  'assessment-error',
-  'addendum-branch',
-  'evidence-collection-error',
-  'dirty-worktree',
-  'no-committed-work',
-  'not-task-scoped',
-  'missing-validation-evidence',
-  'missing-execplan',
-  'plan-blocked',
-  'dry-run',
-]
-
-// Review-mode resume eligibility: only a clean, committed, task-scoped
-// adopt-complete branch with validation evidence may spend review and
-// integration effort. Returns '' when eligible, else the disqualifying skip
-// reason. Host-collected evidence is decisive over agent-reported fields.
-function recoveryResumeEligibility(candidate, evidence, assessment) {
-  if (candidate?.isAddendum) return 'addendum-branch'
-  if ((evidence?.collectionErrors || []).length) return 'evidence-collection-error'
-  if (evidence?.dirtyState !== 'clean') return 'dirty-worktree'
-  if (!(evidence?.recentCommits || []).length) return 'no-committed-work'
-  if (assessment?.taskScoped !== true) return 'not-task-scoped'
-  if (!String(assessment?.validation || '').trim()) return 'missing-validation-evidence'
-  if ((assessment?.missingEvidence || []).length) return 'missing-validation-evidence'
-  if (!candidate?.execplanPath) return 'missing-execplan'
-  return ''
-}
-
-// The failure-resume decision table. Every classification is report-only in
-// assess mode; in review mode only eligible adopt-complete candidates may
-// resume, and an adopt-complete verdict that fails an eligibility check is
-// DOWNGRADED to continue-manual in the summary (fail closed).
-function recoveryDecision(candidate, evidence, assessment, mode, flags = {}) {
-  const classification = assessment?.classification || ''
-  if (mode !== 'review' || classification !== 'adopt-complete') {
-    return { action: 'report', classification, reason: '', skip: false }
-  }
-  const reason = recoveryResumeEligibility(candidate, evidence, assessment)
-  if (reason) {
-    return { action: 'report', classification: 'continue-manual', reason, skip: true }
-  }
-  if (flags.dryRun) {
-    return { action: 'report', classification, reason: 'dry-run', skip: true }
-  }
-  return { action: 'resume', classification, reason: '', skip: false }
-}
-
-// ---------------------------------------------------------------------------
-// Continue-mode dispatch (failure resume, phase 3) — the committed ExecPlan is
-// the durable source of truth for where a task stands. Agents commit the plan
-// after every change and keep its Status field accurate, so a fresh run can
-// dispatch a survivor branch deterministically, with no judgement agent:
-//   Status DRAFT (or missing/unfilled) -> re-enter the plan/design-review loop
-//   Status APPROVED or IN PROGRESS     -> re-enter implementation
-//   Status COMPLETE                    -> re-enter dual review + integration
-//   Status BLOCKED                     -> report for the operator
-// Safety comes from the downstream gates the resumed branch still has to pass
-// (design review, deterministic gates, dual review, serialized integration),
-// not from an up-front classification.
-// ---------------------------------------------------------------------------
-const EXECPLAN_STATUS_MAP = {
-  draft: 'draft',
-  approved: 'approved',
-  'in progress': 'in-progress',
-  blocked: 'blocked',
-  complete: 'complete',
-}
-
-// Parse the durable state out of a committed ExecPlan: the Status field and
-// the Progress checkbox tallies (informational — dispatch keys on Status
-// alone). An unfilled skeleton line ("Status: DRAFT | APPROVED | …") or an
-// unrecognized value parses as 'unknown', which dispatches to planning.
-function parseExecplanState(text) {
-  const source = String(text || '')
-  let status = 'unknown'
-  const statusMatch = source.match(/^Status:\s*([A-Za-z ]+?)\s*$/m)
-  if (statusMatch) {
-    const value = statusMatch[1].trim().toLowerCase().replace(/\s+/g, ' ')
-    status = EXECPLAN_STATUS_MAP[value] || 'unknown'
-  }
-  let ticked = 0
-  let unticked = 0
-  const progressSection = source.split(/^##\s+/m).find((section) => /^progress\b/i.test(section)) || ''
-  for (const line of progressSection.split(/\r?\n/)) {
-    if (/^\s*-\s+\[[xX]\]/.test(line)) ticked += 1
-    else if (/^\s*-\s+\[ \]/.test(line)) unticked += 1
-  }
-  return { status, ticked, unticked }
-}
-
 async function readExecplanState(candidate) {
   if (!candidate?.execplanPath) return { status: 'missing', ticked: 0, unticked: 0 }
   const path = process.getBuiltinModule('node:path')
@@ -1599,27 +1476,6 @@ async function readExecplanState(candidate) {
       error: `${candidate.execplanPath}: ${(error && error.message) || String(error)}`,
     }
   }
-}
-
-// The continue-mode decision table. Purely deterministic: hygiene checks from
-// host-collected evidence, then a stage keyed on the committed ExecPlan
-// Status. Returns { action: 'report'|'resume', stage, reason, skip }.
-function recoveryContinueDecision(candidate, evidence, planState, flags = {}) {
-  const report = (reason) => ({ action: 'report', stage: null, reason, skip: true })
-  if (candidate?.isAddendum) return report('addendum-branch')
-  if ((evidence?.collectionErrors || []).length) return report('evidence-collection-error')
-  if (evidence?.dirtyState !== 'clean') return report('dirty-worktree')
-  if (planState.status === 'unreadable') return report('plan-unreadable')
-  if (planState.status === 'blocked') return report('plan-blocked')
-  const stage =
-    planState.status === 'approved' || planState.status === 'in-progress'
-      ? 'implement'
-      : planState.status === 'complete'
-        ? 'review'
-        : 'plan' // missing, draft, or unknown: (re-)enter planning
-  if (stage === 'review' && !(evidence?.recentCommits || []).length) return report('no-committed-work')
-  if (flags.dryRun) return { action: 'report', stage, reason: 'dry-run', skip: true }
-  return { action: 'resume', stage, reason: '', skip: false }
 }
 
 // Skip reasons whose branch still exists and still maps to a selectable

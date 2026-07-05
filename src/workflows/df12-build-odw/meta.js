@@ -3,7 +3,8 @@
 // adversarial plan/design review, implementation with deterministic gates,
 // dual review, merge-lock integration, post-merge audit, remediation triage,
 // fresh-run recovery of surviving task branches (failure-resume design), and
-// a host-verified task-agent write preflight. Helpers live above the
+// a host-verified task-agent write preflight. Built from the module tree in
+// src/workflows/df12-build-odw/ (make workflow-build); helpers land above the
 // worker-pool control-loop marker so the test suites in tests/ can compile
 // them in isolation; see docs/architecture.md for the enforcement boundary.
 export const meta = {

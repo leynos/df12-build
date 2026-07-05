@@ -5,7 +5,8 @@
 // adversarial plan/design review, implementation with deterministic gates,
 // dual review, merge-lock integration, post-merge audit, remediation triage,
 // fresh-run recovery of surviving task branches (failure-resume design), and
-// a host-verified task-agent write preflight. Helpers live above the
+// a host-verified task-agent write preflight. Built from the module tree in
+// src/workflows/df12-build-odw/ (make workflow-build); helpers land above the
 // worker-pool control-loop marker so the test suites in tests/ can compile
 // them in isolation; see docs/architecture.md for the enforcement boundary.
 export const meta = {
@@ -29,6 +30,115 @@ export const meta = {
     { title: 'Audit' },
     { title: 'Remediation' },
   ],
+}
+
+// src/workflows/df12-build-odw/recovery-decision.js
+var TASK_BRANCH_RE = /^roadmap-((?:\d+-)*\d+)(-addendum)?$/;
+function branchToRoadmapId(branch) {
+  const match = TASK_BRANCH_RE.exec(String(branch || ""));
+  if (!match) return null;
+  return { id: match[1].replace(/-/g, "."), isAddendum: Boolean(match[2]) };
+}
+function parseWorktreeList(output) {
+  const entries = [];
+  let current = null;
+  for (const line of String(output || "").split(/\r?\n/)) {
+    if (!line.trim()) {
+      if (current) entries.push(current);
+      current = null;
+      continue;
+    }
+    const spaceIndex = line.indexOf(" ");
+    const key = spaceIndex === -1 ? line : line.slice(0, spaceIndex);
+    const value = spaceIndex === -1 ? "" : line.slice(spaceIndex + 1);
+    if (key === "worktree") {
+      current = { worktreePath: value, branch: "", head: "" };
+    } else if (current && key === "HEAD") {
+      current.head = value;
+    } else if (current && key === "branch") {
+      current.branch = value.replace(/^refs\/heads\//, "");
+    }
+  }
+  if (current) entries.push(current);
+  return entries;
+}
+var RECOVERY_SKIP_REASONS = [
+  "unmapped-branch",
+  "already-complete",
+  "unreadable-commit",
+  "missing-worktree",
+  "candidate-cap",
+  "assessment-error",
+  "addendum-branch",
+  "evidence-collection-error",
+  "dirty-worktree",
+  "no-committed-work",
+  "not-task-scoped",
+  "missing-validation-evidence",
+  "missing-execplan",
+  "plan-blocked",
+  "dry-run"
+];
+function recoveryResumeEligibility(candidate, evidence, assessment) {
+  if (candidate?.isAddendum) return "addendum-branch";
+  if ((evidence?.collectionErrors || []).length) return "evidence-collection-error";
+  if (evidence?.dirtyState !== "clean") return "dirty-worktree";
+  if (!(evidence?.recentCommits || []).length) return "no-committed-work";
+  if (assessment?.taskScoped !== true) return "not-task-scoped";
+  if (!String(assessment?.validation || "").trim()) return "missing-validation-evidence";
+  if ((assessment?.missingEvidence || []).length) return "missing-validation-evidence";
+  if (!candidate?.execplanPath) return "missing-execplan";
+  return "";
+}
+function recoveryDecision(candidate, evidence, assessment, mode, flags = {}) {
+  const classification = assessment?.classification || "";
+  if (mode !== "review" || classification !== "adopt-complete") {
+    return { action: "report", classification, reason: "", skip: false };
+  }
+  const reason = recoveryResumeEligibility(candidate, evidence, assessment);
+  if (reason) {
+    return { action: "report", classification: "continue-manual", reason, skip: true };
+  }
+  if (flags.dryRun) {
+    return { action: "report", classification, reason: "dry-run", skip: true };
+  }
+  return { action: "resume", classification, reason: "", skip: false };
+}
+var EXECPLAN_STATUS_MAP = {
+  draft: "draft",
+  approved: "approved",
+  "in progress": "in-progress",
+  blocked: "blocked",
+  complete: "complete"
+};
+function parseExecplanState(text) {
+  const source = String(text || "");
+  let status = "unknown";
+  const statusMatch = source.match(/^Status:\s*([A-Za-z ]+?)\s*$/m);
+  if (statusMatch) {
+    const value = statusMatch[1].trim().toLowerCase().replace(/\s+/g, " ");
+    status = EXECPLAN_STATUS_MAP[value] || "unknown";
+  }
+  let ticked = 0;
+  let unticked = 0;
+  const progressSection = source.split(/^##\s+/m).find((section) => /^progress\b/i.test(section)) || "";
+  for (const line of progressSection.split(/\r?\n/)) {
+    if (/^\s*-\s+\[[xX]\]/.test(line)) ticked += 1;
+    else if (/^\s*-\s+\[ \]/.test(line)) unticked += 1;
+  }
+  return { status, ticked, unticked };
+}
+function recoveryContinueDecision(candidate, evidence, planState, flags = {}) {
+  const report = (reason) => ({ action: "report", stage: null, reason, skip: true });
+  if (candidate?.isAddendum) return report("addendum-branch");
+  if ((evidence?.collectionErrors || []).length) return report("evidence-collection-error");
+  if (evidence?.dirtyState !== "clean") return report("dirty-worktree");
+  if (planState.status === "unreadable") return report("plan-unreadable");
+  if (planState.status === "blocked") return report("plan-blocked");
+  const stage = planState.status === "approved" || planState.status === "in-progress" ? "implement" : planState.status === "complete" ? "review" : "plan";
+  if (stage === "review" && !(evidence?.recentCommits || []).length) return report("no-committed-work");
+  if (flags.dryRun) return { action: "report", stage, reason: "dry-run", skip: true };
+  return { action: "resume", stage, reason: "", skip: false };
 }
 
 // src/workflows/df12-build-odw/main.js
@@ -1178,35 +1288,6 @@ async function attachAssessment(task, wt, result) {
     };
   }
 }
-var TASK_BRANCH_RE = /^roadmap-((?:\d+-)*\d+)(-addendum)?$/;
-function branchToRoadmapId(branch) {
-  const match = TASK_BRANCH_RE.exec(String(branch || ""));
-  if (!match) return null;
-  return { id: match[1].replace(/-/g, "."), isAddendum: Boolean(match[2]) };
-}
-function parseWorktreeList(output) {
-  const entries = [];
-  let current = null;
-  for (const line of String(output || "").split(/\r?\n/)) {
-    if (!line.trim()) {
-      if (current) entries.push(current);
-      current = null;
-      continue;
-    }
-    const spaceIndex = line.indexOf(" ");
-    const key = spaceIndex === -1 ? line : line.slice(0, spaceIndex);
-    const value = spaceIndex === -1 ? "" : line.slice(spaceIndex + 1);
-    if (key === "worktree") {
-      current = { worktreePath: value, branch: "", head: "" };
-    } else if (current && key === "HEAD") {
-      current.head = value;
-    } else if (current && key === "branch") {
-      current.branch = value.replace(/^refs\/heads\//, "");
-    }
-  }
-  if (current) entries.push(current);
-  return entries;
-}
 async function directoryExists(pathValue) {
   if (!pathValue) return false;
   const fs = process.getBuiltinModule("node:fs/promises");
@@ -1295,72 +1376,6 @@ async function discoverRecoveryCandidates(roadmapText, gitRoot) {
   }
   return { candidates, skipped, errors };
 }
-var RECOVERY_SKIP_REASONS = [
-  "unmapped-branch",
-  "already-complete",
-  "unreadable-commit",
-  "missing-worktree",
-  "candidate-cap",
-  "assessment-error",
-  "addendum-branch",
-  "evidence-collection-error",
-  "dirty-worktree",
-  "no-committed-work",
-  "not-task-scoped",
-  "missing-validation-evidence",
-  "missing-execplan",
-  "plan-blocked",
-  "dry-run"
-];
-function recoveryResumeEligibility(candidate, evidence, assessment) {
-  if (candidate?.isAddendum) return "addendum-branch";
-  if ((evidence?.collectionErrors || []).length) return "evidence-collection-error";
-  if (evidence?.dirtyState !== "clean") return "dirty-worktree";
-  if (!(evidence?.recentCommits || []).length) return "no-committed-work";
-  if (assessment?.taskScoped !== true) return "not-task-scoped";
-  if (!String(assessment?.validation || "").trim()) return "missing-validation-evidence";
-  if ((assessment?.missingEvidence || []).length) return "missing-validation-evidence";
-  if (!candidate?.execplanPath) return "missing-execplan";
-  return "";
-}
-function recoveryDecision(candidate, evidence, assessment, mode, flags = {}) {
-  const classification = assessment?.classification || "";
-  if (mode !== "review" || classification !== "adopt-complete") {
-    return { action: "report", classification, reason: "", skip: false };
-  }
-  const reason = recoveryResumeEligibility(candidate, evidence, assessment);
-  if (reason) {
-    return { action: "report", classification: "continue-manual", reason, skip: true };
-  }
-  if (flags.dryRun) {
-    return { action: "report", classification, reason: "dry-run", skip: true };
-  }
-  return { action: "resume", classification, reason: "", skip: false };
-}
-var EXECPLAN_STATUS_MAP = {
-  draft: "draft",
-  approved: "approved",
-  "in progress": "in-progress",
-  blocked: "blocked",
-  complete: "complete"
-};
-function parseExecplanState(text) {
-  const source = String(text || "");
-  let status = "unknown";
-  const statusMatch = source.match(/^Status:\s*([A-Za-z ]+?)\s*$/m);
-  if (statusMatch) {
-    const value = statusMatch[1].trim().toLowerCase().replace(/\s+/g, " ");
-    status = EXECPLAN_STATUS_MAP[value] || "unknown";
-  }
-  let ticked = 0;
-  let unticked = 0;
-  const progressSection = source.split(/^##\s+/m).find((section) => /^progress\b/i.test(section)) || "";
-  for (const line of progressSection.split(/\r?\n/)) {
-    if (/^\s*-\s+\[[xX]\]/.test(line)) ticked += 1;
-    else if (/^\s*-\s+\[ \]/.test(line)) unticked += 1;
-  }
-  return { status, ticked, unticked };
-}
 async function readExecplanState(candidate) {
   if (!candidate?.execplanPath) return { status: "missing", ticked: 0, unticked: 0 };
   const path = process.getBuiltinModule("node:path");
@@ -1378,18 +1393,6 @@ async function readExecplanState(candidate) {
       error: `${candidate.execplanPath}: ${error && error.message || String(error)}`
     };
   }
-}
-function recoveryContinueDecision(candidate, evidence, planState, flags = {}) {
-  const report = (reason) => ({ action: "report", stage: null, reason, skip: true });
-  if (candidate?.isAddendum) return report("addendum-branch");
-  if ((evidence?.collectionErrors || []).length) return report("evidence-collection-error");
-  if (evidence?.dirtyState !== "clean") return report("dirty-worktree");
-  if (planState.status === "unreadable") return report("plan-unreadable");
-  if (planState.status === "blocked") return report("plan-blocked");
-  const stage = planState.status === "approved" || planState.status === "in-progress" ? "implement" : planState.status === "complete" ? "review" : "plan";
-  if (stage === "review" && !(evidence?.recentCommits || []).length) return report("no-committed-work");
-  if (flags.dryRun) return { action: "report", stage, reason: "dry-run", skip: true };
-  return { action: "resume", stage, reason: "", skip: false };
 }
 var RECOVERY_HOLD_REASONS = /* @__PURE__ */ new Set(["missing-worktree", "candidate-cap", "unreadable-commit", "assessment-error"]);
 async function recoveryExecplanPath(candidate) {

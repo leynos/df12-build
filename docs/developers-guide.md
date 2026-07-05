@@ -27,11 +27,20 @@ Read these before changing launch or workflow behaviour:
 
 The repository contains workflow scripts, skill documentation, docs, operator
 scripts, focused test suites, a project roadmap with ExecPlans, and a small
-validation `Makefile`. It does not contain a package manifest.
+validation `Makefile`. Development dependencies (esbuild, fast-check,
+bun-test-cucumber, LemmaScript) are managed with `bun` via `package.json`.
 
 Relevant paths:
 
-- `workflows/df12-build-odw.js`: ODW/Codex workflow.
+- `src/workflows/df12-build-odw/`: source of truth for the ODW workflow — a
+  literal `meta.js` banner, the `main.js` entry, and peeled pure modules such
+  as `recovery-decision.js`.
+- `workflows/df12-build-odw.js`: GENERATED ODW/Codex workflow artefact, built
+  by `make workflow-build` (see `scripts/build-workflow.mjs`); this is the
+  single file the sidecar copies and ODW loads.
+- `verify/recovery-decision.model.ts`: LemmaScript-annotated verified twin of
+  the recovery decision tables, checked into Dafny by `make verify-modules`,
+  with its generated `.dfy.gen`/`.dfy` proof files alongside.
 - `workflows/df12-build.js`: baseline workflow.
 - `skills/df12-build-supervisor/SKILL.md`: operator skill.
 - `scripts/blinkentrees`, `scripts/git-commit-feed`, `scripts/odw-list-runs`,
@@ -39,6 +48,9 @@ Relevant paths:
   guide's "Monitoring runs" section).
 - `tests/`: Node suites for the ODW workflow plus
   `tests/run-odw-script-tests.py` for the operator scripts.
+- `tests/modules/`: bun-run suites for the individual src modules — Gherkin
+  features (bun-test-cucumber), fast-check properties, and the differential
+  test pinning the verified twin to production.
 - `docs/roadmap.md`: this repository's own GIST roadmap.
 - `docs/execplans/`: ExecPlans for landed roadmap work.
 - `docs/failure-resume-design.md`: the failure-resume design the recovery
@@ -56,8 +68,14 @@ branch lands planned work.
 
 ## ODW workflow contract
 
-`workflows/df12-build-odw.js` is an ODW script, not a conventional Node module.
-Keep the ODW script contract intact:
+`workflows/df12-build-odw.js` is an ODW script, not a conventional Node
+module, and it is generated: edit `src/workflows/df12-build-odw/` and run
+`make workflow-build` (the `workflow-freshness` gate fails a stale artefact).
+The build frames the artefact from a verbatim `meta.js` banner, a flat
+esbuild bundle of `main.js` and its imports, and a generated
+`return await workflowMain()` footer, and it fails closed on anything the
+ODW loader would reject. Within the src tree, keep the ODW script contract
+intact:
 
 - Keep `meta` as a literal `export const meta = { ... }` object.
 - Do not import ODW primitives. `args`, `agent`, `parallel`, `phase`, `log`,
@@ -223,7 +241,19 @@ documentation changes:
 make all
 ```
 
-Run focused assessment tests while changing partial-branch recovery:
+Run the module suites (bun) or the whole-workflow suites (node, against a
+fresh artefact) separately when iterating:
+
+```bash
+make test-modules
+make test-workflow
+```
+
+`make verify-modules` re-checks the LemmaScript decision-table model with
+Dafny; it skips (loudly) when `dafny` is not on `PATH`.
+
+Run focused assessment tests while changing partial-branch recovery (rebuild
+the artefact first if the src tree changed):
 
 ```bash
 node --test tests/df12-build-odw-assessment.test.mjs
