@@ -1248,6 +1248,124 @@ function makePrompts(config) {
   };
 }
 
+// src/workflows/df12-build-odw/write-preflight.ts
+var WRITE_PROBE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ok: { type: "boolean", description: "true when the probe file was written with the exact token" },
+    detail: { type: "string", description: "the error encountered, empty when ok" }
+  },
+  required: ["ok"]
+};
+function writeProbePath(worktree, adapter) {
+  const path = process.getBuiltinModule("node:path");
+  return path.join(worktree, `.df12-write-probe-${String(adapter).replace(/[^0-9a-zA-Z._-]+/g, "-")}`);
+}
+function writeProbeToken(tag, adapter) {
+  return `df12-write-probe v1 task=${tag} adapter=${adapter}`;
+}
+function writeProbePrompt(probeFile, token) {
+  return [
+    "You are a sub-agent in the df12-build roadmap workflow. Your final message IS your return value \u2014 return data, not chat.",
+    "",
+    "TASK: Writable-root probe. Write EXACTLY the token below (no trailing newline required) to the probe file path below, using your shell or file-edit tooling. Do not write anywhere else, do not commit, and do not delete the file afterwards \u2014 the workflow host verifies and removes it.",
+    "",
+    `PROBE_FILE: ${probeFile}`,
+    `PROBE_TOKEN: ${token}`,
+    "",
+    "Return ok=true only if the write succeeded. If the write is rejected (sandbox, permissions, missing directory), return ok=false with the exact error text in detail."
+  ].join("\n");
+}
+async function clearProbeArtifact(probeFile) {
+  const fs = process.getBuiltinModule("node:fs/promises");
+  try {
+    await fs.lstat(probeFile);
+  } catch {
+    return;
+  }
+  await fs.rm(probeFile, { force: true, recursive: true });
+}
+async function verifyWriteProbe(probeFile, token) {
+  const fs = process.getBuiltinModule("node:fs/promises");
+  const { constants } = process.getBuiltinModule("node:fs");
+  let handle = null;
+  let content = null;
+  try {
+    handle = await fs.open(probeFile, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const stat = await handle.stat();
+    if (stat.isFile()) {
+      content = await handle.readFile({ encoding: "utf8" });
+    }
+  } catch (error) {
+    const failure = error;
+    if (failure && (failure.code === "ELOOP" || failure.code === "EMLINK")) {
+      await fs.rm(probeFile, { force: true, recursive: true });
+      return { ok: false, detail: "probe path is not a regular file (symlink or special file rejected)" };
+    }
+    return { ok: false, detail: `probe file missing or unreadable: ${failure && failure.message || String(error)}` };
+  } finally {
+    if (handle) await handle.close();
+  }
+  await fs.rm(probeFile, { force: true, recursive: true });
+  if (content === null) {
+    return { ok: false, detail: "probe path is not a regular file (symlink or special file rejected)" };
+  }
+  if (content.trim() === token) return { ok: true, detail: "" };
+  return { ok: false, detail: `probe file content mismatch (${content.trim().slice(0, 80) || "<empty>"})` };
+}
+async function hostWriteProbe(worktree) {
+  const fs = process.getBuiltinModule("node:fs/promises");
+  const path = process.getBuiltinModule("node:path");
+  const hostProbe = path.join(worktree, ".df12-write-probe-host");
+  try {
+    await clearProbeArtifact(hostProbe);
+    await fs.writeFile(hostProbe, "df12-write-probe host", { encoding: "utf8", flag: "wx" });
+    await fs.rm(hostProbe, { force: true });
+    return { ok: true, detail: "" };
+  } catch (error) {
+    return { ok: false, detail: error && error.message || String(error) };
+  }
+}
+function makeWritePreflight({ enabled, targets }) {
+  async function runTaskAgentWritePreflight2(worktree, tag) {
+    const failures = [];
+    const host = await hostWriteProbe(worktree);
+    if (!host.ok) {
+      return { ok: false, failures: [{ adapter: "host", detail: host.detail }] };
+    }
+    for (const target of targets()) {
+      const probeFile = writeProbePath(worktree, target.adapter);
+      const token = writeProbeToken(tag, target.adapter);
+      await clearProbeArtifact(probeFile);
+      let reply = null;
+      let agentError = "";
+      try {
+        reply = await agent(writeProbePrompt(probeFile, token), target.options({
+          phase: "Worktree",
+          label: `write-probe:${target.adapter}`,
+          schema: WRITE_PROBE_SCHEMA
+        }));
+      } catch (error) {
+        agentError = error && error.message || String(error);
+      }
+      const verified = await verifyWriteProbe(probeFile, token);
+      if (!verified.ok) {
+        const detail = [verified.detail, reply && reply.ok === false ? reply.detail : "", agentError].filter(Boolean).join("; ");
+        failures.push({ adapter: target.adapter, detail });
+      }
+    }
+    return { ok: failures.length === 0, failures };
+  }
+  let taskAgentWritePreflight = null;
+  function ensureTaskAgentWriteAccess2(worktree, tag) {
+    if (!enabled) return Promise.resolve({ ok: true, skipped: true, failures: [] });
+    if (!taskAgentWritePreflight) taskAgentWritePreflight = runTaskAgentWritePreflight2(worktree, tag);
+    return taskAgentWritePreflight;
+  }
+  return { runTaskAgentWritePreflight: runTaskAgentWritePreflight2, ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2 };
+}
+
 // src/workflows/df12-build-odw/main.js
 var CONFIG = makeConfig(args);
 var {
@@ -1331,6 +1449,10 @@ var {
   integratePrompt,
   auditPrompt
 } = makePrompts(CONFIG);
+var { runTaskAgentWritePreflight, ensureTaskAgentWriteAccess } = makeWritePreflight({
+  enabled: WORKTREE_WRITE_PREFLIGHT,
+  targets: writeProbeTargets
+});
 async function runAuthPreflight() {
   if (!AUTH_PREFLIGHT) return [];
   phase("Auth Preflight");
@@ -1750,15 +1872,6 @@ async function runRecovery(root, mergeLock2 = null) {
   }
   return { summary, taskResults, held, fatal: null };
 }
-var WRITE_PROBE_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    ok: { type: "boolean", description: "true when the probe file was written with the exact token" },
-    detail: { type: "string", description: "the error encountered, empty when ok" }
-  },
-  required: ["ok"]
-};
 function writeProbeTargets() {
   const targets = [
     { role: "plan", adapter: String(PLAN_ADAPTER).toLowerCase(), options: planAgentOptions },
@@ -1770,109 +1883,6 @@ function writeProbeTargets() {
     seen.add(target.adapter);
     return true;
   });
-}
-function writeProbePath(worktree, adapter) {
-  const path = process.getBuiltinModule("node:path");
-  return path.join(worktree, `.df12-write-probe-${String(adapter).replace(/[^0-9a-zA-Z._-]+/g, "-")}`);
-}
-function writeProbeToken(tag, adapter) {
-  return `df12-write-probe v1 task=${tag} adapter=${adapter}`;
-}
-function writeProbePrompt(probeFile, token) {
-  return [
-    "You are a sub-agent in the df12-build roadmap workflow. Your final message IS your return value \u2014 return data, not chat.",
-    "",
-    "TASK: Writable-root probe. Write EXACTLY the token below (no trailing newline required) to the probe file path below, using your shell or file-edit tooling. Do not write anywhere else, do not commit, and do not delete the file afterwards \u2014 the workflow host verifies and removes it.",
-    "",
-    `PROBE_FILE: ${probeFile}`,
-    `PROBE_TOKEN: ${token}`,
-    "",
-    "Return ok=true only if the write succeeded. If the write is rejected (sandbox, permissions, missing directory), return ok=false with the exact error text in detail."
-  ].join("\n");
-}
-async function clearProbeArtifact(probeFile) {
-  const fs = process.getBuiltinModule("node:fs/promises");
-  try {
-    await fs.lstat(probeFile);
-  } catch {
-    return;
-  }
-  await fs.rm(probeFile, { force: true, recursive: true });
-}
-async function verifyWriteProbe(probeFile, token) {
-  const fs = process.getBuiltinModule("node:fs/promises");
-  const { constants } = process.getBuiltinModule("node:fs");
-  let handle = null;
-  let content = null;
-  try {
-    handle = await fs.open(probeFile, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const stat = await handle.stat();
-    if (stat.isFile()) {
-      content = await handle.readFile({ encoding: "utf8" });
-    }
-  } catch (error) {
-    if (error && (error.code === "ELOOP" || error.code === "EMLINK")) {
-      await fs.rm(probeFile, { force: true, recursive: true });
-      return { ok: false, detail: "probe path is not a regular file (symlink or special file rejected)" };
-    }
-    return { ok: false, detail: `probe file missing or unreadable: ${error && error.message || String(error)}` };
-  } finally {
-    if (handle) await handle.close();
-  }
-  await fs.rm(probeFile, { force: true, recursive: true });
-  if (content === null) {
-    return { ok: false, detail: "probe path is not a regular file (symlink or special file rejected)" };
-  }
-  if (content.trim() === token) return { ok: true, detail: "" };
-  return { ok: false, detail: `probe file content mismatch (${content.trim().slice(0, 80) || "<empty>"})` };
-}
-async function hostWriteProbe(worktree) {
-  const fs = process.getBuiltinModule("node:fs/promises");
-  const path = process.getBuiltinModule("node:path");
-  const hostProbe = path.join(worktree, ".df12-write-probe-host");
-  try {
-    await clearProbeArtifact(hostProbe);
-    await fs.writeFile(hostProbe, "df12-write-probe host", { encoding: "utf8", flag: "wx" });
-    await fs.rm(hostProbe, { force: true });
-    return { ok: true, detail: "" };
-  } catch (error) {
-    return { ok: false, detail: error && error.message || String(error) };
-  }
-}
-async function runTaskAgentWritePreflight(worktree, tag) {
-  const failures = [];
-  const host = await hostWriteProbe(worktree);
-  if (!host.ok) {
-    return { ok: false, failures: [{ adapter: "host", detail: host.detail }] };
-  }
-  for (const target of writeProbeTargets()) {
-    const probeFile = writeProbePath(worktree, target.adapter);
-    const token = writeProbeToken(tag, target.adapter);
-    await clearProbeArtifact(probeFile);
-    let reply = null;
-    let agentError = "";
-    try {
-      reply = await agent(writeProbePrompt(probeFile, token), target.options({
-        phase: "Worktree",
-        label: `write-probe:${target.adapter}`,
-        schema: WRITE_PROBE_SCHEMA
-      }));
-    } catch (error) {
-      agentError = error && error.message || String(error);
-    }
-    const verified = await verifyWriteProbe(probeFile, token);
-    if (!verified.ok) {
-      const detail = [verified.detail, reply && reply.ok === false ? reply.detail : "", agentError].filter(Boolean).join("; ");
-      failures.push({ adapter: target.adapter, detail });
-    }
-  }
-  return { ok: failures.length === 0, failures };
-}
-var taskAgentWritePreflight = null;
-function ensureTaskAgentWriteAccess(worktree, tag) {
-  if (!WORKTREE_WRITE_PREFLIGHT) return Promise.resolve({ ok: true, skipped: true, failures: [] });
-  if (!taskAgentWritePreflight) taskAgentWritePreflight = runTaskAgentWritePreflight(worktree, tag);
-  return taskAgentWritePreflight;
 }
 function execplanRelPath(worktree, planPath) {
   const path = process.getBuiltinModule("node:path");

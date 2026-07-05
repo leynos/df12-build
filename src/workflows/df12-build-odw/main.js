@@ -43,6 +43,7 @@ import {
 } from './recovery-discovery.ts'
 import { makeConfig } from './config.ts'
 import { makePrompts } from './prompts.ts'
+import { makeWritePreflight } from './write-preflight.ts'
 
 // ---------------------------------------------------------------------------
 // Configuration (all overridable through the ODW `args` object).
@@ -140,6 +141,14 @@ const {
   integratePrompt,
   auditPrompt,
 } = makePrompts(CONFIG)
+
+// Host-verified write preflight with the run's probe targets bound once
+// (see write-preflight.ts). writeProbeTargets stays here: it routes the
+// planner and builder adapters from run configuration.
+const { runTaskAgentWritePreflight, ensureTaskAgentWriteAccess } = makeWritePreflight({
+  enabled: WORKTREE_WRITE_PREFLIGHT,
+  targets: writeProbeTargets,
+})
 
 // ---------------------------------------------------------------------------
 // Deterministic roadmap selection
@@ -641,27 +650,6 @@ async function runRecovery(root, mergeLock = null) {
   return { summary, taskResults, held, fatal: null }
 }
 
-// ---------------------------------------------------------------------------
-// Task-agent writable-root preflight — ODW launches every adapter with the
-// control checkout as its working directory, so a sandbox scoped to that
-// checkout silently rejects writes to sibling ...worktrees/roadmap-* paths.
-// Prompt text cannot fix that, so the workflow proves writability once per
-// run: each adapter that must write into task worktrees (planner and builder)
-// is asked to write a token file inside the first task worktree, and the HOST
-// verifies the bytes on disk. A failed probe is a launch/sandbox fault, so the
-// task fails fast at stage "worktree-write" instead of burning design rounds,
-// and that stage is excluded from partial-branch assessment.
-// ---------------------------------------------------------------------------
-const WRITE_PROBE_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    ok: { type: 'boolean', description: 'true when the probe file was written with the exact token' },
-    detail: { type: 'string', description: 'the error encountered, empty when ok' },
-  },
-  required: ['ok'],
-}
-
 function writeProbeTargets() {
   const targets = [
     { role: 'plan', adapter: String(PLAN_ADAPTER).toLowerCase(), options: planAgentOptions },
@@ -673,136 +661,6 @@ function writeProbeTargets() {
     seen.add(target.adapter)
     return true
   })
-}
-
-function writeProbePath(worktree, adapter) {
-  const path = process.getBuiltinModule('node:path')
-  return path.join(worktree, `.df12-write-probe-${String(adapter).replace(/[^0-9a-zA-Z._-]+/g, '-')}`)
-}
-
-function writeProbeToken(tag, adapter) {
-  return `df12-write-probe v1 task=${tag} adapter=${adapter}`
-}
-
-function writeProbePrompt(probeFile, token) {
-  return [
-    'You are a sub-agent in the df12-build roadmap workflow. Your final message IS your return value — return data, not chat.',
-    '',
-    'TASK: Writable-root probe. Write EXACTLY the token below (no trailing newline required) to the probe file path below, using your shell or file-edit tooling. Do not write anywhere else, do not commit, and do not delete the file afterwards — the workflow host verifies and removes it.',
-    '',
-    `PROBE_FILE: ${probeFile}`,
-    `PROBE_TOKEN: ${token}`,
-    '',
-    'Return ok=true only if the write succeeded. If the write is rejected (sandbox, permissions, missing directory), return ok=false with the exact error text in detail.',
-  ].join('\n')
-}
-
-// The worktree is untrusted content: a branch can commit a symlink or a decoy
-// file at a probe path. `fs.rm` removes the link itself (never its target),
-// so clearing before writing or dispatching keeps the host from writing
-// through, reading through, or trusting anything it did not create.
-async function clearProbeArtifact(probeFile) {
-  const fs = process.getBuiltinModule('node:fs/promises')
-  try {
-    await fs.lstat(probeFile)
-  } catch {
-    return // nothing at the path
-  }
-  await fs.rm(probeFile, { force: true, recursive: true })
-}
-
-async function verifyWriteProbe(probeFile, token) {
-  const fs = process.getBuiltinModule('node:fs/promises')
-  const { constants } = process.getBuiltinModule('node:fs')
-  // Open once with O_NOFOLLOW and verify/read through the handle: the check
-  // and the read then target the same inode, so a symlink (or a swap between
-  // a check and a separate path-based read) can never redirect the read.
-  let handle = null
-  let content = null
-  try {
-    handle = await fs.open(probeFile, constants.O_RDONLY | constants.O_NOFOLLOW)
-    const stat = await handle.stat()
-    if (stat.isFile()) {
-      content = await handle.readFile({ encoding: 'utf8' })
-    }
-  } catch (error) {
-    // Linux reports ELOOP for O_NOFOLLOW on a symlink; FreeBSD uses EMLINK.
-    if (error && (error.code === 'ELOOP' || error.code === 'EMLINK')) {
-      await fs.rm(probeFile, { force: true, recursive: true })
-      return { ok: false, detail: 'probe path is not a regular file (symlink or special file rejected)' }
-    }
-    return { ok: false, detail: `probe file missing or unreadable: ${(error && error.message) || String(error)}` }
-  } finally {
-    if (handle) await handle.close()
-  }
-  await fs.rm(probeFile, { force: true, recursive: true })
-  if (content === null) {
-    return { ok: false, detail: 'probe path is not a regular file (symlink or special file rejected)' }
-  }
-  if (content.trim() === token) return { ok: true, detail: '' }
-  return { ok: false, detail: `probe file content mismatch (${content.trim().slice(0, 80) || '<empty>'})` }
-}
-
-async function hostWriteProbe(worktree) {
-  const fs = process.getBuiltinModule('node:fs/promises')
-  const path = process.getBuiltinModule('node:path')
-  const hostProbe = path.join(worktree, '.df12-write-probe-host')
-  try {
-    // Clear any committed artefact first, then create exclusively ('wx'
-    // fails on any pre-existing path), so the write can never follow a
-    // symlink out of the worktree.
-    await clearProbeArtifact(hostProbe)
-    await fs.writeFile(hostProbe, 'df12-write-probe host', { encoding: 'utf8', flag: 'wx' })
-    await fs.rm(hostProbe, { force: true })
-    return { ok: true, detail: '' }
-  } catch (error) {
-    return { ok: false, detail: (error && error.message) || String(error) }
-  }
-}
-
-async function runTaskAgentWritePreflight(worktree, tag) {
-  const failures = []
-  const host = await hostWriteProbe(worktree)
-  if (!host.ok) {
-    return { ok: false, failures: [{ adapter: 'host', detail: host.detail }] }
-  }
-  for (const target of writeProbeTargets()) {
-    const probeFile = writeProbePath(worktree, target.adapter)
-    const token = writeProbeToken(tag, target.adapter)
-    // Clear committed decoys before dispatch: the token is predictable, so a
-    // pre-existing file (or symlink) at the probe path must never be able to
-    // satisfy — or redirect — the verification that follows.
-    await clearProbeArtifact(probeFile)
-    let reply = null
-    let agentError = ''
-    try {
-      reply = await agent(writeProbePrompt(probeFile, token), target.options({
-        phase: 'Worktree',
-        label: `write-probe:${target.adapter}`,
-        schema: WRITE_PROBE_SCHEMA,
-      }))
-    } catch (error) {
-      agentError = (error && error.message) || String(error)
-    }
-    const verified = await verifyWriteProbe(probeFile, token)
-    if (!verified.ok) {
-      const detail = [verified.detail, reply && reply.ok === false ? reply.detail : '', agentError]
-        .filter(Boolean)
-        .join('; ')
-      failures.push({ adapter: target.adapter, detail })
-    }
-  }
-  return { ok: failures.length === 0, failures }
-}
-
-// One probe per run: sandbox scope does not vary between sibling worktrees,
-// so every task shares the first task's verdict (concurrent tasks await the
-// same promise and fail fast together when the environment is broken).
-let taskAgentWritePreflight = null
-function ensureTaskAgentWriteAccess(worktree, tag) {
-  if (!WORKTREE_WRITE_PREFLIGHT) return Promise.resolve({ ok: true, skipped: true, failures: [] })
-  if (!taskAgentWritePreflight) taskAgentWritePreflight = runTaskAgentWritePreflight(worktree, tag)
-  return taskAgentWritePreflight
 }
 
 // ---------------------------------------------------------------------------

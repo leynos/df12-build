@@ -204,7 +204,19 @@ Planned work:
   under-destructure (`COMMIT_GATES`) was caught by the artefact slicing
   suites, not tsc — see Surprises. Milestone 4's CodeRabbit review
   returned zero findings first.
-- [ ] Milestone 6: write preflight (`write-preflight.ts`).
+- [x] (2026-07-06 00:35Z) Milestone 6: `write-preflight.ts` — probe
+  construction, `clearProbeArtifact`, `verifyWriteProbe` (O_NOFOLLOW
+  handle discipline), `hostWriteProbe`, and `makeWritePreflight({
+  enabled, targets })` returning `runTaskAgentWritePreflight` and the
+  memoized `ensureTaskAgentWriteAccess` with their original two-argument
+  shapes (the artefact suites call them directly, so signatures were
+  load-bearing). `writeProbeTargets` stays in the entry — it routes
+  planner/builder adapters from run configuration. Red-then-green module
+  suite covers the untrusted-worktree cases: symlink removal without
+  touching the target, symlink/directory rejection at the probe path,
+  claim-without-write failing on host evidence, and one-probe-per-run
+  memoization. Milestone 5's CodeRabbit review returned zero findings
+  first.
 - [ ] Milestone 7: ExecPlan durability and containment
   (`execplan-durability.ts`).
 - [ ] Milestone 8: assessment and remediation triage (`assessment.ts`,
