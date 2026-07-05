@@ -5,9 +5,10 @@
 // "not committed" from "the environment would not answer".
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import fc from 'fast-check'
 
 import {
   commitExecplanApproval,
@@ -59,6 +60,36 @@ describe('execplanRelPath containment', () => {
       expect(contained.detail, planPath).toMatch(/escapes the assigned worktree/)
     }
   })
+
+  test('containment holds across fuzzed untrusted planner paths', () => {
+    // Planner output is untrusted, prompt-injectable data: for ANY string,
+    // an accepted path must resolve inside the worktree and a rejected one
+    // must carry no usable relPath. Structured segments bias the search
+    // toward traversal shapes; plain strings cover the rest.
+    const segmentPath = fc
+      .array(fc.constantFrom('..', '.', 'docs', 'execplans', 'plan.md', '~', 'a b', '...'), { maxLength: 6 })
+      .map((parts) => parts.join('/'))
+    const plannerPath = fc.oneof(
+      fc.string(),
+      segmentPath,
+      segmentPath.map((p) => `/${p}`),
+      segmentPath.map((p) => `/wt/${p}`),
+      segmentPath.map((p) => `/wt-evil/${p}`),
+    )
+    fc.assert(
+      fc.property(plannerPath, (planPath) => {
+        const contained = execplanRelPath('/wt', planPath)
+        if (contained.ok) {
+          const resolved = path.resolve('/wt', contained.relPath)
+          expect(resolved).not.toBe('/wt')
+          expect(resolved.startsWith('/wt/')).toBe(true)
+        } else {
+          expect(contained.relPath).toBe('')
+          expect(contained.detail).toMatch(/escapes the assigned worktree/)
+        }
+      }),
+    )
+  })
 })
 
 describe('verifyExecplanCommitted', () => {
@@ -103,6 +134,24 @@ describe('commitExecplanApproval', () => {
     const dir = makeWorktree('# ExecPlan without status\n')
     expect((await commitExecplanApproval(dir, PLAN, '1.2.3')).ok).toBe(true)
     expect(readFileSync(path.join(dir, PLAN), 'utf8')).toMatch(/\n\nStatus: APPROVED\n$/)
+  })
+})
+
+describe('symlinked plan paths (untrusted worktree)', () => {
+  test('the approval flip refuses to read or write through a committed symlink', async () => {
+    const dir = makeWorktree()
+    const outside = path.join(mkdtempSync(path.join(tmpdir(), 'outside-')), 'target.md')
+    writeFileSync(outside, '# Precious file outside the worktree\n')
+    unlinkSync(path.join(dir, PLAN))
+    symlinkSync(outside, path.join(dir, PLAN))
+    git(dir, 'add', '.')
+    git(dir, 'commit', '-m', 'Swap the plan for a symlink')
+
+    const flipped = await commitExecplanApproval(dir, PLAN, '1.2.3')
+    expect(flipped.ok).toBe(false)
+    expect(flipped.detail).toMatch(/could not update the plan status/)
+    // The symlink target must be untouched: no read-modify-write escape.
+    expect(readFileSync(outside, 'utf8')).toBe('# Precious file outside the worktree\n')
   })
 })
 

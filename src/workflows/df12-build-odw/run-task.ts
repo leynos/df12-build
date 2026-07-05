@@ -445,6 +445,45 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     return { impl }
   }
 
+  // One integration implementation for the normal pipeline and the addendum
+  // lane (the two copies had already drifted once). Deliberately NOT wrapped
+  // in withInfraRetry: integration pushes to origin/BASE, so a hidden-success
+  // first attempt re-run after an adapter death could squash and push the
+  // same task twice — a fault here is terminal and hands verification to the
+  // operator. Returns the integration report, or a terminal infra-fault
+  // result the caller must return as-is.
+  async function integrateTask(
+    task: SelectedTask,
+    worktree: string,
+    mergeLock: MergeLock,
+    proposals: Array<Record<string, unknown>>,
+    kindExtra: Record<string, unknown>,
+  ): Promise<{ integration?: StageIntegration | null; fault?: StageResult }> {
+    const tag = task.id
+    const doIntegrate = () => {
+      phase('Integrate')
+      return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
+    }
+    try {
+      return { integration: (mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()) as StageIntegration | null }
+    } catch (error) {
+      const message = ((error as Error | null) && (error as Error).message) || String(error)
+      if (!infrastructureFailureDetail(message)) throw error
+      faultMetrics.infraFaults += 1
+      return {
+        fault: {
+          id: tag,
+          status: 'infra-fault',
+          stage: 'integrate',
+          detail: `integration agent died on an infrastructure fault (${message}); integration is never retried because the push to origin/${BASE} is not idempotent — inspect origin/${BASE} and the roadmap for a partial or hidden-success integration before relaunching with resumeMode: "continue"`,
+          worktree,
+          proposals,
+          ...kindExtra,
+        },
+      }
+    }
+  }
+
   async function runDualReviewAndIntegration(task: SelectedTask, worktree: string, plan: StagePlan, impl: StageImpl, mergeLock: MergeLock, options: Record<string, unknown> = {}): Promise<StageResult> {
     const tag = task.id
     const kindExtra = options.kind ? { kind: options.kind } : {}
@@ -580,30 +619,9 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     // so at most one task touches origin/BASE at a time.
     let integration: StageIntegration | null = null
     if (AUTO_MERGE) {
-      const doIntegrate = () => {
-        phase('Integrate')
-        // Deliberately NOT wrapped in withInfraRetry: integration pushes to
-        // origin/BASE, so a hidden-success first attempt re-run after an
-        // adapter death could squash and push the same task twice. A fault
-        // here is terminal and hands verification to the operator.
-        return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
-      }
-      try {
-        integration = (mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()) as StageIntegration | null
-      } catch (error) {
-        const message = ((error as Error | null) && (error as Error).message) || String(error)
-        if (!infrastructureFailureDetail(message)) throw error
-        faultMetrics.infraFaults += 1
-        return {
-          id: tag,
-          status: 'infra-fault',
-          stage: 'integrate',
-          detail: `integration agent died on an infrastructure fault (${message}); integration is never retried because the push to origin/${BASE} is not idempotent — inspect origin/${BASE} and the roadmap for a partial or hidden-success integration before relaunching with resumeMode: "continue"`,
-          worktree,
-          proposals,
-          ...kindExtra,
-        }
-      }
+      const attempt = await integrateTask(task, worktree, mergeLock, proposals, kindExtra)
+      if (attempt.fault) return attempt.fault
+      integration = attempt.integration ?? null
       if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
         return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, ...kindExtra }
       }
@@ -696,6 +714,13 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       if (!impl || !impl.ok || !impl.gatesGreen || (openIssues.length > 0 && !onlyDeferredReviewIssues)) {
         return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: impl?.summary || 'addendum did not reach a green state or left open issues', openIssues: impl?.openIssues || [], worktree, proposals: [], kind: 'addendum' })
       }
+      // Host-verified durability gate, same contract as the normal pipeline
+      // (finishImplementationStage): ok=true with a dirty worktree means
+      // unreviewable, squash-merge-lost work — fail fast with the paths.
+      const committed = await verifyWorktreeCommitted(worktree)
+      if (!committed.ok) {
+        return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: `addendum implementation returned ok but left uncommitted state in the worktree (${committed.detail}); every sub-task must be committed before returning`, openIssues, worktree, proposals: [], kind: 'addendum' })
+      }
       const proposals: Array<Record<string, unknown>> = []
       const addendumOpenIssues: string[] = []
       // Host-verified gates: addenda have no review rounds, so a gatesGreen
@@ -742,28 +767,9 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       }
       let integration: StageIntegration | null = null
       if (AUTO_MERGE) {
-        const doIntegrate = () => {
-          phase('Integrate')
-          // Deliberately NOT wrapped in withInfraRetry: the push to origin/BASE
-          // is not idempotent (see the normal-pipeline integrate above).
-          return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
-        }
-        try {
-          integration = (mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()) as StageIntegration | null
-        } catch (error) {
-          const message = ((error as Error | null) && (error as Error).message) || String(error)
-          if (!infrastructureFailureDetail(message)) throw error
-          faultMetrics.infraFaults += 1
-          return {
-            id: tag,
-            status: 'infra-fault',
-            stage: 'integrate',
-            detail: `integration agent died on an infrastructure fault (${message}); integration is never retried because the push to origin/${BASE} is not idempotent — inspect origin/${BASE} and the roadmap for a partial or hidden-success integration before relaunching with resumeMode: "continue"`,
-            worktree,
-            proposals,
-            kind: 'addendum',
-          }
-        }
+        const attempt = await integrateTask(task, worktree, mergeLock, proposals, { kind: 'addendum' })
+        if (attempt.fault) return attempt.fault
+        integration = attempt.integration ?? null
         if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
           return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, kind: 'addendum' })
         }

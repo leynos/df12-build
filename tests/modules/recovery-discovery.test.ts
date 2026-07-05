@@ -117,6 +117,22 @@ describe('recoveryExecplanPath and syntheticRecoveryImpl', () => {
     }
   })
 
+  test('a filesystem fault surfaces as an error, distinct from an absent plan', async () => {
+    const repo = makeRecoveryRepo()
+    try {
+      // A NUL byte makes the stat fail with a non-ENOENT error: the fault
+      // must be reported, never conflated with "no plan on disk".
+      const fault = await recoveryExecplanPath({
+        branchName: 'roadmap-1-2-3',
+        worktreePath: `${repo.parserWorktree}\0`,
+      })
+      expect(fault.execplanPath).toBe('')
+      expect(fault.error).toMatch(/stat failed/)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
   test('the synthetic implementation mirrors IMPL_SCHEMA and flags fresh review', async () => {
     const repo = makeRecoveryRepo()
     try {

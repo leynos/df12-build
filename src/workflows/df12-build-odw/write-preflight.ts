@@ -120,12 +120,14 @@ export async function hostWriteProbe(worktree: string): Promise<{ ok: boolean; d
 
 export function makeWritePreflight({ enabled, targets }: { enabled: boolean; targets: () => WriteProbeTarget[] }) {
   async function runTaskAgentWritePreflight(worktree: string, tag: string): Promise<WritePreflightOutcome> {
-    const failures: Array<{ adapter: string; detail: string }> = []
     const host = await hostWriteProbe(worktree)
     if (!host.ok) {
       return { ok: false, failures: [{ adapter: 'host', detail: host.detail }] }
     }
-    for (const target of targets()) {
+    // Each adapter probes a distinct file with a distinct token, so the
+    // probes run concurrently; results keep the targets' order so the
+    // failure aggregation stays deterministic.
+    const outcomes = await Promise.all(targets().map(async (target) => {
       const probeFile = writeProbePath(worktree, target.adapter)
       const token = writeProbeToken(tag, target.adapter)
       // Clear committed decoys before dispatch: the token is predictable, so a
@@ -144,13 +146,13 @@ export function makeWritePreflight({ enabled, targets }: { enabled: boolean; tar
         agentError = ((error as Error | null) && (error as Error).message) || String(error)
       }
       const verified = await verifyWriteProbe(probeFile, token)
-      if (!verified.ok) {
-        const detail = [verified.detail, reply && reply.ok === false ? reply.detail : '', agentError]
-          .filter(Boolean)
-          .join('; ')
-        failures.push({ adapter: target.adapter, detail })
-      }
-    }
+      if (verified.ok) return null
+      const detail = [verified.detail, reply && reply.ok === false ? reply.detail : '', agentError]
+        .filter(Boolean)
+        .join('; ')
+      return { adapter: target.adapter, detail }
+    }))
+    const failures = outcomes.filter((outcome): outcome is { adapter: string; detail: string } => outcome !== null)
     return { ok: failures.length === 0, failures }
   }
 

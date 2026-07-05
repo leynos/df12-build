@@ -75,8 +75,10 @@ describe('makeConfig overrides and clamps', () => {
     expect(makeConfig({ resumeMaxCandidates: 'many' }).RESUME_MAX_CANDIDATES).toBe(4)
   })
 
-  test('resumeMode normalizes case and rejects junk', () => {
+  test('resumeMode accepts all three modes, normalizes case, and rejects junk', () => {
     expect(makeConfig({ resumeMode: 'REVIEW' }).RESUME_MODE).toBe('review')
+    expect(makeConfig({ resumeMode: 'continue' }).RESUME_MODE).toBe('continue')
+    expect(makeConfig({ resumeMode: 'assess' }).RESUME_MODE).toBe('assess')
     expect(() => makeConfig({ resumeMode: 'yolo' })).toThrow(/Unsupported resumeMode/)
   })
 

@@ -67,8 +67,11 @@ export function shellQuote(value: unknown): string {
 
 // Distinguish "the file is absent" from "the filesystem would not answer":
 // ENOENT/ENOTDIR mean absent; anything else (permissions, I/O) is a fault the
-// caller must surface rather than conflate with a missing file. Returns
-// { ok, exists, detail }.
+// caller must surface rather than conflate with a missing file. Probes with
+// lstat and requires a REGULAR file: callers pass worktree paths that are
+// untrusted content (see write-preflight.ts), so a committed symlink at the
+// probed path must read as absent (fail closed), never as the file it
+// points at. Returns { ok, exists, detail }.
 export async function fileState(pathValue: unknown, baseDir: string = process.cwd()): Promise<FileState> {
   if (!pathValue) return { ok: true, exists: false, detail: '' }
   const path = process.getBuiltinModule('node:path')
@@ -77,7 +80,7 @@ export async function fileState(pathValue: unknown, baseDir: string = process.cw
     : path.join(baseDir, String(pathValue))
   const fs = process.getBuiltinModule('node:fs/promises')
   try {
-    const stat = await fs.stat(candidate)
+    const stat = await fs.lstat(candidate)
     return { ok: true, exists: stat.isFile(), detail: '' }
   } catch (error) {
     const failure = error as (Error & { code?: string }) | null

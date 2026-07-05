@@ -2,7 +2,7 @@
 // milestone 3): shell quoting, execFile wrappers, and the absent-vs-fault
 // file probe.
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import fc from 'fast-check'
@@ -60,6 +60,11 @@ describe('fileState', () => {
 
   test('a directory is not a file', async () => {
     expect(await fileState('.', dir)).toEqual({ ok: true, exists: false, detail: '' })
+  })
+
+  test('a symlink reads as absent (fail closed), never as its target', async () => {
+    symlinkSync(path.join(dir, 'present.txt'), path.join(dir, 'plan-link.md'))
+    expect(await fileState('plan-link.md', dir)).toEqual({ ok: true, exists: false, detail: '' })
   })
 
   test('a filesystem fault surfaces as ok=false, not as absent', async () => {

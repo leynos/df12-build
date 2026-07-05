@@ -1,7 +1,7 @@
 // Module tests for remediation triage (decomposition milestone 8): the step
 // grouping key, the lane contract in the triage schema, and the prompt/agent
 // wiring for a settled step's proposals.
-import { describe, expect, test } from 'bun:test'
+import { beforeEach, describe, expect, test } from 'bun:test'
 
 import {
   TRIAGE_SCHEMA,
@@ -12,6 +12,12 @@ import {
 const globals = globalThis as Record<string, unknown>
 globals.log = () => {}
 globals.phase = () => {}
+
+// bun test runs every module suite in one process, so start each test with a
+// clean agent global rather than whatever a sibling suite left behind.
+beforeEach(() => {
+  delete globals.agent
+})
 
 function subject() {
   return makeRemediation({

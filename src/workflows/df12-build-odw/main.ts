@@ -1,3 +1,14 @@
+// df12-build-odw entry: the ODW workflow's worker-pool control loop and
+// fresh-run recovery entrypoint. This module unpacks the run configuration
+// (config.ts) once, binds each subsystem factory with that configuration
+// (prompts, write preflight, assessment, remediation, host review, and the
+// per-task pipeline in run-task.ts), and owns the run-scoped state the
+// factories must share: the merge queue and stage semaphores, the worker
+// pool, recovery orchestration over the recovery-decision/-discovery
+// helpers, per-step remediation flushing, and the terminal run summary.
+// The build (scripts/build-workflow.mjs) bundles this file and its imports
+// flat and wraps the whole body for the ODW loader; workflowMain() below is
+// invoked by the generated footer.
 import {
   branchToRoadmapId,
   parseWorktreeList,
@@ -21,6 +32,7 @@ import {
   isComplete,
   isTaskFullyComplete,
   parseRoadmap,
+  roadmapIdSlug,
   roadmapTaskIndex,
   selectRoadmapTask,
 } from './roadmap.ts'
@@ -159,7 +171,15 @@ const {
 } = CONFIG
 if (PROJECT_ROOT !== process.cwd()) {
   const fs = process.getBuiltinModule('node:fs')
-  if (!fs.statSync(PROJECT_ROOT).isDirectory()) {
+  // stat first so a missing path fails with a configuration error rather
+  // than a raw ENOENT from statSync.
+  let projectRootStat
+  try {
+    projectRootStat = fs.statSync(PROJECT_ROOT)
+  } catch (error) {
+    throw new Error(`Configured projectRoot is not accessible: ${PROJECT_ROOT} (${((error as Error | null) && (error as Error).message) || String(error)})`)
+  }
+  if (!projectRootStat.isDirectory()) {
     throw new Error(`Configured projectRoot is not a directory: ${PROJECT_ROOT}`)
   }
   process.chdir(PROJECT_ROOT)
@@ -312,7 +332,7 @@ async function runAuthPreflight() {
 }
 
 function slugForTask(task: SelectedTask): string {
-  return `roadmap-${task.id.replace(/[^0-9a-zA-Z]+/g, '-')}${task.isAddendum ? '-addendum' : ''}`
+  return `roadmap-${roadmapIdSlug(task.id)}${task.isAddendum ? '-addendum' : ''}`
 }
 
 function worktreeParentPath() {

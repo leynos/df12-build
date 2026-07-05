@@ -334,6 +334,9 @@ var TASK_LINE_RE = /^(\s*)-\s+\[([ xX])\]\s+(\d+(?:\.\d+)+)\.\s*(.*)$/;
 var REQUIRES_LINE_RE = /^\s*-\s+Requires\s+(.+?)\.?\s*$/;
 var STEP_RANGE_RE = /\bsteps?\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)\b/gi;
 var ROADMAP_ID_RE = /\b\d+(?:\.\d+)+\b/g;
+function roadmapIdSlug(id) {
+  return String(id).replace(/[^0-9a-zA-Z]+/g, "-");
+}
 function parentIdOf(id) {
   const parts = id.split(".");
   return parts.length > 1 ? parts.slice(0, -1).join(".") : "";
@@ -549,7 +552,7 @@ async function fileState(pathValue, baseDir = process.cwd()) {
   const candidate = path.isAbsolute(String(pathValue)) ? String(pathValue) : path.join(baseDir, String(pathValue));
   const fs = process.getBuiltinModule("node:fs/promises");
   try {
-    const stat = await fs.stat(candidate);
+    const stat = await fs.lstat(candidate);
     return { ok: true, exists: stat.isFile(), detail: "" };
   } catch (error) {
     const failure = error;
@@ -611,7 +614,14 @@ function makeWithInfraRetry(attempts) {
         return await run();
       } catch (error) {
         const message = error && error.message || String(error);
-        if (attempt >= attempts || !infrastructureFailureDetail(message)) throw error;
+        if (attempt >= attempts || !infrastructureFailureDetail(message)) {
+          if (infrastructureFailureDetail(message)) {
+            log(`[${label}] infrastructure fault persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`);
+          } else {
+            log(`[${label}] non-infrastructure failure; not retried: ${message}`);
+          }
+          throw error;
+        }
         faultMetrics.infraRetries += 1;
         log(`[${label}] infrastructure fault (${message}); retrying the stage agent (attempt ${attempt + 1} of ${attempts})`);
       }
@@ -698,19 +708,21 @@ async function collectAssessmentEvidence(task, wt) {
   const baseCommit = wt?.baseSha || "";
   const branchName = wt?.branch || "";
   const errors = [];
-  const current = await gitEvidence(worktreePath, ["rev-parse", "HEAD"]);
+  const [current, branch, status, committed, dirty, staged, commits] = await Promise.all([
+    gitEvidence(worktreePath, ["rev-parse", "HEAD"]),
+    branchName ? Promise.resolve({ ok: true, value: branchName }) : gitEvidence(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"]),
+    gitEvidence(worktreePath, ["status", "--porcelain=v1"]),
+    baseCommit ? gitEvidence(worktreePath, ["diff", "--name-status", `${baseCommit}...HEAD`], parseNameStatus) : Promise.resolve({ ok: false, value: [], error: "missing base commit" }),
+    gitEvidence(worktreePath, ["diff", "--name-status"], parseNameStatus),
+    gitEvidence(worktreePath, ["diff", "--cached", "--name-status"], parseNameStatus),
+    baseCommit ? gitEvidence(worktreePath, ["log", "--oneline", "--max-count=20", `${baseCommit}..HEAD`], (text) => String(text || "").trim().split(/\r?\n/).filter(Boolean)) : Promise.resolve({ ok: false, value: [], error: "missing base commit" })
+  ]);
   if (!current.ok) errors.push(`rev-parse HEAD: ${current.error}`);
-  const branch = branchName ? { ok: true, value: branchName } : await gitEvidence(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"]);
   if (!branch.ok) errors.push(`rev-parse --abbrev-ref HEAD: ${branch.error}`);
-  const status = await gitEvidence(worktreePath, ["status", "--porcelain=v1"]);
   if (!status.ok) errors.push(`status --porcelain=v1: ${status.error}`);
-  const committed = baseCommit ? await gitEvidence(worktreePath, ["diff", "--name-status", `${baseCommit}...HEAD`], parseNameStatus) : { ok: false, value: [], error: "missing base commit" };
   if (!committed.ok) errors.push(`diff base...HEAD: ${committed.error}`);
-  const dirty = await gitEvidence(worktreePath, ["diff", "--name-status"], parseNameStatus);
   if (!dirty.ok) errors.push(`diff --name-status: ${dirty.error}`);
-  const staged = await gitEvidence(worktreePath, ["diff", "--cached", "--name-status"], parseNameStatus);
   if (!staged.ok) errors.push(`diff --cached --name-status: ${staged.error}`);
-  const commits = baseCommit ? await gitEvidence(worktreePath, ["log", "--oneline", "--max-count=20", `${baseCommit}..HEAD`], (text) => String(text || "").trim().split(/\r?\n/).filter(Boolean)) : { ok: false, value: [], error: "missing base commit" };
   if (!commits.ok) errors.push(`log base..HEAD: ${commits.error}`);
   const untrackedOrModified = parsePorcelainDirty(status.value);
   const dirtyChanges = [
@@ -739,8 +751,14 @@ async function collectAssessmentEvidence(task, wt) {
   };
 }
 async function readFileText(path) {
-  const { readFile } = process.getBuiltinModule("node:fs/promises");
-  return await readFile(path, "utf8");
+  const fs = process.getBuiltinModule("node:fs/promises");
+  const { constants } = process.getBuiltinModule("node:fs");
+  const handle = await fs.open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    return await handle.readFile({ encoding: "utf8" });
+  } finally {
+    await handle.close();
+  }
 }
 async function directoryExists(pathValue) {
   if (!pathValue) return false;
@@ -1213,7 +1231,7 @@ function makePrompts(config) {
   }
   function addendumReviewPrompt2(task, worktree, impl) {
     const ids = (task.subtasks || []).join(", ");
-    const parentPlan = `docs/execplans/roadmap-${task.id.replace(/[^0-9a-zA-Z]+/g, "-")}.md`;
+    const parentPlan = `docs/execplans/roadmap-${roadmapIdSlug(task.id)}.md`;
     return [
       preamble2(worktree),
       `TASK: Review the committed addendum implementation for completed roadmap task ${task.id}, scoped ONLY to sub-task(s): ${ids}.`,
@@ -1239,7 +1257,7 @@ function makePrompts(config) {
   }
   function implementAddendumPrompt2(task, worktree) {
     const ids = (task.subtasks || []).join(", ");
-    const parentPlan = `docs/execplans/roadmap-${task.id.replace(/[^0-9a-zA-Z]+/g, "-")}.md`;
+    const parentPlan = `docs/execplans/roadmap-${roadmapIdSlug(task.id)}.md`;
     return [
       preamble2(worktree),
       `TASK: Lightweight ADDENDUM PASS for completed roadmap task ${task.id}. Implement ONLY its open sub-tasks: ${ids}. This is an addendum, NOT a full task \u2014 there is deliberately NO plan, NO design review, and NO dual logisphere review. Keep every change surgical and strictly in-scope; an addendum that grows into a redesign is a defect.`,
@@ -1272,7 +1290,7 @@ function makePrompts(config) {
       `  1. ${markStep}`,
       `  2. Fetch and rebase the branch onto the current origin/${BASE2} (\`git fetch origin ${BASE2}\` then rebase). Use the \`rebase\` skill for functionality-aware conflict resolution: resolve each conflict by preserving the INTENT of both sides (favour the design docs and existing contracts), not by blindly taking one side. If a conflict genuinely cannot be resolved safely, set ok=false, describe it in conflicts, and STOP without merging.`,
       `  3. Re-run the project commit gates (${COMMIT_GATE_TEXT2}) after the rebase to confirm the branch is still green.`,
-      `  4. Land the squash ENTIRELY inside this worktree. NEVER \`git switch ${BASE2}\` and never touch the control/root worktree or its checked-out ${BASE2}: that switch fails when ${BASE2} is checked out elsewhere, and it pollutes the control worktree (the root of recurring detritus). Step 2 left the task branch rebased on the current origin/${BASE2}; from here, create a fresh temp branch there (\`git switch -c integrate-${task.id.replace(/[^0-9a-zA-Z]+/g, "-")} origin/${BASE2}\`), squash-merge the task branch onto it (\`git merge --squash <task-branch>\` then \`git commit\` with a clear squash message summarising the task), and push it straight to the integration branch with \`git push origin HEAD:${BASE2}\`. If the push is rejected non-fast-forward (a sibling advanced origin/${BASE2} since step 2), go back to step 2 \u2014 re-fetch and re-rebase the task branch onto the new origin/${BASE2} \u2014 then redo this step. Retry until it lands.`,
+      `  4. Land the squash ENTIRELY inside this worktree. NEVER \`git switch ${BASE2}\` and never touch the control/root worktree or its checked-out ${BASE2}: that switch fails when ${BASE2} is checked out elsewhere, and it pollutes the control worktree (the root of recurring detritus). Step 2 left the task branch rebased on the current origin/${BASE2}; from here, create a fresh temp branch there (\`git switch -c integrate-${roadmapIdSlug(task.id)} origin/${BASE2}\`), squash-merge the task branch onto it (\`git merge --squash <task-branch>\` then \`git commit\` with a clear squash message summarising the task), and push it straight to the integration branch with \`git push origin HEAD:${BASE2}\`. If the push is rejected non-fast-forward (a sibling advanced origin/${BASE2} since step 2), go back to step 2 \u2014 re-fetch and re-rebase the task branch onto the new origin/${BASE2} \u2014 then redo this step. Retry until it lands.`,
       "",
       "Return what you actually did (roadmapMarkedDone, rebased, squashMerged, mergeSha, pushed) and any conflict notes. Do not delete the worktree unless git donkey expects you to; leave the repo in a clean state."
     ].join("\n");
@@ -1393,12 +1411,11 @@ async function hostWriteProbe(worktree) {
 }
 function makeWritePreflight({ enabled, targets }) {
   async function runTaskAgentWritePreflight2(worktree, tag) {
-    const failures = [];
     const host = await hostWriteProbe(worktree);
     if (!host.ok) {
       return { ok: false, failures: [{ adapter: "host", detail: host.detail }] };
     }
-    for (const target of targets()) {
+    const outcomes = await Promise.all(targets().map(async (target) => {
       const probeFile = writeProbePath(worktree, target.adapter);
       const token = writeProbeToken(tag, target.adapter);
       await clearProbeArtifact(probeFile);
@@ -1414,11 +1431,11 @@ function makeWritePreflight({ enabled, targets }) {
         agentError = error && error.message || String(error);
       }
       const verified = await verifyWriteProbe(probeFile, token);
-      if (!verified.ok) {
-        const detail = [verified.detail, reply && reply.ok === false ? reply.detail : "", agentError].filter(Boolean).join("; ");
-        failures.push({ adapter: target.adapter, detail });
-      }
-    }
+      if (verified.ok) return null;
+      const detail = [verified.detail, reply && reply.ok === false ? reply.detail : "", agentError].filter(Boolean).join("; ");
+      return { adapter: target.adapter, detail };
+    }));
+    const failures = outcomes.filter((outcome) => outcome !== null);
     return { ok: failures.length === 0, failures };
   }
   let taskAgentWritePreflight = null;
@@ -1528,6 +1545,7 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
   async function assessRecoveryCandidate2(candidate) {
     const task = { id: candidate.taskId, title: candidate.taskTitle };
     const wt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit };
+    phase("Recovery");
     const evidence = await collectAssessmentEvidence(task, wt);
     try {
       const label = `recover-assess:${candidate.taskId}${candidate.isAddendum ? "-addendum" : ""}`;
@@ -1822,13 +1840,25 @@ async function commitExecplanApproval(worktree, planPath, tag) {
   const relPath = contained.relPath;
   const absPath = path.join(worktree, relPath);
   try {
-    const text = await fs.readFile(absPath, "utf8");
+    const { constants } = process.getBuiltinModule("node:fs");
+    let text;
+    const readHandle = await fs.open(absPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      text = await readHandle.readFile({ encoding: "utf8" });
+    } finally {
+      await readHandle.close();
+    }
     if (parseExecplanState(text).status !== "approved") {
       const updated = /^Status:.*$/m.test(text) ? text.replace(/^Status:.*$/m, "Status: APPROVED") : `${text.trimEnd()}
 
 Status: APPROVED
 `;
-      await fs.writeFile(absPath, updated, "utf8");
+      const writeHandle = await fs.open(absPath, constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW);
+      try {
+        await writeHandle.writeFile(updated, { encoding: "utf8" });
+      } finally {
+        await writeHandle.close();
+      }
     }
   } catch (error) {
     return { ok: false, detail: `could not update the plan status: ${error && error.message || String(error)}` };
@@ -2190,6 +2220,31 @@ function makeTaskPipeline(deps) {
     }
     return { impl };
   }
+  async function integrateTask(task, worktree, mergeLock2, proposals, kindExtra) {
+    const tag = task.id;
+    const doIntegrate = () => {
+      phase("Integrate");
+      return buildLock2(() => agent(integratePrompt2(task, worktree), buildAgentOptions2({ phase: "Integrate", label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })));
+    };
+    try {
+      return { integration: mergeLock2 ? await mergeLock2(doIntegrate) : await doIntegrate() };
+    } catch (error) {
+      const message = error && error.message || String(error);
+      if (!infrastructureFailureDetail(message)) throw error;
+      faultMetrics.infraFaults += 1;
+      return {
+        fault: {
+          id: tag,
+          status: "infra-fault",
+          stage: "integrate",
+          detail: `integration agent died on an infrastructure fault (${message}); integration is never retried because the push to origin/${BASE2} is not idempotent \u2014 inspect origin/${BASE2} and the roadmap for a partial or hidden-success integration before relaunching with resumeMode: "continue"`,
+          worktree,
+          proposals,
+          ...kindExtra
+        }
+      };
+    }
+  }
   async function runDualReviewAndIntegration2(task, worktree, plan, impl, mergeLock2, options = {}) {
     const tag = task.id;
     const kindExtra = options.kind ? { kind: options.kind } : {};
@@ -2306,26 +2361,9 @@ function makeTaskPipeline(deps) {
     }
     let integration = null;
     if (AUTO_MERGE2) {
-      const doIntegrate = () => {
-        phase("Integrate");
-        return buildLock2(() => agent(integratePrompt2(task, worktree), buildAgentOptions2({ phase: "Integrate", label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })));
-      };
-      try {
-        integration = mergeLock2 ? await mergeLock2(doIntegrate) : await doIntegrate();
-      } catch (error) {
-        const message = error && error.message || String(error);
-        if (!infrastructureFailureDetail(message)) throw error;
-        faultMetrics.infraFaults += 1;
-        return {
-          id: tag,
-          status: "infra-fault",
-          stage: "integrate",
-          detail: `integration agent died on an infrastructure fault (${message}); integration is never retried because the push to origin/${BASE2} is not idempotent \u2014 inspect origin/${BASE2} and the roadmap for a partial or hidden-success integration before relaunching with resumeMode: "continue"`,
-          worktree,
-          proposals,
-          ...kindExtra
-        };
-      }
+      const attempt = await integrateTask(task, worktree, mergeLock2, proposals, kindExtra);
+      if (attempt.fault) return attempt.fault;
+      integration = attempt.integration ?? null;
       if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
         return { id: tag, status: "halted", stage: "integrate", detail: integration?.conflicts || integration?.summary || "integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)", worktree, proposals, ...kindExtra };
       }
@@ -2402,6 +2440,10 @@ function makeTaskPipeline(deps) {
         if (!impl2 || !impl2.ok || !impl2.gatesGreen || openIssues.length > 0 && !onlyDeferredReviewIssues) {
           return await attachAssessment2(task, wt, { id: tag, status: "failed", stage: "addendum", detail: impl2?.summary || "addendum did not reach a green state or left open issues", openIssues: impl2?.openIssues || [], worktree, proposals: [], kind: "addendum" });
         }
+        const committed = await verifyWorktreeCommitted(worktree);
+        if (!committed.ok) {
+          return await attachAssessment2(task, wt, { id: tag, status: "failed", stage: "addendum", detail: `addendum implementation returned ok but left uncommitted state in the worktree (${committed.detail}); every sub-task must be committed before returning`, openIssues, worktree, proposals: [], kind: "addendum" });
+        }
         const proposals = [];
         const addendumOpenIssues = [];
         if (HOST_COMMIT_GATES2) {
@@ -2442,26 +2484,9 @@ function makeTaskPipeline(deps) {
         }
         let integration = null;
         if (AUTO_MERGE2) {
-          const doIntegrate = () => {
-            phase("Integrate");
-            return buildLock2(() => agent(integratePrompt2(task, worktree), buildAgentOptions2({ phase: "Integrate", label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })));
-          };
-          try {
-            integration = mergeLock2 ? await mergeLock2(doIntegrate) : await doIntegrate();
-          } catch (error) {
-            const message = error && error.message || String(error);
-            if (!infrastructureFailureDetail(message)) throw error;
-            faultMetrics.infraFaults += 1;
-            return {
-              id: tag,
-              status: "infra-fault",
-              stage: "integrate",
-              detail: `integration agent died on an infrastructure fault (${message}); integration is never retried because the push to origin/${BASE2} is not idempotent \u2014 inspect origin/${BASE2} and the roadmap for a partial or hidden-success integration before relaunching with resumeMode: "continue"`,
-              worktree,
-              proposals,
-              kind: "addendum"
-            };
-          }
+          const attempt = await integrateTask(task, worktree, mergeLock2, proposals, { kind: "addendum" });
+          if (attempt.fault) return attempt.fault;
+          integration = attempt.integration ?? null;
           if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
             return await attachAssessment2(task, wt, { id: tag, status: "halted", stage: "integrate", detail: integration?.conflicts || integration?.summary || "integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)", worktree, proposals, kind: "addendum" });
           }
@@ -2555,7 +2580,13 @@ var {
 } = CONFIG;
 if (PROJECT_ROOT !== process.cwd()) {
   const fs = process.getBuiltinModule("node:fs");
-  if (!fs.statSync(PROJECT_ROOT).isDirectory()) {
+  let projectRootStat;
+  try {
+    projectRootStat = fs.statSync(PROJECT_ROOT);
+  } catch (error) {
+    throw new Error(`Configured projectRoot is not accessible: ${PROJECT_ROOT} (${error && error.message || String(error)})`);
+  }
+  if (!projectRootStat.isDirectory()) {
     throw new Error(`Configured projectRoot is not a directory: ${PROJECT_ROOT}`);
   }
   process.chdir(PROJECT_ROOT);
@@ -2677,7 +2708,7 @@ async function runAuthPreflight() {
   return failures;
 }
 function slugForTask(task) {
-  return `roadmap-${task.id.replace(/[^0-9a-zA-Z]+/g, "-")}${task.isAddendum ? "-addendum" : ""}`;
+  return `roadmap-${roadmapIdSlug(task.id)}${task.isAddendum ? "-addendum" : ""}`;
 }
 function worktreeParentPath() {
   const path = process.getBuiltinModule("node:path");

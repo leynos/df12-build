@@ -6,9 +6,16 @@ MARKDOWN_FILES := $(shell find . \
 	-name '*.md' -print | sort)
 WORKFLOW_FILES := workflows/df12-build-odw.js workflows/df12-build.js
 
-.PHONY: all check-fmt lint typecheck markdownlint nixie test test-modules test-workflow verify-modules workflow-parse workflow-build workflow-freshness
+.PHONY: all clean check-fmt lint typecheck markdownlint nixie test test-modules test-workflow verify-modules workflow-parse workflow-build workflow-freshness
 
 all: check-fmt lint typecheck markdownlint nixie test workflow-freshness verify-modules
+
+# Reset fetched dependencies. The generated workflow artefact is deliberately
+# NOT removed: it is a committed file (the sidecar copies it verbatim), so its
+# reset path is `make workflow-build`, and `make workflow-freshness` polices
+# staleness.
+clean:
+	rm -rf node_modules
 
 # Regenerate the ODW workflow artifact from the module tree under src/.
 workflow-build:

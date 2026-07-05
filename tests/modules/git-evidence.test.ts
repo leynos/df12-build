@@ -5,7 +5,7 @@
 // base, unreachable worktree).
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -127,5 +127,12 @@ describe('small readers', () => {
     expect(await directoryExists(dir)).toBe(true)
     expect(await directoryExists(path.join(dir, 'README.md'))).toBe(false)
     expect(await directoryExists('')).toBe(false)
+  })
+
+  test('readFileText refuses to follow a symlink at the read path', async () => {
+    const { dir } = makeRepo()
+    const link = path.join(dir, 'plan-link.md')
+    symlinkSync(path.join(dir, 'README.md'), link)
+    await expect(readFileText(link)).rejects.toThrow()
   })
 })

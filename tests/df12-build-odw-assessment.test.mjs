@@ -347,8 +347,12 @@ test('integration is never retried on infrastructure faults', async () => {
   // The push to origin/BASE is not idempotent: a hidden-success first
   // attempt re-run after an adapter death could integrate the task twice.
   assert.doesNotMatch(source, /withInfraRetry\([^\n]*integratePrompt/)
+  // Both lanes now route through the single integrateTask helper, so exactly
+  // one unwrapped call site must exist and both callers must use the helper.
   const bareCalls = source.match(/buildLock\(\(\) => agent\(integratePrompt\(task, worktree\)/g) || []
-  assert.equal(bareCalls.length, 2, 'both integrate call sites (normal and addendum) stay unwrapped')
+  assert.equal(bareCalls.length, 1, 'the shared integrateTask call site stays unwrapped')
+  const helperCalls = source.match(/await integrateTask\(task, worktree, mergeLock, proposals,/g) || []
+  assert.equal(helperCalls.length, 2, 'normal and addendum lanes both integrate through integrateTask')
 })
 
 test('the CodeRabbit NDJSON parser reads the pinned agent wire contract', async () => {

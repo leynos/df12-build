@@ -54,12 +54,28 @@ export async function commitExecplanApproval(worktree: string, planPath: unknown
   const relPath = contained.relPath
   const absPath = path.join(worktree, relPath)
   try {
-    const text = await fs.readFile(absPath, 'utf8')
+    // The worktree is untrusted content (see write-preflight.ts): open both
+    // the read and the rewrite with O_NOFOLLOW so a committed symlink at the
+    // plan path can never redirect host I/O outside the worktree. ELOOP
+    // surfaces through the catch below as a status-update failure.
+    const { constants } = process.getBuiltinModule('node:fs')
+    let text: string
+    const readHandle = await fs.open(absPath, constants.O_RDONLY | constants.O_NOFOLLOW)
+    try {
+      text = await readHandle.readFile({ encoding: 'utf8' })
+    } finally {
+      await readHandle.close()
+    }
     if (parseExecplanState(text).status !== 'approved') {
       const updated = /^Status:.*$/m.test(text)
         ? text.replace(/^Status:.*$/m, 'Status: APPROVED')
         : `${text.trimEnd()}\n\nStatus: APPROVED\n`
-      await fs.writeFile(absPath, updated, 'utf8')
+      const writeHandle = await fs.open(absPath, constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW)
+      try {
+        await writeHandle.writeFile(updated, { encoding: 'utf8' })
+      } finally {
+        await writeHandle.close()
+      }
     }
   } catch (error) {
     return { ok: false, detail: `could not update the plan status: ${((error as Error | null) && (error as Error).message) || String(error)}` }

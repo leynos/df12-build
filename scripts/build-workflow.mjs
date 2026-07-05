@@ -76,9 +76,9 @@ const moduleFiles = readdirSync(SRC_DIR).filter(
 )
 for (const file of moduleFiles) {
   const text = readFileSync(path.join(SRC_DIR, file), 'utf8')
-  for (const match of text.matchAll(/^export (?:async )?(?:function|const|let|var) ([A-Za-z_$][\w$]*)/gm)) {
+  for (const match of text.matchAll(/^export (?:async )?(?:function|class|const|let|var) ([A-Za-z_$][\w$]*)/gm)) {
     const name = match[1]
-    const declared = new RegExp(`^(?:async )?(?:function|var|let|const) ${name}\\b`, 'm')
+    const declared = new RegExp(`^(?:async )?(?:function|class|var|let|const) ${name}\\b`, 'm')
     if (!declared.test(bundle)) {
       fail(`top-level name '${name}' from ${file} is missing or was renamed in the bundle`)
     }

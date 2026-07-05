@@ -175,6 +175,10 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
   async function assessRecoveryCandidate(candidate: RecoveryCandidate) {
     const task = { id: candidate.taskId, title: candidate.taskTitle }
     const wt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit }
+    // Re-assert the global phase: a previously resumed candidate re-enters
+    // the ordinary pipeline (Plan/Implement/Integrate), so without this the
+    // next candidate's assessment would be recorded under a stale phase.
+    phase('Recovery')
     const evidence = await collectAssessmentEvidence(task, wt)
     try {
       const label = `recover-assess:${candidate.taskId}${candidate.isAddendum ? '-addendum' : ''}`

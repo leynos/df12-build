@@ -85,31 +85,30 @@ export async function collectAssessmentEvidence(
   const branchName = wt?.branch || ''
   const errors: string[] = []
 
-  const current = await gitEvidence(worktreePath, ['rev-parse', 'HEAD'])
+  // The seven probes are independent read-only git commands, so they start
+  // together; the error accumulation below keeps its fixed order so
+  // collectionErrors stays deterministic.
+  const [current, branch, status, committed, dirty, staged, commits] = await Promise.all([
+    gitEvidence(worktreePath, ['rev-parse', 'HEAD']),
+    branchName
+      ? Promise.resolve<GitEvidenceValue<string>>({ ok: true, value: branchName })
+      : gitEvidence(worktreePath, ['rev-parse', '--abbrev-ref', 'HEAD']),
+    gitEvidence(worktreePath, ['status', '--porcelain=v1']),
+    baseCommit
+      ? gitEvidence(worktreePath, ['diff', '--name-status', `${baseCommit}...HEAD`], parseNameStatus)
+      : Promise.resolve({ ok: false, value: [] as NameStatusEntry[], error: 'missing base commit' }),
+    gitEvidence(worktreePath, ['diff', '--name-status'], parseNameStatus),
+    gitEvidence(worktreePath, ['diff', '--cached', '--name-status'], parseNameStatus),
+    baseCommit
+      ? gitEvidence(worktreePath, ['log', '--oneline', '--max-count=20', `${baseCommit}..HEAD`], (text) => String(text || '').trim().split(/\r?\n/).filter(Boolean))
+      : Promise.resolve({ ok: false, value: [] as string[], error: 'missing base commit' }),
+  ])
   if (!current.ok) errors.push(`rev-parse HEAD: ${current.error}`)
-
-  const branch = branchName
-    ? { ok: true, value: branchName }
-    : await gitEvidence(worktreePath, ['rev-parse', '--abbrev-ref', 'HEAD'])
   if (!branch.ok) errors.push(`rev-parse --abbrev-ref HEAD: ${branch.error}`)
-
-  const status = await gitEvidence(worktreePath, ['status', '--porcelain=v1'])
   if (!status.ok) errors.push(`status --porcelain=v1: ${status.error}`)
-
-  const committed = baseCommit
-    ? await gitEvidence(worktreePath, ['diff', '--name-status', `${baseCommit}...HEAD`], parseNameStatus)
-    : { ok: false, value: [] as NameStatusEntry[], error: 'missing base commit' }
   if (!committed.ok) errors.push(`diff base...HEAD: ${committed.error}`)
-
-  const dirty = await gitEvidence(worktreePath, ['diff', '--name-status'], parseNameStatus)
   if (!dirty.ok) errors.push(`diff --name-status: ${dirty.error}`)
-
-  const staged = await gitEvidence(worktreePath, ['diff', '--cached', '--name-status'], parseNameStatus)
   if (!staged.ok) errors.push(`diff --cached --name-status: ${staged.error}`)
-
-  const commits = baseCommit
-    ? await gitEvidence(worktreePath, ['log', '--oneline', '--max-count=20', `${baseCommit}..HEAD`], (text) => String(text || '').trim().split(/\r?\n/).filter(Boolean))
-    : { ok: false, value: [] as string[], error: 'missing base commit' }
   if (!commits.ok) errors.push(`log base..HEAD: ${commits.error}`)
 
   const untrackedOrModified = parsePorcelainDirty(status.value)
@@ -140,9 +139,19 @@ export async function collectAssessmentEvidence(
   }
 }
 
+// Read a worktree file without following a symlink at the final component:
+// worktrees are untrusted content (see write-preflight.ts), so a committed
+// symlink at the read path must fail (ELOOP) instead of redirecting the read
+// outside the worktree. Callers treat the failure as an unreadable file.
 export async function readFileText(path: string): Promise<string> {
-  const { readFile } = process.getBuiltinModule('node:fs/promises')
-  return await readFile(path, 'utf8')
+  const fs = process.getBuiltinModule('node:fs/promises')
+  const { constants } = process.getBuiltinModule('node:fs')
+  const handle = await fs.open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    return await handle.readFile({ encoding: 'utf8' })
+  } finally {
+    await handle.close()
+  }
 }
 
 export async function directoryExists(pathValue: unknown): Promise<boolean> {

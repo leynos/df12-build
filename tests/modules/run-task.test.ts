@@ -205,6 +205,25 @@ describe('runTask', () => {
     expect(outcome.detail).toContain('uncommitted state')
   })
 
+  test('a green addendum with a dirty worktree fails the durability gate before review or integration', async () => {
+    const worktree = makeWorktree()
+    scriptAgent((label) => {
+      if (label.startsWith('addendum:')) {
+        writeFileSync(path.join(worktree, 'uncommitted.txt'), 'stray\n')
+        return { ok: true, gatesGreen: true, workItemsCompleted: 1, workItemsTotal: 1, openIssues: [], summary: 'green but dirty' }
+      }
+      throw new Error(`unscripted label: ${label}`)
+    })
+    const addendum = { ...task, isAddendum: true, subtasks: ['1.2.3.1'] }
+    const outcome = await subject(worktree).runTask(addendum, null)
+    expect(outcome.status).toBe('failed')
+    expect(outcome.stage).toBe('addendum')
+    expect(outcome.detail).toContain('uncommitted state')
+    expect(outcome.assessed).toBe(true)
+    expect(labels.some((label) => label.startsWith('integrate:'))).toBe(false)
+    expect(labels.some((label) => label.startsWith('addendum-review:'))).toBe(false)
+  })
+
   test('a completed addendum with only deferred review issues is manual-merge-ready', async () => {
     const worktree = makeWorktree()
     scriptAgent((label) => {

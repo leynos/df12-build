@@ -117,6 +117,62 @@ describe('shouldAssessFailure gate', () => {
   })
 })
 
+describe('recovery assessment entry points', () => {
+  const candidate = (dir: string, baseSha: string) => ({
+    taskId: '1.2.3',
+    taskTitle: 'Parser',
+    branchName: 'roadmap-1-2-3',
+    worktreePath: dir,
+    baseCommit: baseSha,
+    currentCommit: 'deadbeef',
+    roadmapComplete: false,
+    isAddendum: false,
+    line: 6,
+  })
+
+  test('the recovery prompt carries the recovery header and discovery context, not the failure shape', () => {
+    const assessment = subject()
+    const prompt = assessment.recoveryAssessmentPrompt(
+      { id: '1.2.3', title: 'Parser' },
+      candidate('/tmp/wt', 'abc123'),
+      { branchName: 'roadmap-1-2-3', collectionErrors: [] },
+    )
+    expect(prompt).toContain('discovered during fresh-run recovery')
+    expect(prompt).toContain('Recovery discovery context')
+    expect(prompt).not.toContain('after a workflow failure')
+    expect(prompt).toContain('"branchName": "roadmap-1-2-3"')
+    expect(prompt).toContain('"baseCommit": "abc123"')
+  })
+
+  test('assessRecoveryCandidate returns the structured assessment with host evidence', async () => {
+    const { dir, baseSha } = makeRepo()
+    globals.agent = async () => ({ classification: 'adopt-complete', taskScoped: true })
+    const assessed = await subject().assessRecoveryCandidate(candidate(dir, baseSha))
+    expect(assessed.assessmentError).toBe('')
+    const attached = assessed.assessment as { classification?: string; hostEvidence?: { branchName?: string } } | null
+    expect(attached?.classification).toBe('adopt-complete')
+    expect(attached?.hostEvidence?.branchName).toBe('roadmap-1-2-3')
+    expect(assessed.evidence.collectionErrors).toEqual([])
+  })
+
+  test('a null reply and a thrown agent error both surface as assessmentError', async () => {
+    const { dir, baseSha } = makeRepo()
+
+    globals.agent = async () => null
+    const nulled = await subject().assessRecoveryCandidate(candidate(dir, baseSha))
+    expect(nulled.assessment).toBeNull()
+    expect(nulled.assessmentError).toMatch(/no structured output/)
+
+    globals.agent = async () => {
+      throw new Error("adapter 'claude' exited with code 137")
+    }
+    const threw = await subject().assessRecoveryCandidate(candidate(dir, baseSha))
+    expect(threw.assessment).toBeNull()
+    expect(threw.assessmentError).toMatch(/exited with code 137/)
+    expect(threw.evidence).toBeDefined()
+  })
+})
+
 describe('attachAssessment', () => {
   test('attaches the agent assessment with host evidence riding along', async () => {
     const { dir, baseSha } = makeRepo()

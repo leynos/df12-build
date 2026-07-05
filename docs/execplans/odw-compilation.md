@@ -655,6 +655,22 @@ artefact-slicing suites were retained as shipped-artefact coverage. The
 Surprises entry about the `checkJs: false` blind spot is resolved by the
 milestone 10 entry conversion.
 
+2026-07-06 (review remediation): a findings batch was triaged by a wyvern
+verification team; 12 code and 6 test findings were confirmed and fixed,
+and 8 were skipped as stale or wrong (both docs findings already correct;
+`plan-unreadable` already present in the skip-reason contract and the twin
+test's REASON map; the Bun `process.getBuiltinModule` claims empirically
+false on Bun 1.3.14, where the proposed static-import fix would break the
+loader contract; no CI configuration exists for the Dafny job to attach
+to). Notable fixes: symlink containment for every ExecPlan read/write
+(`readFileText` and the approval flip now open O_NOFOLLOW, `fileState`
+lstats and fails closed), the addendum lane gained the
+`verifyWorktreeCommitted` durability gate, both lanes now integrate
+through one `integrateTask` helper (the two-call-site source invariant was
+re-anchored accordingly), retry exhaustion is logged, evidence probes and
+write probes run concurrently, and a fast-check fuzz property now guards
+`execplanRelPath` containment.
+
 2026-07-06 (post-completion): upstream `assessment-issues` — the branch this
 work forked from mid-way, at e755141 — gained eight further commits and was
 squash-merged to `origin/main`. The delta was ported into the decomposed

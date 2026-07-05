@@ -17,6 +17,13 @@ export const REQUIRES_LINE_RE = /^\s*-\s+Requires\s+(.+?)\.?\s*$/
 export const STEP_RANGE_RE = /\bsteps?\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)\b/gi
 export const ROADMAP_ID_RE = /\b\d+(?:\.\d+)+\b/g
 
+// One canonical sanitizer for roadmap ids in branch and file names:
+// `1.2.3` -> `1-2-3` (used for roadmap-* branches, execplan leaf names, and
+// integrate-* temp branches).
+export function roadmapIdSlug(id: unknown): string {
+  return String(id).replace(/[^0-9a-zA-Z]+/g, '-')
+}
+
 export function parentIdOf(id: string): string {
   const parts = id.split('.')
   return parts.length > 1 ? parts.slice(0, -1).join('.') : ''

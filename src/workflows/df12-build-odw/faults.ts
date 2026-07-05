@@ -74,7 +74,16 @@ export function makeWithInfraRetry(attempts: number) {
         return await run()
       } catch (error) {
         const message = ((error as Error | null) && (error as Error).message) || String(error)
-        if (attempt >= attempts || !infrastructureFailureDetail(message)) throw error
+        if (attempt >= attempts || !infrastructureFailureDetail(message)) {
+          // Log the terminal boundary distinctly from the retry path so
+          // operators can see where the retry budget actually gave up.
+          if (infrastructureFailureDetail(message)) {
+            log(`[${label}] infrastructure fault persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`)
+          } else {
+            log(`[${label}] non-infrastructure failure; not retried: ${message}`)
+          }
+          throw error
+        }
         faultMetrics.infraRetries += 1
         log(`[${label}] infrastructure fault (${message}); retrying the stage agent (attempt ${attempt + 1} of ${attempts})`)
       }

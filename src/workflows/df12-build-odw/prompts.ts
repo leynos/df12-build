@@ -5,6 +5,7 @@
 // destructures the returned builders, so call sites keep their shape.
 import type { WorkflowConfig } from './config.ts'
 import { shellQuote } from './exec.ts'
+import { roadmapIdSlug } from './roadmap.ts'
 
 // The slices of task / plan / implementation records the prompts read.
 export interface PromptTask {
@@ -274,7 +275,7 @@ export function makePrompts(config: WorkflowConfig) {
 
   function addendumReviewPrompt(task: PromptTask, worktree: string, impl: PromptImpl | null | undefined) {
     const ids = (task.subtasks || []).join(', ')
-    const parentPlan = `docs/execplans/roadmap-${task.id.replace(/[^0-9a-zA-Z]+/g, '-')}.md`
+    const parentPlan = `docs/execplans/roadmap-${roadmapIdSlug(task.id)}.md`
     return [
       preamble(worktree),
       `TASK: Review the committed addendum implementation for completed roadmap task ${task.id}, scoped ONLY to sub-task(s): ${ids}.`,
@@ -301,7 +302,7 @@ export function makePrompts(config: WorkflowConfig) {
 
   function implementAddendumPrompt(task: PromptTask, worktree: string) {
     const ids = (task.subtasks || []).join(', ')
-    const parentPlan = `docs/execplans/roadmap-${task.id.replace(/[^0-9a-zA-Z]+/g, '-')}.md`
+    const parentPlan = `docs/execplans/roadmap-${roadmapIdSlug(task.id)}.md`
     return [
       preamble(worktree),
       `TASK: Lightweight ADDENDUM PASS for completed roadmap task ${task.id}. Implement ONLY its open sub-tasks: ${ids}. This is an addendum, NOT a full task — there is deliberately NO plan, NO design review, and NO dual logisphere review. Keep every change surgical and strictly in-scope; an addendum that grows into a redesign is a defect.`,
@@ -339,7 +340,7 @@ export function makePrompts(config: WorkflowConfig) {
       `  1. ${markStep}`,
       `  2. Fetch and rebase the branch onto the current origin/${BASE} (\`git fetch origin ${BASE}\` then rebase). Use the \`rebase\` skill for functionality-aware conflict resolution: resolve each conflict by preserving the INTENT of both sides (favour the design docs and existing contracts), not by blindly taking one side. If a conflict genuinely cannot be resolved safely, set ok=false, describe it in conflicts, and STOP without merging.`,
       `  3. Re-run the project commit gates (${COMMIT_GATE_TEXT}) after the rebase to confirm the branch is still green.`,
-      `  4. Land the squash ENTIRELY inside this worktree. NEVER \`git switch ${BASE}\` and never touch the control/root worktree or its checked-out ${BASE}: that switch fails when ${BASE} is checked out elsewhere, and it pollutes the control worktree (the root of recurring detritus). Step 2 left the task branch rebased on the current origin/${BASE}; from here, create a fresh temp branch there (\`git switch -c integrate-${task.id.replace(/[^0-9a-zA-Z]+/g, '-')} origin/${BASE}\`), squash-merge the task branch onto it (\`git merge --squash <task-branch>\` then \`git commit\` with a clear squash message summarising the task), and push it straight to the integration branch with \`git push origin HEAD:${BASE}\`. If the push is rejected non-fast-forward (a sibling advanced origin/${BASE} since step 2), go back to step 2 — re-fetch and re-rebase the task branch onto the new origin/${BASE} — then redo this step. Retry until it lands.`,
+      `  4. Land the squash ENTIRELY inside this worktree. NEVER \`git switch ${BASE}\` and never touch the control/root worktree or its checked-out ${BASE}: that switch fails when ${BASE} is checked out elsewhere, and it pollutes the control worktree (the root of recurring detritus). Step 2 left the task branch rebased on the current origin/${BASE}; from here, create a fresh temp branch there (\`git switch -c integrate-${roadmapIdSlug(task.id)} origin/${BASE}\`), squash-merge the task branch onto it (\`git merge --squash <task-branch>\` then \`git commit\` with a clear squash message summarising the task), and push it straight to the integration branch with \`git push origin HEAD:${BASE}\`. If the push is rejected non-fast-forward (a sibling advanced origin/${BASE} since step 2), go back to step 2 — re-fetch and re-rebase the task branch onto the new origin/${BASE} — then redo this step. Retry until it lands.`,
       '',
       'Return what you actually did (roadmapMarkedDone, rebased, squashMerged, mergeSha, pushed) and any conflict notes. Do not delete the worktree unless git donkey expects you to; leave the repo in a clean state.',
     ].join('\n')

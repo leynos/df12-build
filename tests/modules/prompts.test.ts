@@ -68,14 +68,64 @@ describe('implementation and fix prompts', () => {
   })
 })
 
+describe('dual review prompts', () => {
+  test('codeReviewPrompt benchmarks against the plan and the configured gates', () => {
+    const text = prompts.codeReviewPrompt(task, worktree, plan)
+    expect(text).toContain(task.id)
+    expect(text).toContain(plan.execplanPath)
+    expect(text).toContain(config.COMMIT_GATE_TEXT)
+  })
+
+  test('expertReviewPrompt scopes the crew to the task and its plan', () => {
+    const text = prompts.expertReviewPrompt(task, worktree, plan)
+    expect(text).toContain(task.id)
+    expect(text).toContain(plan.execplanPath)
+  })
+})
+
+describe('addendum prompts', () => {
+  const addendum = { ...task, id: '1.2.8', isAddendum: true, subtasks: ['1.2.8.5', '1.2.8.6'] }
+
+  test('addendumReviewPrompt names the sub-tasks, the parent plan, and the builder evidence', () => {
+    const impl = { summary: 'complete but review deferred', openIssues: ['coderabbit 429 rate limit'] }
+    const text = prompts.addendumReviewPrompt(addendum, worktree, impl)
+    expect(text).toContain('1.2.8.5, 1.2.8.6')
+    expect(text).toContain('docs/execplans/roadmap-1-2-8.md')
+    expect(text).toContain('complete but review deferred')
+    expect(text).toContain('1. coderabbit 429 rate limit')
+  })
+
+  test('implementAddendumPrompt scopes the pass to the open sub-tasks and parent plan', () => {
+    const text = prompts.implementAddendumPrompt(addendum, worktree)
+    expect(text).toContain('1.2.8.5, 1.2.8.6')
+    expect(text).toContain('docs/execplans/roadmap-1-2-8.md')
+    expect(text).toContain(config.COMMIT_GATE_TEXT)
+  })
+
+  test('integratePrompt in the addendum lane ticks sub-tasks and preserves the parent', () => {
+    const text = prompts.integratePrompt(addendum, worktree)
+    expect(text).toContain(`origin/${config.BASE}`)
+    expect(text).toContain('[1.2.8.5, 1.2.8.6]')
+    expect(text).toContain('LEAVE the parent 1.2.8')
+  })
+})
+
 describe('integration and audit prompts', () => {
   test('integratePrompt targets the configured base branch', () => {
     const text = prompts.integratePrompt(task, worktree)
     expect(text).toContain(`origin/${config.BASE}`)
   })
 
-  test('auditPrompt names the task and worktree', () => {
+  test('auditPrompt names the task and writes findings when documentAudit is on', () => {
     const text = prompts.auditPrompt(task, worktree)
     expect(text).toContain(task.id)
+    expect(text).toContain(`docs/issues/audit-${task.id}.md`)
+  })
+
+  test('auditPrompt with documentAudit=false reports findings without writing', () => {
+    const reportOnly = makePrompts(makeConfig({ documentAudit: false }))
+    const text = reportOnly.auditPrompt(task, worktree)
+    expect(text).not.toContain(`docs/issues/audit-${task.id}.md`)
+    expect(text).toMatch(/return findings only/i)
   })
 })
