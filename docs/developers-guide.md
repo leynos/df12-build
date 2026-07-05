@@ -147,6 +147,19 @@ fails the addendum before any review. Test loaders and the simulation driver
 force `hostCommitGates: false` (fixture repos have no `Makefile`); pipeline
 coverage uses a scripted fake gate command.
 
+The per-work-item build loop (`perWorkItemBuild`, default on) makes the
+committed ExecPlan's `## Progress` checklist the build's control surface:
+`parseExecplanState` returns the checklist as `items[]`, the planner prompt
+pins the `- [ ] WI-<n>: <title>` convention, and `runWorkItemBuildLoop`
+dispatches one `implement:<id> wi<n>` builder turn per unticked item,
+verifying `verifyWorktreeCommitted` plus committed checklist movement after
+every turn (one bounce with the defect named, two consecutive no-progress
+turns fail closed; `maxWorkItemRounds` bounds the loop). A plan with no
+checklist returns `null` from the loop and the stage falls back to the
+single-turn `implementPrompt` build. Test loaders and the simulation driver
+force `perWorkItemBuild: false` because scripted implement agents do not
+tick Progress items; loop coverage uses fixture plans with real ticks.
+
 The run result exposes the contract for operators and tests: `commitGates`
 (the effective deterministic gate list; agents must never assume `make all`
 aggregates a project's gates), `stageAttempts`, bounded-cardinality

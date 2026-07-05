@@ -62,6 +62,8 @@ async function runSmoke(resumeMode) {
       // run `make all` in the Makefile-less fixture repo.
       coderabbitHostReview: false,
       hostCommitGates: false,
+      // The mock implement adapter does not tick ExecPlan Progress items.
+      perWorkItemBuild: false,
       resumePartialBranches: true,
       resumeMode,
       planAdapter: 'mock',

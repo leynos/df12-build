@@ -198,6 +198,15 @@ provides the doc skills):
    timeout named). Host gate logs land at `/tmp/df12-gate-<task>-<round>-…`
    on the runner; read them before re-running a gate by hand.
 
+   Build-loop knobs: `perWorkItemBuild` (default on — the host dispatches
+   one builder turn per unticked ExecPlan `## Progress` item, labelled
+   `implement:<id> wi<n>` in the events, verifying committed progress after
+   every turn; a turn that returns ok without committing a tick is bounced
+   once with the defect named, and two consecutive no-progress turns fail
+   the task; plans without a Progress checklist fall back to the single-turn
+   build) and `maxWorkItemRounds` (default 16 — builder turns per task
+   before the loop fails closed).
+
    Set the ODW adapter `timeout` (in the ODW config, not workflow args) well
    below its 6-hour default. ODW has no per-call timeout, so the workflow's
    `stageAttempts` retry can only begin after the adapter kills the process —
@@ -205,6 +214,9 @@ provides the doc skills):
    review stages normally finish within tens of minutes, so 4500–5400 seconds
    (75–90 minutes) is generous: a hang then costs roughly 1.5 hours plus one
    warm retry from the committed ExecPlan, instead of 6 hours and a dead run.
+   With `perWorkItemBuild` on (the default), each build turn is a single
+   work item, so the BUILD adapter can sit even tighter — roughly 3600
+   seconds — and a hang costs at most one work item plus a warm retry.
    A multi-hour silent stream is a hung connection, not progress.
 
    The checked-in defaults split execution from judgement. Build-side work
@@ -237,7 +249,9 @@ Every time a run completes you do the same loop:
    verification: enabled flag, per-gate timeout, and run/failure counters;
    with host gates on, `gatesGreen` is host-verified at review time and
    per-round pass/fail sits in failed tasks' `reviewRounds[].hostGates`
-   with `/tmp/df12-gate-*` log paths), `stageAttempts` (the
+   with `/tmp/df12-gate-*` log paths), `workItemBuild` (whether the host
+   drove the build one Progress item at a time, and the round cap),
+   `stageAttempts` (the
    in-run retry budget for stage agents that die on infrastructure faults;
    a result with `status: "infra-fault"` means the fault outlived that budget
    and carries no evidence about the branch), `coderabbit` (host-review
@@ -568,9 +582,12 @@ reviewer.
   - If the plan's **premise is factually wrong** (e.g. it assumes one code
     boundary when there are two), correct the fact in the task so the planner
     cannot repeat it.
-- **Implement halt** (often a turn-budget/size issue): a task with many work
-  items, each gated by `make all` (plus a per-item coderabbit review in the
-  legacy `coderabbitHostReview=false` flow), can exceed one agent turn.
+- **Implement halt** (often a turn-budget/size issue): with
+  `perWorkItemBuild` off, a task with many work items, each gated by
+  `make all` (plus a per-item coderabbit review in the legacy
+  `coderabbitHostReview=false` flow), can exceed one agent turn — the
+  per-work-item build loop exists precisely to remove this failure mode, so
+  check that knob first when you see one.
   Check `result.assessment` before decomposing the task. A
   timeout may leave a coherent partial slice worth preserving, but the roadmap
   task stays unchecked unless its success criterion is complete and gates/review

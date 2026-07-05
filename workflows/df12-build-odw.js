@@ -54,6 +54,15 @@ const MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4 // plan <-> design-review exc
 const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review cycles
 const STAGE_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2)) // total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, schema-retry exhaustion); product failures are never retried
 
+// Per-work-item build loop: the host reads the committed ExecPlan's Progress
+// checklist and dispatches ONE builder turn per unticked work item, verifying
+// committed progress after each turn. Small turns keep the build adapter on a
+// tight timeout and make a hung stream cheap. perWorkItemBuild=false restores
+// the single-turn whole-task build. Plans without a Progress checklist fall
+// back to the single-turn build automatically.
+const PER_WORK_ITEM_BUILD = cfg.perWorkItemBuild !== false
+const MAX_WORK_ITEM_ROUNDS = Math.max(1, Math.trunc(Number(cfg.maxWorkItemRounds) || 16)) // builder turns per task before failing closed
+
 // Bounded-cardinality fault counters, surfaced verbatim in the run result so
 // operators can see retry pressure and terminal fault classes without
 // scraping logs. Fixed keys only — never keyed by task id or error text.
@@ -1207,6 +1216,7 @@ function planPrompt(task, worktree, priorVerdict, round, opts = {}) {
     'Use the `execplans` skill and follow it exactly. Name the plan docs/execplans/<branch-leaf>.md within the worktree (branch leaf = the part after the last "/").',
     'The plan must:',
     '- Decompose the task into ordered, atomic work items, each independently committable and gate-passable.',
+    '- Record the work items in the `## Progress` section as one checklist line each, `- [ ] WI-<n>: <imperative title>`, in execution order. The workflow host reads this checklist to dispatch the build one work item at a time, so every implementable work item must appear as its own unticked line — preparation notes that are not build work must not be checklist lines.',
     `- Adhere to the design documents (${DESIGN_DOCS}), the developers guide, the coding standards, and AGENTS.md. Cite the exact sections/ADRs each work item implements.`,
     '- Signpost, per work item, the documentation to read and the skills to load (router skills, hypothesis/crosshair/mutmut for verification, etc.).',
     '- Specify the tests (unit, behavioural, property, snapshot, e2e) each work item must add or update, per the AGENTS.md testing rules.',
@@ -1277,6 +1287,38 @@ function implementPrompt(task, worktree, plan, opts = {}) {
     '',
     `${DRY_RUN ? 'DRY RUN: do not run this step — it is skipped by the orchestrator.' : ''}`,
     `When all work items are done, ensure the project commit gates (${COMMIT_GATE_TEXT}) are green at HEAD. Return the completion counts, commit subjects, whether gates are green, the number of coderabbit runs, and any open issues.`,
+  ].join('\n')
+}
+
+// One builder turn, one work item. The host owns the loop: it picks the
+// first unticked Progress item from the committed plan, dispatches this
+// prompt, and verifies committed progress before dispatching the next.
+function implementWorkItemPrompt(task, worktree, plan, item, opts = {}) {
+  return [
+    preamble(worktree),
+    `TASK: Implement EXACTLY ONE work item of roadmap task ${task.id} ("${task.title}") from the approved ExecPlan at ${plan.execplanPath}.`,
+    '',
+    'THE WORK ITEM (the first unticked entry in the plan\'s ## Progress checklist):',
+    `  ${item.text}`,
+    '',
+    'Read the ExecPlan first: it carries the design citations, signposted docs and skills, and the tests this work item must add. Implement THIS work item completely (code + tests + docs per the plan) and NOTHING ELSE — do not start later work items and do not refactor beyond this item; the next builder turn continues from the committed state you leave.',
+    ...(opts.noProgressNote ? ['', `PREVIOUS TURN DEFECT: ${opts.noProgressNote}`] : []),
+    '',
+    SPARK_DELEGATION_GUIDANCE,
+    '',
+    SCRUTINEER_DELEGATION_GUIDANCE,
+    '',
+    'Then, in this exact order:',
+    `  1. DETERMINISTIC GATE: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT}, plus any further gate targets AGENTS.md names; \`make markdownlint\` and \`make nixie\` for any markdown you touched). Fix failures yourself and re-run until green. ${COMMIT_GATE_GUIDANCE}`,
+    CODERABBIT_HOST_REVIEW
+      ? `  2. ${CODERABBIT_REVIEW_GUIDANCE}`
+      : `  2. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to confirm the gates are still green. ${CODERABBIT_REVIEW_GUIDANCE}`,
+    '  3. Update the ExecPlan IN PLACE: tick this work item in ## Progress and record findings, decisions, and deviations. If this was the first work item, also set the header Status to `IN PROGRESS`; if it was the LAST unticked item, set Status to `COMPLETE` together with the Outcomes & Retrospective update.',
+    '  4. Commit the work item and the ExecPlan update together as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).',
+    '',
+    'EXECPLAN DURABILITY CONTRACT: never return with the worktree dirty or the Progress tick uncommitted — the host verifies both after every turn and bounces the defect back to you.',
+    '',
+    'Return using the IMPL schema: ok=true only when this work item is complete, every gate is green at HEAD, and the tick is committed. Set workItemsCompleted/workItemsTotal to the plan\'s ticked/total counts after your commit.',
   ].join('\n')
 }
 
@@ -1817,23 +1859,28 @@ function parseExecplanState(text) {
   }
   let ticked = 0
   let unticked = 0
+  const items = []
   const progressSection = source.split(/^##\s+/m).find((section) => /^progress\b/i.test(section)) || ''
   for (const line of progressSection.split(/\r?\n/)) {
-    if (/^\s*-\s+\[[xX]\]/.test(line)) ticked += 1
-    else if (/^\s*-\s+\[ \]/.test(line)) unticked += 1
+    const match = line.match(/^\s*-\s+\[([ xX])\]\s*(.*)$/)
+    if (!match) continue
+    const isTicked = match[1] !== ' '
+    if (isTicked) ticked += 1
+    else unticked += 1
+    items.push({ text: match[2].trim(), ticked: isTicked })
   }
-  return { status, ticked, unticked }
+  return { status, ticked, unticked, items }
 }
 
 async function readExecplanState(candidate) {
-  if (!candidate?.execplanPath) return { status: 'missing', ticked: 0, unticked: 0 }
+  if (!candidate?.execplanPath) return { status: 'missing', ticked: 0, unticked: 0, items: [] }
   const path = process.getBuiltinModule('node:path')
   try {
     const text = await readFileText(path.join(candidate.worktreePath, candidate.execplanPath))
     return parseExecplanState(text)
   } catch (error) {
     if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
-      return { status: 'missing', ticked: 0, unticked: 0 }
+      return { status: 'missing', ticked: 0, unticked: 0, items: [] }
     }
     // A plan that cannot be read is NOT a missing plan: dispatching to the
     // planning stage on an I/O or permission fault could overwrite durable
@@ -1842,6 +1889,7 @@ async function readExecplanState(candidate) {
       status: 'unreadable',
       ticked: 0,
       unticked: 0,
+      items: [],
       error: `${candidate.execplanPath}: ${(error && error.message) || String(error)}`,
     }
   }
@@ -2518,10 +2566,106 @@ async function runPlanDesignLoop(task, worktree, opts = {}) {
   }
 }
 
+// The host-driven build loop: one builder turn per unticked Progress item in
+// the committed ExecPlan, with committed progress verified after every turn.
+// The checklist — not the agent's say-so — decides when the build is done.
+// Returns null when the plan has no checklist (caller falls back to the
+// single-turn build), { fail } on failure, or { impl } with an aggregate
+// implementation report on success.
+async function runWorkItemBuildLoop(task, worktree, plan, opts = {}) {
+  const tag = task.id
+  const extra = opts.extra || {}
+  const fail = (detail, openIssues = []) => ({ fail: { id: tag, status: 'failed', stage: 'implement', detail, openIssues, worktree, proposals: [], ...extra } })
+  const contained = execplanRelPath(worktree, plan.execplanPath)
+  if (!contained.ok) return fail(contained.detail)
+  const planRef = { worktreePath: worktree, execplanPath: contained.relPath }
+  const initial = await readExecplanState(planRef)
+  if (initial.status === 'unreadable') return fail(`could not read the committed ExecPlan: ${initial.error}`)
+  if (initial.status === 'missing') return fail(`the ExecPlan disappeared before the build: ${contained.relPath}`)
+  if (!(initial.items || []).length) return null
+  const commits = []
+  const openIssues = []
+  let coderabbitRuns = 0
+  let lastImpl = null
+  let noProgressNote = ''
+  let strikes = 0
+  for (let round = 1; round <= MAX_WORK_ITEM_ROUNDS; round++) {
+    const before = await readExecplanState(planRef)
+    if (before.status === 'unreadable') return fail(`could not read the committed ExecPlan: ${before.error}`, openIssues)
+    const item = (before.items || []).find((entry) => !entry.ticked)
+    if (!item) break
+    const label = `implement:${tag} wi${round}`
+    const impl = await buildLock(() => withInfraRetry(() => agent(implementWorkItemPrompt(task, worktree, plan, item, { ...opts, noProgressNote }), buildAgentOptions({
+      phase: 'Implement',
+      label,
+      schema: IMPL_SCHEMA,
+    })), label))
+    lastImpl = impl
+    const authDetail = implementationAuthFailureDetail(impl)
+    if (authDetail) {
+      return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
+    }
+    if (!impl || !impl.ok || !impl.gatesGreen) {
+      return fail(impl?.summary || `work item did not reach a green state: ${item.text}`, impl?.openIssues || [])
+    }
+    if (Array.isArray(impl.commits)) commits.push(...impl.commits)
+    openIssues.push(...(impl.openIssues || []))
+    coderabbitRuns += Number(impl.coderabbitRuns) || 0
+    // Host-verified durability per turn: a dirty worktree or an uncommitted
+    // tick would silently stall the loop, so both are checked here.
+    const committed = await verifyWorktreeCommitted(worktree)
+    if (!committed.ok) {
+      return fail(`work item returned ok but left uncommitted state in the worktree (${committed.detail}); every work item must be committed before returning`, openIssues)
+    }
+    const after = await readExecplanState(planRef)
+    if (after.status === 'unreadable') return fail(`could not re-read the committed ExecPlan: ${after.error}`, openIssues)
+    if (after.unticked >= before.unticked) {
+      strikes += 1
+      noProgressNote = `your previous turn returned ok but the committed ExecPlan still shows ${after.unticked} unticked Progress item(s) (it had ${before.unticked} before the turn); tick the work item you completed in ## Progress and commit the plan update together with the work`
+      log(`[task ${tag}] work-item round ${round}: no committed Progress movement (strike ${strikes} of 2)`)
+      if (strikes >= 2) {
+        return fail(`the work-item build made no committed ExecPlan progress in two consecutive turns; ${after.unticked} Progress item(s) remain unticked`, openIssues)
+      }
+    } else {
+      strikes = 0
+      noProgressNote = ''
+      log(`[task ${tag}] work-item round ${round}: ${after.ticked}/${after.ticked + after.unticked} Progress item(s) committed`)
+    }
+  }
+  const final = await readExecplanState(planRef)
+  const remaining = (final.items || []).filter((entry) => !entry.ticked)
+  if (remaining.length) {
+    return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0].text}`, openIssues)
+  }
+  return {
+    impl: {
+      ok: true,
+      gatesGreen: true,
+      execplanPath: contained.relPath,
+      workItemsCompleted: final.ticked,
+      workItemsTotal: final.ticked + final.unticked,
+      commits: commits.slice(0, 50),
+      coderabbitRuns,
+      openIssues: [...new Set(openIssues)].slice(0, 20),
+      summary: lastImpl?.summary || 'work-item build completed from the committed ExecPlan checklist',
+    },
+  }
+}
+
 async function runImplementationStage(task, worktree, plan, opts = {}) {
   const tag = task.id
   const extra = opts.extra || {}
   phase('Implement')
+  if (PER_WORK_ITEM_BUILD) {
+    const itemised = await runWorkItemBuildLoop(task, worktree, plan, opts)
+    // null means the plan carries no Progress checklist: fall back to the
+    // single-turn whole-task build below.
+    if (itemised) {
+      if (itemised.fail) return itemised
+      return finishImplementationStage(task, worktree, plan, itemised.impl, extra)
+    }
+    log(`[task ${tag}] the committed ExecPlan has no Progress checklist; falling back to the single-turn build`)
+  }
   const impl = await buildLock(() => withInfraRetry(() => agent(implementPrompt(task, worktree, plan, opts), buildAgentOptions({
     phase: 'Implement',
     label: `implement:${tag}`,
@@ -2545,6 +2689,13 @@ async function runImplementationStage(task, worktree, plan, opts = {}) {
       },
     }
   }
+  return finishImplementationStage(task, worktree, plan, impl, extra)
+}
+
+// Shared tail of the implementation stage: the committed-worktree durability
+// gate and the plan-status advisory, identical for both build modes.
+async function finishImplementationStage(task, worktree, plan, impl, extra) {
+  const tag = task.id
   // Host-verified durability gate: ok=true with a dirty worktree is a
   // contract violation — uncommitted work is unreviewable and would be lost
   // at the squash merge, so fail fast with the exact paths.
@@ -3477,6 +3628,10 @@ return {
     ...hostGateMetrics,
   },
   stageAttempts: STAGE_ATTEMPTS,
+  // Host-driven build loop configuration: one builder turn per unticked
+  // ExecPlan Progress item when enabled, with committed progress verified
+  // after every turn.
+  workItemBuild: { enabled: PER_WORK_ITEM_BUILD, maxRounds: MAX_WORK_ITEM_ROUNDS },
   // Bounded-cardinality fault metrics (fixed keys): stage retries spent on
   // infrastructure faults plus terminal fault counts per class, so operators
   // can read retry pressure straight from the result instead of the logs.

@@ -72,11 +72,12 @@ return {
 `,
   )
   return factory(
-    // Host review and host gates default OFF here: several tests drive the
-    // review and integration pipeline against fixture repos, and the host
-    // review would exec the REAL coderabbit CLI on PATH (burning review
-    // quota) while host gates would run `make all` in Makefile-less fixtures.
-    { coderabbitHostReview: false, hostCommitGates: false, ...args },
+    // Host review, host gates, and the per-work-item build loop default OFF
+    // here: several tests drive the pipeline against fixture repos, where
+    // the host review would exec the REAL coderabbit CLI on PATH (burning
+    // review quota), host gates would run `make all` in Makefile-less
+    // fixtures, and the build loop expects agents to tick Progress items.
+    { coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...args },
     () => {},
     () => {},
     agentImpl,
@@ -929,6 +930,13 @@ test('the ExecPlan parser reads the status vocabulary the prompts require', asyn
   )
   assert.equal(withProgress.ticked, 1)
   assert.equal(withProgress.unticked, 2)
+  // The work-item build loop dispatches from this list, in order.
+  assert.deepEqual(withProgress.items, [
+    { text: '(2026-07-01) Done step.', ticked: true },
+    { text: 'Remaining step.', ticked: false },
+    { text: 'Another remaining step.', ticked: false },
+  ])
+  assert.deepEqual(surface.parseExecplanState('Status: DRAFT\n\nno progress section').items, [])
 })
 
 test('the continue-mode decision table dispatches on the committed ExecPlan Status', async () => {
@@ -1401,6 +1409,97 @@ test('a red host gate drives a fix round before any reviewer agent spends tokens
   assert.ok(!labels.slice(0, 1).some((label) => label.startsWith('code-review:')), 'no reviewer tokens spent on a red branch')
   assert.match(fixPrompts[0], /HOST GATES RED/, 'the fix agent sees the host verdict')
   assert.match(fixPrompts[0], /test_parser_range FAILED/, 'the fix agent sees the gate output tail')
+})
+
+// Tick the first unticked Progress item of the fixture plan and commit it,
+// as a compliant per-work-item builder would.
+function tickFirstProgressItem(worktree) {
+  const planPath = path.join(worktree, PARSER_PLAN)
+  const text = readFileSync(planPath, 'utf8')
+  writeFileSync(planPath, text.replace('- [ ] ', '- [x] '))
+  git(worktree, 'add', PARSER_PLAN)
+  git(worktree, 'commit', '-m', 'Complete a work item')
+}
+
+test('the work-item build loop dispatches one builder turn per unticked item', async () => {
+  const repo = makeRecoveryRepo({
+    parserExecplanStatus: 'APPROVED',
+    parserExecplanProgress: ['- [ ] WI-1: Add the parser state machine.', '- [ ] WI-2: Add the behavioural tests.'],
+  })
+  const worktree = repo.parserWorktree
+
+  const labels = []
+  const prompts = []
+  const agentImpl = async (prompt, opts = {}) => {
+    labels.push(opts.label || '')
+    prompts.push(prompt)
+    if (!opts.label?.startsWith('implement:')) throw new Error(`unexpected label: ${opts.label}`)
+    tickFirstProgressItem(worktree)
+    return { ok: true, gatesGreen: true, execplanPath: PARSER_PLAN, workItemsCompleted: 1, workItemsTotal: 2, commits: [`Complete ${opts.label}`], coderabbitRuns: 0, openIssues: [], summary: 'work item done' }
+  }
+  const surface = await loadRecoverySurface({ perWorkItemBuild: true }, agentImpl)
+
+  const outcome = await surface.runImplementationStage({ id: '1.2.3', title: 'Parser' }, worktree, { execplanPath: PARSER_PLAN })
+
+  assert.ok(outcome.impl, JSON.stringify(outcome.fail || {}))
+  assert.deepEqual(labels, ['implement:1.2.3 wi1', 'implement:1.2.3 wi2'])
+  assert.match(prompts[0], /EXACTLY ONE work item/)
+  assert.match(prompts[0], /WI-1: Add the parser state machine\./)
+  assert.match(prompts[1], /WI-2: Add the behavioural tests\./)
+  assert.equal(outcome.impl.workItemsCompleted, 2)
+  assert.equal(outcome.impl.workItemsTotal, 2)
+  assert.deepEqual(outcome.impl.commits, ['Complete implement:1.2.3 wi1', 'Complete implement:1.2.3 wi2'])
+})
+
+test('a builder that never commits a tick is bounced once, then failed', async () => {
+  const repo = makeRecoveryRepo({
+    parserExecplanStatus: 'APPROVED',
+    parserExecplanProgress: ['- [ ] WI-1: Add the parser state machine.'],
+  })
+  const worktree = repo.parserWorktree
+
+  const prompts = []
+  const agentImpl = async (prompt, opts = {}) => {
+    prompts.push(prompt)
+    if (!opts.label?.startsWith('implement:')) throw new Error(`unexpected label: ${opts.label}`)
+    // Claims success but commits nothing: the committed plan cannot move.
+    return { ok: true, gatesGreen: true, execplanPath: PARSER_PLAN, summary: 'claims done' }
+  }
+  const surface = await loadRecoverySurface({ perWorkItemBuild: true }, agentImpl)
+
+  const outcome = await surface.runImplementationStage({ id: '1.2.3', title: 'Parser' }, worktree, { execplanPath: PARSER_PLAN })
+
+  assert.ok(outcome.fail, 'two no-progress turns must fail the stage')
+  assert.equal(outcome.fail.stage, 'implement')
+  assert.match(outcome.fail.detail, /no committed ExecPlan progress in two consecutive turns/)
+  assert.equal(prompts.length, 2)
+  assert.doesNotMatch(prompts[0], /PREVIOUS TURN DEFECT/)
+  assert.match(prompts[1], /PREVIOUS TURN DEFECT/, 'the bounce reaches the second turn as evidence')
+  assert.match(prompts[1], /tick the work item you completed/)
+})
+
+test('a plan without a Progress checklist falls back to the single-turn build', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'APPROVED' })
+  const worktree = repo.parserWorktree
+
+  const labels = []
+  const agentImpl = async (prompt, opts = {}) => {
+    labels.push(opts.label || '')
+    return { ok: true, gatesGreen: true, execplanPath: PARSER_PLAN, workItemsCompleted: 1, workItemsTotal: 1, summary: 'done in one turn' }
+  }
+  const surface = await loadRecoverySurface({ perWorkItemBuild: true }, agentImpl)
+
+  const outcome = await surface.runImplementationStage({ id: '1.2.3', title: 'Parser' }, worktree, { execplanPath: PARSER_PLAN })
+
+  assert.ok(outcome.impl, JSON.stringify(outcome.fail || {}))
+  assert.deepEqual(labels, ['implement:1.2.3'], 'no wi-suffixed turns without a checklist')
+})
+
+test('the planner prompt pins the WI checklist convention the loop dispatches from', async () => {
+  const surface = await loadRecoverySurface({})
+  const prompt = surface.planPrompt({ id: '1.2.3', title: 'Parser' }, '/tmp/wt', null, 1)
+  assert.match(prompt, /- \[ \] WI-<n>: <imperative title>/)
+  assert.match(prompt, /dispatch the build one work item at a time/)
 })
 
 test('a green implementation that leaves uncommitted state fails the durability gate', async () => {

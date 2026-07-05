@@ -163,11 +163,12 @@ try {
     pipeline,
     (title) => phases.push(title),
     () => {},
-    // Host review and host gates default OFF in simulations: they would
-    // invoke the REAL coderabbit CLI (burning review quota) and run real
-    // gate commands like `make all` in fixture repos. A scenario that wants
-    // them must opt in and provide safe fakes (pathPrefix / commitGates).
-    { coderabbitHostReview: false, hostCommitGates: false, ...(scenario.args || {}) },
+    // Host review, host gates, and the per-work-item build loop default OFF
+    // in simulations: they would invoke the REAL coderabbit CLI (burning
+    // review quota), run real gate commands like `make all` in fixture
+    // repos, and expect scripted implement agents to tick Progress items. A
+    // scenario that wants them must opt in and provide safe fakes.
+    { coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...(scenario.args || {}) },
     { total: null, spent: () => 0, remaining: () => Infinity },
     async () => {
       throw new Error('nested workflow not scripted')

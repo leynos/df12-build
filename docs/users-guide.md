@@ -357,6 +357,13 @@ Common arguments:
   schema-retry exhaustion). Defaults to `2`. Product failures are never
   retried, and integration is never retried because its push to
   `origin/<base>` is not idempotent.
+- `perWorkItemBuild`: when `true` (the default), the workflow host reads the
+  approved ExecPlan's `## Progress` checklist and dispatches one builder turn
+  per unticked work item, verifying committed progress after every turn.
+  Plans without a Progress checklist fall back to the single-turn build
+  automatically; set `false` to force the single-turn build for every task.
+- `maxWorkItemRounds`: builder turns per task before the work-item loop fails
+  closed. Defaults to `16`.
 - `coderabbitHostReview`: when `true` (the default), the workflow host runs
   `coderabbit review --agent` against each task's committed work instead of
   asking agents to babysit CodeRabbit. Rate-limit backoff is absorbed as host
@@ -468,6 +475,31 @@ The run result's `coderabbit` object reports the effective configuration and
 bounded counters (reviews run, findings by severity, rate-limited runs,
 deferred reviews). When `coderabbitFindingsFile` is set, every finding is
 also appended as JSONL for cross-run linter tuning.
+
+## Per-work-item builds
+
+By default the build is host-driven, one work item at a time. The planner
+records the plan's work items as `- [ ] WI-<n>: <imperative title>` checklist
+lines in the ExecPlan's `## Progress` section, and after design approval the
+host loops: read the committed checklist, dispatch a builder turn scoped to
+exactly the first unticked item, then verify that the turn left the worktree
+fully committed and moved the committed checklist forward. A turn that
+returns `ok` without committing a tick is bounced once with the defect named
+in the next prompt; two consecutive no-progress turns fail the task. The
+loop is bounded by `maxWorkItemRounds`, and the committed checklist — not the
+agent's say-so — decides when the build is done.
+
+Small turns change the failure economics: each builder turn does one work
+item's worth of code, tests, docs, gates, and one atomic commit, so the ODW
+build adapter can sit on a tight timeout (roughly 3600 seconds) and a hung
+stream costs at most one work item plus a warm `stageAttempts` retry from
+the committed ExecPlan — not a whole task. Legacy plans whose Progress
+section is prose ticks rather than work items still work: the loop
+dispatches "the first unticked item" by its text, and a plan with no
+checklist at all falls back to the single-turn build.
+
+The run result's `workItemBuild` object reports the effective configuration.
+Work-item turns appear in the events as `implement:<id> wi<n>` labels.
 
 ## Host-run commit gates
 
