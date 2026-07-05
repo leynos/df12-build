@@ -57,7 +57,9 @@ export interface HostReviewConfig {
 
 // The CLI's --agent mode emits NDJSON events on stdout and exits 0 even on
 // fatal errors, so classification parses events, never exit codes. Wire
-// contract pinned against coderabbit CLI internals:
+// contract pinned against coderabbit CLI internals; captured live sessions
+// documenting every observed event shape live in
+// docs/coderabbit-wire-contract.md. Summary:
 //   {"type":"review_context"|"status"|"heartbeat"} — progress events
 //   {"type":"finding", severity: critical|major|minor|trivial|info,
 //    fileName, comment?, suggestions?, codegenInstructions?}

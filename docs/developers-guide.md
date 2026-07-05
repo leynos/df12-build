@@ -151,7 +151,9 @@ Host-run CodeRabbit review (`coderabbitHostReview`, default on) moves the
 CLI invocation from agent prompts to the control loop: `coderabbit review
 --agent --type committed` runs per dual-review round and per addendum, its
 NDJSON events are parsed host-side (the CLI exits 0 even on fatal errors, so
-classification must read events, never exit codes), `critical`/`major`
+classification must read events, never exit codes — see
+`docs/coderabbit-wire-contract.md` for captured live sessions documenting
+every observed event shape), `critical`/`major`
 findings join the fix-round blocking items, and rate-limit backoff sleeps in
 host wall-clock with deterministic jitter (`Math.random()`, `Date.now()`, and
 arg-less `new Date()` are banned by ODW's `scanDualCompat` for Claude Code
