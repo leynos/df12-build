@@ -535,14 +535,17 @@ test('a red host gate stops the sequence and carries the log evidence', async ()
 
 test('a hung host gate is killed at the configured timeout', async () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'df12-host-gates-hang-'))
+  // 3 seconds leaves generous head-room for child start-up and scheduler
+  // jitter on a loaded CI runner; the child loops forever, so the kill (not
+  // its exact timing) is what the test verifies.
   const surface = await loadAssessmentSurface({
     commitGates: [`${process.execPath} -e "setInterval(() => {}, 50)"`],
-    commitGateTimeoutSeconds: 1,
+    commitGateTimeoutSeconds: 3,
   })
-  assert.equal(surface.COMMIT_GATE_TIMEOUT_SECONDS, 1)
+  assert.equal(surface.COMMIT_GATE_TIMEOUT_SECONDS, 3)
   const hung = await surface.runHostCommitGates(dir, '1.2.3', 'r1')
   assert.equal(hung.green, false)
-  assert.match(hung.detail, /killed after the 1s gate timeout/)
+  assert.match(hung.detail, /killed after the 3s gate timeout/)
 })
 
 test('gate guidance warns about host verification only when it is enabled', async () => {
