@@ -45,6 +45,14 @@ import { makeConfig } from './config.ts'
 import { makePrompts } from './prompts.ts'
 import { makeWritePreflight } from './write-preflight.ts'
 import {
+  addendumImplementationNeedsManualMerge,
+  hasOnlyDeferredReviewIssues,
+  implementationAuthFailureDetail,
+  isDeferredReviewIssue,
+  makeAssessment,
+} from './assessment.ts'
+import { TRIAGE_SCHEMA, makeRemediation, stepOf } from './remediation.ts'
+import {
   commitExecplanApproval,
   commitExecplanDraft,
   execplanRelPath,
@@ -155,6 +163,27 @@ const {
 const { runTaskAgentWritePreflight, ensureTaskAgentWriteAccess } = makeWritePreflight({
   enabled: WORKTREE_WRITE_PREFLIGHT,
   targets: writeProbeTargets,
+})
+
+// ADR 002 assessment and remediation triage with the run wiring bound once
+// (see assessment.ts and remediation.ts).
+const {
+  assessmentPrompt,
+  recoveryAssessmentPrompt,
+  assessRecoveryCandidate,
+  shouldAssessFailure,
+  attachAssessment,
+} = makeAssessment({
+  preamble,
+  assessPartialBranches: ASSESS_PARTIAL_BRANCHES,
+  assessmentAgentOptions,
+  withInfraRetry,
+})
+const { triagePrompt, runTriage } = makeRemediation({
+  preamble,
+  base: BASE,
+  roadmap: ROADMAP,
+  triageAgentOptions,
 })
 
 // ---------------------------------------------------------------------------
@@ -284,170 +313,6 @@ async function readRoadmapForSelection(root = process.cwd()) {
       error?.stdout ? `stdout: ${error.stdout.trim()}` : '',
     ].filter(Boolean).join('; ')
     throw new Error(`Failed to read canonical roadmap ref ${canonicalRef}: ${details}`)
-  }
-}
-
-function isDeferredReviewIssue(issue) {
-  const text = String(issue || '').toLowerCase()
-  const deferredReviewMarkers = [
-    'rate limit',
-    'rate_limit',
-    'rate-limit',
-    'ratelimit',
-    '429',
-    'retry after',
-    'waittime',
-    'wait time',
-    'deferred review',
-    'deferred coderabbit review',
-    'coderabbit review deferred',
-    'unavailable',
-  ]
-  return text.includes('coderabbit') && deferredReviewMarkers.some((marker) => text.includes(marker))
-}
-
-function hasOnlyDeferredReviewIssues(openIssues) {
-  const issues = openIssues || []
-  return issues.length > 0 && issues.every(isDeferredReviewIssue)
-}
-
-function implementationAuthFailureDetail(impl) {
-  const detail = [impl?.summary, ...(impl?.openIssues || [])].filter(Boolean).join('\n')
-  return authFailureDetail(detail)
-}
-
-// A complete, gate-green addendum whose builder did not set ok=true is an
-// operator handoff, not an assessment case. Open issues are tolerated only
-// when every one is a deferred/recoverable review fault (e.g. a CodeRabbit
-// 429): that exact missing evidence is bounded and mechanical — retry the
-// review, verify, integrate — so spending an unbounded judgement agent on it
-// burns tokens without adding operator information (issue #27).
-function addendumImplementationNeedsManualMerge(impl) {
-  if (!impl || impl.ok || !impl.gatesGreen) return false
-  const openIssues = impl.openIssues || []
-  if (openIssues.length > 0 && !hasOnlyDeferredReviewIssues(openIssues)) return false
-  const completed = Number(impl.workItemsCompleted)
-  const total = Number(impl.workItemsTotal)
-  return Number.isFinite(completed) && Number.isFinite(total) && total > 0 && completed >= total
-}
-
-// Shared ADR 002 assessment prompt body — the classification contract is ONE
-// contract: in-run failure assessment and fresh-run recovery assessment feed
-// the same schema, enum, and evidence expectations. Only the task header and
-// the context block differ between the two entry points.
-function assessmentPromptLines(taskHeader, worktreePath, evidence, contextTitle, contextValue) {
-  return [
-    preamble(worktreePath),
-    taskHeader,
-    '',
-    'This is a READ-ONLY recovery assessment. Do not edit files, commit, stash, merge, cherry-pick, push, delete worktrees, mark roadmap checkboxes, or run any command that mutates repository state. Do not resume or rely on the failed agent transcript. Inspect only durable state that exists on disk or in Git.',
-    '',
-    'Use ADR 002 (`docs/adr-002-assess-partial-task-branches.md`) as the classification contract. Return exactly one classification:',
-    '- `adopt-complete`: the branch satisfies the roadmap task success criterion, has an up-to-date ExecPlan, required gates are green, and can proceed through the ordinary review and integration path.',
-    '- `adopt-partial`: the branch contains a coherent useful slice, but the roadmap task must remain unchecked and the work should be preserved only through Git state.',
-    '- `continue-manual`: the branch is promising, but scope, roadmap state, validation, or review evidence needs operator judgement before any merge.',
-    '- `discard`: the branch is stale, unsafe, incoherent, unrelated, or too incomplete to keep.',
-    '',
-    'Assess evidence first:',
-    '- branch name, worktree path, base commit, and current commit;',
-    '- dirty-state summary;',
-    '- changed files and whether they are scoped to the task;',
-    '- ExecPlan status, progress notes, decision log, and retrospective state;',
-    '- roadmap checkbox state for the task;',
-    '- available validation evidence;',
-    '- missing validation or review evidence;',
-    '- safety risks and recommended operator next actions.',
-    '',
-    'Evidence freshness rules:',
-    '- Judge the branch at the CURRENT commit recorded in the host-collected evidence below. ExecPlan prose, earlier assessments, and logs that predate later commits are historical context, not the current validation state.',
-    '- When the failure context includes `reviewRounds`, those review verdicts and structured fix-round reports were produced by this workflow AFTER any earlier snapshot: treat the latest fix round\'s gate and CodeRabbit report, together with the host-collected git evidence, as the branch\'s current validation state. Do not list evidence as missing when the latest fix round reports the named gates green at the current tip — cite that report instead.',
-    '- Gate logs under /tmp are not durable; their absence is not, by itself, missing evidence when a structured fix-round or implementation report records the gates that ran and their outcomes.',
-    '',
-    'Host-collected git evidence:',
-    '```json',
-    JSON.stringify(evidence, null, 2),
-    '```',
-    '',
-    contextTitle,
-    '```json',
-    JSON.stringify(contextValue, null, 2),
-    '```',
-    '',
-    'Return only the schema-bound assessment object. Free-text recommendations do not drive integration; make the enum classification and evidence fields precise.',
-  ].join('\n')
-}
-
-function assessmentPrompt(task, wt, result, evidence) {
-  return assessmentPromptLines(
-    `TASK: Assess the surviving task branch for roadmap task ${task.id} ("${task.title}") after a workflow failure.`,
-    wt.worktreePath,
-    evidence,
-    'Original workflow failure result:',
-    result,
-  )
-}
-
-function recoveryAssessmentPrompt(task, candidate, evidence) {
-  return assessmentPromptLines(
-    `TASK: Assess the surviving task branch for roadmap task ${task.id} ("${task.title}") discovered during fresh-run recovery.`,
-    candidate.worktreePath,
-    evidence,
-    "Recovery discovery context (fresh launch; the failed run's transcript and result are unavailable by design):",
-    candidate,
-  )
-}
-
-// Route a discovered candidate through the SAME ADR 002 assessment contract as
-// in-run failures: same evidence collector, same schema, same adapter routing.
-async function assessRecoveryCandidate(candidate) {
-  const task = { id: candidate.taskId, title: candidate.taskTitle }
-  const wt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit }
-  const evidence = await collectAssessmentEvidence(task, wt)
-  try {
-    const label = `recover-assess:${candidate.taskId}${candidate.isAddendum ? '-addendum' : ''}`
-    const assessment = await withInfraRetry(() => agent(recoveryAssessmentPrompt(task, candidate, evidence), assessmentAgentOptions({
-      phase: 'Recovery',
-      label,
-      schema: ASSESSMENT_SCHEMA,
-    })), label)
-    if (!assessment) {
-      return { evidence, assessment: null, assessmentError: 'assessment agent returned no structured output' }
-    }
-    return { evidence, assessment: { ...assessment, hostEvidence: evidence }, assessmentError: '' }
-  } catch (error) {
-    return { evidence, assessment: null, assessmentError: (error && error.message) || String(error) }
-  }
-}
-
-function shouldAssessFailure(result, wt) {
-  if (!ASSESS_PARTIAL_BRANCHES) return false
-  if (!wt?.branch || !wt?.worktreePath) return false
-  if (!result || !['failed', 'halted'].includes(result.status)) return false
-  if (result.stage === 'worktree' || result.stage === 'worktree-write' || result.stage === 'auth' || result.stage === 'provider' || result.stage === 'infrastructure' || result.status === 'fatal-auth' || result.status === 'provider-fault' || result.status === 'infra-fault') return false
-  const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
-  return !authFailureDetail(detail) && !providerFailureDetail(detail) && !infrastructureFailureDetail(detail)
-}
-
-async function attachAssessment(task, wt, result) {
-  if (!shouldAssessFailure(result, wt)) return result
-  phase('Assess')
-  const evidence = await collectAssessmentEvidence(task, wt)
-  try {
-    const assessment = await withInfraRetry(() => agent(assessmentPrompt(task, wt, result, evidence), assessmentAgentOptions({
-      phase: 'Assess',
-      label: `assess:${task.id}`,
-      schema: ASSESSMENT_SCHEMA,
-    })), `assess:${task.id}`)
-    if (!assessment) {
-      return { ...result, assessmentError: 'assessment agent returned no structured output', assessmentEvidence: evidence }
-    }
-    return { ...result, assessment: { ...assessment, hostEvidence: evidence } }
-  } catch (error) {
-    return {
-      ...result,
-      assessmentError: (error && error.message) || String(error),
-      assessmentEvidence: evidence,
-    }
   }
 }
 
@@ -1183,86 +1048,6 @@ async function runAudit(task) {
   phase('Audit')
   const audit = await agent(auditPrompt(task, null), reviewAgentOptions({ phase: 'Audit', label: `audit:after-${task.id}`, schema: AUDIT_SCHEMA }))
   return audit
-}
-
-// ---------------------------------------------------------------------------
-// Remediation triage — when a step quiesces (no task from it still building),
-// GIST-triage the review/audit proposals it accrued into three lanes instead of
-// dumping them as full tasks into the current step:
-//   • addendum  -> small fix folded onto a completed task's execplan + a nested
-//                  [ ] sub-task (consumed by the lightweight addendum lane);
-//   • step-task -> substantial work that serves THIS step's hypothesis;
-//   • reroute   -> substantial work filed under the step/phase whose hypothesis
-//                  it actually serves (a new step is created when none fits).
-// Routing by hypothesis keeps a step carrying only debt that advances it, and
-// the cheap addendum lane (no audit) is what stops the amplification spiral.
-// ---------------------------------------------------------------------------
-const TRIAGE_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    ok: { type: 'boolean' },
-    decisions: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          proposal: { type: 'string', description: 'short title of the proposal triaged' },
-          lane: { type: 'string', enum: ['addendum', 'step-task', 'reroute', 'editorial', 'dropped'] },
-          newId: { type: 'string', description: 'roadmap id created — a sub-task id like "1.2.8.5" for addendum, a task id for step-task/reroute, empty if dropped' },
-          target: { type: 'string', description: 'addendum: parent task id + execplan folded onto; step-task/reroute: the step filed under; dropped: why' },
-          reason: { type: 'string', description: 'GIST rationale — which step hypothesis it serves, or why it does not serve the settling step' },
-        },
-        required: ['proposal', 'lane', 'reason'],
-      },
-    },
-    newSteps: { type: 'array', items: { type: 'string' }, description: 'any new step headings created to home reroutes, e.g. "7.4 Harden …"' },
-    pushed: { type: 'boolean' },
-    commitSha: { type: 'string' },
-    summary: { type: 'string' },
-  },
-  required: ['ok', 'decisions', 'summary'],
-}
-
-const stepOf = (id) => String(id).split('.').slice(0, 2).join('.')
-
-function triagePrompt(stepPrefix, proposals) {
-  return [
-    preamble(null),
-    `TASK: GIST-triage the remediation proposals accrued during step ${stepPrefix} (now settled) and file each onto the correct roadmap lane. They came from the reviews and audits of step ${stepPrefix}'s tasks. RECORD them correctly; do NOT implement them.`,
-    '',
-    `Create a fresh git-donkey worktree off origin/${BASE} (no edits in the root worktree); do all work there. Read ${ROADMAP} in full first. It is a GIST roadmap: each PHASE states an "Idea:", each STEP states a hypothesis it confirms or falsifies ("This step answers whether…"), and each TASK has Success criteria. Route by hypothesis. Re-read step ${stepPrefix}'s hypothesis specifically.`,
-    '',
-    'For EACH proposal below: first DE-DUPLICATE (merge near-identical items; DROP any already covered by an existing task or sub-task), then choose exactly ONE lane:',
-    '',
-    '  • ADDENDUM — a small, surgical correction to a SPECIFIC already-completed task (a doc fix, a localised bugfix, a small test/fixture refactor; about one focused commit, no design needed). File it as BOTH (a) a new item under a "## Addenda" section of that task\'s execplan in docs/execplans/ (create the section if absent), and (b) a nested unchecked sub-task on the roadmap directly under that [x] parent, numbered `<parent-id>.<next-n>` (e.g. `- [ ] 1.2.8.5.`) with one child bullet `- Addendum (from <source>; <sev>). <one-line scope>. Lightweight addendum pass.` and NO Requires line. The harness runs these as a no-plan, no-review lightweight pass.',
-    '',
-    `  • STEP-TASK — substantial work (warrants its own plan and review) that genuinely advances the settling step's hypothesis (${stepPrefix}). Append a full task in step ${stepPrefix}: \`- [ ] ${stepPrefix}.<next-n>. <title>\` with a description bullet, an appropriate \`- Requires …\` line, and a \`- Success:\` criterion. Use this lane ONLY if you can name the ${stepPrefix} hypothesis it serves.`,
-    '',
-    '  • REROUTE — substantial work that does NOT serve the settling step\'s hypothesis (hardening, cross-cutting quality, or a different concern). File it as a full task under the EXISTING step whose hypothesis it genuinely serves, with a `- Requires …` line so it is sequenced correctly and blocks nothing earlier. If NO existing step fits, CREATE a new step under the most appropriate phase (prefer the hardening or "deferred extensions" phase, typically the last phase): add a `### <phase>.<n>. <title>` heading with a one-paragraph hypothesis ("This step answers whether…") followed by the task(s). Record any new step in newSteps.',
-    '',
-    '  • EDITORIAL — the proposal is a correction to the roadmap text itself (a task description, success criterion, or wording — not code or other docs). APPLY it directly to the roadmap NOW, in this step (you are already editing the roadmap here), and do NOT file it as an addendum or task: the addendum/step-task/reroute lanes run later as sub-agents that are FORBIDDEN to edit the roadmap, so such an item is un-runnable and would halt the loop. Record lane "editorial" and note the corrected wording in reason.',
-    '  • DROPPED — duplicate, already done, or not actionable. Record why in reason.',
-    '',
-    'Rules:',
-    '  - Route by HYPOTHESIS, not by where the proposal was raised. A proposal raised during step ' + stepPrefix + ' that does not advance ' + stepPrefix + "'s hypothesis MUST be rerouted, never parked in " + stepPrefix + '.',
-    '  - Prefer ADDENDUM for anything small and tied to one completed task — it is the cheap lane and skips the full plan/review cycle.',
-    '  - Only append; keep the format and numbering of OTHER tasks intact. en-GB Oxford spelling throughout.',
-    `  - When done, run \`make markdownlint\` and \`make nixie\`; fix any issues. Commit the roadmap and any execplan changes (en-GB imperative subject) and push it straight to the integration branch with \`git push origin HEAD:${BASE}\` (docs-only; re-fetch and rebase on a non-fast-forward reject, then retry). NEVER \`git switch ${BASE}\` or touch the control/root worktree.`,
-    '',
-    'Proposals to triage (JSON — each has title, rationale, optional severity, and a source tag like "audit:1.2.8" or "review:1.3.2"):',
-    '```json',
-    JSON.stringify(proposals, null, 2),
-    '```',
-    '',
-    'Return one decision per proposal (proposal, lane, newId, target, reason), any newSteps created, whether you pushed, the commit sha, and a short summary.',
-  ].join('\n')
-}
-
-async function runTriage(stepPrefix, proposals) {
-  phase('Remediation')
-  return await agent(triagePrompt(stepPrefix, proposals), triageAgentOptions({ phase: 'Remediation', label: `triage:${stepPrefix}`, schema: TRIAGE_SCHEMA }))
 }
 
 // ---------------------------------------------------------------------------

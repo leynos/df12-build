@@ -227,8 +227,20 @@ Planned work:
   the idempotent APPROVED flip (including the append-when-absent path),
   plan-only draft salvage vs foreign-dirty bounce, and the bounded dirty
   sample. Milestone 6's CodeRabbit review returned zero findings first.
-- [ ] Milestone 8: assessment and remediation triage (`assessment.ts`,
-  `remediation.ts`).
+- [x] (2026-07-06 02:05Z) Milestone 8: `assessment.ts` (deferred-review
+  classifiers, `implementationAuthFailureDetail`, the manual-merge
+  handoff guard as direct exports; `makeAssessment({ preamble,
+  assessPartialBranches, assessmentAgentOptions, withInfraRetry })`
+  returning the two ADR 002 prompts, `assessRecoveryCandidate`,
+  `shouldAssessFailure`, and `attachAssessment`) and `remediation.ts`
+  (`TRIAGE_SCHEMA`, `stepOf` direct; `makeRemediation({ preamble, base,
+  roadmap, triageAgentOptions })` returning `triagePrompt`/`runTriage`).
+  Red-then-green suites: classifier tables with negatives, the handoff
+  guard matrix, the assessment gate matrix (excluded stages/statuses and
+  fault-shaped details), attach-with-evidence over a fixture repo
+  (including null-reply and thrown-agent paths), triage lane contract,
+  and the triage agent wiring. Milestone 7's CodeRabbit review returned
+  zero findings first.
 - [ ] Milestone 9: dual review, integration, and the per-task pipeline
   (`integration.ts`, `run-task.ts`).
 - [ ] Milestone 10: convert `main.js` to `main.ts`; retire artefact slicing
