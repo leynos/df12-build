@@ -150,7 +150,17 @@ Planned work:
   and required-exists checks over every schema, enum ↔ ADR 002
   classification, mock-satisfiability of `dirtyState`. Milestone 0's
   CodeRabbit review returned zero findings before this milestone began.
-- [ ] Milestone 2: roadmap parsing and selection (`roadmap.ts`).
+- [x] (2026-07-05 21:05Z) Milestone 2: roadmap parsing and selection peeled
+  to `roadmap.ts` (regexes, `parseRoadmap`, `completedIds`,
+  `selectRoadmapTask`, `roadmapTaskIndex`, `candidateRoadmapComplete` and
+  friends). `taskMatchesOnlyTask`/`selectRoadmapTask` were parameterized
+  on `onlyTask` (single control-loop call site updated to pass
+  `ONLY_TASK`). New red-then-green module suites: an eight-scenario
+  Gherkin feature for selection semantics (earliest-unblocked, Requires
+  gating, step-range expansion, addendum lane, taken exclusion, taskId
+  filter) and fast-check properties (step-range expansion, generated
+  roadmap round-trips, phase-prefix completion, selection invariants).
+  Milestone 1's CodeRabbit review returned zero findings first.
 - [ ] Milestone 3: process and failure-classification helpers
   (`exec.ts`, `faults.ts`).
 - [ ] Milestone 4: git evidence and recovery discovery (`git-evidence.ts`,

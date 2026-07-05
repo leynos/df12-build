@@ -17,13 +17,15 @@ export interface RoadmapTask {
   isAddendumSubtask?: boolean
 }
 
-// A task as selected for the worker pool (normal or addendum lane).
+// A task as selected for the worker pool (normal or addendum lane). For an
+// addendum pass, `subtasks` carries the open sub-task ids, not task records.
 export interface SelectedTask {
   id: string
   title: string
   requires: string[]
+  rationale: string
   isAddendum: boolean
-  subtasks: RoadmapTask[]
+  subtasks: string[]
 }
 
 // A surviving roadmap-* branch reconstructed from durable git state by

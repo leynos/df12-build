@@ -322,6 +322,184 @@ var ASSESSMENT_SCHEMA = {
   ]
 };
 
+// src/workflows/df12-build-odw/roadmap.ts
+var TASK_LINE_RE = /^(\s*)-\s+\[([ xX])\]\s+(\d+(?:\.\d+)+)\.\s*(.*)$/;
+var REQUIRES_LINE_RE = /^\s*-\s+Requires\s+(.+?)\.?\s*$/;
+var STEP_RANGE_RE = /\bsteps?\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)\b/gi;
+var ROADMAP_ID_RE = /\b\d+(?:\.\d+)+\b/g;
+function parentIdOf(id) {
+  const parts = id.split(".");
+  return parts.length > 1 ? parts.slice(0, -1).join(".") : "";
+}
+function isComplete(task) {
+  return task?.checked?.toLowerCase() === "x";
+}
+function extractRoadmapIds(text) {
+  const ids = new Set([...text.matchAll(ROADMAP_ID_RE)].map((match) => match[0]));
+  for (const match of text.matchAll(STEP_RANGE_RE)) {
+    const expanded = expandStepRange(match[1], match[2]);
+    if (expanded.length) {
+      ids.delete(match[1]);
+      ids.delete(match[2]);
+      for (const id of expanded) ids.add(id);
+    }
+  }
+  return [...ids];
+}
+function expandStepRange(start, end) {
+  const startParts = start.split(".").map(Number);
+  const endParts = end.split(".").map(Number);
+  if (startParts.length !== 2 || endParts.length !== 2 || startParts[0] !== endParts[0]) return [];
+  const [phaseId, firstStep] = startParts;
+  const lastStep = endParts[1];
+  if (!Number.isInteger(phaseId) || !Number.isInteger(firstStep) || !Number.isInteger(lastStep) || firstStep > lastStep) return [];
+  return Array.from({ length: lastStep - firstStep + 1 }, (_, index) => `${phaseId}.${firstStep + index}`);
+}
+function parseRoadmap(text) {
+  const tasks = [];
+  const byId = /* @__PURE__ */ new Map();
+  let currentTask = null;
+  for (const [index, line] of text.split(/\r?\n/).entries()) {
+    const taskMatch = line.match(TASK_LINE_RE);
+    if (taskMatch) {
+      const [, indent, checked, id, rawTitle] = taskMatch;
+      const task = {
+        id,
+        checked,
+        title: rawTitle.trim(),
+        requires: [],
+        line: index + 1,
+        indent: indent.length,
+        subtasks: []
+      };
+      const parent = byId.get(parentIdOf(id));
+      if (parent && isComplete(parent) && task.indent > parent.indent) {
+        task.parentId = parent.id;
+        task.isAddendumSubtask = true;
+        parent.subtasks.push(task);
+      } else {
+        tasks.push(task);
+      }
+      byId.set(id, task);
+      currentTask = task;
+      continue;
+    }
+    const requiresMatch = line.match(REQUIRES_LINE_RE);
+    if (requiresMatch && currentTask) {
+      currentTask.requires.push(...extractRoadmapIds(requiresMatch[1]));
+    }
+  }
+  for (const task of byId.values()) {
+    task.requires = [...new Set(task.requires)];
+  }
+  return {
+    tasks,
+    completed: completedIds(tasks)
+  };
+}
+function completedIds(tasks) {
+  const completed = /* @__PURE__ */ new Set();
+  const prefixes = /* @__PURE__ */ new Map();
+  for (const task of tasks) {
+    if (isTaskFullyComplete(task)) completed.add(task.id);
+    for (const subtask of task.subtasks || []) {
+      if (isComplete(subtask)) completed.add(subtask.id);
+    }
+    const parts = task.id.split(".");
+    for (let length = 1; length < parts.length; length += 1) {
+      const prefix = parts.slice(0, length).join(".");
+      if (!prefixes.has(prefix)) prefixes.set(prefix, []);
+      prefixes.get(prefix).push(task);
+    }
+  }
+  for (const [prefix, groupedTasks] of prefixes.entries()) {
+    if (groupedTasks.length && groupedTasks.every(isTaskFullyComplete)) completed.add(prefix);
+  }
+  return completed;
+}
+function isTaskFullyComplete(task) {
+  return isComplete(task) && task.subtasks.every(isComplete);
+}
+function taskMatchesOnlyTask(candidate, onlyTask) {
+  if (!onlyTask) return true;
+  if (candidate.task.id === onlyTask) return true;
+  return Boolean(candidate.task.subtasks?.includes(onlyTask));
+}
+function blockedSummary(blocked) {
+  if (!blocked.length) return "";
+  const sample = blocked.slice(0, 5).join("; ");
+  const suffix = blocked.length > 5 ? `; ${blocked.length - 5} more` : "";
+  return `${blocked.length} blocked task(s): ${sample}${suffix}`;
+}
+function selectRoadmapTask(roadmapText, taken, onlyTask) {
+  const { tasks, completed } = parseRoadmap(roadmapText);
+  const normalTaken = new Set(taken?.normal || []);
+  const addendumTaken = new Set(taken?.addendum || []);
+  const candidates = [];
+  const blocked = [];
+  for (const task of tasks) {
+    const openSubtasks = task.subtasks.filter((subtask) => !isComplete(subtask));
+    if (isComplete(task) && openSubtasks.length && !addendumTaken.has(task.id)) {
+      candidates.push({
+        order: task.line,
+        kind: "addendum",
+        task: {
+          id: task.id,
+          title: task.title,
+          requires: [],
+          rationale: `Completed parent ${task.id} has open addendum sub-task(s): ${openSubtasks.map((subtask) => subtask.id).join(", ")}.`,
+          isAddendum: true,
+          subtasks: openSubtasks.map((subtask) => subtask.id)
+        }
+      });
+    }
+    if (!isComplete(task) && !normalTaken.has(task.id)) {
+      const missing = task.requires.filter((id) => !completed.has(id));
+      if (missing.length) {
+        blocked.push(`${task.id} requires ${missing.join(", ")}`);
+      } else {
+        candidates.push({
+          order: task.line,
+          kind: "normal",
+          task: {
+            id: task.id,
+            title: task.title,
+            requires: task.requires,
+            rationale: task.requires.length ? `Every declared dependency is complete: ${task.requires.join(", ")}.` : "The task has no declared dependencies.",
+            isAddendum: false,
+            subtasks: []
+          }
+        });
+      }
+    }
+  }
+  const matchingCandidates = candidates.filter((candidate) => taskMatchesOnlyTask(candidate, onlyTask)).sort((left, right) => left.order - right.order);
+  const selected = matchingCandidates[0];
+  if (!selected) {
+    const reason = onlyTask ? `Task ${onlyTask} is not currently unblocked as a normal task or addendum pass. ${blockedSummary(blocked)}` : blockedSummary(blocked);
+    return { hasTask: false, remainingUnblocked: [], blockedSummary: reason.trim() };
+  }
+  return {
+    hasTask: true,
+    task: selected.task,
+    remainingUnblocked: matchingCandidates.slice(1).map((candidate) => candidate.kind === "addendum" ? `${candidate.task.id} (addendum)` : candidate.task.id),
+    blockedSummary: blockedSummary(blocked)
+  };
+}
+function roadmapTaskIndex(roadmapText) {
+  const { tasks } = parseRoadmap(roadmapText);
+  const byId = /* @__PURE__ */ new Map();
+  for (const task of tasks) {
+    byId.set(task.id, task);
+    for (const subtask of task.subtasks || []) byId.set(subtask.id, subtask);
+  }
+  return byId;
+}
+function candidateRoadmapComplete(task, isAddendum) {
+  if (!isAddendum) return isComplete(task);
+  return isTaskFullyComplete(task);
+}
+
 // src/workflows/df12-build-odw/main.js
 var cfg = args || {};
 var PROJECT_ROOT = cfg.projectRoot || process.cwd();
@@ -472,10 +650,6 @@ function preamble(worktree) {
     ""
   ].join("\n");
 }
-var TASK_LINE_RE = /^(\s*)-\s+\[([ xX])\]\s+(\d+(?:\.\d+)+)\.\s*(.*)$/;
-var REQUIRES_LINE_RE = /^\s*-\s+Requires\s+(.+?)\.?\s*$/;
-var STEP_RANGE_RE = /\bsteps?\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)\b/gi;
-var ROADMAP_ID_RE = /\b\d+(?:\.\d+)+\b/g;
 async function execFileText(command, commandArgs) {
   const { execFile } = process.getBuiltinModule("node:child_process");
   return await new Promise((resolve, reject) => {
@@ -781,165 +955,6 @@ async function readRoadmapForSelection(root = process.cwd()) {
     ].filter(Boolean).join("; ");
     throw new Error(`Failed to read canonical roadmap ref ${canonicalRef}: ${details}`);
   }
-}
-function parentIdOf(id) {
-  const parts = id.split(".");
-  return parts.length > 1 ? parts.slice(0, -1).join(".") : "";
-}
-function isComplete(task) {
-  return task?.checked?.toLowerCase() === "x";
-}
-function extractRoadmapIds(text) {
-  const ids = new Set([...text.matchAll(ROADMAP_ID_RE)].map((match) => match[0]));
-  for (const match of text.matchAll(STEP_RANGE_RE)) {
-    const expanded = expandStepRange(match[1], match[2]);
-    if (expanded.length) {
-      ids.delete(match[1]);
-      ids.delete(match[2]);
-      for (const id of expanded) ids.add(id);
-    }
-  }
-  return [...ids];
-}
-function expandStepRange(start, end) {
-  const startParts = start.split(".").map(Number);
-  const endParts = end.split(".").map(Number);
-  if (startParts.length !== 2 || endParts.length !== 2 || startParts[0] !== endParts[0]) return [];
-  const [phaseId, firstStep] = startParts;
-  const lastStep = endParts[1];
-  if (!Number.isInteger(phaseId) || !Number.isInteger(firstStep) || !Number.isInteger(lastStep) || firstStep > lastStep) return [];
-  return Array.from({ length: lastStep - firstStep + 1 }, (_, index) => `${phaseId}.${firstStep + index}`);
-}
-function parseRoadmap(text) {
-  const tasks = [];
-  const byId = /* @__PURE__ */ new Map();
-  let currentTask = null;
-  for (const [index, line] of text.split(/\r?\n/).entries()) {
-    const taskMatch = line.match(TASK_LINE_RE);
-    if (taskMatch) {
-      const [, indent, checked, id, rawTitle] = taskMatch;
-      const task = {
-        id,
-        checked,
-        title: rawTitle.trim(),
-        requires: [],
-        line: index + 1,
-        indent: indent.length,
-        subtasks: []
-      };
-      const parent = byId.get(parentIdOf(id));
-      if (parent && isComplete(parent) && task.indent > parent.indent) {
-        task.parentId = parent.id;
-        task.isAddendumSubtask = true;
-        parent.subtasks.push(task);
-      } else {
-        tasks.push(task);
-      }
-      byId.set(id, task);
-      currentTask = task;
-      continue;
-    }
-    const requiresMatch = line.match(REQUIRES_LINE_RE);
-    if (requiresMatch && currentTask) {
-      currentTask.requires.push(...extractRoadmapIds(requiresMatch[1]));
-    }
-  }
-  for (const task of byId.values()) {
-    task.requires = [...new Set(task.requires)];
-  }
-  return {
-    tasks,
-    completed: completedIds(tasks)
-  };
-}
-function completedIds(tasks) {
-  const completed = /* @__PURE__ */ new Set();
-  const prefixes = /* @__PURE__ */ new Map();
-  for (const task of tasks) {
-    if (isTaskFullyComplete(task)) completed.add(task.id);
-    for (const subtask of task.subtasks || []) {
-      if (isComplete(subtask)) completed.add(subtask.id);
-    }
-    const parts = task.id.split(".");
-    for (let length = 1; length < parts.length; length += 1) {
-      const prefix = parts.slice(0, length).join(".");
-      if (!prefixes.has(prefix)) prefixes.set(prefix, []);
-      prefixes.get(prefix).push(task);
-    }
-  }
-  for (const [prefix, groupedTasks] of prefixes.entries()) {
-    if (groupedTasks.length && groupedTasks.every(isTaskFullyComplete)) completed.add(prefix);
-  }
-  return completed;
-}
-function isTaskFullyComplete(task) {
-  return isComplete(task) && task.subtasks.every(isComplete);
-}
-function taskMatchesOnlyTask(candidate) {
-  if (!ONLY_TASK) return true;
-  if (candidate.task.id === ONLY_TASK) return true;
-  return Boolean(candidate.task.subtasks?.includes(ONLY_TASK));
-}
-function blockedSummary(blocked) {
-  if (!blocked.length) return "";
-  const sample = blocked.slice(0, 5).join("; ");
-  const suffix = blocked.length > 5 ? `; ${blocked.length - 5} more` : "";
-  return `${blocked.length} blocked task(s): ${sample}${suffix}`;
-}
-function selectRoadmapTask(roadmapText, taken) {
-  const { tasks, completed } = parseRoadmap(roadmapText);
-  const normalTaken = new Set(taken?.normal || []);
-  const addendumTaken = new Set(taken?.addendum || []);
-  const candidates = [];
-  const blocked = [];
-  for (const task of tasks) {
-    const openSubtasks = task.subtasks.filter((subtask) => !isComplete(subtask));
-    if (isComplete(task) && openSubtasks.length && !addendumTaken.has(task.id)) {
-      candidates.push({
-        order: task.line,
-        kind: "addendum",
-        task: {
-          id: task.id,
-          title: task.title,
-          requires: [],
-          rationale: `Completed parent ${task.id} has open addendum sub-task(s): ${openSubtasks.map((subtask) => subtask.id).join(", ")}.`,
-          isAddendum: true,
-          subtasks: openSubtasks.map((subtask) => subtask.id)
-        }
-      });
-    }
-    if (!isComplete(task) && !normalTaken.has(task.id)) {
-      const missing = task.requires.filter((id) => !completed.has(id));
-      if (missing.length) {
-        blocked.push(`${task.id} requires ${missing.join(", ")}`);
-      } else {
-        candidates.push({
-          order: task.line,
-          kind: "normal",
-          task: {
-            id: task.id,
-            title: task.title,
-            requires: task.requires,
-            rationale: task.requires.length ? `Every declared dependency is complete: ${task.requires.join(", ")}.` : "The task has no declared dependencies.",
-            isAddendum: false,
-            subtasks: []
-          }
-        });
-      }
-    }
-  }
-  const matchingCandidates = candidates.filter(taskMatchesOnlyTask).sort((left, right) => left.order - right.order);
-  const selected = matchingCandidates[0];
-  if (!selected) {
-    const reason = ONLY_TASK ? `Task ${ONLY_TASK} is not currently unblocked as a normal task or addendum pass. ${blockedSummary(blocked)}` : blockedSummary(blocked);
-    return { hasTask: false, remainingUnblocked: [], blockedSummary: reason.trim() };
-  }
-  return {
-    hasTask: true,
-    task: selected.task,
-    remainingUnblocked: matchingCandidates.slice(1).map((candidate) => candidate.kind === "addendum" ? `${candidate.task.id} (addendum)` : candidate.task.id),
-    blockedSummary: blockedSummary(blocked)
-  };
 }
 function planPrompt(task, worktree, priorVerdict, round, opts = {}) {
   const revision = round === 1 ? "This is the first planning round." : [
@@ -1299,19 +1314,6 @@ async function directoryExists(pathValue) {
   } catch {
     return false;
   }
-}
-function roadmapTaskIndex(roadmapText) {
-  const { tasks } = parseRoadmap(roadmapText);
-  const byId = /* @__PURE__ */ new Map();
-  for (const task of tasks) {
-    byId.set(task.id, task);
-    for (const subtask of task.subtasks || []) byId.set(subtask.id, subtask);
-  }
-  return byId;
-}
-function candidateRoadmapComplete(task, isAddendum) {
-  if (!isAddendum) return isComplete(task);
-  return isTaskFullyComplete(task);
 }
 async function discoverRecoveryCandidates(roadmapText, gitRoot) {
   const root = gitRoot || process.cwd();
@@ -2368,7 +2370,7 @@ async function doSelect(taken) {
   if (roadmap.fallbackReason) {
     log(`[${label}] using working-tree ${ROADMAP}; origin/${BASE} read failed: ${roadmap.fallbackReason}`);
   }
-  const selection = selectRoadmapTask(roadmap.text, taken);
+  const selection = selectRoadmapTask(roadmap.text, taken, ONLY_TASK);
   if (selection?.hasTask && selection.task) {
     log(`[${label}] selected ${selection.task.isAddendum ? "addendum pass" : "normal task"} ${selection.task.id} from ${roadmap.source}`);
   } else {
