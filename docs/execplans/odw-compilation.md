@@ -655,6 +655,32 @@ artefact-slicing suites were retained as shipped-artefact coverage. The
 Surprises entry about the `checkJs: false` blind spot is resolved by the
 milestone 10 entry conversion.
 
+2026-07-06 (CodeScene review batch): the review flagged one security error
+plus several consistency/perf issues. SECURITY: `runCodeSceneCheck`'s presence
+probe ran `command -v ${bin}` through `sh -c` with the operator-config binary
+name interpolated; it now passes the name as a positional argument (`sh -c
+'command -v "$1"' sh bin`), so shell metacharacters cannot be interpreted.
+Perf: the git-evidence dirty-path dedupe replaced an O(n^2) nested scan with a
+Set lookup, and `streamGate` now honours write backpressure — it pauses the
+child pipes when the log stream's buffer is full and resumes them on `drain`,
+so a huge gate log cannot over-allocate memory. Consistency: `writeProbeTargets`
+normalizes each adapter once (lowercase) and reuses the single value for both
+the dedup key and the `agent()` adapter. Refactor: the six near-identical
+check -> fix -> durability blocks (host gates, CodeScene, and CodeRabbit, in
+both the between-item loop and the dual review) now share one
+`dispatchFixAndVerify` helper that dispatches the fix agent at the live round
+and host-verifies the commit, while each caller keeps its own failure-result
+shape and logging — removing the duplication that let the round-number drift
+in earlier. Testing: a new compile-time-contract test proves the erasable-syntax
+tsconfig flags are both configured and enforced (tsc rejects an enum via
+TS1294); the prompt-ordering test anchors on the numbered step markers rather
+than an incidental word match. Docs: the developers-guide adapter/model routing
+section documents the assessment/triage medium defaults and the
+ASSESSMENT_ESCALATION_MODEL / TRIAGE_ESCALATION_MODEL escalation tiers. Skipped:
+the tracing-spans warning (the ODW loader injects no span primitive, imports
+are banned, and log() plus events.jsonl already carry task id, stage, round,
+and attempt) and the prompt-snapshot suggestion (an odw-testing anti-pattern).
+
 2026-07-06 (CodeScene follow-up fixes): a wyvern team confirmed five review
 findings valid. `dedupeProposals` and `triageNeedsEscalation`
 (remediation.ts) now key on the proposal's `source` tag (the

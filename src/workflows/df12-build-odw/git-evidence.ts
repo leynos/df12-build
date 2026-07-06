@@ -112,9 +112,11 @@ export async function collectAssessmentEvidence(
   if (!commits.ok) errors.push(`log base..HEAD: ${commits.error}`)
 
   const untrackedOrModified = parsePorcelainDirty(status.value)
+  // Dedupe against the diff paths in O(n) with a Set rather than a nested scan.
+  const dirtyPaths = new Set(dirty.value.map((item) => item.path))
   const dirtyChanges = [
     ...dirty.value,
-    ...untrackedOrModified.filter((entry) => !dirty.value.some((item) => item.path === entry.path)),
+    ...untrackedOrModified.filter((entry) => !dirtyPaths.has(entry.path)),
   ]
   const allChanged = new Set([
     ...committed.value.map((entry) => entry.path),

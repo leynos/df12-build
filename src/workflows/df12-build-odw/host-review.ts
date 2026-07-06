@@ -304,7 +304,13 @@ export function makeHostReview(config: HostReviewConfig) {
       // stream.end() (and resolve) from running twice.
       let settled = false
       const record = (chunk: Buffer) => {
-        stream.write(chunk)
+        // Respect write backpressure: when the log stream's buffer is full,
+        // pause the child's pipes and resume them on 'drain', so a slow disk
+        // or a huge gate log cannot over-allocate memory.
+        if (!stream.write(chunk)) {
+          child.stdout?.pause()
+          child.stderr?.pause()
+        }
         carry += chunk.toString('utf8')
         const lines = carry.split(/\r?\n/)
         carry = lines.pop() || ''
@@ -328,6 +334,12 @@ export function makeHostReview(config: HostReviewConfig) {
       // exception and crash the run. Route it into a failed gate result.
       stream.on('error', (error) => finish(false, `gate log write failed: ${(error as Error).message}`))
       const child = spawn('sh', ['-c', command], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+      // Resume the paused child pipes once the log stream has drained (see the
+      // backpressure guard in record()).
+      stream.on('drain', () => {
+        child.stdout?.resume()
+        child.stderr?.resume()
+      })
       child.stdout.on('data', record)
       child.stderr.on('data', record)
       const sigterm = setTimeout(() => {
@@ -356,7 +368,10 @@ export function makeHostReview(config: HostReviewConfig) {
   async function runCodeSceneCheck(worktree: string, tag: string, label: string): Promise<{ clean: boolean; skipped: boolean; detail: string; logFile: string }> {
     if (!csCheck) return { clean: true, skipped: true, detail: '', logFile: '' }
     const bin = csCheckCommand.trim().split(/\s+/)[0] || 'cs-check-changed'
-    const probe = await execFileStatus('sh', ['-c', `command -v ${bin}`], { cwd: worktree })
+    // Pass the probed name as a positional argument ($1), never interpolated
+    // into the command string: csCheckCommand is operator config (a trust
+    // boundary), so shell metacharacters in the name must not be interpreted.
+    const probe = await execFileStatus('sh', ['-c', 'command -v "$1"', 'sh', bin], { cwd: worktree })
     if (!probe.ok) {
       csCheckMetrics.skipped += 1
       log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`)

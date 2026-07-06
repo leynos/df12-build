@@ -80,12 +80,15 @@ describe('implementation and fix prompts', () => {
   test('implementWorkItemPrompt orders the CodeScene check after the gates and before CodeRabbit', () => {
     const item = { text: 'WI-1: add the parser' }
     const text = prompts.implementWorkItemPrompt(task, worktree, plan, item)
-    const gatesAt = text.indexOf('DETERMINISTIC GATE')
-    const csAt = text.indexOf('CODE HEALTH')
-    const coderabbitAt = text.indexOf('CodeRabbit')
-    expect(gatesAt).toBeGreaterThanOrEqual(0)
-    expect(csAt).toBeGreaterThan(gatesAt)
-    expect(coderabbitAt).toBeGreaterThan(csAt)
+    // Anchor on the numbered STEP markers, not incidental word matches: the
+    // CODE HEALTH bullet itself mentions "before CodeRabbit", so matching the
+    // bare word 'CodeRabbit' would pass even if the real step 2 moved earlier.
+    const gateStepAt = text.indexOf('  1. DETERMINISTIC GATE')
+    const codeHealthStepAt = text.indexOf('  1b. CODE HEALTH')
+    const coderabbitStepAt = text.indexOf('  2. ')
+    expect(gateStepAt).toBeGreaterThanOrEqual(0)
+    expect(codeHealthStepAt).toBeGreaterThan(gateStepAt)
+    expect(coderabbitStepAt).toBeGreaterThan(codeHealthStepAt)
     expect(text).toContain('CodeScene')
   })
 })

@@ -269,6 +269,17 @@ review, addendum fallback review, and audit. Because partial-branch assessment
 defaults to the review adapter, keep `assessmentAdapter` explicit in examples
 or operator notes when that stage must remain on Codex.
 
+Assessment and triage are model-tiered rather than pinned to `REVIEW_MODEL`,
+because most of their work is cheap. `ASSESSMENT_MODEL` has its own medium
+default (`claude-sonnet-5`, not the review model): a deterministic
+fast-classifier resolves the clear cases with zero tokens, and only a genuine
+adopt candidate escalates to `ASSESSMENT_ESCALATION_MODEL` (defaulting to
+`REVIEW_MODEL`). `TRIAGE_MODEL` likewise runs at a medium default after a
+deterministic dedup pre-pass, escalating to `TRIAGE_ESCALATION_MODEL` only when
+the deduped proposals span more than one audit/review source. Each escalation
+model is an independent override, so a sidecar can tune the cheap tier and the
+escalation tier separately.
+
 ## Sidecar tooling contract
 
 ODW/Codex launches use a `.workshop` sidecar outside the target project's Git

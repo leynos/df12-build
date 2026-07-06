@@ -655,9 +655,14 @@ function writeProbeTargets() {
     effort: WRITE_PROBE_EFFORT,
     ...options,
   })
+  // Normalize each adapter once (lowercase, matching AUTH_REQUIRED_ADAPTERS)
+  // and reuse the single value for both the dedup key and the agent() adapter,
+  // so a mixed-case config cannot make them diverge.
+  const planAdapter = String(PLAN_ADAPTER).toLowerCase()
+  const buildAdapter = String(BUILD_ADAPTER).toLowerCase()
   const targets = [
-    { role: 'plan', adapter: String(PLAN_ADAPTER).toLowerCase(), options: probeOptions(PLAN_ADAPTER) },
-    { role: 'build', adapter: String(BUILD_ADAPTER).toLowerCase(), options: probeOptions(BUILD_ADAPTER) },
+    { role: 'plan', adapter: planAdapter, options: probeOptions(planAdapter) },
+    { role: 'build', adapter: buildAdapter, options: probeOptions(buildAdapter) },
   ]
   const seen = new Set()
   return targets.filter((target) => {

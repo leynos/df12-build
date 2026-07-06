@@ -726,9 +726,10 @@ async function collectAssessmentEvidence(task, wt) {
   if (!staged.ok) errors.push(`diff --cached --name-status: ${staged.error}`);
   if (!commits.ok) errors.push(`log base..HEAD: ${commits.error}`);
   const untrackedOrModified = parsePorcelainDirty(status.value);
+  const dirtyPaths = new Set(dirty.value.map((item) => item.path));
   const dirtyChanges = [
     ...dirty.value,
-    ...untrackedOrModified.filter((entry) => !dirty.value.some((item) => item.path === entry.path))
+    ...untrackedOrModified.filter((entry) => !dirtyPaths.has(entry.path))
   ];
   const allChanged = /* @__PURE__ */ new Set([
     ...committed.value.map((entry) => entry.path),
@@ -1949,7 +1950,10 @@ ${outcome.tail}`
       let killed = false;
       let settled = false;
       const record = (chunk) => {
-        stream.write(chunk);
+        if (!stream.write(chunk)) {
+          child.stdout?.pause();
+          child.stderr?.pause();
+        }
         carry += chunk.toString("utf8");
         const lines = carry.split(/\r?\n/);
         carry = lines.pop() || "";
@@ -1970,6 +1974,10 @@ ${outcome.tail}`
       };
       stream.on("error", (error) => finish(false, `gate log write failed: ${error.message}`));
       const child = spawn("sh", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+      stream.on("drain", () => {
+        child.stdout?.resume();
+        child.stderr?.resume();
+      });
       child.stdout.on("data", record);
       child.stderr.on("data", record);
       const sigterm = setTimeout(() => {
@@ -1990,7 +1998,7 @@ ${outcome.tail}`
   async function runCodeSceneCheck2(worktree, tag, label) {
     if (!csCheck) return { clean: true, skipped: true, detail: "", logFile: "" };
     const bin = csCheckCommand.trim().split(/\s+/)[0] || "cs-check-changed";
-    const probe = await execFileStatus("sh", ["-c", `command -v ${bin}`], { cwd: worktree });
+    const probe = await execFileStatus("sh", ["-c", 'command -v "$1"', "sh", bin], { cwd: worktree });
     if (!probe.ok) {
       csCheckMetrics.skipped += 1;
       log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`);
@@ -2280,15 +2288,19 @@ function makeTaskPipeline(deps) {
       }
     };
   }
+  async function dispatchFixAndVerify(task, worktree, plan, blocking, label, round) {
+    phase("Implement");
+    const report = await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, blocking, round), buildAgentOptions2({ phase: "Implement", label, schema: FIX_SCHEMA })), label));
+    const committed = await verifyWorktreeCommitted(worktree);
+    return { report, dirtyDetail: committed.ok ? null : committed.detail };
+  }
   async function runBetweenItemGates(task, worktree, plan, itemLabel, extra) {
     const tag = task.id;
     const runGates = HOST_COMMIT_GATES2 && HOST_GATES_BETWEEN_WORK_ITEMS2;
     const runFix = async (blocking, fixLabel, attempt) => {
-      phase("Implement");
-      await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, blocking, attempt), buildAgentOptions2({ phase: "Implement", label: fixLabel, schema: FIX_SCHEMA })), fixLabel));
-      const committed = await verifyWorktreeCommitted(worktree);
-      if (!committed.ok) {
-        return { fail: { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the fix for ${itemLabel} left uncommitted state (${committed.detail}); every fix must be committed before the checks re-run`, worktree, proposals: [], ...extra } };
+      const { dirtyDetail } = await dispatchFixAndVerify(task, worktree, plan, blocking, fixLabel, attempt);
+      if (dirtyDetail) {
+        return { fail: { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the fix for ${itemLabel} left uncommitted state (${dirtyDetail}); every fix must be committed before the checks re-run`, worktree, proposals: [], ...extra } };
       }
       return null;
     };
@@ -2336,11 +2348,9 @@ function makeTaskPipeline(deps) {
       if (attempt === MAX_REVIEW_ROUNDS2) {
         return { fail: { id: tag, status: "failed", stage: "code-review", detail: `CodeRabbit between-item review left blocking finding(s) unresolved after ${MAX_REVIEW_ROUNDS2} fix attempt(s) on ${itemLabel}: ${blocking.join("; ")}`, worktree, proposals: [], ...extra } };
       }
-      phase("Implement");
-      await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, blocking, attempt), buildAgentOptions2({ phase: "Implement", label: `fix:${tag} ${itemLabel} a${attempt}`, schema: FIX_SCHEMA })), `fix:${tag} ${itemLabel} a${attempt}`));
-      const committed = await verifyWorktreeCommitted(worktree);
-      if (!committed.ok) {
-        return { fail: { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeRabbit fix for ${itemLabel} left uncommitted state (${committed.detail}); every fix must be committed before re-review`, worktree, proposals: [], ...extra } };
+      const { dirtyDetail } = await dispatchFixAndVerify(task, worktree, plan, blocking, `fix:${tag} ${itemLabel} a${attempt}`, attempt);
+      if (dirtyDetail) {
+        return { fail: { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeRabbit fix for ${itemLabel} left uncommitted state (${dirtyDetail}); every fix must be committed before re-review`, worktree, proposals: [], ...extra } };
       }
     }
     return { ok: true, coderabbitRuns: runs };
@@ -2543,12 +2553,10 @@ function makeTaskPipeline(deps) {
           const gateBlocking = [`HOST GATES RED: ${hostGates.detail} The agent-reported gate status was wrong or is stale \u2014 reproduce the failure from the log, fix it, re-run the gates to green, and commit.`];
           reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: gateBlocking, hostGates: hostGates.results, fix: null });
           if (round === MAX_REVIEW_ROUNDS2) break;
-          phase("Implement");
-          const gateFix = await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, gateBlocking, round), buildAgentOptions2({ phase: "Implement", label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`));
-          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(gateFix);
-          const gateFixCommitted = await verifyWorktreeCommitted(worktree);
-          if (!gateFixCommitted.ok) {
-            return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the gate-fix round left uncommitted state (${gateFixCommitted.detail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
+          const gateFix = await dispatchFixAndVerify(task, worktree, plan, gateBlocking, `fix:${tag} r${round}`, round);
+          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(gateFix.report);
+          if (gateFix.dirtyDetail) {
+            return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the gate-fix round left uncommitted state (${gateFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
           }
           continue;
         }
@@ -2560,12 +2568,10 @@ function makeTaskPipeline(deps) {
           const csBlocking = [`CODESCENE RED: ${cs.detail} Clear these code-health regressions by refactoring, or \u2014 only where further refinement would be deleterious \u2014 suppress the specific smell with a justified @codescene(disable:"...") comment, then re-run the check to green and commit.`];
           reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: csBlocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null });
           if (round === MAX_REVIEW_ROUNDS2) break;
-          phase("Implement");
-          const csFix = await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, csBlocking, round), buildAgentOptions2({ phase: "Implement", label: `fix:${tag} cs r${round}`, schema: FIX_SCHEMA })), `fix:${tag} cs r${round}`));
-          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(csFix);
-          const csFixCommitted = await verifyWorktreeCommitted(worktree);
-          if (!csFixCommitted.ok) {
-            return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeScene-fix round left uncommitted state (${csFixCommitted.detail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
+          const csFix = await dispatchFixAndVerify(task, worktree, plan, csBlocking, `fix:${tag} cs r${round}`, round);
+          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(csFix.report);
+          if (csFix.dirtyDetail) {
+            return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeScene-fix round left uncommitted state (${csFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
           }
           continue;
         }
@@ -2586,12 +2592,10 @@ function makeTaskPipeline(deps) {
           if (coderabbitBlocking.length) {
             reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: coderabbitBlocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null });
             if (round === MAX_REVIEW_ROUNDS2) break;
-            phase("Implement");
-            const crFix = await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, coderabbitBlocking, round), buildAgentOptions2({ phase: "Implement", label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`));
-            reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(crFix);
-            const crFixCommitted = await verifyWorktreeCommitted(worktree);
-            if (!crFixCommitted.ok) {
-              return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeRabbit-fix round left uncommitted state (${crFixCommitted.detail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
+            const crFix = await dispatchFixAndVerify(task, worktree, plan, coderabbitBlocking, `fix:${tag} r${round}`, round);
+            reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(crFix.report);
+            if (crFix.dirtyDetail) {
+              return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeRabbit-fix round left uncommitted state (${crFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
             }
             continue;
           }
@@ -2654,12 +2658,10 @@ function makeTaskPipeline(deps) {
       }
       log(`[task ${tag}] review round ${round}: ${blocking.length} blocking item(s)`);
       if (round === MAX_REVIEW_ROUNDS2) break;
-      phase("Implement");
-      const fix = await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, blocking, round), buildAgentOptions2({ phase: "Implement", label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`));
-      roundRecord.fix = summarizeFixReport(fix);
-      const fixCommitted = await verifyWorktreeCommitted(worktree);
-      if (!fixCommitted.ok) {
-        return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the review-fix round left uncommitted state (${fixCommitted.detail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
+      const fix = await dispatchFixAndVerify(task, worktree, plan, blocking, `fix:${tag} r${round}`, round);
+      roundRecord.fix = summarizeFixReport(fix.report);
+      if (fix.dirtyDetail) {
+        return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the review-fix round left uncommitted state (${fix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
       }
     }
     if (!reviewsPass) {
@@ -3286,9 +3288,11 @@ function writeProbeTargets() {
     effort: WRITE_PROBE_EFFORT,
     ...options
   });
+  const planAdapter = String(PLAN_ADAPTER).toLowerCase();
+  const buildAdapter = String(BUILD_ADAPTER).toLowerCase();
   const targets = [
-    { role: "plan", adapter: String(PLAN_ADAPTER).toLowerCase(), options: probeOptions(PLAN_ADAPTER) },
-    { role: "build", adapter: String(BUILD_ADAPTER).toLowerCase(), options: probeOptions(BUILD_ADAPTER) }
+    { role: "plan", adapter: planAdapter, options: probeOptions(planAdapter) },
+    { role: "build", adapter: buildAdapter, options: probeOptions(buildAdapter) }
   ];
   const seen = /* @__PURE__ */ new Set();
   return targets.filter((target) => {
