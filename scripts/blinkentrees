@@ -1000,7 +1000,14 @@ class RoboLightsApp(App[None]):
             show_lines=False,
             pad_edge=False,
         )
-        table.add_column("worktree", no_wrap=True, ratio=2, min_width=WORKTREE_MIN_WIDTH)
+        # A fixed width keeps the column from flexing against the ratio
+        # columns on every redraw, which cropped long names intermittently.
+        # Size it to the widest name present, including the " gone" suffix.
+        name_width = max(
+            [WORKTREE_MIN_WIDTH]
+            + [len(stat.name) + (0 if stat.active else len(" gone")) for stat in self.stats.values()]
+        )
+        table.add_column("worktree", no_wrap=True, width=name_width)
         table.add_column("lamps", no_wrap=True, width=12)
         table.add_column("trail", no_wrap=True, width=TRAIL_WIDTH)
         table.add_column("events", justify="right", no_wrap=True)
