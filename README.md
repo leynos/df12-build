@@ -29,8 +29,9 @@ ______________________________________________________________________
 
 ### Installation
 
-Clone this repository and make sure the df12 toolchain, Open Dynamic Workflows
-(ODW), Codex and Claude adapters, Git, Node.js, `markdownlint-cli2`, and
+Clone this repository and make sure the df12 toolchain,
+[Open Dynamic Workflows (ODW)](https://github.com/xz1220/open-dynamic-workflows),
+Codex and Claude adapters, Git, Node.js, `markdownlint-cli2`, and
 `nixie` are available on the machine that will supervise the workshop.
 
 Verify the checked-in workflow assets before launching a workshop:
@@ -82,6 +83,66 @@ ______________________________________________________________________
   useful durable evidence.
 - Documentation for launch, architecture, security, permissions, and
   contributor workflow maintenance.
+
+______________________________________________________________________
+
+## How the workflow runs
+
+For each unblocked roadmap task the host creates an isolated git worktree,
+verifies the task agent can write into it, then drives the task through
+planning, implementation, review, and integration — serialising only the
+steps that advance `origin/<base>`. Failed or halted branches are assessed
+report-only rather than discarded.
+
+```mermaid
+flowchart TD
+    start([Launch run]) --> auth[Auth preflight]
+    auth -->|fatal auth| halt([Halt for operator])
+    auth --> recovery{Resume partial<br/>branches?}
+    recovery -->|yes| assessBranches[Discover and assess<br/>surviving branches]
+    recovery -->|no| select
+    assessBranches --> select[Select next unblocked<br/>roadmap task]
+    select -->|frontier dry| done([Clean stop])
+    select --> worktree[Create worktree +<br/>write preflight]
+    worktree --> lane{Addendum pass?}
+
+    lane -->|no| plan[Plan]
+    plan --> design[Design review]
+    design -->|not satisfied| plan
+    design -->|approved| build[Implement<br/>one work item per turn]
+    build --> between[CodeRabbit between<br/>each work item]
+    between -->|blocking| build
+    between --> review[Dual review +<br/>host gates + CodeRabbit]
+    review -->|blocking| fix[Fix round]
+    fix --> review
+
+    lane -->|yes| addendum[Addendum implement<br/>+ host gate + review]
+
+    review -->|pass| integrate[Integrate<br/>rebase + squash-merge]
+    addendum -->|pass| integrate
+    integrate --> audit[Post-merge audit]
+    audit --> triage[Remediation triage]
+    triage --> select
+
+    build -.->|failed / halted| assess[Report-only assessment]
+    review -.->|failed / halted| assess
+    addendum -.->|failed / halted| assess
+    integrate -.->|failed / halted| assess
+    assess -.-> select
+```
+
+______________________________________________________________________
+
+## Related projects
+
+- [Open Dynamic Workflows (ODW)](https://github.com/xz1220/open-dynamic-workflows)
+  — the TypeScript CLI runtime that executes the `df12-build-odw.js` workflow
+  across Codex, Claude Code, and other coding-agent CLIs.
+- [df12-documentation-skills](https://github.com/leynos/df12-documentation-skills)
+  — the df12 documentation authoring skills these guides follow.
+- [agent-helper-scripts](https://github.com/leynos/agent-helper-scripts)
+  — helper scripts and skills (including the `odw-*` authoring, testing, and
+  supervision skills) run by the supervising agent.
 
 ______________________________________________________________________
 
