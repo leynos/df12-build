@@ -972,6 +972,7 @@ function makeConfig(rawArgs) {
   const COMMIT_GATES2 = (Array.isArray(cfg.commitGates) && cfg.commitGates.length ? cfg.commitGates : ["make all"]).map((command) => String(command));
   const COMMIT_GATE_TEXT2 = COMMIT_GATES2.map((command) => `\`${command}\``).join(" then ");
   const HOST_COMMIT_GATES2 = cfg.hostCommitGates !== false;
+  const HOST_GATES_BETWEEN_WORK_ITEMS2 = cfg.hostGatesBetweenWorkItems !== false;
   const COMMIT_GATE_TIMEOUT_SECONDS2 = Math.max(1, Math.trunc(Number(cfg.commitGateTimeoutSeconds) || 3600));
   const COMMIT_GATE_GUIDANCE2 = `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT2}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well \u2014 NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.${HOST_COMMIT_GATES2 ? " The workflow host independently re-runs the configured gates against your committed HEAD before review and integration; a gatesGreen claim the host cannot reproduce fails the stage with the host gate log as evidence." : ""}`;
   const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? "Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work \u2014 only committed changes reach the host review." : `Use \`coderabbit review --agent\` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the \`vsleep\` command) for \`$(shuf -i ${CODERABBIT_BACKOFF_MINUTES2[0]}-${CODERABBIT_BACKOFF_MINUTES2[1]} -n 1)\` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.`;
@@ -1027,6 +1028,7 @@ function makeConfig(rawArgs) {
     CODERABBIT_BACKOFF_MINUTES: CODERABBIT_BACKOFF_MINUTES2,
     CODERABBIT_FINDINGS_FILE: CODERABBIT_FINDINGS_FILE2,
     HOST_COMMIT_GATES: HOST_COMMIT_GATES2,
+    HOST_GATES_BETWEEN_WORK_ITEMS: HOST_GATES_BETWEEN_WORK_ITEMS2,
     COMMIT_GATE_TIMEOUT_SECONDS: COMMIT_GATE_TIMEOUT_SECONDS2,
     COMMIT_GATES: COMMIT_GATES2,
     COMMIT_GATE_TEXT: COMMIT_GATE_TEXT2,
@@ -2014,6 +2016,7 @@ function makeTaskPipeline(deps) {
     MAX_WORK_ITEM_ROUNDS: MAX_WORK_ITEM_ROUNDS2,
     PER_WORK_ITEM_BUILD: PER_WORK_ITEM_BUILD2,
     HOST_COMMIT_GATES: HOST_COMMIT_GATES2,
+    HOST_GATES_BETWEEN_WORK_ITEMS: HOST_GATES_BETWEEN_WORK_ITEMS2,
     CODERABBIT_HOST_REVIEW: CODERABBIT_HOST_REVIEW2,
     CODERABBIT_BETWEEN_WORK_ITEMS: CODERABBIT_BETWEEN_WORK_ITEMS2,
     DRY_RUN: DRY_RUN2,
@@ -2138,6 +2141,25 @@ function makeTaskPipeline(deps) {
       }
     };
   }
+  async function runBetweenItemGates(task, worktree, plan, itemLabel, extra) {
+    const tag = task.id;
+    for (let attempt = 1; attempt <= MAX_REVIEW_ROUNDS2; attempt++) {
+      const gates = await hostGateLock2(() => runHostCommitGates2(worktree, tag, `${itemLabel} a${attempt}`));
+      if (gates.green) return { ok: true };
+      log(`[task ${tag}] host commit gates red after ${itemLabel} (attempt ${attempt} of ${MAX_REVIEW_ROUNDS2})`);
+      if (attempt === MAX_REVIEW_ROUNDS2) {
+        return { fail: { id: tag, status: "failed", stage: "implement", detail: `HOST GATES RED after ${itemLabel}: ${gates.detail} The committed work item's gatesGreen claim could not be reproduced after ${MAX_REVIEW_ROUNDS2} fix attempt(s).`, worktree, proposals: [], ...extra } };
+      }
+      phase("Implement");
+      const gateBlocking = [`HOST GATES RED: ${gates.detail} The agent-reported gate status for ${itemLabel} was wrong or is stale \u2014 reproduce the failure from the log, fix it, re-run the gates to green, and commit.`];
+      await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, gateBlocking, attempt), buildAgentOptions2({ phase: "Implement", label: `fix:${tag} ${itemLabel} gate a${attempt}`, schema: FIX_SCHEMA })), `fix:${tag} ${itemLabel} gate a${attempt}`));
+      const committed = await verifyWorktreeCommitted(worktree);
+      if (!committed.ok) {
+        return { fail: { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the gate fix for ${itemLabel} left uncommitted state (${committed.detail}); every fix must be committed before the gates re-run`, worktree, proposals: [], ...extra } };
+      }
+    }
+    return { ok: true };
+  }
   async function runBetweenItemReview(task, worktree, plan, itemLabel, extra) {
     const tag = task.id;
     let runs = 0;
@@ -2225,6 +2247,10 @@ function makeTaskPipeline(deps) {
         strikes = 0;
         noProgressNote = "";
         log(`[task ${tag}] work-item round ${round}: ${after.ticked}/${after.ticked + after.unticked} Progress item(s) committed`);
+        if (HOST_COMMIT_GATES2 && HOST_GATES_BETWEEN_WORK_ITEMS2) {
+          const gate = await runBetweenItemGates(task, worktree, plan, `wi${round}`, extra);
+          if ("fail" in gate) return gate;
+        }
         if (CODERABBIT_HOST_REVIEW2 && CODERABBIT_BETWEEN_WORK_ITEMS2) {
           const gate = await runBetweenItemReview(task, worktree, plan, `wi${round}`, extra);
           if ("fail" in gate) return gate;
@@ -2682,6 +2708,7 @@ var {
   CODERABBIT_BACKOFF_MINUTES,
   CODERABBIT_FINDINGS_FILE,
   HOST_COMMIT_GATES,
+  HOST_GATES_BETWEEN_WORK_ITEMS,
   COMMIT_GATE_TIMEOUT_SECONDS,
   COMMIT_GATES,
   COMMIT_GATE_TEXT,
@@ -3142,6 +3169,7 @@ var {
   MAX_WORK_ITEM_ROUNDS,
   PER_WORK_ITEM_BUILD,
   HOST_COMMIT_GATES,
+  HOST_GATES_BETWEEN_WORK_ITEMS,
   CODERABBIT_HOST_REVIEW,
   CODERABBIT_BETWEEN_WORK_ITEMS,
   DRY_RUN,

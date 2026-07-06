@@ -83,6 +83,7 @@ export interface TaskPipelineDeps {
   MAX_WORK_ITEM_ROUNDS: number
   PER_WORK_ITEM_BUILD: boolean
   HOST_COMMIT_GATES: boolean
+  HOST_GATES_BETWEEN_WORK_ITEMS: boolean
   CODERABBIT_HOST_REVIEW: boolean
   CODERABBIT_BETWEEN_WORK_ITEMS: boolean
   DRY_RUN: boolean
@@ -146,6 +147,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     MAX_WORK_ITEM_ROUNDS,
     PER_WORK_ITEM_BUILD,
     HOST_COMMIT_GATES,
+    HOST_GATES_BETWEEN_WORK_ITEMS,
     CODERABBIT_HOST_REVIEW,
     CODERABBIT_BETWEEN_WORK_ITEMS,
     DRY_RUN,
@@ -289,6 +291,38 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
   // Returns null when the plan has no checklist (caller falls back to the
   // single-turn build), { fail } on failure, or { impl } with an aggregate
   // implementation report on success.
+  // Deterministic host commit-gate check on ONE committed work item, run
+  // between build turns and BEFORE the between-item CodeRabbit review, so a
+  // committed red work item is caught by the host re-running the gates rather
+  // than trusting the build agent's gatesGreen claim. A red gate drives a
+  // bounded fix loop; an unresolved red state fails the item. Returns
+  // { ok } or { fail }.
+  async function runBetweenItemGates(
+    task: SelectedTask,
+    worktree: string,
+    plan: StagePlan,
+    itemLabel: string,
+    extra: Record<string, unknown>,
+  ): Promise<{ ok: true } | { fail: StageResult }> {
+    const tag = task.id
+    for (let attempt = 1; attempt <= MAX_REVIEW_ROUNDS; attempt++) {
+      const gates = await hostGateLock(() => runHostCommitGates(worktree, tag, `${itemLabel} a${attempt}`))
+      if (gates.green) return { ok: true }
+      log(`[task ${tag}] host commit gates red after ${itemLabel} (attempt ${attempt} of ${MAX_REVIEW_ROUNDS})`)
+      if (attempt === MAX_REVIEW_ROUNDS) {
+        return { fail: { id: tag, status: 'failed', stage: 'implement', detail: `HOST GATES RED after ${itemLabel}: ${gates.detail} The committed work item's gatesGreen claim could not be reproduced after ${MAX_REVIEW_ROUNDS} fix attempt(s).`, worktree, proposals: [], ...extra } }
+      }
+      phase('Implement')
+      const gateBlocking = [`HOST GATES RED: ${gates.detail} The agent-reported gate status for ${itemLabel} was wrong or is stale — reproduce the failure from the log, fix it, re-run the gates to green, and commit.`]
+      await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, gateBlocking, attempt), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} ${itemLabel} gate a${attempt}`, schema: FIX_SCHEMA })), `fix:${tag} ${itemLabel} gate a${attempt}`))
+      const committed = await verifyWorktreeCommitted(worktree)
+      if (!committed.ok) {
+        return { fail: { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the gate fix for ${itemLabel} left uncommitted state (${committed.detail}); every fix must be committed before the gates re-run`, worktree, proposals: [], ...extra } }
+      }
+    }
+    return { ok: true }
+  }
+
   // Deterministic host CodeRabbit gate on ONE committed work item, run between
   // build turns. Blocking findings (critical/major) drive a bounded fix loop;
   // an unresolved set fails the item, and a terminal deferral (rate limit or
@@ -391,9 +425,15 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         strikes = 0
         noProgressNote = ''
         log(`[task ${tag}] work-item round ${round}: ${after.ticked}/${after.ticked + after.unticked} Progress item(s) committed`)
-        // Deterministic CodeRabbit gate on this committed work item, before the
-        // next unticked item is dispatched (concern: "CodeRabbit between each
-        // ExecPlan stage"). Off by config restores end-of-stage-only review.
+        // Deterministic gates on this committed work item, before the next
+        // item is dispatched. Host commit gates run FIRST (a red branch must
+        // not spend a CodeRabbit review), then the between-item CodeRabbit
+        // review. Either is independently disableable by config, restoring
+        // verification at the dual-review boundary only.
+        if (HOST_COMMIT_GATES && HOST_GATES_BETWEEN_WORK_ITEMS) {
+          const gate = await runBetweenItemGates(task, worktree, plan, `wi${round}`, extra)
+          if ('fail' in gate) return gate
+        }
         if (CODERABBIT_HOST_REVIEW && CODERABBIT_BETWEEN_WORK_ITEMS) {
           const gate = await runBetweenItemReview(task, worktree, plan, `wi${round}`, extra)
           if ('fail' in gate) return gate

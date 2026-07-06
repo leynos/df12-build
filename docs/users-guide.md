@@ -370,15 +370,23 @@ Common arguments:
   asking agents to babysit CodeRabbit. Rate-limit backoff is absorbed as host
   wall-clock (zero agent tokens), and blocking findings feed the fix rounds.
   Set `false` to restore the legacy agent-run flow.
+- `hostGatesBetweenWorkItems`: when `true` (the default), and when both
+  `hostCommitGates` and `perWorkItemBuild` are on, the host re-runs the
+  commit gates after each committed work item — before the between-item
+  CodeRabbit review — so a committed work item whose gates are actually red
+  is caught at the item boundary instead of only at the dual-review stage.
+  A red gate drives a bounded fix loop; if it cannot be made green the work
+  item fails. Set `false` to verify gates only at the dual-review boundary
+  (cheaper: one gate run per review round rather than one per work item).
 - `coderabbitBetweenWorkItems`: when `true` (the default), and when both
   `coderabbitHostReview` and `perWorkItemBuild` are on, the host runs a
   CodeRabbit review after each committed work item — a deterministic gate
-  between build turns — rather than only once after the whole implementation
-  stage. Blocking findings drive a bounded fix loop; if they cannot be
-  cleared the work item fails, and if CodeRabbit stays rate-limited or errors
-  after its retries the task halts for assessment instead of continuing
-  unreviewed. Set `false` to review only once at the end of the
-  implementation stage.
+  between build turns, after the host gates — rather than only once after the
+  whole implementation stage. Blocking findings drive a bounded fix loop; if
+  they cannot be cleared the work item fails, and if CodeRabbit stays
+  rate-limited or errors after its retries the task halts for assessment
+  instead of continuing unreviewed. Set `false` to review only once at the
+  end of the implementation stage.
 - `coderabbitAttempts`: total host review attempts when CodeRabbit rate
   limits. Defaults to `3`.
 - `coderabbitBackoffMinutes`: `[low, high]` range for the deterministic

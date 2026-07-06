@@ -189,7 +189,14 @@ ring-buffer keeps the last lines for the structured `detail` tail; the
 timeout fires `SIGTERM` and escalates to `SIGKILL`. In the dual-review loop
 the gates run FIRST each round — a red branch goes to a fix round with the
 host evidence without spending reviewer agents; in the addendum lane an
-unreproducible green claim fails the addendum before any review. Test loaders
+unreproducible green claim fails the addendum before any review. With
+`hostGatesBetweenWorkItems` on (the default), the gates ALSO re-run after each
+committed work item during the per-work-item build, BEFORE the between-item
+CodeRabbit review, so a committed work item whose gates are really red is
+caught at the item boundary (bounded fix loop, then fail-closed) rather than
+only at the dual-review stage — closing the window where an intermediate red
+commit could persist across work items on the agent's `gatesGreen` claim
+alone. Test loaders
 and the simulation driver force `hostCommitGates: false` (fixture repos have
 no `Makefile`); pipeline coverage uses a scripted fake gate command, and the
 streaming path is covered by a module test with output past the old buffer

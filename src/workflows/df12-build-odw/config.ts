@@ -56,6 +56,7 @@ export interface RawWorkflowArgs {
   coderabbitBackoffMinutes?: unknown
   coderabbitFindingsFile?: string
   hostCommitGates?: boolean
+  hostGatesBetweenWorkItems?: boolean
   commitGateTimeoutSeconds?: number | string
   commitGates?: unknown
 }
@@ -110,6 +111,7 @@ export interface WorkflowConfig {
   CODERABBIT_BACKOFF_MINUTES: [number, number]
   CODERABBIT_FINDINGS_FILE: string
   HOST_COMMIT_GATES: boolean
+  HOST_GATES_BETWEEN_WORK_ITEMS: boolean
   COMMIT_GATE_TIMEOUT_SECONDS: number
   COMMIT_GATES: string[]
   COMMIT_GATE_TEXT: string
@@ -223,6 +225,13 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   // gatesGreen claim is verified, never trusted. hostCommitGates=false
   // restores the trust-the-agent flow.
   const HOST_COMMIT_GATES = cfg.hostCommitGates !== false
+  // Re-run the host commit gates BETWEEN per-work-item build turns (a
+  // deterministic gate on each committed work item, before the between-item
+  // CodeRabbit review) rather than only at the dual-review boundary. Only
+  // meaningful when both host gates and the per-work-item build are on.
+  // hostGatesBetweenWorkItems=false restores gate verification at the review
+  // boundary only (cheaper: one `make all` per review round, not per item).
+  const HOST_GATES_BETWEEN_WORK_ITEMS = cfg.hostGatesBetweenWorkItems !== false
   const COMMIT_GATE_TIMEOUT_SECONDS = Math.max(1, Math.trunc(Number(cfg.commitGateTimeoutSeconds) || 3600))
   const COMMIT_GATE_GUIDANCE =
     `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well — NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.${HOST_COMMIT_GATES ? ' The workflow host independently re-runs the configured gates against your committed HEAD before review and integration; a gatesGreen claim the host cannot reproduce fails the stage with the host gate log as evidence.' : ''}`
@@ -285,6 +294,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     CODERABBIT_BACKOFF_MINUTES,
     CODERABBIT_FINDINGS_FILE,
     HOST_COMMIT_GATES,
+    HOST_GATES_BETWEEN_WORK_ITEMS,
     COMMIT_GATE_TIMEOUT_SECONDS,
     COMMIT_GATES,
     COMMIT_GATE_TEXT,

@@ -67,6 +67,7 @@ function subject(worktree: string, overrides: Record<string, unknown> = {}) {
     MAX_WORK_ITEM_ROUNDS: 4,
     PER_WORK_ITEM_BUILD: false,
     HOST_COMMIT_GATES: false,
+    HOST_GATES_BETWEEN_WORK_ITEMS: false,
     CODERABBIT_HOST_REVIEW: false,
     CODERABBIT_BETWEEN_WORK_ITEMS: false,
     DRY_RUN: false,
@@ -300,6 +301,86 @@ describe('runTask', () => {
     expect(outcome.status).toBe('done')
     // One between-item review per committed item, before the dual-review pass.
     expect(reviews.filter((label) => /wi1|wi2/.test(label))).toHaveLength(2)
+  })
+
+  test('a committed red host gate fails the work item before CodeRabbit runs', async () => {
+    const worktree = makeWorktree()
+    writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: IN PROGRESS\n\n## Progress\n\n- [ ] WI-1: only\n')
+    git(worktree, 'add', '.')
+    git(worktree, 'commit', '-m', 'One-item checklist')
+    const order: string[] = []
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('implement:')) {
+        writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: COMPLETE\n\n## Progress\n\n- [x] WI-1: only\n')
+        git(worktree, 'commit', '-aqm', 'Tick WI-1')
+        // The builder claims green, but the host gate below finds it red.
+        return { ok: true, gatesGreen: true, workItemsCompleted: 1, workItemsTotal: 1, commits: ['c1'], coderabbitRuns: 0, openIssues: [], summary: 'claimed green' }
+      }
+      if (label.startsWith('fix:')) {
+        git(worktree, 'commit', '-qm', 'attempt fix', '--allow-empty')
+        return { gatesGreen: true, summary: 'tried' }
+      }
+      return happyScript()(label, prompt)
+    })
+    const pipe = subject(worktree, {
+      PER_WORK_ITEM_BUILD: true,
+      HOST_COMMIT_GATES: true,
+      HOST_GATES_BETWEEN_WORK_ITEMS: true,
+      CODERABBIT_HOST_REVIEW: true,
+      CODERABBIT_BETWEEN_WORK_ITEMS: true,
+      runHostCommitGates: async () => {
+        order.push('gate')
+        return { green: false, results: [], detail: '`make all` failed: 1 test red' }
+      },
+      runCoderabbitHostReview: async () => {
+        order.push('coderabbit')
+        return { outcome: 'clean' as const, attempts: 1, findings: [], detail: '' }
+      },
+    })
+    const outcome = await pipe.runTask(task, null)
+    expect(outcome.status).toBe('failed')
+    expect(outcome.stage).toBe('implement')
+    expect(outcome.detail).toMatch(/HOST GATES RED/)
+    // Gates ran; CodeRabbit was never reached for the red item.
+    expect(order).toContain('gate')
+    expect(order).not.toContain('coderabbit')
+    expect(labels.some((label) => label.startsWith('integrate:'))).toBe(false)
+  })
+
+  test('per-item host gates run before the between-item CodeRabbit on a clean item', async () => {
+    const worktree = makeWorktree()
+    writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: IN PROGRESS\n\n## Progress\n\n- [ ] WI-1: only\n')
+    git(worktree, 'add', '.')
+    git(worktree, 'commit', '-m', 'One-item checklist')
+    const order: string[] = []
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('implement:')) {
+        writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: COMPLETE\n\n## Progress\n\n- [x] WI-1: only\n')
+        git(worktree, 'commit', '-aqm', 'Tick WI-1')
+        return { ok: true, gatesGreen: true, workItemsCompleted: 1, workItemsTotal: 1, commits: ['c1'], coderabbitRuns: 0, openIssues: [], summary: 'done' }
+      }
+      return happyScript()(label, prompt)
+    })
+    const pipe = subject(worktree, {
+      PER_WORK_ITEM_BUILD: true,
+      HOST_COMMIT_GATES: true,
+      HOST_GATES_BETWEEN_WORK_ITEMS: true,
+      CODERABBIT_HOST_REVIEW: true,
+      CODERABBIT_BETWEEN_WORK_ITEMS: true,
+      runHostCommitGates: async () => {
+        order.push('gate')
+        return { green: true, results: [], detail: '' }
+      },
+      runCoderabbitHostReview: async () => {
+        order.push('coderabbit')
+        return { outcome: 'clean' as const, attempts: 1, findings: [], detail: '' }
+      },
+    })
+    const outcome = await pipe.runTask(task, null)
+    expect(outcome.status).toBe('done')
+    // The per-item gate precedes the per-item CodeRabbit review.
+    expect(order.indexOf('gate')).toBeLessThan(order.indexOf('coderabbit'))
+    expect(order.indexOf('gate')).toBeGreaterThanOrEqual(0)
   })
 
   test('between-item CodeRabbit blocking findings fail the build after the fix cap', async () => {
