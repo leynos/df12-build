@@ -77,10 +77,15 @@ describe('implementation and fix prompts', () => {
     expect(off.fixPrompt(task, worktree, plan, ['x'], 1)).not.toContain('@codescene(disable:')
   })
 
-  test('implementWorkItemPrompt notes the CodeScene check runs after the gates, before CodeRabbit', () => {
+  test('implementWorkItemPrompt orders the CodeScene check after the gates and before CodeRabbit', () => {
     const item = { text: 'WI-1: add the parser' }
     const text = prompts.implementWorkItemPrompt(task, worktree, plan, item)
-    expect(text).toContain('CODE HEALTH')
+    const gatesAt = text.indexOf('DETERMINISTIC GATE')
+    const csAt = text.indexOf('CODE HEALTH')
+    const coderabbitAt = text.indexOf('CodeRabbit')
+    expect(gatesAt).toBeGreaterThanOrEqual(0)
+    expect(csAt).toBeGreaterThan(gatesAt)
+    expect(coderabbitAt).toBeGreaterThan(csAt)
     expect(text).toContain('CodeScene')
   })
 })

@@ -15,6 +15,10 @@ export interface RemediationProposal extends Record<string, unknown> {
   title?: string
   rationale?: string
   severity?: string
+  // The audit/review origin tag (e.g. `review:1.2.3`, `audit:1.2.4`) that
+  // run-task.ts stamps onto every proposal; the canonical identity for
+  // multi-source escalation. `rationale` is only a legacy fallback.
+  source?: string
 }
 
 export interface RemediationDeps {
@@ -65,7 +69,9 @@ export function dedupeProposals(proposals: readonly RemediationProposal[]): Reme
   for (const proposal of proposals || []) {
     const key = String(proposal?.title || '').trim().toLowerCase().replace(/\s+/g, ' ')
     if (!key) continue
-    const source = String(proposal?.rationale || '')
+    // Canonical origin is `source` (the tag run-task.ts stamps); rationale is a
+    // legacy fallback only.
+    const source = String(proposal?.source || proposal?.rationale || '')
     const existing = byKey.get(key)
     if (existing) {
       if (source && !(existing.sources || []).includes(source)) existing.sources = [...(existing.sources || []), source]
@@ -84,8 +90,12 @@ export function triageNeedsEscalation(deduped: readonly (RemediationProposal & {
   const sources = new Set<string>()
   for (const proposal of deduped) {
     for (const source of proposal.sources || []) sources.add(source)
-    // Fall back to the rationale tag when sources was not threaded.
-    if (!(proposal.sources || []).length && proposal.rationale) sources.add(String(proposal.rationale))
+    // Fall back to the proposal's own source tag (rationale only as a last
+    // resort for legacy inputs) when the merged `sources` was not threaded.
+    if (!(proposal.sources || []).length) {
+      const fallback = String(proposal.source || proposal.rationale || '')
+      if (fallback) sources.add(fallback)
+    }
   }
   return sources.size > 1
 }

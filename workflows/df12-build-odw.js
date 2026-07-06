@@ -1724,7 +1724,7 @@ function dedupeProposals(proposals) {
   for (const proposal of proposals || []) {
     const key = String(proposal?.title || "").trim().toLowerCase().replace(/\s+/g, " ");
     if (!key) continue;
-    const source = String(proposal?.rationale || "");
+    const source = String(proposal?.source || proposal?.rationale || "");
     const existing = byKey.get(key);
     if (existing) {
       if (source && !(existing.sources || []).includes(source)) existing.sources = [...existing.sources || [], source];
@@ -1738,7 +1738,10 @@ function triageNeedsEscalation(deduped) {
   const sources = /* @__PURE__ */ new Set();
   for (const proposal of deduped) {
     for (const source of proposal.sources || []) sources.add(source);
-    if (!(proposal.sources || []).length && proposal.rationale) sources.add(String(proposal.rationale));
+    if (!(proposal.sources || []).length) {
+      const fallback = String(proposal.source || proposal.rationale || "");
+      if (fallback) sources.add(fallback);
+    }
   }
   return sources.size > 1;
 }
@@ -2279,9 +2282,10 @@ function makeTaskPipeline(deps) {
   }
   async function runBetweenItemGates(task, worktree, plan, itemLabel, extra) {
     const tag = task.id;
-    const runFix = async (blocking, fixLabel) => {
+    const runGates = HOST_COMMIT_GATES2 && HOST_GATES_BETWEEN_WORK_ITEMS2;
+    const runFix = async (blocking, fixLabel, attempt) => {
       phase("Implement");
-      await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, blocking, 1), buildAgentOptions2({ phase: "Implement", label: fixLabel, schema: FIX_SCHEMA })), fixLabel));
+      await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, blocking, attempt), buildAgentOptions2({ phase: "Implement", label: fixLabel, schema: FIX_SCHEMA })), fixLabel));
       const committed = await verifyWorktreeCommitted(worktree);
       if (!committed.ok) {
         return { fail: { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the fix for ${itemLabel} left uncommitted state (${committed.detail}); every fix must be committed before the checks re-run`, worktree, proposals: [], ...extra } };
@@ -2289,15 +2293,17 @@ function makeTaskPipeline(deps) {
       return null;
     };
     for (let attempt = 1; attempt <= MAX_REVIEW_ROUNDS2; attempt++) {
-      const gates = await hostGateLock2(() => runHostCommitGates2(worktree, tag, `${itemLabel} a${attempt}`));
-      if (!gates.green) {
-        log(`[task ${tag}] host commit gates red after ${itemLabel} (attempt ${attempt} of ${MAX_REVIEW_ROUNDS2})`);
-        if (attempt === MAX_REVIEW_ROUNDS2) {
-          return { fail: { id: tag, status: "failed", stage: "implement", detail: `HOST GATES RED after ${itemLabel}: ${gates.detail} The committed work item's gatesGreen claim could not be reproduced after ${MAX_REVIEW_ROUNDS2} fix attempt(s).`, worktree, proposals: [], ...extra } };
+      if (runGates) {
+        const gates = await hostGateLock2(() => runHostCommitGates2(worktree, tag, `${itemLabel} a${attempt}`));
+        if (!gates.green) {
+          log(`[task ${tag}] host commit gates red after ${itemLabel} (attempt ${attempt} of ${MAX_REVIEW_ROUNDS2})`);
+          if (attempt === MAX_REVIEW_ROUNDS2) {
+            return { fail: { id: tag, status: "failed", stage: "implement", detail: `HOST GATES RED after ${itemLabel}: ${gates.detail} The committed work item's gatesGreen claim could not be reproduced after ${MAX_REVIEW_ROUNDS2} fix attempt(s).`, worktree, proposals: [], ...extra } };
+          }
+          const durability2 = await runFix([`HOST GATES RED: ${gates.detail} The agent-reported gate status for ${itemLabel} was wrong or is stale \u2014 reproduce the failure from the log, fix it, re-run the gates to green, and commit.`], `fix:${tag} ${itemLabel} gate a${attempt}`, attempt);
+          if (durability2) return durability2;
+          continue;
         }
-        const durability2 = await runFix([`HOST GATES RED: ${gates.detail} The agent-reported gate status for ${itemLabel} was wrong or is stale \u2014 reproduce the failure from the log, fix it, re-run the gates to green, and commit.`], `fix:${tag} ${itemLabel} gate a${attempt}`);
-        if (durability2) return durability2;
-        continue;
       }
       const cs = CS_CHECK2 ? await hostGateLock2(() => runCodeSceneCheck2(worktree, tag, `${itemLabel} a${attempt}`)) : { clean: true, skipped: true, detail: "", logFile: "" };
       if (cs.clean) return { ok: true };
@@ -2305,7 +2311,7 @@ function makeTaskPipeline(deps) {
       if (attempt === MAX_REVIEW_ROUNDS2) {
         return { fail: { id: tag, status: "failed", stage: "implement", detail: `CODESCENE RED after ${itemLabel}: ${cs.detail} The committed work item's code health could not be cleared after ${MAX_REVIEW_ROUNDS2} fix attempt(s).`, worktree, proposals: [], ...extra } };
       }
-      const durability = await runFix([`CODESCENE RED: ${cs.detail} Clear these code-health regressions by refactoring, or \u2014 only where further refinement would be deleterious \u2014 suppress the specific smell with a justified @codescene(disable:"...") comment, then re-run the check to green and commit.`], `fix:${tag} ${itemLabel} cs a${attempt}`);
+      const durability = await runFix([`CODESCENE RED: ${cs.detail} Clear these code-health regressions by refactoring, or \u2014 only where further refinement would be deleterious \u2014 suppress the specific smell with a justified @codescene(disable:"...") comment, then re-run the check to green and commit.`], `fix:${tag} ${itemLabel} cs a${attempt}`, attempt);
       if (durability) return durability;
     }
     return { ok: true };
@@ -2397,7 +2403,7 @@ function makeTaskPipeline(deps) {
         strikes = 0;
         noProgressNote = "";
         log(`[task ${tag}] work-item round ${round}: ${after.ticked}/${after.ticked + after.unticked} Progress item(s) committed`);
-        if (HOST_COMMIT_GATES2 && HOST_GATES_BETWEEN_WORK_ITEMS2) {
+        if (HOST_COMMIT_GATES2 && HOST_GATES_BETWEEN_WORK_ITEMS2 || CS_CHECK2) {
           const gate = await runBetweenItemGates(task, worktree, plan, `wi${round}`, extra);
           if ("fail" in gate) return gate;
         }

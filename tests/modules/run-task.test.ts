@@ -385,6 +385,87 @@ describe('runTask', () => {
     expect(order.indexOf('gate')).toBeGreaterThanOrEqual(0)
   })
 
+  test('the between-item CodeScene fix loop forwards the real attempt number', async () => {
+    const worktree = makeWorktree()
+    writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: IN PROGRESS\n\n## Progress\n\n- [ ] WI-1: only\n')
+    git(worktree, 'add', '.')
+    git(worktree, 'commit', '-m', 'One-item checklist')
+    let cs = 0
+    const rounds: number[] = []
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('implement:')) {
+        writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: COMPLETE\n\n## Progress\n\n- [x] WI-1: only\n')
+        git(worktree, 'commit', '-aqm', 'Tick WI-1')
+        return { ok: true, gatesGreen: true, workItemsCompleted: 1, workItemsTotal: 1, commits: ['c1'], coderabbitRuns: 0, openIssues: [], summary: 'done' }
+      }
+      if (label.startsWith('fix:')) {
+        git(worktree, 'commit', '-qm', 'refactor', '--allow-empty')
+        return { gatesGreen: true, summary: 'refactored' }
+      }
+      if (label.startsWith('code-review:') || label.startsWith('expert-review:')) return passReview
+      return happyScript()(label, prompt)
+    })
+    const pipe = subject(worktree, {
+      MAX_REVIEW_ROUNDS: 3,
+      PER_WORK_ITEM_BUILD: true,
+      HOST_COMMIT_GATES: true,
+      HOST_GATES_BETWEEN_WORK_ITEMS: true,
+      CS_CHECK: true,
+      // Capture the round forwarded into every fix (was hardcoded to 1).
+      fixPrompt: (_task: unknown, _worktree: unknown, _plan: unknown, _blocking: unknown, round: number) => {
+        rounds.push(round)
+        return 'FIX'
+      },
+      runHostCommitGates: async () => ({ green: true, results: [], detail: '' }),
+      // Dirty on the first two attempts, clean thereafter.
+      runCodeSceneCheck: async () => {
+        cs += 1
+        return cs >= 3
+          ? { clean: true, skipped: false, detail: '', logFile: '' }
+          : { clean: false, skipped: false, detail: 'Complex Method in x.ts', logFile: '/tmp/x' }
+      },
+    })
+    const outcome = await pipe.runTask(task, null)
+    expect(outcome.status).toBe('done')
+    // The two between-item CodeScene fixes carried the real attempt numbers,
+    // not a hardcoded 1.
+    expect(rounds).toEqual([1, 2])
+  })
+
+  test('the CodeScene check runs between items even when host gates between items are off', async () => {
+    const worktree = makeWorktree()
+    writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: IN PROGRESS\n\n## Progress\n\n- [ ] WI-1: only\n')
+    git(worktree, 'add', '.')
+    git(worktree, 'commit', '-m', 'One-item checklist')
+    const csLabels: string[] = []
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('implement:')) {
+        writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: COMPLETE\n\n## Progress\n\n- [x] WI-1: only\n')
+        git(worktree, 'commit', '-aqm', 'Tick WI-1')
+        return { ok: true, gatesGreen: true, workItemsCompleted: 1, workItemsTotal: 1, commits: ['c1'], coderabbitRuns: 0, openIssues: [], summary: 'done' }
+      }
+      if (label.startsWith('code-review:') || label.startsWith('expert-review:')) return passReview
+      return happyScript()(label, prompt)
+    })
+    const pipe = subject(worktree, {
+      PER_WORK_ITEM_BUILD: true,
+      // Between-item host gates OFF, but the CodeScene check is ON — it must
+      // still run between items (it is a separate gate).
+      HOST_COMMIT_GATES: false,
+      HOST_GATES_BETWEEN_WORK_ITEMS: false,
+      CS_CHECK: true,
+      runCodeSceneCheck: async (_wt: string, _tag: string, label: string) => {
+        csLabels.push(label)
+        return { clean: true, skipped: false, detail: '', logFile: '' }
+      },
+    })
+    const outcome = await pipe.runTask(task, null)
+    expect(outcome.status).toBe('done')
+    // A `wi<round>` label proves the between-item check ran (dual-review checks
+    // use `r<round>` labels).
+    expect(csLabels.some((label) => label.startsWith('wi'))).toBe(true)
+  })
+
   test('between-item CodeRabbit blocking findings fail the build after the fix cap', async () => {
     const worktree = makeWorktree()
     writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: IN PROGRESS\n\n## Progress\n\n- [ ] WI-1: only\n')

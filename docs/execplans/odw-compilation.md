@@ -655,13 +655,33 @@ artefact-slicing suites were retained as shipped-artefact coverage. The
 Surprises entry about the `checkJs: false` blind spot is resolved by the
 milestone 10 entry conversion.
 
+2026-07-06 (CodeScene follow-up fixes): a wyvern team confirmed five review
+findings valid. `dedupeProposals` and `triageNeedsEscalation`
+(remediation.ts) now key on the proposal's `source` tag (the
+`review:`/`audit:` origin run-task.ts stamps), with `rationale` kept only as a
+legacy fallback and `source` added to the `RemediationProposal` type, so
+multi-source escalation counts real origins rather than free-form text. In
+`runBetweenItemGates` the `runFix` helper now forwards the live attempt number
+into `fixPrompt` (it was hardcoded to 1, losing the round on retries). The
+between-item CodeScene check was decoupled from `hostGatesBetweenWorkItems`:
+the caller guard is now `(HOST_COMMIT_GATES && HOST_GATES_BETWEEN_WORK_ITEMS)
+|| CS_CHECK`, and inside the loop the commit-gate portion runs only when the
+gate flag is on while the CodeScene portion runs whenever `csCheck` is on, so
+enabling `csCheck` alone runs it between items. Tests strengthened: the
+implementWorkItemPrompt test asserts step ordering by index (gates, then
+CodeScene, then CodeRabbit); new run-task tests assert the between-item fix
+loop forwards attempts [1, 2] rather than always 1, and that the CodeScene
+check runs between items (a `wi` label) even with `hostGatesBetweenWorkItems`
+off. Docs: architecture.md's gate cell split into shorter sentences, and
+grammar/style fixes in the execplan and SKILL.md (via scribe).
+
 2026-07-06 (CodeScene deterministic gate): added `cs-check-changed` as a
 second deterministic gate, running after the commit gates and before
 CodeRabbit at every gate point — each work item (in `runBetweenItemGates`),
 each dual-review round, and the addendum lane. `runCodeSceneCheck`
 (host-review.ts) runs `csCheckCommand` (default `cs-check-changed`, an
-operator-provided wrapper) through the same secure-log spawn path as the
-commit gates on the committed changed files, and skips gracefully when the
+operator-provided wrapper) on the committed changed files, through the same
+secure-log spawn path as the commit gates, and skips gracefully when the
 binary is absent (like `make verify-modules` without Dafny). A code-health
 regression short-circuits to a bounded fix round before any CodeRabbit quota
 or reviewer-agent tokens are spent, keeping the cost hierarchy (free gates,
@@ -690,7 +710,7 @@ hygiene: `host-review.test.ts` imports were hoisted to the top and the
 streaming tests gained `afterEach` cleanup of every temp dir and gate log; a
 new `recovery-discovery.test.ts` case drives the `worktree-probe-fault` skip
 end-to-end (chmod 0000 on the worktrees parent to force an EACCES stat,
-skipped when running as root). Docs: the developers guide roster now lists
+skipped when running as root). Docs: the developers-guide roster now lists
 `host-review.ts`, the dated revision notes were tidied by scribe, and every
 `/tmp/df12-gate-*` reference was updated to the secure per-run directory.
 Skipped as already-covered: the compile-time-regression finding (tsc's
@@ -704,7 +724,7 @@ already carry task id, stage, round, and attempt).
 2026-07-06 (model right-sizing): the operator flagged three places where an
 Opus/high-effort model was paying for near-zero-cognition work. (1) The
 write-preflight probe (writing one exact token to one exact path) now keeps
-the plan/build ADAPTER, but runs at `writeProbeEffort` (minimal) and no
+the plan/build adapter, but runs at `writeProbeEffort` (minimal) and no
 longer inherits `planModel`/`buildModel`; `writeProbeModelByAdapter` sets a
 cheaper per-adapter probe model. (2) Report-only partial-branch assessment
 gained a deterministic fast-classifier — an empty, clean branch is
@@ -731,16 +751,16 @@ weekly quota, and the reviewer agents (code and expert review) spend
 tokens, the one non-replenishable resource — and stated a preference to
 trade wall-clock time for tokens. Two changes followed. (1) Within the
 per-work-item build, the host commit gates now re-run after each committed
-item, before the between-item CodeRabbit review (hostGatesBetweenWorkItems,
+item, before the between-item CodeRabbit review (`hostGatesBetweenWorkItems`,
 default on), closing the window where a committed red item could ride the
-agent's gatesGreen claim across later items. (2) The dual-review round was
+agent's `impl.gatesGreen` claim across later items. (2) The dual-review round was
 reordered to spend cheapest-first — host gates, then CodeRabbit, then the
 reviewer agents — short-circuiting to a fix round the moment a cheaper
 stage blocks, so a CodeRabbit-blocking round no longer dispatches the
 reviewer agents (a CodeRabbit deferral still falls through to them as the
 decisive review). Module tests pin the per-item gate ordering, the
 red-gate fail, and the CodeRabbit-before-agents short-circuit; the
-users-guide, architecture, and developers guide document the cost-ordered
+users-guide, architecture, and developers-guide document the cost-ordered
 stage.
 
 2026-07-06 (review remediation, batch 3): a wyvern team triaged another
@@ -761,8 +781,8 @@ doc-comment were made via scribe. Skipped as stale: the recurring
 re-confirmed by a runtime probe and passing bun suites; established
 authoritatively via firecrawl in batch 2 that support landed in
 bun-v1.2.6), and the developers-guide dependency list (already complete).
-The write-preflight cross-boundary regex was verified theoretical (the
-tokens are co-located) but was scoped anyway, as a cheap robustness win.
+The write-preflight cross-boundary regex was confirmed theoretical (the
+tokens are co-located), but was scoped anyway as a cheap robustness win.
 
 2026-07-06 (design-review remediation): a reviewer flagged that "CodeRabbit
 between each ExecPlan stage" was not yet real — host CodeRabbit ran only

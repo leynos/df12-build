@@ -127,8 +127,8 @@ provides the doc skills):
    and `error.json` beside the run's config and notes instead of pooling them
    under a shared `~/.odw/runs`. These are inspectable agent logs written
    entirely by ODW, decoupled from workflow control flow — a run that cannot
-   write them still proceeds. (A shared `~/.odw/runs` is fine if you prefer one
-   pool; the sidecar just keeps each run self-contained.) With host-run CodeRabbit
+   write them still proceeds. (A shared `~/.odw/runs` also works for a single
+   pool; the sidecar simply keeps each run self-contained.) With host-run CodeRabbit
    review (the default), agents never wait on CodeRabbit, so the adapter
    `timeout` only needs to cover honest stage work — see the timeout
    recommendation below. Only with `coderabbitHostReview=false` do agents
@@ -218,8 +218,9 @@ provides the doc skills):
    check on the committed changed files runs as a second deterministic gate
    after the commit gates and before CodeRabbit at every gate point; a
    regression drives a bounded fix round, and the build agent clears it by
-   refactoring or, only where refactoring would be deleterious, suppresses a
-   specific smell with a justified `@codescene(disable:"...")` comment) and
+   refactoring, or — only where refactoring would be deleterious — by
+   suppressing the specific smell with a justified
+   `@codescene(disable:"...")` comment) and
    `csCheckCommand` (default `cs-check-changed`, the operator-provided wrapper
    — override with the exact invocation, e.g. `cs check --changed --base
    main`). The check skips gracefully when its binary is absent, so a runner
@@ -259,7 +260,7 @@ provides the doc skills):
 
 ## The supervision cycle
 
-Every time a run completes you do the same loop. When `runsRoot` points at the
+Every time a run completes, follow the same loop. When `runsRoot` points at the
 sidecar, the durable copies to inspect are `$SIDECAR/runs/<run>/result.json`
 (parsed below), `$SIDECAR/runs/<run>/events.jsonl` (the per-`agent()` stream —
 count `agent_finished` by adapter to see where effort went, or trace a stuck
