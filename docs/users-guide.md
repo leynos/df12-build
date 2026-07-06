@@ -7,6 +7,70 @@ remediation work through isolated worker branches. Use it only for projects that
 already have a roadmap, design documentation, `AGENTS.md`, repository gates, and
 the df12 skill/toolchain installed.
 
+## Workflow at a glance
+
+Three sequence diagrams sketch the moving parts you will operate around: how
+the shipped workflow artefact is built, how a fresh launch recovers surviving
+branches, and how a single task moves from plan to integration. Each diagram is
+followed by a text description that conveys the same sequence.
+
+Figure 1 shows how the single-file workflow artefact is produced and kept
+honest.
+
+```mermaid
+sequenceDiagram
+  participant Makefile
+  participant scripts/build-workflow.mjs
+  participant workflows/df12-build-odw.js
+  Makefile->>scripts/build-workflow.mjs: run workflow-build
+  scripts/build-workflow.mjs->>workflows/df12-build-odw.js: regenerate artefact
+  Makefile->>scripts/build-workflow.mjs: run workflow-freshness
+```
+
+*Figure 1 — the build pipeline.* `make workflow-build` runs
+`scripts/build-workflow.mjs`, which regenerates the committed single-file
+artefact `workflows/df12-build-odw.js` from the module tree. `make
+workflow-freshness` then re-runs the build and fails if the committed artefact
+differs, so a stale artefact can never land.
+
+Figure 2 shows fresh-run recovery of surviving task branches.
+
+```mermaid
+sequenceDiagram
+  participant RecoveryDiscovery
+  participant RecoveryDecision
+  participant Main
+  RecoveryDiscovery->>RecoveryDecision: candidate + evidence
+  RecoveryDecision-->>Main: resume or report
+  Main->>RecoveryDecision: continue-mode dispatch
+```
+
+*Figure 2 — fresh-run recovery.* Recovery discovery hands each surviving
+branch's candidate record and host-collected git evidence to the recovery
+decision. The decision returns either an eligible branch to resume or a
+report-only result to the main loop; in continue mode the main loop asks the
+decision which stage to dispatch next from the committed ExecPlan state.
+
+Figure 3 shows how a single task moves from plan to integration.
+
+```mermaid
+sequenceDiagram
+  participant runTask
+  participant runPlanDesignLoop
+  participant runImplementationStage
+  participant runDualReviewAndIntegration
+  runTask->>runPlanDesignLoop: approve ExecPlan
+  runPlanDesignLoop->>runImplementationStage: validated plan
+  runImplementationStage->>runDualReviewAndIntegration: gates-green implementation
+  runDualReviewAndIntegration-->>runTask: integrate or halt
+```
+
+*Figure 3 — the per-task pipeline.* `runTask` drives the plan and design-review
+loop until the ExecPlan is approved, hands the validated plan to the
+implementation stage, and that stage passes gates-green work to dual review and
+integration. The review-and-integration stage either integrates the branch
+through the merge lock or halts it for the operator.
+
 ## Launch model
 
 Current ODW launches use a `.workshop` sidecar outside the target project's Git
