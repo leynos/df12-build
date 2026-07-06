@@ -69,7 +69,7 @@ Minimal sidecar `odw.config.json` shape for the Claude/Codex split:
   "workspaceMode": "inplace",
   "timeout": 5400,
   "schemaRetries": 2,
-  "runsRoot": "~/.odw/runs",
+  "runsRoot": "/abs/path/to/example-project.workshop/df12-build-RUN/runs",
   "workflowsRoot": "~/.odw/workflows",
   "claudeJobsScope": "project",
   "adapters": {
@@ -133,6 +133,28 @@ Minimal sidecar `odw.config.json` shape for the Claude/Codex split:
   }
 }
 ```
+
+### Inspectable logs in the sidecar
+
+Point both log sinks at the sidecar so a run's agent transcripts and CodeRabbit
+findings are durably inspectable next to the run, without touching workflow
+behaviour — both are out-of-band sinks outside the project Git worktree, so
+they never enter a diff, trip `workflow-freshness`, or affect a gate:
+
+- **Agent logs** — set `runsRoot` (in `odw.config.json`) to an absolute path
+  inside the run's sidecar, e.g. `"$SIDECAR/runs"`. ODW writes each run's
+  durable artefacts there: `events.jsonl` (an ordered stream with
+  `agent_started`/`agent_finished` per `agent()` call, tagged by adapter,
+  label, and phase), `result.json` (the final return, including every
+  `reviewRounds`, `assessments`, host-gate result, and CodeRabbit summary), and
+  `error.json`. This is entirely ODW's domain — no workflow involvement.
+  Regenerate the value per run, or use a shared `~/.odw/runs` if you prefer one
+  pool; the sidecar keeps each run's logs beside its config and notes.
+- **CodeRabbit findings** — set `coderabbitFindingsFile` (in `args.json`) to a
+  sidecar JSONL path, e.g. `"$SIDECAR/coderabbit-findings.jsonl"`. Every parsed
+  finding (timestamp, task label, severity, file, comment, codegen
+  instructions, suggestion count) is appended best-effort: a bad path or full
+  disk degrades logging with a warning and never fails a task.
 
 Patch the sidecar copy only to recover or tune a live workshop. Record the patch
 in `operator-notes.md`, validate it there, then promote the proven change back

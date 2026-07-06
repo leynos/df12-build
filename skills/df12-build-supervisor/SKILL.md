@@ -96,6 +96,13 @@ provides the doc skills):
    - `args.json` — project-specific workflow args.
    - `operator-notes.md` — run id, launch command, patches, validations,
      status checks, failures, and operator decisions.
+   - `runs/` — ODW's per-run agent logs, when `runsRoot` points here (see
+     below): `events.jsonl` (`agent_started`/`agent_finished` per `agent()`
+     call, tagged by adapter, label, and phase), `result.json` (the final
+     return, including every `reviewRounds`, `assessments`, host-gate result,
+     and CodeRabbit summary), and `error.json`.
+   - `coderabbit-findings.jsonl` — appended CodeRabbit findings, when
+     `coderabbitFindingsFile` points here (see below).
 
    Bootstrap the workflow script once so later launches do not overwrite
    sidecar-local recovery edits:
@@ -114,7 +121,14 @@ provides the doc skills):
    proven change back to the `df12-build` repository as an ordinary branch.
    For normal Codex and Claude Code workshops, set ODW `concurrency` to `16`;
    keep `maxAgents` high (for example `1000`) because it is the per-run
-   dispatch guard, not the live process-pool size. With host-run CodeRabbit
+   dispatch guard, not the live process-pool size. Set `runsRoot` (in
+   `odw.config.json`) to an absolute path inside this sidecar, e.g.
+   `"$SIDECAR/runs"`, so ODW writes each run's `events.jsonl`, `result.json`,
+   and `error.json` beside the run's config and notes instead of pooling them
+   under a shared `~/.odw/runs`. These are inspectable agent logs written
+   entirely by ODW, decoupled from workflow control flow — a run that cannot
+   write them still proceeds. (A shared `~/.odw/runs` is fine if you prefer one
+   pool; the sidecar just keeps each run self-contained.) With host-run CodeRabbit
    review (the default), agents never wait on CodeRabbit, so the adapter
    `timeout` only needs to cover honest stage work — see the timeout
    recommendation below. Only with `coderabbitHostReview=false` do agents
@@ -231,7 +245,12 @@ provides the doc skills):
 
 ## The supervision cycle
 
-Every time a run completes you do the same loop:
+Every time a run completes you do the same loop. When `runsRoot` points at the
+sidecar, the durable copies to inspect are `$SIDECAR/runs/<run>/result.json`
+(parsed below), `$SIDECAR/runs/<run>/events.jsonl` (the per-`agent()` stream —
+count `agent_finished` by adapter to see where effort went, or trace a stuck
+phase), `$SIDECAR/runs/<run>/error.json` (present only on a terminal failure),
+and `$SIDECAR/coderabbit-findings.jsonl` (accumulated findings across runs).
 
 1. **Parse the result JSON.** Key fields: `processed` (ids merged this run),
    `results[]` (per-task `{id, status, stage, detail}` plus any
