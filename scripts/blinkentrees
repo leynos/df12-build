@@ -131,7 +131,7 @@ EVENT_WEIGHT = {
 SPARKS = "▁▂▃▄▅▆▇█"
 
 TRAIL_WIDTH = 16
-WORKTREE_MIN_WIDTH = 24
+WORKTREE_MIN_WIDTH = 20
 
 
 @dataclass(frozen=True)
