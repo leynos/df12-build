@@ -84,6 +84,7 @@ export interface TaskPipelineDeps {
   PER_WORK_ITEM_BUILD: boolean
   HOST_COMMIT_GATES: boolean
   CODERABBIT_HOST_REVIEW: boolean
+  CODERABBIT_BETWEEN_WORK_ITEMS: boolean
   DRY_RUN: boolean
   AUTO_MERGE: boolean
   BASE: string
@@ -146,6 +147,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     PER_WORK_ITEM_BUILD,
     HOST_COMMIT_GATES,
     CODERABBIT_HOST_REVIEW,
+    CODERABBIT_BETWEEN_WORK_ITEMS,
     DRY_RUN,
     AUTO_MERGE,
     BASE,
@@ -287,6 +289,48 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
   // Returns null when the plan has no checklist (caller falls back to the
   // single-turn build), { fail } on failure, or { impl } with an aggregate
   // implementation report on success.
+  // Deterministic host CodeRabbit gate on ONE committed work item, run between
+  // build turns. Blocking findings (critical/major) drive a bounded fix loop;
+  // an unresolved set fails the item, and a terminal deferral (rate limit or
+  // CLI fault after the configured retries) HALTS the task for assessment
+  // rather than silently continuing — "between" is a real gate, so a gate that
+  // cannot complete must not read as a pass. Returns { ok } or { fail }.
+  async function runBetweenItemReview(
+    task: SelectedTask,
+    worktree: string,
+    plan: StagePlan,
+    itemLabel: string,
+    extra: Record<string, unknown>,
+  ): Promise<{ ok: true; coderabbitRuns: number } | { fail: StageResult }> {
+    const tag = task.id
+    let runs = 0
+    for (let attempt = 1; attempt <= MAX_REVIEW_ROUNDS; attempt++) {
+      const review = await runCoderabbitHostReview(worktree, `coderabbit:${tag} ${itemLabel} a${attempt}`)
+      await recordCoderabbitReview(`${tag} ${itemLabel} a${attempt}`, review)
+      runs += 1
+      if (review.outcome === 'auth') {
+        return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: `CodeRabbit host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } }
+      }
+      if (review.outcome === 'rate-limited' || review.outcome === 'error') {
+        coderabbitCapture.deferred += 1
+        return { fail: { id: tag, status: 'halted', stage: 'code-review', detail: `CodeRabbit between-item review could not complete for ${itemLabel} (${review.outcome} after ${review.attempts} attempt(s)): ${review.detail}; the work is committed but unreviewed — resolve the CodeRabbit quota/CLI fault and relaunch with resumeMode: "continue"`, worktree, proposals: [], ...extra } }
+      }
+      const blocking = coderabbitBlockingItems(review.findings)
+      log(`[task ${tag}] between-item CodeRabbit ${itemLabel} attempt ${attempt}: ${review.findings.length} finding(s), ${blocking.length} blocking`)
+      if (!blocking.length) return { ok: true, coderabbitRuns: runs }
+      if (attempt === MAX_REVIEW_ROUNDS) {
+        return { fail: { id: tag, status: 'failed', stage: 'code-review', detail: `CodeRabbit between-item review left blocking finding(s) unresolved after ${MAX_REVIEW_ROUNDS} fix attempt(s) on ${itemLabel}: ${blocking.join('; ')}`, worktree, proposals: [], ...extra } }
+      }
+      phase('Implement')
+      await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, blocking, attempt), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} ${itemLabel} a${attempt}`, schema: FIX_SCHEMA })), `fix:${tag} ${itemLabel} a${attempt}`))
+      const committed = await verifyWorktreeCommitted(worktree)
+      if (!committed.ok) {
+        return { fail: { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the CodeRabbit fix for ${itemLabel} left uncommitted state (${committed.detail}); every fix must be committed before re-review`, worktree, proposals: [], ...extra } }
+      }
+    }
+    return { ok: true, coderabbitRuns: runs }
+  }
+
   async function runWorkItemBuildLoop(task: SelectedTask, worktree: string, plan: StagePlan, opts: Record<string, unknown> = {}): Promise<{ impl?: StageImpl; fail?: StageResult } | null> {
     const tag = task.id
     const extra = (opts.extra as Record<string, unknown>) || {}
@@ -347,6 +391,14 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         strikes = 0
         noProgressNote = ''
         log(`[task ${tag}] work-item round ${round}: ${after.ticked}/${after.ticked + after.unticked} Progress item(s) committed`)
+        // Deterministic CodeRabbit gate on this committed work item, before the
+        // next unticked item is dispatched (concern: "CodeRabbit between each
+        // ExecPlan stage"). Off by config restores end-of-stage-only review.
+        if (CODERABBIT_HOST_REVIEW && CODERABBIT_BETWEEN_WORK_ITEMS) {
+          const gate = await runBetweenItemReview(task, worktree, plan, `wi${round}`, extra)
+          if ('fail' in gate) return gate
+          coderabbitRuns += gate.coderabbitRuns
+        }
       }
     }
     const final = await readExecplanState(planRef)
@@ -510,6 +562,13 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
           phase('Implement')
           const gateFix = await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, gateBlocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`))
           reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(gateFix as Record<string, unknown> | null)
+          // A fix that leaves the worktree dirty is unreviewable and lost at
+          // the squash merge, so the next round's gates/reviews and any
+          // integration would judge state the host never verified.
+          const gateFixCommitted = await verifyWorktreeCommitted(worktree)
+          if (!gateFixCommitted.ok) {
+            return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the gate-fix round left uncommitted state (${gateFixCommitted.detail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
+          }
           continue
         }
       }
@@ -600,6 +659,13 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       phase('Implement')
       const fix = await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, blocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`))
       roundRecord.fix = summarizeFixReport(fix as Record<string, unknown> | null)
+      // Same durability contract as implementation: a review fix that leaves
+      // the worktree dirty is unreviewable and squash-merge-lost, so fail
+      // closed before the next review round or integration.
+      const fixCommitted = await verifyWorktreeCommitted(worktree)
+      if (!fixCommitted.ok) {
+        return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the review-fix round left uncommitted state (${fixCommitted.detail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
+      }
     }
 
     if (!reviewsPass) {

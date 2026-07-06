@@ -6,7 +6,7 @@ MARKDOWN_FILES := $(shell find . \
 	-name '*.md' -print | sort)
 WORKFLOW_FILES := workflows/df12-build-odw.js workflows/df12-build.js
 
-.PHONY: all clean check-fmt lint typecheck markdownlint nixie test test-modules test-workflow verify-modules workflow-parse workflow-build workflow-freshness
+.PHONY: all clean check-fmt lint typecheck markdownlint nixie test test-modules test-workflow verify-modules verify-modules-strict workflow-parse workflow-build workflow-freshness
 
 all: check-fmt lint typecheck markdownlint nixie test workflow-freshness verify-modules
 
@@ -57,13 +57,21 @@ test-workflow: workflow-build
 	uv run tests/run-odw-script-tests.py
 
 # LemmaScript -> Dafny verification of the recovery decision-table model.
-# Skips when dafny is not on PATH so the gate stays runnable everywhere.
+# Skips when dafny is not on PATH so the gate stays runnable everywhere;
+# `make all` uses this lenient form so local runs without Dafny stay friendly.
 verify-modules:
 	@if command -v dafny >/dev/null 2>&1; then \
 		node_modules/.bin/lsc check --backend=dafny verify/recovery-decision.model.ts; \
 	else \
 		echo "verify-modules: dafny not on PATH; skipping LemmaScript verification"; \
 	fi
+
+# Strict verification that FAILS when Dafny is absent. CI must run this (not
+# the lenient verify-modules) so the Dafny-backed proof is a real PR gate
+# rather than advisory. The CI job is responsible for installing Dafny.
+verify-modules-strict:
+	@command -v dafny >/dev/null 2>&1 || { echo "verify-modules-strict: dafny is required but not on PATH"; exit 1; }
+	node_modules/.bin/lsc check --backend=dafny verify/recovery-decision.model.ts
 
 workflow-parse:
 	node -e "const fs=require('fs'); for (const path of process.argv.slice(1)) { let source=fs.readFileSync(path,'utf8').replace(/^export const meta\s*=/m,'const meta ='); new Function('return (async function __workflow_wrapped__() {\n' + source + '\n})'); console.log(path + ': wrapped JavaScript parses'); }" $(WORKFLOW_FILES)

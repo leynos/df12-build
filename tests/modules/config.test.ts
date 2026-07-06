@@ -29,6 +29,9 @@ describe('makeConfig defaults', () => {
     expect(config.DRY_RUN).toBe(false)
     expect(config.AUTH_PREFLIGHT).toBe(true)
     expect(config.REQUIRE_CODERABBIT_AUTH).toBe(true)
+    expect(config.CODERABBIT_HOST_REVIEW).toBe(true)
+    expect(config.CODERABBIT_BETWEEN_WORK_ITEMS).toBe(true)
+    expect(config.HOST_COMMIT_GATES).toBe(true)
     expect(config.ASSESS_PARTIAL_BRANCHES).toBe(true)
     expect(config.RESUME_PARTIAL_BRANCHES).toBe(false)
     expect(config.RESUME_MODE).toBe('assess')
@@ -80,6 +83,12 @@ describe('makeConfig overrides and clamps', () => {
     expect(makeConfig({ resumeMode: 'continue' }).RESUME_MODE).toBe('continue')
     expect(makeConfig({ resumeMode: 'assess' }).RESUME_MODE).toBe('assess')
     expect(() => makeConfig({ resumeMode: 'yolo' })).toThrow(/Unsupported resumeMode/)
+  })
+
+  test('the between-work-items host review can be disabled independently', () => {
+    expect(makeConfig({ coderabbitBetweenWorkItems: false }).CODERABBIT_BETWEEN_WORK_ITEMS).toBe(false)
+    // Still defaults on when host review is on.
+    expect(makeConfig({ coderabbitHostReview: true }).CODERABBIT_BETWEEN_WORK_ITEMS).toBe(true)
   })
 
   test('dryRun waives the CodeRabbit auth requirement', () => {

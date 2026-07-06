@@ -150,31 +150,55 @@ sites as unwrapped.
 
 Host-run CodeRabbit review (`coderabbitHostReview`, default on) moves the
 CLI invocation from agent prompts to the control loop: `coderabbit review
---agent --type committed` runs per dual-review round and per addendum, its
+--agent --type committed --base <base>` (a FIXED host invocation; the
+`coderabbitReviewCommand` knob applies only to the legacy agent-run mode and
+does NOT override it) runs BETWEEN each per-work-item build turn
+(`coderabbitBetweenWorkItems`, default on) as a deterministic gate on each
+committed work item, and again per dual-review round and per addendum. Its
 NDJSON events are parsed host-side (the CLI exits 0 even on fatal errors, so
 classification must read events, never exit codes — see
 `docs/coderabbit-wire-contract.md` for captured live sessions documenting
-every observed event shape), `critical`/`major`
-findings join the fix-round blocking items, and rate-limit backoff sleeps in
-host wall-clock with deterministic jitter (`Math.random()`, `Date.now()`, and
+every observed event shape and the success-status set), `critical`/`major`
+findings drive a bounded fix loop, and rate-limit backoff sleeps in host
+wall-clock with deterministic jitter (`Math.random()`, `Date.now()`, and
 arg-less `new Date()` are banned by ODW's `scanDualCompat` for Claude Code
 dual-compatibility — hash a seed instead, and shell out to `date` for
-timestamps). Test loaders and the simulation driver force
-`coderabbitHostReview: false` so fixture runs can never invoke the real CLI
-and burn review quota; the pipeline seam is covered by a fake NDJSON-emitting
-`coderabbit` on `PATH`.
+timestamps). The between-item gate fails closed: unresolved blocking findings
+fail the work item (`code-review`), and a terminal deferral (rate limit or
+CLI fault after the retries) HALTS the task for assessment rather than
+silently continuing — so "between each stage" is a real gate, not a label.
+Test loaders and the simulation driver force `coderabbitHostReview: false` so
+fixture runs can never invoke the real CLI and burn review quota; the
+pipeline seam is covered by a fake NDJSON-emitting `coderabbit` on `PATH`,
+and the between-item gate by an injected `runCoderabbitHostReview`.
+
+Every fix round — gate fix, dual-review fix, and between-item fix — is
+followed by `verifyWorktreeCommitted`; a fix that leaves the worktree dirty
+fails the task closed (`FIX DURABILITY`), because uncommitted fix output is
+unreviewable and lost at the squash merge.
 
 Host-run commit gates (`hostCommitGates`, default on) apply the same
 philosophy to gate greenness: `runHostCommitGates` executes the configured
 `commitGates` commands via `sh -c` in the task worktree, serialized pool-wide
 behind `hostGateLock` (width 1, for build-cache friendliness), with a
-per-command timeout (`commitGateTimeoutSeconds`) and full output teed to
-`/tmp/df12-gate-*` logs. In the dual-review loop the gates run FIRST each
-round — a red branch goes to a fix round with the host evidence without
-spending reviewer agents; in the addendum lane an unreproducible green claim
-fails the addendum before any review. Test loaders and the simulation driver
-force `hostCommitGates: false` (fixture repos have no `Makefile`); pipeline
-coverage uses a scripted fake gate command.
+per-command timeout (`commitGateTimeoutSeconds`) and output streamed to
+`/tmp/df12-gate-*` logs. Gates run via `spawn`, streaming stdout/stderr to
+the log as they run (evidence is visible during a long gate, and there is no
+`maxBuffer` ceiling for a noisy `make all` to trip) while a bounded
+ring-buffer keeps the last lines for the structured `detail` tail; the
+timeout fires `SIGTERM` and escalates to `SIGKILL`. In the dual-review loop
+the gates run FIRST each round — a red branch goes to a fix round with the
+host evidence without spending reviewer agents; in the addendum lane an
+unreproducible green claim fails the addendum before any review. Test loaders
+and the simulation driver force `hostCommitGates: false` (fixture repos have
+no `Makefile`); pipeline coverage uses a scripted fake gate command, and the
+streaming path is covered by a module test with output past the old buffer
+ceiling.
+
+`make verify-modules` skips when Dafny is absent so local runs stay friendly;
+CI must run `make verify-modules-strict`, which FAILS when Dafny is not on
+`PATH`, so the LemmaScript/Dafny proof is a real PR gate rather than
+advisory. The CI job installs Dafny (see the toolchain notes).
 
 The per-work-item build loop (`perWorkItemBuild`, default on) makes the
 committed ExecPlan's `## Progress` checklist the build's control surface:

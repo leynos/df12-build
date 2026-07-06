@@ -230,37 +230,78 @@ export function makeHostReview(config: HostReviewConfig) {
   // gatesGreen claim is caught with the host's own log as evidence. Full
   // output is teed to a /tmp log per gate; the returned detail carries a
   // bounded tail.
-  async function runHostCommitGates(worktree: string, tag: string, roundLabel: string, deps: HostReviewDeps = {}): Promise<HostGateRun> {
-    const exec = deps.exec || execFileStatus
-    const fs = process.getBuiltinModule('node:fs/promises')
+  async function runHostCommitGates(worktree: string, tag: string, roundLabel: string): Promise<HostGateRun> {
     const results: Array<{ command: string; ok: boolean; logFile: string }> = []
     for (const [index, command] of commitGates.entries()) {
       hostGateMetrics.runs += 1
       log(`[task ${tag}] host gate ${index + 1}/${commitGates.length} (${roundLabel}): ${command}`)
-      const result = await exec('sh', ['-c', command], { cwd: worktree, timeoutMs: commitGateTimeoutSeconds * 1000 })
-      const output = `${result.stdout || ''}${result.stderr ? `\n--- stderr ---\n${result.stderr}` : ''}`
       const logFile = hostGateLogPath(tag, roundLabel, index, command)
-      try {
-        await fs.writeFile(logFile, output, 'utf8')
-      } catch {
-        // the log file is best-effort evidence; the tail below still lands
-      }
-      if (!result.ok) {
+      const outcome = await streamGate(command, worktree, logFile)
+      if (!outcome.ok) {
         hostGateMetrics.failures += 1
-        const timedOut = result.killed || /SIGTERM|timed? ?out/i.test(result.message || '')
-          ? ` (killed after the ${commitGateTimeoutSeconds}s gate timeout)`
-          : ''
-        const tail = output.trim().split(/\r?\n/).slice(-12).join('\n')
+        const timedOut = outcome.killed ? ` (killed after the ${commitGateTimeoutSeconds}s gate timeout)` : ''
         results.push({ command, ok: false, logFile })
         return {
           green: false,
           results,
-          detail: `host gate \`${command}\` failed${timedOut}; full log: ${logFile}; output tail:\n${tail}`,
+          detail: `host gate \`${command}\` failed${timedOut}; full log: ${logFile}; output tail:\n${outcome.tail}`,
         }
       }
       results.push({ command, ok: true, logFile })
     }
     return { green: true, results, detail: '' }
+  }
+
+  // Run one gate with spawn, streaming stdout+stderr straight to the log as
+  // it runs (no maxBuffer ceiling, evidence visible during long gates) while
+  // keeping a bounded ring buffer of the last TAIL_LINES lines for the
+  // structured result. A SIGTERM fires at the configured timeout, escalating
+  // to SIGKILL if the child ignores it.
+  function streamGate(command: string, cwd: string, logFile: string): Promise<{ ok: boolean; killed: boolean; tail: string }> {
+    const TAIL_LINES = 12
+    const { spawn } = process.getBuiltinModule('node:child_process')
+    const fs = process.getBuiltinModule('node:fs')
+    return new Promise((resolve) => {
+      const stream = fs.createWriteStream(logFile)
+      const tail: string[] = []
+      let carry = ''
+      let killed = false
+      const record = (chunk: Buffer) => {
+        stream.write(chunk)
+        carry += chunk.toString('utf8')
+        const lines = carry.split(/\r?\n/)
+        carry = lines.pop() || ''
+        for (const line of lines) {
+          tail.push(line)
+          if (tail.length > TAIL_LINES) tail.shift()
+        }
+      }
+      const finish = (ok: boolean, extraTail?: string) => {
+        if (carry) {
+          tail.push(carry)
+          if (tail.length > TAIL_LINES) tail.shift()
+        }
+        if (extraTail) tail.push(extraTail)
+        stream.end(() => resolve({ ok, killed, tail: tail.slice(-TAIL_LINES).join('\n').trim() }))
+      }
+      const child = spawn('sh', ['-c', command], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+      child.stdout.on('data', record)
+      child.stderr.on('data', record)
+      const sigterm = setTimeout(() => {
+        killed = true
+        child.kill('SIGTERM')
+        // Escalate if the child ignores SIGTERM; unref so it never holds the loop.
+        setTimeout(() => child.kill('SIGKILL'), 2000).unref()
+      }, commitGateTimeoutSeconds * 1000)
+      child.on('close', (code) => {
+        clearTimeout(sigterm)
+        finish(code === 0 && !killed)
+      })
+      child.on('error', (error) => {
+        clearTimeout(sigterm)
+        finish(false, `spawn failed: ${(error as Error).message}`)
+      })
+    })
   }
 
   return { coderabbitBackoffMinutes, runCoderabbitHostReview, recordCoderabbitReview, runHostCommitGates }

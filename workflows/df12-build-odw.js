@@ -949,6 +949,7 @@ function makeConfig(rawArgs) {
   ].map((adapter) => String(adapter || "").toLowerCase()));
   const CODERABBIT_REVIEW_COMMAND2 = cfg.coderabbitReviewCommand || "coderabbit review --agent";
   const CODERABBIT_HOST_REVIEW2 = cfg.coderabbitHostReview !== false;
+  const CODERABBIT_BETWEEN_WORK_ITEMS2 = cfg.coderabbitBetweenWorkItems !== false;
   const CODERABBIT_ATTEMPTS2 = Math.max(1, Math.trunc(Number(cfg.coderabbitAttempts) || 3));
   const CODERABBIT_BACKOFF_MINUTES2 = (() => {
     const range = Array.isArray(cfg.coderabbitBackoffMinutes) ? cfg.coderabbitBackoffMinutes : [];
@@ -1010,6 +1011,7 @@ function makeConfig(rawArgs) {
     AUTH_REQUIRED_ADAPTERS: AUTH_REQUIRED_ADAPTERS2,
     CODERABBIT_REVIEW_COMMAND: CODERABBIT_REVIEW_COMMAND2,
     CODERABBIT_HOST_REVIEW: CODERABBIT_HOST_REVIEW2,
+    CODERABBIT_BETWEEN_WORK_ITEMS: CODERABBIT_BETWEEN_WORK_ITEMS2,
     CODERABBIT_ATTEMPTS: CODERABBIT_ATTEMPTS2,
     CODERABBIT_BACKOFF_MINUTES: CODERABBIT_BACKOFF_MINUTES2,
     CODERABBIT_FINDINGS_FILE: CODERABBIT_FINDINGS_FILE2,
@@ -1783,37 +1785,72 @@ function makeHostReview(config) {
       log(`[${label}] could not append CodeRabbit findings to ${coderabbitFindingsFile}: ${coderabbitCapture.sinkError}`);
     }
   }
-  async function runHostCommitGates2(worktree, tag, roundLabel, deps = {}) {
-    const exec = deps.exec || execFileStatus;
-    const fs = process.getBuiltinModule("node:fs/promises");
+  async function runHostCommitGates2(worktree, tag, roundLabel) {
     const results2 = [];
     for (const [index, command] of commitGates.entries()) {
       hostGateMetrics.runs += 1;
       log(`[task ${tag}] host gate ${index + 1}/${commitGates.length} (${roundLabel}): ${command}`);
-      const result = await exec("sh", ["-c", command], { cwd: worktree, timeoutMs: commitGateTimeoutSeconds * 1e3 });
-      const output = `${result.stdout || ""}${result.stderr ? `
---- stderr ---
-${result.stderr}` : ""}`;
       const logFile = hostGateLogPath(tag, roundLabel, index, command);
-      try {
-        await fs.writeFile(logFile, output, "utf8");
-      } catch {
-      }
-      if (!result.ok) {
+      const outcome = await streamGate(command, worktree, logFile);
+      if (!outcome.ok) {
         hostGateMetrics.failures += 1;
-        const timedOut = result.killed || /SIGTERM|timed? ?out/i.test(result.message || "") ? ` (killed after the ${commitGateTimeoutSeconds}s gate timeout)` : "";
-        const tail = output.trim().split(/\r?\n/).slice(-12).join("\n");
+        const timedOut = outcome.killed ? ` (killed after the ${commitGateTimeoutSeconds}s gate timeout)` : "";
         results2.push({ command, ok: false, logFile });
         return {
           green: false,
           results: results2,
           detail: `host gate \`${command}\` failed${timedOut}; full log: ${logFile}; output tail:
-${tail}`
+${outcome.tail}`
         };
       }
       results2.push({ command, ok: true, logFile });
     }
     return { green: true, results: results2, detail: "" };
+  }
+  function streamGate(command, cwd, logFile) {
+    const TAIL_LINES = 12;
+    const { spawn } = process.getBuiltinModule("node:child_process");
+    const fs = process.getBuiltinModule("node:fs");
+    return new Promise((resolve) => {
+      const stream = fs.createWriteStream(logFile);
+      const tail = [];
+      let carry = "";
+      let killed = false;
+      const record = (chunk) => {
+        stream.write(chunk);
+        carry += chunk.toString("utf8");
+        const lines = carry.split(/\r?\n/);
+        carry = lines.pop() || "";
+        for (const line of lines) {
+          tail.push(line);
+          if (tail.length > TAIL_LINES) tail.shift();
+        }
+      };
+      const finish = (ok, extraTail) => {
+        if (carry) {
+          tail.push(carry);
+          if (tail.length > TAIL_LINES) tail.shift();
+        }
+        if (extraTail) tail.push(extraTail);
+        stream.end(() => resolve({ ok, killed, tail: tail.slice(-TAIL_LINES).join("\n").trim() }));
+      };
+      const child = spawn("sh", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+      child.stdout.on("data", record);
+      child.stderr.on("data", record);
+      const sigterm = setTimeout(() => {
+        killed = true;
+        child.kill("SIGTERM");
+        setTimeout(() => child.kill("SIGKILL"), 2e3).unref();
+      }, commitGateTimeoutSeconds * 1e3);
+      child.on("close", (code) => {
+        clearTimeout(sigterm);
+        finish(code === 0 && !killed);
+      });
+      child.on("error", (error) => {
+        clearTimeout(sigterm);
+        finish(false, `spawn failed: ${error.message}`);
+      });
+    });
   }
   return { coderabbitBackoffMinutes: coderabbitBackoffMinutes2, runCoderabbitHostReview: runCoderabbitHostReview2, recordCoderabbitReview: recordCoderabbitReview2, runHostCommitGates: runHostCommitGates2 };
 }
@@ -1963,6 +2000,7 @@ function makeTaskPipeline(deps) {
     PER_WORK_ITEM_BUILD: PER_WORK_ITEM_BUILD2,
     HOST_COMMIT_GATES: HOST_COMMIT_GATES2,
     CODERABBIT_HOST_REVIEW: CODERABBIT_HOST_REVIEW2,
+    CODERABBIT_BETWEEN_WORK_ITEMS: CODERABBIT_BETWEEN_WORK_ITEMS2,
     DRY_RUN: DRY_RUN2,
     AUTO_MERGE: AUTO_MERGE2,
     BASE: BASE2,
@@ -2085,6 +2123,35 @@ function makeTaskPipeline(deps) {
       }
     };
   }
+  async function runBetweenItemReview(task, worktree, plan, itemLabel, extra) {
+    const tag = task.id;
+    let runs = 0;
+    for (let attempt = 1; attempt <= MAX_REVIEW_ROUNDS2; attempt++) {
+      const review = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} ${itemLabel} a${attempt}`);
+      await recordCoderabbitReview2(`${tag} ${itemLabel} a${attempt}`, review);
+      runs += 1;
+      if (review.outcome === "auth") {
+        return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: `CodeRabbit host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } };
+      }
+      if (review.outcome === "rate-limited" || review.outcome === "error") {
+        coderabbitCapture.deferred += 1;
+        return { fail: { id: tag, status: "halted", stage: "code-review", detail: `CodeRabbit between-item review could not complete for ${itemLabel} (${review.outcome} after ${review.attempts} attempt(s)): ${review.detail}; the work is committed but unreviewed \u2014 resolve the CodeRabbit quota/CLI fault and relaunch with resumeMode: "continue"`, worktree, proposals: [], ...extra } };
+      }
+      const blocking = coderabbitBlockingItems(review.findings);
+      log(`[task ${tag}] between-item CodeRabbit ${itemLabel} attempt ${attempt}: ${review.findings.length} finding(s), ${blocking.length} blocking`);
+      if (!blocking.length) return { ok: true, coderabbitRuns: runs };
+      if (attempt === MAX_REVIEW_ROUNDS2) {
+        return { fail: { id: tag, status: "failed", stage: "code-review", detail: `CodeRabbit between-item review left blocking finding(s) unresolved after ${MAX_REVIEW_ROUNDS2} fix attempt(s) on ${itemLabel}: ${blocking.join("; ")}`, worktree, proposals: [], ...extra } };
+      }
+      phase("Implement");
+      await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, blocking, attempt), buildAgentOptions2({ phase: "Implement", label: `fix:${tag} ${itemLabel} a${attempt}`, schema: FIX_SCHEMA })), `fix:${tag} ${itemLabel} a${attempt}`));
+      const committed = await verifyWorktreeCommitted(worktree);
+      if (!committed.ok) {
+        return { fail: { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeRabbit fix for ${itemLabel} left uncommitted state (${committed.detail}); every fix must be committed before re-review`, worktree, proposals: [], ...extra } };
+      }
+    }
+    return { ok: true, coderabbitRuns: runs };
+  }
   async function runWorkItemBuildLoop2(task, worktree, plan, opts = {}) {
     const tag = task.id;
     const extra = opts.extra || {};
@@ -2143,6 +2210,11 @@ function makeTaskPipeline(deps) {
         strikes = 0;
         noProgressNote = "";
         log(`[task ${tag}] work-item round ${round}: ${after.ticked}/${after.ticked + after.unticked} Progress item(s) committed`);
+        if (CODERABBIT_HOST_REVIEW2 && CODERABBIT_BETWEEN_WORK_ITEMS2) {
+          const gate = await runBetweenItemReview(task, worktree, plan, `wi${round}`, extra);
+          if ("fail" in gate) return gate;
+          coderabbitRuns += gate.coderabbitRuns;
+        }
       }
     }
     const final = await readExecplanState(planRef);
@@ -2277,6 +2349,10 @@ function makeTaskPipeline(deps) {
           phase("Implement");
           const gateFix = await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, gateBlocking, round), buildAgentOptions2({ phase: "Implement", label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`));
           reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(gateFix);
+          const gateFixCommitted = await verifyWorktreeCommitted(worktree);
+          if (!gateFixCommitted.ok) {
+            return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the gate-fix round left uncommitted state (${gateFixCommitted.detail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
+          }
           continue;
         }
       }
@@ -2357,6 +2433,10 @@ function makeTaskPipeline(deps) {
       phase("Implement");
       const fix = await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, blocking, round), buildAgentOptions2({ phase: "Implement", label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`));
       roundRecord.fix = summarizeFixReport(fix);
+      const fixCommitted = await verifyWorktreeCommitted(worktree);
+      if (!fixCommitted.ok) {
+        return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the review-fix round left uncommitted state (${fixCommitted.detail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
+      }
     }
     if (!reviewsPass) {
       const lastRound = reviewRounds[reviewRounds.length - 1];
@@ -2582,6 +2662,7 @@ var {
   AUTH_REQUIRED_ADAPTERS,
   CODERABBIT_REVIEW_COMMAND,
   CODERABBIT_HOST_REVIEW,
+  CODERABBIT_BETWEEN_WORK_ITEMS,
   CODERABBIT_ATTEMPTS,
   CODERABBIT_BACKOFF_MINUTES,
   CODERABBIT_FINDINGS_FILE,
@@ -3047,6 +3128,7 @@ var {
   PER_WORK_ITEM_BUILD,
   HOST_COMMIT_GATES,
   CODERABBIT_HOST_REVIEW,
+  CODERABBIT_BETWEEN_WORK_ITEMS,
   DRY_RUN,
   AUTO_MERGE,
   BASE,

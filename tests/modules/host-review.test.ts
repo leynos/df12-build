@@ -32,3 +32,54 @@ describe('classifyCoderabbitOutcome terminal completion', () => {
     expect(classifyCoderabbitOutcome({ ok: true, stderr: '', message: '' }, parsed)).toBe('rate-limited')
   })
 })
+
+import { mkdtempSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { makeHostReview } from '../../src/workflows/df12-build-odw/host-review.ts'
+
+const g = globalThis as Record<string, unknown>
+g.log = () => {}
+
+function hostReview(overrides: Partial<Parameters<typeof makeHostReview>[0]> = {}) {
+  return makeHostReview({
+    base: 'main',
+    coderabbitAttempts: 3,
+    coderabbitBackoffMinutes: [45, 90],
+    coderabbitFindingsFile: '',
+    commitGates: ['make all'],
+    commitGateTimeoutSeconds: 5,
+    ...overrides,
+  })
+}
+
+describe('runHostCommitGates streaming', () => {
+  test('handles output far larger than the old 16MB execFile ceiling', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'gate-stream-'))
+    // ~40MB of stdout would have tripped maxBuffer under execFile; streaming
+    // must pass it through and still report green.
+    const { runHostCommitGates } = hostReview({ commitGates: ['yes x | head -c 40000000; echo; echo DONE-OK'] })
+    const result = await runHostCommitGates(dir, '1.2.3', 'r1')
+    expect(result.green).toBe(true)
+    expect(result.results[0].ok).toBe(true)
+    // The log file holds the full stream, not a truncated buffer.
+    expect(readFileSync(result.results[0].logFile, 'utf8').length).toBeGreaterThan(40000000)
+  })
+
+  test('a red gate carries the streamed tail and the log path', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'gate-stream-red-'))
+    const { runHostCommitGates } = hostReview({ commitGates: ['echo working; echo boom; exit 2'] })
+    const result = await runHostCommitGates(dir, '1.2.3', 'r1')
+    expect(result.green).toBe(false)
+    expect(result.detail).toMatch(/boom/)
+    expect(result.detail).toContain(result.results[0].logFile)
+  })
+
+  test('a hung gate is killed at the timeout', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'gate-stream-hang-'))
+    const { runHostCommitGates } = hostReview({ commitGates: [`${process.execPath} -e "setInterval(()=>{},50)"`], commitGateTimeoutSeconds: 2 })
+    const result = await runHostCommitGates(dir, '1.2.3', 'r1')
+    expect(result.green).toBe(false)
+    expect(result.detail).toMatch(/killed after the 2s gate timeout/)
+  })
+})

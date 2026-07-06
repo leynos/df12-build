@@ -655,6 +655,27 @@ artefact-slicing suites were retained as shipped-artefact coverage. The
 Surprises entry about the `checkJs: false` blind spot is resolved by the
 milestone 10 entry conversion.
 
+2026-07-06 (design-review remediation): a reviewer flagged that "CodeRabbit
+between each ExecPlan stage" was not yet real — host CodeRabbit ran only
+once after the whole implementation stage, not between per-work-item build
+turns. Five concerns were validated against the code and addressed: (1) the
+per-work-item build loop now runs a deterministic host CodeRabbit gate after
+each committed work item (`coderabbitBetweenWorkItems`, default on) with a
+bounded fix loop; the gate fails closed — unresolved blocking findings fail
+the item (`code-review`), and a terminal rate-limit/CLI deferral HALTS the
+task for assessment instead of silently continuing. (2) Every fix round
+(gate fix, dual-review fix, between-item fix) now runs
+`verifyWorktreeCommitted`; a dirty fix fails `FIX DURABILITY` rather than
+reaching integration. (3) Host commit gates stream stdout/stderr via `spawn`
+to the log with a bounded ring-buffer tail, removing the 16MB `execFile`
+`maxBuffer` ceiling that a noisy `make all` could trip and streaming
+evidence during long gates. (4) `coderabbitReviewCommand` is documented as
+legacy-agent-mode-only (host mode uses a fixed committed-diff invocation).
+(5) `make verify-modules-strict` fails when Dafny is absent, for CI to use as
+a real PR gate while `make all` keeps the lenient skip for local runs. New
+module tests cover the between-item pass/block/defer paths, the fix
+durability gate, the >16MB streaming path, and the config flag.
+
 2026-07-06 (review remediation, batch 2): a second findings batch was
 triaged by a wyvern verification team, with firecrawl used to settle the
 Bun-capability question authoritatively — Bun issue #12161 was closed as

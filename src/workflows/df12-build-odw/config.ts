@@ -51,6 +51,7 @@ export interface RawWorkflowArgs {
   assessmentModel?: string
   coderabbitReviewCommand?: string
   coderabbitHostReview?: boolean
+  coderabbitBetweenWorkItems?: boolean
   coderabbitAttempts?: number | string
   coderabbitBackoffMinutes?: unknown
   coderabbitFindingsFile?: string
@@ -104,6 +105,7 @@ export interface WorkflowConfig {
   AUTH_REQUIRED_ADAPTERS: Set<string>
   CODERABBIT_REVIEW_COMMAND: string
   CODERABBIT_HOST_REVIEW: boolean
+  CODERABBIT_BETWEEN_WORK_ITEMS: boolean
   CODERABBIT_ATTEMPTS: number
   CODERABBIT_BACKOFF_MINUTES: [number, number]
   CODERABBIT_FINDINGS_FILE: string
@@ -181,12 +183,23 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     TRIAGE_ADAPTER,
     ASSESSMENT_ADAPTER,
   ].map((adapter) => String(adapter || '').toLowerCase()))
+  // LEGACY (agent-run) mode ONLY: the command the build/fix prompts tell the
+  // agent to invoke when coderabbitHostReview=false. In host-review mode the
+  // control loop runs a FIXED committed-diff invocation
+  // (`coderabbit review --agent --type committed --base <base>`, see
+  // host-review.ts) that this knob does NOT override.
   const CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || 'coderabbit review --agent'
   // Host-run CodeRabbit review: the control loop invokes the CLI against
   // committed work, absorbs rate-limit backoff in host wall-clock instead of
   // agent tokens, and feeds actionable findings back into the fix rounds.
   // coderabbitHostReview=false restores the legacy agent-run flow.
   const CODERABBIT_HOST_REVIEW = cfg.coderabbitHostReview !== false
+  // Run the host CodeRabbit review BETWEEN per-work-item build turns (a
+  // deterministic gate on each committed work item) rather than only once at
+  // the end of the implementation stage. Only meaningful when both host
+  // review and the per-work-item build are on. coderabbitBetweenWorkItems=false
+  // restores end-of-stage-only host review.
+  const CODERABBIT_BETWEEN_WORK_ITEMS = cfg.coderabbitBetweenWorkItems !== false
   const CODERABBIT_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.coderabbitAttempts) || 3)) // total attempts per host review when rate limited
   const CODERABBIT_BACKOFF_MINUTES: [number, number] = (() => {
     const range = Array.isArray(cfg.coderabbitBackoffMinutes) ? cfg.coderabbitBackoffMinutes : []
@@ -267,6 +280,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     AUTH_REQUIRED_ADAPTERS,
     CODERABBIT_REVIEW_COMMAND,
     CODERABBIT_HOST_REVIEW,
+    CODERABBIT_BETWEEN_WORK_ITEMS,
     CODERABBIT_ATTEMPTS,
     CODERABBIT_BACKOFF_MINUTES,
     CODERABBIT_FINDINGS_FILE,

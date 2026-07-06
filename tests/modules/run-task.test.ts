@@ -68,6 +68,7 @@ function subject(worktree: string, overrides: Record<string, unknown> = {}) {
     PER_WORK_ITEM_BUILD: false,
     HOST_COMMIT_GATES: false,
     CODERABBIT_HOST_REVIEW: false,
+    CODERABBIT_BETWEEN_WORK_ITEMS: false,
     DRY_RUN: false,
     AUTO_MERGE: true,
     BASE: 'main',
@@ -268,6 +269,116 @@ describe('runTask', () => {
     expect(outcome.stage).toBe('implement')
     expect(outcome.detail).toMatch(/ExecPlan (disappeared|is absent)/)
     expect(labels.filter((label) => label.startsWith('implement:'))).toHaveLength(1)
+  })
+
+  test('between-item CodeRabbit passes the build when each item is clean', async () => {
+    const worktree = makeWorktree()
+    writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: IN PROGRESS\n\n## Progress\n\n- [ ] WI-1: first\n- [ ] WI-2: second\n')
+    git(worktree, 'add', '.')
+    git(worktree, 'commit', '-m', 'Two-item checklist')
+    let tick = 0
+    const reviews: string[] = []
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('implement:')) {
+        tick += 1
+        writeFileSync(path.join(worktree, PLAN_PATH), `# ExecPlan\n\nStatus: IN PROGRESS\n\n## Progress\n\n- [${tick >= 1 ? 'x' : ' '}] WI-1: first\n- [${tick >= 2 ? 'x' : ' '}] WI-2: second\n`)
+        git(worktree, 'commit', '-aqm', `Tick WI-${tick}`)
+        return { ok: true, gatesGreen: true, workItemsCompleted: tick, workItemsTotal: 2, commits: [`c${tick}`], coderabbitRuns: 0, openIssues: [], summary: 'item done' }
+      }
+      return happyScript()(label, prompt)
+    })
+    const pipe = subject(worktree, {
+      PER_WORK_ITEM_BUILD: true,
+      CODERABBIT_HOST_REVIEW: true,
+      CODERABBIT_BETWEEN_WORK_ITEMS: true,
+      runCoderabbitHostReview: async (_wt: string, label: string) => {
+        reviews.push(label)
+        return { outcome: 'clean' as const, attempts: 1, findings: [], detail: '' }
+      },
+    })
+    const outcome = await pipe.runTask(task, null)
+    expect(outcome.status).toBe('done')
+    // One between-item review per committed item, before the dual-review pass.
+    expect(reviews.filter((label) => /wi1|wi2/.test(label))).toHaveLength(2)
+  })
+
+  test('between-item CodeRabbit blocking findings fail the build after the fix cap', async () => {
+    const worktree = makeWorktree()
+    writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: IN PROGRESS\n\n## Progress\n\n- [ ] WI-1: only\n')
+    git(worktree, 'add', '.')
+    git(worktree, 'commit', '-m', 'One-item checklist')
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('implement:')) {
+        writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: COMPLETE\n\n## Progress\n\n- [x] WI-1: only\n')
+        git(worktree, 'commit', '-aqm', 'Tick WI-1')
+        return { ok: true, gatesGreen: true, workItemsCompleted: 1, workItemsTotal: 1, commits: ['c1'], coderabbitRuns: 0, openIssues: [], summary: 'done' }
+      }
+      if (label.startsWith('fix:')) {
+        git(worktree, 'commit', '-qm', 'attempt fix', '--allow-empty')
+        return { gatesGreen: true, summary: 'tried' }
+      }
+      return happyScript()(label, prompt)
+    })
+    const pipe = subject(worktree, {
+      PER_WORK_ITEM_BUILD: true,
+      CODERABBIT_HOST_REVIEW: true,
+      CODERABBIT_BETWEEN_WORK_ITEMS: true,
+      // Always returns a blocking finding, so the bounded fix loop exhausts.
+      runCoderabbitHostReview: async () => ({ outcome: 'findings' as const, attempts: 1, findings: [{ type: 'finding', severity: 'major', fileName: 'x.ts', comment: 'fix me' }], detail: '' }),
+    })
+    const outcome = await pipe.runTask(task, null)
+    expect(outcome.status).toBe('failed')
+    expect(outcome.stage).toBe('code-review')
+    expect(outcome.detail).toMatch(/blocking finding/)
+  })
+
+  test('between-item CodeRabbit terminal deferral halts rather than silently continuing', async () => {
+    const worktree = makeWorktree()
+    writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: IN PROGRESS\n\n## Progress\n\n- [ ] WI-1: only\n')
+    git(worktree, 'add', '.')
+    git(worktree, 'commit', '-m', 'One-item checklist')
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('implement:')) {
+        writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: COMPLETE\n\n## Progress\n\n- [x] WI-1: only\n')
+        git(worktree, 'commit', '-aqm', 'Tick WI-1')
+        return { ok: true, gatesGreen: true, workItemsCompleted: 1, workItemsTotal: 1, commits: ['c1'], coderabbitRuns: 0, openIssues: [], summary: 'done' }
+      }
+      return happyScript()(label, prompt)
+    })
+    const pipe = subject(worktree, {
+      PER_WORK_ITEM_BUILD: true,
+      CODERABBIT_HOST_REVIEW: true,
+      CODERABBIT_BETWEEN_WORK_ITEMS: true,
+      runCoderabbitHostReview: async () => ({ outcome: 'rate-limited' as const, attempts: 3, findings: [], detail: 'quota exhausted' }),
+    })
+    const outcome = await pipe.runTask(task, null)
+    expect(outcome.status).toBe('halted')
+    expect(outcome.stage).toBe('code-review')
+    expect(outcome.detail).toMatch(/could not complete/)
+    expect(outcome.assessed).toBe(true)
+    expect(labels.some((label) => label.startsWith('integrate:'))).toBe(false)
+  })
+
+  test('a review fix that leaves the worktree dirty fails the FIX DURABILITY gate', async () => {
+    const worktree = makeWorktree()
+    let round = 0
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('code-review:')) {
+        round += 1
+        return round === 1 ? { verdict: 'changes-requested', blocking: ['fix this'] } : passReview
+      }
+      if (label.startsWith('fix:')) {
+        // A fix that edits but does not commit — the durability gate must catch it.
+        writeFileSync(path.join(worktree, 'stray.txt'), 'uncommitted\n')
+        return { gatesGreen: true, summary: 'edited without committing' }
+      }
+      return happyScript()(label, prompt)
+    })
+    const outcome = await subject(worktree).runTask(task, null)
+    expect(outcome.status).toBe('failed')
+    expect(outcome.stage).toBe('implement')
+    expect(outcome.detail).toMatch(/FIX DURABILITY/)
+    expect(labels.some((label) => label.startsWith('integrate:'))).toBe(false)
   })
 
   test('recovery resume shares the same integration path, tagged recovery-resume', async () => {
