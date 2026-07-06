@@ -53,6 +53,8 @@ export interface HostReviewConfig {
   coderabbitFindingsFile: string
   commitGates: readonly string[]
   commitGateTimeoutSeconds: number
+  csCheck: boolean
+  csCheckCommand: string
 }
 
 // The CLI's --agent mode emits NDJSON events on stdout and exits 0 even on
@@ -143,6 +145,8 @@ export const coderabbitCapture: {
 
 export const hostGateMetrics = { runs: 0, failures: 0 }
 
+export const csCheckMetrics = { runs: 0, failures: 0, skipped: 0 }
+
 // Per-process gate-log directory, created lazily with mkdtempSync so its name
 // is unpredictable and its mode is 0700: a local attacker cannot pre-plant a
 // symlink at a guessable path to clobber or leak the logs. Combined with the
@@ -174,6 +178,8 @@ export function makeHostReview(config: HostReviewConfig) {
     coderabbitFindingsFile,
     commitGates,
     commitGateTimeoutSeconds,
+    csCheck,
+    csCheckCommand,
   } = config
 
   // Deterministic jitter in [low, high] minutes: Math.random() is banned for
@@ -341,5 +347,30 @@ export function makeHostReview(config: HostReviewConfig) {
     })
   }
 
-  return { coderabbitBackoffMinutes, runCoderabbitHostReview, recordCoderabbitReview, runHostCommitGates }
+  // CodeScene code-health check on the committed changed files, streamed to a
+  // secure per-run log via the same spawn path as the commit gates. It runs
+  // AFTER the commit gates and BEFORE CodeRabbit (deterministic and free).
+  // Skips gracefully — like `make verify-modules` without Dafny — when the
+  // configured binary is not on PATH, so environments without CodeScene are
+  // not blocked. Returns { clean, skipped, detail, logFile }.
+  async function runCodeSceneCheck(worktree: string, tag: string, label: string): Promise<{ clean: boolean; skipped: boolean; detail: string; logFile: string }> {
+    if (!csCheck) return { clean: true, skipped: true, detail: '', logFile: '' }
+    const bin = csCheckCommand.trim().split(/\s+/)[0] || 'cs-check-changed'
+    const probe = await execFileStatus('sh', ['-c', `command -v ${bin}`], { cwd: worktree })
+    if (!probe.ok) {
+      csCheckMetrics.skipped += 1
+      log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`)
+      return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: '' }
+    }
+    csCheckMetrics.runs += 1
+    const logFile = hostGateLogPath(tag, `cs-${label}`, 0)
+    log(`[task ${tag}] CodeScene check (${label}): ${csCheckCommand}`)
+    const outcome = await streamGate(csCheckCommand, worktree, logFile)
+    if (outcome.ok) return { clean: true, skipped: false, detail: '', logFile }
+    csCheckMetrics.failures += 1
+    const timedOut = outcome.killed ? ` (killed after the ${commitGateTimeoutSeconds}s timeout)` : ''
+    return { clean: false, skipped: false, detail: `CodeScene check \`${csCheckCommand}\` reported code-health issues${timedOut}; full log: ${logFile}; output tail:\n${outcome.tail}`, logFile }
+  }
+
+  return { coderabbitBackoffMinutes, runCoderabbitHostReview, recordCoderabbitReview, runHostCommitGates, runCodeSceneCheck }
 }

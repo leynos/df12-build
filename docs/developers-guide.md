@@ -215,7 +215,19 @@ CodeRabbit review, so a committed work item whose gates are really red is
 caught at the item boundary (bounded fix loop, then fail-closed) rather than
 only at the dual-review stage — closing the window where an intermediate red
 commit could persist across work items on the agent's `gatesGreen` claim
-alone. Test loaders
+alone.
+
+`runCodeSceneCheck` (`csCheck`, default on) is a SECOND deterministic gate,
+run after the commit gates and before CodeRabbit at every gate point (each
+work item, each dual-review round, and the addendum lane). It runs
+`csCheckCommand` (default `cs-check-changed`, an operator-provided wrapper)
+through the same secure-log spawn path as the commit gates, on the committed
+changed files. A code-health regression short-circuits to a fix round — free
+gates before the quota-limited CodeRabbit and the token-spending reviewer
+agents — and the build/fix prompts carry the smell glossary plus the
+`@codescene(disable:"...")` suppression escape hatch (`CS_CHECK_GUIDANCE`).
+Like `make verify-modules` without Dafny, it skips gracefully (clean, not
+failed) when the binary is absent. Test loaders
 and the simulation driver force `hostCommitGates: false` (fixture repos have
 no `Makefile`); pipeline coverage uses a scripted fake gate command, and the
 streaming path is covered by a module test with output past the old buffer

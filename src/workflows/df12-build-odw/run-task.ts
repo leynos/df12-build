@@ -84,6 +84,7 @@ export interface TaskPipelineDeps {
   PER_WORK_ITEM_BUILD: boolean
   HOST_COMMIT_GATES: boolean
   HOST_GATES_BETWEEN_WORK_ITEMS: boolean
+  CS_CHECK: boolean
   CODERABBIT_HOST_REVIEW: boolean
   CODERABBIT_BETWEEN_WORK_ITEMS: boolean
   DRY_RUN: boolean
@@ -109,6 +110,7 @@ export interface TaskPipelineDeps {
   attachAssessment: (task: SelectedTask, wt: { branch?: string; worktreePath?: string; baseSha?: string }, result: StageResult) => Promise<StageResult>
   ensureTaskAgentWriteAccess: (worktree: string, tag: string) => Promise<{ ok: boolean; failures: Array<{ adapter: string; detail: string }> }>
   runHostCommitGates: (worktree: string, tag: string, roundLabel: string) => Promise<HostGateRun>
+  runCodeSceneCheck: (worktree: string, tag: string, label: string) => Promise<{ clean: boolean; skipped: boolean; detail: string; logFile: string }>
   runCoderabbitHostReview: (worktree: string, label: string) => Promise<CoderabbitReview>
   recordCoderabbitReview: (label: string, review: CoderabbitReview) => Promise<void>
   createWorktree: (task: SelectedTask) => Promise<{ ok?: boolean; worktreePath?: string; branch?: string; baseSha?: string; notes?: string } | null>
@@ -148,6 +150,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     PER_WORK_ITEM_BUILD,
     HOST_COMMIT_GATES,
     HOST_GATES_BETWEEN_WORK_ITEMS,
+    CS_CHECK,
     CODERABBIT_HOST_REVIEW,
     CODERABBIT_BETWEEN_WORK_ITEMS,
     DRY_RUN,
@@ -174,6 +177,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     ensureTaskAgentWriteAccess,
     createWorktree,
     runHostCommitGates,
+    runCodeSceneCheck,
     runCoderabbitHostReview,
     recordCoderabbitReview,
   } = deps
@@ -305,20 +309,42 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     extra: Record<string, unknown>,
   ): Promise<{ ok: true } | { fail: StageResult }> {
     const tag = task.id
-    for (let attempt = 1; attempt <= MAX_REVIEW_ROUNDS; attempt++) {
-      const gates = await hostGateLock(() => runHostCommitGates(worktree, tag, `${itemLabel} a${attempt}`))
-      if (gates.green) return { ok: true }
-      log(`[task ${tag}] host commit gates red after ${itemLabel} (attempt ${attempt} of ${MAX_REVIEW_ROUNDS})`)
-      if (attempt === MAX_REVIEW_ROUNDS) {
-        return { fail: { id: tag, status: 'failed', stage: 'implement', detail: `HOST GATES RED after ${itemLabel}: ${gates.detail} The committed work item's gatesGreen claim could not be reproduced after ${MAX_REVIEW_ROUNDS} fix attempt(s).`, worktree, proposals: [], ...extra } }
-      }
+    // Bounded fix loop shared by the two deterministic checks: the commit gates
+    // FIRST, then the CodeScene code-health check on the committed changed
+    // files. Both are free, so they gate the item before the quota-limited
+    // between-item CodeRabbit review the caller runs next.
+    const runFix = async (blocking: string[], fixLabel: string): Promise<{ fail: StageResult } | null> => {
       phase('Implement')
-      const gateBlocking = [`HOST GATES RED: ${gates.detail} The agent-reported gate status for ${itemLabel} was wrong or is stale — reproduce the failure from the log, fix it, re-run the gates to green, and commit.`]
-      await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, gateBlocking, attempt), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} ${itemLabel} gate a${attempt}`, schema: FIX_SCHEMA })), `fix:${tag} ${itemLabel} gate a${attempt}`))
+      await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, blocking, 1), buildAgentOptions({ phase: 'Implement', label: fixLabel, schema: FIX_SCHEMA })), fixLabel))
       const committed = await verifyWorktreeCommitted(worktree)
       if (!committed.ok) {
-        return { fail: { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the gate fix for ${itemLabel} left uncommitted state (${committed.detail}); every fix must be committed before the gates re-run`, worktree, proposals: [], ...extra } }
+        return { fail: { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the fix for ${itemLabel} left uncommitted state (${committed.detail}); every fix must be committed before the checks re-run`, worktree, proposals: [], ...extra } }
       }
+      return null
+    }
+    for (let attempt = 1; attempt <= MAX_REVIEW_ROUNDS; attempt++) {
+      const gates = await hostGateLock(() => runHostCommitGates(worktree, tag, `${itemLabel} a${attempt}`))
+      if (!gates.green) {
+        log(`[task ${tag}] host commit gates red after ${itemLabel} (attempt ${attempt} of ${MAX_REVIEW_ROUNDS})`)
+        if (attempt === MAX_REVIEW_ROUNDS) {
+          return { fail: { id: tag, status: 'failed', stage: 'implement', detail: `HOST GATES RED after ${itemLabel}: ${gates.detail} The committed work item's gatesGreen claim could not be reproduced after ${MAX_REVIEW_ROUNDS} fix attempt(s).`, worktree, proposals: [], ...extra } }
+        }
+        const durability = await runFix([`HOST GATES RED: ${gates.detail} The agent-reported gate status for ${itemLabel} was wrong or is stale — reproduce the failure from the log, fix it, re-run the gates to green, and commit.`], `fix:${tag} ${itemLabel} gate a${attempt}`)
+        if (durability) return durability
+        continue
+      }
+      // Gates green — the CodeScene code-health check (skips gracefully when
+      // its binary is absent).
+      const cs = CS_CHECK
+        ? await hostGateLock(() => runCodeSceneCheck(worktree, tag, `${itemLabel} a${attempt}`))
+        : { clean: true, skipped: true, detail: '', logFile: '' }
+      if (cs.clean) return { ok: true }
+      log(`[task ${tag}] CodeScene check red after ${itemLabel} (attempt ${attempt} of ${MAX_REVIEW_ROUNDS})`)
+      if (attempt === MAX_REVIEW_ROUNDS) {
+        return { fail: { id: tag, status: 'failed', stage: 'implement', detail: `CODESCENE RED after ${itemLabel}: ${cs.detail} The committed work item's code health could not be cleared after ${MAX_REVIEW_ROUNDS} fix attempt(s).`, worktree, proposals: [], ...extra } }
+      }
+      const durability = await runFix([`CODESCENE RED: ${cs.detail} Clear these code-health regressions by refactoring, or — only where further refinement would be deleterious — suppress the specific smell with a justified @codescene(disable:"...") comment, then re-run the check to green and commit.`], `fix:${tag} ${itemLabel} cs a${attempt}`)
+      if (durability) return durability
     }
     return { ok: true }
   }
@@ -612,6 +638,28 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
           continue
         }
       }
+      // Second deterministic check (still free): the CodeScene code-health
+      // check on the committed changed files, after the commit gates and
+      // before CodeRabbit. A regression short-circuits to a fix round without
+      // spending CodeRabbit quota or reviewer-agent tokens; it skips
+      // gracefully when the binary is absent.
+      if (CS_CHECK) {
+        const cs = await hostGateLock(() => runCodeSceneCheck(worktree, tag, `r${round}`))
+        if (!cs.clean) {
+          log(`[task ${tag}] CodeScene check red in round ${round}`)
+          const csBlocking = [`CODESCENE RED: ${cs.detail} Clear these code-health regressions by refactoring, or — only where further refinement would be deleterious — suppress the specific smell with a justified @codescene(disable:"...") comment, then re-run the check to green and commit.`]
+          reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: csBlocking, ...(hostGates ? { hostGates: hostGates.results } : {}), fix: null })
+          if (round === MAX_REVIEW_ROUNDS) break
+          phase('Implement')
+          const csFix = await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, csBlocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} cs r${round}`, schema: FIX_SCHEMA })), `fix:${tag} cs r${round}`))
+          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(csFix as Record<string, unknown> | null)
+          const csFixCommitted = await verifyWorktreeCommitted(worktree)
+          if (!csFixCommitted.ok) {
+            return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the CodeScene-fix round left uncommitted state (${csFixCommitted.detail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
+          }
+          continue
+        }
+      }
       // Cost hierarchy: the deterministic gates (free) already ran above. Run
       // the host CodeRabbit review (a fixed weekly quota — cheaper than agent
       // tokens) BEFORE the reviewer agents, so a CodeRabbit-blocking round
@@ -855,6 +903,14 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         const hostGates = await hostGateLock(() => runHostCommitGates(worktree, tag, 'addendum'))
         if (!hostGates.green) {
           return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: `addendum reported green gates but the host could not reproduce them: ${hostGates.detail}`, openIssues, worktree, proposals, kind: 'addendum' })
+        }
+      }
+      // CodeScene code-health check, after the gates and before CodeRabbit.
+      // Addenda have no fix loop, so a regression halts for assessment.
+      if (CS_CHECK) {
+        const cs = await hostGateLock(() => runCodeSceneCheck(worktree, tag, 'addendum'))
+        if (!cs.clean) {
+          return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: `addendum committed work with unresolved CodeScene code-health issues: ${cs.detail}`, openIssues, worktree, proposals, kind: 'addendum' })
         }
       }
       // Host-run CodeRabbit review of the committed addendum work. Blocking

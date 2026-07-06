@@ -214,6 +214,18 @@ provides the doc skills):
    result carries its exact `logFile` path); read them before re-running a
    gate by hand.
 
+   CodeScene gate knobs: `csCheck` (default on — a CodeScene code-health
+   check on the committed changed files runs as a second deterministic gate
+   after the commit gates and before CodeRabbit at every gate point; a
+   regression drives a bounded fix round, and the build agent clears it by
+   refactoring or, only where refactoring would be deleterious, suppresses a
+   specific smell with a justified `@codescene(disable:"...")` comment) and
+   `csCheckCommand` (default `cs-check-changed`, the operator-provided wrapper
+   — override with the exact invocation, e.g. `cs check --changed --base
+   main`). The check skips gracefully when its binary is absent, so a runner
+   without CodeScene is not blocked; install `cs-check-changed` on the runner
+   to make the gate active.
+
    Build-loop knobs: `perWorkItemBuild` (default on — the host dispatches
    one builder turn per unticked ExecPlan `## Progress` item, labelled
    `implement:<id> wi<n>` in the events, verifying committed progress after

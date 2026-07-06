@@ -68,6 +68,7 @@ function subject(worktree: string, overrides: Record<string, unknown> = {}) {
     PER_WORK_ITEM_BUILD: false,
     HOST_COMMIT_GATES: false,
     HOST_GATES_BETWEEN_WORK_ITEMS: false,
+    CS_CHECK: false,
     CODERABBIT_HOST_REVIEW: false,
     CODERABBIT_BETWEEN_WORK_ITEMS: false,
     DRY_RUN: false,
@@ -94,6 +95,7 @@ function subject(worktree: string, overrides: Record<string, unknown> = {}) {
     ensureTaskAgentWriteAccess: async () => ({ ok: true, failures: [] }),
     createWorktree: async () => ({ ok: true, worktreePath: worktree, branch: 'roadmap-1-2-3', baseSha: git(worktree, 'rev-parse', 'HEAD'), notes: '' }),
     runHostCommitGates: async () => ({ green: true, results: [], detail: '' }),
+    runCodeSceneCheck: async () => ({ clean: true, skipped: true, detail: '', logFile: '' }),
     runCoderabbitHostReview: async () => ({ outcome: 'clean' as const, attempts: 1, findings: [], detail: '' }),
     recordCoderabbitReview: async () => {},
     ...overrides,
@@ -474,6 +476,60 @@ describe('runTask', () => {
     const firstReview = labels.findIndex((label) => label.startsWith('code-review:'))
     expect(firstFix).toBeGreaterThanOrEqual(0)
     expect(firstFix).toBeLessThan(firstReview)
+  })
+
+  test('a CodeScene regression drives a fix before any reviewer agent runs', async () => {
+    const worktree = makeWorktree()
+    let cs = 0
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('fix:')) {
+        git(worktree, 'commit', '-qm', 'address code health', '--allow-empty')
+        return { gatesGreen: true, summary: 'refactored' }
+      }
+      if (label.startsWith('code-review:') || label.startsWith('expert-review:')) return passReview
+      return happyScript()(label, prompt)
+    })
+    const pipe = subject(worktree, {
+      CS_CHECK: true,
+      // Round 1 flags a Complex Method; round 2 (after the fix) is clean.
+      runCodeSceneCheck: async () => {
+        cs += 1
+        return cs === 1
+          ? { clean: false, skipped: false, detail: 'Complex Method in x.ts', logFile: '/tmp/x' }
+          : { clean: true, skipped: false, detail: '', logFile: '' }
+      },
+    })
+    const outcome = await pipe.runTask(task, null)
+    expect(outcome.status).toBe('done')
+    // The reviewer agents ran exactly once (round 2) — the CodeScene-blocking
+    // round 1 spent no reviewer-agent tokens, and the fix preceded the review.
+    expect(labels.filter((label) => label.startsWith('code-review:'))).toHaveLength(1)
+    const firstFix = labels.findIndex((label) => label.startsWith('fix:'))
+    const firstReview = labels.findIndex((label) => label.startsWith('code-review:'))
+    expect(firstFix).toBeGreaterThanOrEqual(0)
+    expect(firstFix).toBeLessThan(firstReview)
+  })
+
+  test('a persistent CodeScene regression fails the build after the fix cap', async () => {
+    const worktree = makeWorktree()
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('fix:')) {
+        git(worktree, 'commit', '-qm', 'attempt', '--allow-empty')
+        return { gatesGreen: true, summary: 'tried' }
+      }
+      if (label.startsWith('code-review:') || label.startsWith('expert-review:')) return passReview
+      return happyScript()(label, prompt)
+    })
+    const pipe = subject(worktree, {
+      CS_CHECK: true,
+      runCodeSceneCheck: async () => ({ clean: false, skipped: false, detail: 'Bumpy Road in y.ts', logFile: '/tmp/y' }),
+    })
+    const outcome = await pipe.runTask(task, null)
+    // Exhausting the review-round cap halts (same as host gates red), leaving
+    // the branch unmerged with the CodeScene blocking recorded.
+    expect(outcome.status).toBe('halted')
+    expect(outcome.detail).toMatch(/CODESCENE RED|Bumpy Road/)
+    expect(labels.some((label) => label.startsWith('integrate:'))).toBe(false)
   })
 
   test('a review fix that leaves the worktree dirty fails the FIX DURABILITY gate', async () => {

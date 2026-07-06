@@ -170,10 +170,13 @@ const {
   CODERABBIT_FINDINGS_FILE,
   HOST_COMMIT_GATES,
   HOST_GATES_BETWEEN_WORK_ITEMS,
+  CS_CHECK,
+  CS_CHECK_COMMAND,
   COMMIT_GATE_TIMEOUT_SECONDS,
   COMMIT_GATES,
   COMMIT_GATE_TEXT,
   COMMIT_GATE_GUIDANCE,
+  CS_CHECK_GUIDANCE,
 } = CONFIG
 if (PROJECT_ROOT !== process.cwd()) {
   const fs = process.getBuiltinModule('node:fs')
@@ -276,6 +279,7 @@ const {
   runCoderabbitHostReview,
   recordCoderabbitReview,
   runHostCommitGates,
+  runCodeSceneCheck,
 } = makeHostReview({
   base: BASE,
   coderabbitAttempts: CODERABBIT_ATTEMPTS,
@@ -283,6 +287,8 @@ const {
   coderabbitFindingsFile: CODERABBIT_FINDINGS_FILE,
   commitGates: COMMIT_GATES,
   commitGateTimeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
+  csCheck: CS_CHECK,
+  csCheckCommand: CS_CHECK_COMMAND,
 })
 
 // ---------------------------------------------------------------------------
@@ -761,6 +767,8 @@ const {
   runDualReviewAndIntegration,
   runTask,
 } = makeTaskPipeline({
+  CS_CHECK,
+  runCodeSceneCheck,
   MAX_DESIGN_ROUNDS,
   MAX_REVIEW_ROUNDS,
   MAX_WORK_ITEM_ROUNDS,

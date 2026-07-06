@@ -33,6 +33,8 @@ describe('makeConfig defaults', () => {
     expect(config.CODERABBIT_BETWEEN_WORK_ITEMS).toBe(true)
     expect(config.HOST_COMMIT_GATES).toBe(true)
     expect(config.HOST_GATES_BETWEEN_WORK_ITEMS).toBe(true)
+    expect(config.CS_CHECK).toBe(true)
+    expect(config.CS_CHECK_COMMAND).toBe('cs-check-changed')
     expect(config.ASSESS_PARTIAL_BRANCHES).toBe(true)
     expect(config.RESUME_PARTIAL_BRANCHES).toBe(false)
     expect(config.RESUME_MODE).toBe('assess')
@@ -93,6 +95,18 @@ describe('makeConfig overrides and clamps', () => {
     expect(makeConfig({ resumeMode: 'continue' }).RESUME_MODE).toBe('continue')
     expect(makeConfig({ resumeMode: 'assess' }).RESUME_MODE).toBe('assess')
     expect(() => makeConfig({ resumeMode: 'yolo' })).toThrow(/Unsupported resumeMode/)
+  })
+
+  test('the CodeScene check guidance carries the suppression syntax and smell glossary', () => {
+    const g = makeConfig({}).CS_CHECK_GUIDANCE
+    expect(g).toContain('@codescene(disable:')
+    expect(g).toContain('Bumpy Road')
+    expect(g).toContain('Complex Method')
+    expect(g).toContain('Brain Class')
+    expect(g).toContain('Primitive Obsession')
+    // Disabling the check empties the guidance and command stays overridable.
+    expect(makeConfig({ csCheck: false }).CS_CHECK_GUIDANCE).toBe('')
+    expect(makeConfig({ csCheckCommand: 'cs check --changed --base main' }).CS_CHECK_COMMAND).toBe('cs check --changed --base main')
   })
 
   test('the between-work-items host gates can be disabled independently', () => {

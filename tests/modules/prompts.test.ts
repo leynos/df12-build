@@ -66,6 +66,23 @@ describe('implementation and fix prompts', () => {
     expect(text).toContain('broken test')
     expect(text).toContain('missing doc')
   })
+
+  test('fixPrompt carries the CodeScene suppression syntax and smell glossary when csCheck is on', () => {
+    const text = prompts.fixPrompt(task, worktree, plan, ['CODESCENE RED: Complex Method'], 1)
+    expect(text).toContain('@codescene(disable:')
+    expect(text).toContain('Bumpy Road')
+    expect(text).toContain('Primitive Obsession')
+    // Disabling the check removes the guidance from the prompt.
+    const off = makePrompts(makeConfig({ csCheck: false }))
+    expect(off.fixPrompt(task, worktree, plan, ['x'], 1)).not.toContain('@codescene(disable:')
+  })
+
+  test('implementWorkItemPrompt notes the CodeScene check runs after the gates, before CodeRabbit', () => {
+    const item = { text: 'WI-1: add the parser' }
+    const text = prompts.implementWorkItemPrompt(task, worktree, plan, item)
+    expect(text).toContain('CODE HEALTH')
+    expect(text).toContain('CodeScene')
+  })
 })
 
 describe('dual review prompts', () => {

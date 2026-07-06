@@ -655,6 +655,28 @@ artefact-slicing suites were retained as shipped-artefact coverage. The
 Surprises entry about the `checkJs: false` blind spot is resolved by the
 milestone 10 entry conversion.
 
+2026-07-06 (CodeScene deterministic gate): added `cs-check-changed` as a
+second deterministic gate, running after the commit gates and before
+CodeRabbit at every gate point — each work item (in `runBetweenItemGates`),
+each dual-review round, and the addendum lane. `runCodeSceneCheck`
+(host-review.ts) runs `csCheckCommand` (default `cs-check-changed`, an
+operator-provided wrapper) through the same secure-log spawn path as the
+commit gates on the committed changed files, and skips gracefully when the
+binary is absent (like `make verify-modules` without Dafny). A code-health
+regression short-circuits to a bounded fix round before any CodeRabbit quota
+or reviewer-agent tokens are spent, keeping the cost hierarchy (free gates,
+then CodeRabbit, then agents). The build and fix prompts carry
+`CS_CHECK_GUIDANCE`: the `@codescene(disable:"...")` suppression syntax (used
+only where refactoring would be deleterious, with a justifying comment) plus
+paraphrased summaries of the CodeScene module, function, and implementation
+smells. Config knobs `csCheck` (default on) and `csCheckCommand`. Module
+tests cover the clean/dirty/skip-when-absent host check, the config defaults
+and guidance content, the dual-review short-circuit (a CodeScene-blocking
+round spends no reviewer-agent tokens and the fix precedes the review), the
+persistent-regression halt, and the prompt guidance. `cs-check-changed` is a
+wrapper the operator will fold into agent-helper-scripts, so the exact
+invocation stays configurable.
+
 2026-07-06 (gate-log security and test hygiene): a wyvern team triaged a
 review batch. The security error was real: host gate logs were written to a
 predictable `/tmp/df12-gate-<...>-<command>.out` path via `createWriteStream`

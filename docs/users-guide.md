@@ -400,6 +400,18 @@ Common arguments:
   A red gate drives a bounded fix loop; if it cannot be made green the work
   item fails. Set `false` to verify gates only at the dual-review boundary
   (cheaper: one gate run per review round rather than one per work item).
+- `csCheck`: when `true` (the default), the host runs a CodeScene code-health
+  check on the committed changed files as a deterministic gate AFTER the
+  commit gates and BEFORE CodeRabbit (both free checks precede the
+  quota-limited CodeRabbit and the token-spending reviewer agents). A
+  regression drives a bounded fix round; the build agent clears it by
+  refactoring or, only where refactoring would be deleterious, suppresses the
+  specific smell with a justified `@codescene(disable:"...")` comment. The
+  check skips gracefully when its binary is absent, like `make verify-modules`
+  without Dafny. Set `false` to disable it.
+- `csCheckCommand`: the command the CodeScene check runs in the worktree.
+  Defaults to `cs-check-changed` (an operator-provided wrapper); override it
+  with the exact invocation, e.g. `cs check --changed --base main`.
 - `coderabbitBetweenWorkItems`: when `true` (the default), and when both
   `coderabbitHostReview` and `perWorkItemBuild` are on, the host runs a
   CodeRabbit review after each committed work item — a deterministic gate

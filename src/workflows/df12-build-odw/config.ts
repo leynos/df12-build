@@ -60,6 +60,8 @@ export interface RawWorkflowArgs {
   coderabbitBackoffMinutes?: unknown
   coderabbitFindingsFile?: string
   hostCommitGates?: boolean
+  csCheck?: boolean
+  csCheckCommand?: string
   hostGatesBetweenWorkItems?: boolean
   commitGateTimeoutSeconds?: number | string
   commitGates?: unknown
@@ -119,11 +121,14 @@ export interface WorkflowConfig {
   CODERABBIT_BACKOFF_MINUTES: [number, number]
   CODERABBIT_FINDINGS_FILE: string
   HOST_COMMIT_GATES: boolean
+  CS_CHECK: boolean
+  CS_CHECK_COMMAND: string
   HOST_GATES_BETWEEN_WORK_ITEMS: boolean
   COMMIT_GATE_TIMEOUT_SECONDS: number
   COMMIT_GATES: string[]
   COMMIT_GATE_TEXT: string
   COMMIT_GATE_GUIDANCE: string
+  CS_CHECK_GUIDANCE: string
   CODERABBIT_REVIEW_GUIDANCE: string
   SPARK_DELEGATION_GUIDANCE: string
   SCRUTINEER_DELEGATION_GUIDANCE: string
@@ -264,6 +269,23 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   const COMMIT_GATE_TIMEOUT_SECONDS = Math.max(1, Math.trunc(Number(cfg.commitGateTimeoutSeconds) || 3600))
   const COMMIT_GATE_GUIDANCE =
     `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well — NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.${HOST_COMMIT_GATES ? ' The workflow host independently re-runs the configured gates against your committed HEAD before review and integration; a gatesGreen claim the host cannot reproduce fails the stage with the host gate log as evidence.' : ''}`
+  // CodeScene code-health check on the committed changed files, run as a
+  // deterministic gate AFTER the commit gates and BEFORE CodeRabbit (free, so
+  // it precedes the quota-limited CodeRabbit and the token-spending reviewer
+  // agents). `cs-check-changed` is a wrapper the operator provides; override
+  // the invocation with csCheckCommand. Skips gracefully when the binary is
+  // absent, like `make verify-modules` without Dafny.
+  const CS_CHECK = cfg.csCheck !== false
+  const CS_CHECK_COMMAND = String(cfg.csCheckCommand || 'cs-check-changed')
+  const CS_CHECK_GUIDANCE = CS_CHECK
+    ? [
+        `A deterministic CodeScene code-health check (\`${CS_CHECK_COMMAND}\`) runs on your committed changed files AFTER the commit gates and BEFORE CodeRabbit. Clear a flagged code-health regression by refactoring the code. ONLY when further refinement would genuinely be deleterious to clarity or correctness, suppress a specific smell with a \`@codescene(disable:"Complex Method")\` comment (combine several as \`@codescene(disable:"Complex Method", disable:"Bumpy Road Ahead")\`) placed immediately before the affected function or method, and precede that suppression with a plain-language comment explaining why it is justified.`,
+        'What the flagged smells mean:',
+        'Module smells — Low Cohesion: the module/class carries several unrelated responsibilities (measured by LCOM4), breaking the single-responsibility principle. Brain Class (God Class): a large module with many functions and at least one Brain Method, holding too much responsibility at once. Developer Congestion: the code has become a coordination bottleneck because too many people must change it in parallel. Complex code by former contributors: a low-health hotspot whose original author has left the organisation carries heightened maintenance risk. Lines of Code: the file is simply too large.',
+        "Function smells — Brain Method (God Function): one complex function concentrates the module's behaviour and becomes a local hotspot. DRY violations: duplicated logic that is actually changed together in predictable patterns. Complex Method: high cyclomatic complexity from many conditionals (if/for/while). Primitive Obsession: heavy use of raw primitives (integers, strings, floats) where a domain type would encapsulate the validation and meaning of the values. Large Method: a function with too many lines to comprehend easily.",
+        'Implementation smells — Nested Complexity: if-statements nested inside other ifs and/or loops, which sharply raises defect risk. Bumpy Road: a function that fails to encapsulate its responsibilities and instead holds several separate chunks of logic — extract each chunk into its own function. Complex Conditional: a single branch condition (in an if/for/while) combining multiple logical operators such as AND/OR. Large Assertion Blocks (test smell): a long run of consecutive assert statements that signals a missing abstraction. Duplicated Assertion Blocks (test smell): the same assertion block copy-pasted across the suite — a DRY violation.',
+      ].join('\n')
+    : ''
   const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW
     ? 'Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work — only committed changes reach the host review.'
     : `Use \`coderabbit review --agent\` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the \`vsleep\` command) for \`$(shuf -i ${CODERABBIT_BACKOFF_MINUTES[0]}-${CODERABBIT_BACKOFF_MINUTES[1]} -n 1)\` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.`
@@ -327,11 +349,14 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     CODERABBIT_BACKOFF_MINUTES,
     CODERABBIT_FINDINGS_FILE,
     HOST_COMMIT_GATES,
+    CS_CHECK,
+    CS_CHECK_COMMAND,
     HOST_GATES_BETWEEN_WORK_ITEMS,
     COMMIT_GATE_TIMEOUT_SECONDS,
     COMMIT_GATES,
     COMMIT_GATE_TEXT,
     COMMIT_GATE_GUIDANCE,
+    CS_CHECK_GUIDANCE,
     CODERABBIT_REVIEW_GUIDANCE,
     SPARK_DELEGATION_GUIDANCE,
     SCRUTINEER_DELEGATION_GUIDANCE,

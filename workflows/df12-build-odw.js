@@ -981,6 +981,15 @@ function makeConfig(rawArgs) {
   const HOST_GATES_BETWEEN_WORK_ITEMS2 = cfg.hostGatesBetweenWorkItems !== false;
   const COMMIT_GATE_TIMEOUT_SECONDS2 = Math.max(1, Math.trunc(Number(cfg.commitGateTimeoutSeconds) || 3600));
   const COMMIT_GATE_GUIDANCE2 = `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT2}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well \u2014 NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.${HOST_COMMIT_GATES2 ? " The workflow host independently re-runs the configured gates against your committed HEAD before review and integration; a gatesGreen claim the host cannot reproduce fails the stage with the host gate log as evidence." : ""}`;
+  const CS_CHECK2 = cfg.csCheck !== false;
+  const CS_CHECK_COMMAND2 = String(cfg.csCheckCommand || "cs-check-changed");
+  const CS_CHECK_GUIDANCE2 = CS_CHECK2 ? [
+    `A deterministic CodeScene code-health check (\`${CS_CHECK_COMMAND2}\`) runs on your committed changed files AFTER the commit gates and BEFORE CodeRabbit. Clear a flagged code-health regression by refactoring the code. ONLY when further refinement would genuinely be deleterious to clarity or correctness, suppress a specific smell with a \`@codescene(disable:"Complex Method")\` comment (combine several as \`@codescene(disable:"Complex Method", disable:"Bumpy Road Ahead")\`) placed immediately before the affected function or method, and precede that suppression with a plain-language comment explaining why it is justified.`,
+    "What the flagged smells mean:",
+    "Module smells \u2014 Low Cohesion: the module/class carries several unrelated responsibilities (measured by LCOM4), breaking the single-responsibility principle. Brain Class (God Class): a large module with many functions and at least one Brain Method, holding too much responsibility at once. Developer Congestion: the code has become a coordination bottleneck because too many people must change it in parallel. Complex code by former contributors: a low-health hotspot whose original author has left the organisation carries heightened maintenance risk. Lines of Code: the file is simply too large.",
+    "Function smells \u2014 Brain Method (God Function): one complex function concentrates the module's behaviour and becomes a local hotspot. DRY violations: duplicated logic that is actually changed together in predictable patterns. Complex Method: high cyclomatic complexity from many conditionals (if/for/while). Primitive Obsession: heavy use of raw primitives (integers, strings, floats) where a domain type would encapsulate the validation and meaning of the values. Large Method: a function with too many lines to comprehend easily.",
+    "Implementation smells \u2014 Nested Complexity: if-statements nested inside other ifs and/or loops, which sharply raises defect risk. Bumpy Road: a function that fails to encapsulate its responsibilities and instead holds several separate chunks of logic \u2014 extract each chunk into its own function. Complex Conditional: a single branch condition (in an if/for/while) combining multiple logical operators such as AND/OR. Large Assertion Blocks (test smell): a long run of consecutive assert statements that signals a missing abstraction. Duplicated Assertion Blocks (test smell): the same assertion block copy-pasted across the suite \u2014 a DRY violation."
+  ].join("\n") : "";
   const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? "Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work \u2014 only committed changes reach the host review." : `Use \`coderabbit review --agent\` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the \`vsleep\` command) for \`$(shuf -i ${CODERABBIT_BACKOFF_MINUTES2[0]}-${CODERABBIT_BACKOFF_MINUTES2[1]} -n 1)\` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.`;
   const SPARK_DELEGATION_GUIDANCE = "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks.";
   const SCRUTINEER_DELEGATION_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? `Delegate deterministic gate execution to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until the gates are green. ${CODERABBIT_REVIEW_GUIDANCE}` : `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND2}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`;
@@ -1038,11 +1047,14 @@ function makeConfig(rawArgs) {
     CODERABBIT_BACKOFF_MINUTES: CODERABBIT_BACKOFF_MINUTES2,
     CODERABBIT_FINDINGS_FILE: CODERABBIT_FINDINGS_FILE2,
     HOST_COMMIT_GATES: HOST_COMMIT_GATES2,
+    CS_CHECK: CS_CHECK2,
+    CS_CHECK_COMMAND: CS_CHECK_COMMAND2,
     HOST_GATES_BETWEEN_WORK_ITEMS: HOST_GATES_BETWEEN_WORK_ITEMS2,
     COMMIT_GATE_TIMEOUT_SECONDS: COMMIT_GATE_TIMEOUT_SECONDS2,
     COMMIT_GATES: COMMIT_GATES2,
     COMMIT_GATE_TEXT: COMMIT_GATE_TEXT2,
     COMMIT_GATE_GUIDANCE: COMMIT_GATE_GUIDANCE2,
+    CS_CHECK_GUIDANCE: CS_CHECK_GUIDANCE2,
     CODERABBIT_REVIEW_GUIDANCE,
     SPARK_DELEGATION_GUIDANCE,
     SCRUTINEER_DELEGATION_GUIDANCE
@@ -1064,6 +1076,8 @@ function makePrompts(config) {
     MEMTRACE_REPO_ID,
     COMMIT_GATE_TEXT: COMMIT_GATE_TEXT2,
     COMMIT_GATE_GUIDANCE: COMMIT_GATE_GUIDANCE2,
+    CS_CHECK: CS_CHECK2,
+    CS_CHECK_GUIDANCE: CS_CHECK_GUIDANCE2,
     CODERABBIT_REVIEW_COMMAND: CODERABBIT_REVIEW_COMMAND2,
     CODERABBIT_HOST_REVIEW: CODERABBIT_HOST_REVIEW2,
     CODERABBIT_REVIEW_GUIDANCE,
@@ -1210,6 +1224,7 @@ function makePrompts(config) {
       "",
       "Then, in this exact order:",
       `  1. DETERMINISTIC GATE: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT2}, plus any further gate targets AGENTS.md names; \`make markdownlint\` and \`make nixie\` for any markdown you touched). Fix failures yourself and re-run until green. ${COMMIT_GATE_GUIDANCE2}`,
+      ...CS_CHECK2 ? [`  1b. CODE HEALTH: after the gates are green, the host runs a CodeScene code-health check on your committed changes before CodeRabbit. Keep functions small, cohesive, and free of nested or overly complex conditionals so it passes; a regression bounces back to you with the specific smells and the option \u2014 only where refactoring would be deleterious \u2014 to suppress a smell with a justified \`@codescene(disable:"...")\` comment.`] : [],
       CODERABBIT_HOST_REVIEW2 ? `  2. ${CODERABBIT_REVIEW_GUIDANCE}` : `  2. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND2}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to confirm the gates are still green. ${CODERABBIT_REVIEW_GUIDANCE}`,
       "  3. Update the ExecPlan IN PLACE: tick this work item in ## Progress and record findings, decisions, and deviations. If this was the first work item, also set the header Status to `IN PROGRESS`; if it was the LAST unticked item, set Status to `COMPLETE` together with the Outcomes & Retrospective update.",
       "  4. Commit the work item and the ExecPlan update together as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).",
@@ -1231,6 +1246,7 @@ function makePrompts(config) {
       "The dual review returned the following BLOCKING items. Resolve every one:",
       ...blocking.map((b, i) => `  ${i + 1}. ${b}`),
       "",
+      ...CS_CHECK_GUIDANCE2 ? [CS_CHECK_GUIDANCE2, ""] : [],
       CODERABBIT_HOST_REVIEW2 ? `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT2}, plus markdownlint/nixie for markdown) first and green, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth \u2014 never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.` : `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT2}, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND2}\`, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth \u2014 never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
       "",
       "Return the commit subjects you added, whether every deterministic gate is green at HEAD after your fixes, the number of CodeRabbit runs you completed, how each blocking item was resolved, any open issues with reasons, and a short summary. This structured report is durable validation evidence for the branch \u2014 be precise about which gates ran and at which commit."
@@ -1814,6 +1830,7 @@ function coderabbitBlockingItems(findings) {
 }
 var coderabbitCapture = { reviews: 0, findings: 0, rateLimitedRuns: 0, deferred: 0, bySeverity: {}, sinkError: "" };
 var hostGateMetrics = { runs: 0, failures: 0 };
+var csCheckMetrics = { runs: 0, failures: 0, skipped: 0 };
 var gateLogDirCache = null;
 function gateLogRoot() {
   if (!gateLogDirCache) {
@@ -1836,7 +1853,9 @@ function makeHostReview(config) {
     coderabbitBackoffMinutes: backoffRange,
     coderabbitFindingsFile,
     commitGates,
-    commitGateTimeoutSeconds
+    commitGateTimeoutSeconds,
+    csCheck,
+    csCheckCommand
   } = config;
   function coderabbitBackoffMinutes2(seed) {
     let hash = 5381;
@@ -1965,7 +1984,26 @@ ${outcome.tail}`
       });
     });
   }
-  return { coderabbitBackoffMinutes: coderabbitBackoffMinutes2, runCoderabbitHostReview: runCoderabbitHostReview2, recordCoderabbitReview: recordCoderabbitReview2, runHostCommitGates: runHostCommitGates2 };
+  async function runCodeSceneCheck2(worktree, tag, label) {
+    if (!csCheck) return { clean: true, skipped: true, detail: "", logFile: "" };
+    const bin = csCheckCommand.trim().split(/\s+/)[0] || "cs-check-changed";
+    const probe = await execFileStatus("sh", ["-c", `command -v ${bin}`], { cwd: worktree });
+    if (!probe.ok) {
+      csCheckMetrics.skipped += 1;
+      log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`);
+      return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: "" };
+    }
+    csCheckMetrics.runs += 1;
+    const logFile = hostGateLogPath(tag, `cs-${label}`, 0);
+    log(`[task ${tag}] CodeScene check (${label}): ${csCheckCommand}`);
+    const outcome = await streamGate(csCheckCommand, worktree, logFile);
+    if (outcome.ok) return { clean: true, skipped: false, detail: "", logFile };
+    csCheckMetrics.failures += 1;
+    const timedOut = outcome.killed ? ` (killed after the ${commitGateTimeoutSeconds}s timeout)` : "";
+    return { clean: false, skipped: false, detail: `CodeScene check \`${csCheckCommand}\` reported code-health issues${timedOut}; full log: ${logFile}; output tail:
+${outcome.tail}`, logFile };
+  }
+  return { coderabbitBackoffMinutes: coderabbitBackoffMinutes2, runCoderabbitHostReview: runCoderabbitHostReview2, recordCoderabbitReview: recordCoderabbitReview2, runHostCommitGates: runHostCommitGates2, runCodeSceneCheck: runCodeSceneCheck2 };
 }
 
 // src/workflows/df12-build-odw/execplan-durability.ts
@@ -2113,6 +2151,7 @@ function makeTaskPipeline(deps) {
     PER_WORK_ITEM_BUILD: PER_WORK_ITEM_BUILD2,
     HOST_COMMIT_GATES: HOST_COMMIT_GATES2,
     HOST_GATES_BETWEEN_WORK_ITEMS: HOST_GATES_BETWEEN_WORK_ITEMS2,
+    CS_CHECK: CS_CHECK2,
     CODERABBIT_HOST_REVIEW: CODERABBIT_HOST_REVIEW2,
     CODERABBIT_BETWEEN_WORK_ITEMS: CODERABBIT_BETWEEN_WORK_ITEMS2,
     DRY_RUN: DRY_RUN2,
@@ -2139,6 +2178,7 @@ function makeTaskPipeline(deps) {
     ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2,
     createWorktree: createWorktree2,
     runHostCommitGates: runHostCommitGates2,
+    runCodeSceneCheck: runCodeSceneCheck2,
     runCoderabbitHostReview: runCoderabbitHostReview2,
     recordCoderabbitReview: recordCoderabbitReview2
   } = deps;
@@ -2239,20 +2279,34 @@ function makeTaskPipeline(deps) {
   }
   async function runBetweenItemGates(task, worktree, plan, itemLabel, extra) {
     const tag = task.id;
-    for (let attempt = 1; attempt <= MAX_REVIEW_ROUNDS2; attempt++) {
-      const gates = await hostGateLock2(() => runHostCommitGates2(worktree, tag, `${itemLabel} a${attempt}`));
-      if (gates.green) return { ok: true };
-      log(`[task ${tag}] host commit gates red after ${itemLabel} (attempt ${attempt} of ${MAX_REVIEW_ROUNDS2})`);
-      if (attempt === MAX_REVIEW_ROUNDS2) {
-        return { fail: { id: tag, status: "failed", stage: "implement", detail: `HOST GATES RED after ${itemLabel}: ${gates.detail} The committed work item's gatesGreen claim could not be reproduced after ${MAX_REVIEW_ROUNDS2} fix attempt(s).`, worktree, proposals: [], ...extra } };
-      }
+    const runFix = async (blocking, fixLabel) => {
       phase("Implement");
-      const gateBlocking = [`HOST GATES RED: ${gates.detail} The agent-reported gate status for ${itemLabel} was wrong or is stale \u2014 reproduce the failure from the log, fix it, re-run the gates to green, and commit.`];
-      await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, gateBlocking, attempt), buildAgentOptions2({ phase: "Implement", label: `fix:${tag} ${itemLabel} gate a${attempt}`, schema: FIX_SCHEMA })), `fix:${tag} ${itemLabel} gate a${attempt}`));
+      await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, blocking, 1), buildAgentOptions2({ phase: "Implement", label: fixLabel, schema: FIX_SCHEMA })), fixLabel));
       const committed = await verifyWorktreeCommitted(worktree);
       if (!committed.ok) {
-        return { fail: { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the gate fix for ${itemLabel} left uncommitted state (${committed.detail}); every fix must be committed before the gates re-run`, worktree, proposals: [], ...extra } };
+        return { fail: { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the fix for ${itemLabel} left uncommitted state (${committed.detail}); every fix must be committed before the checks re-run`, worktree, proposals: [], ...extra } };
       }
+      return null;
+    };
+    for (let attempt = 1; attempt <= MAX_REVIEW_ROUNDS2; attempt++) {
+      const gates = await hostGateLock2(() => runHostCommitGates2(worktree, tag, `${itemLabel} a${attempt}`));
+      if (!gates.green) {
+        log(`[task ${tag}] host commit gates red after ${itemLabel} (attempt ${attempt} of ${MAX_REVIEW_ROUNDS2})`);
+        if (attempt === MAX_REVIEW_ROUNDS2) {
+          return { fail: { id: tag, status: "failed", stage: "implement", detail: `HOST GATES RED after ${itemLabel}: ${gates.detail} The committed work item's gatesGreen claim could not be reproduced after ${MAX_REVIEW_ROUNDS2} fix attempt(s).`, worktree, proposals: [], ...extra } };
+        }
+        const durability2 = await runFix([`HOST GATES RED: ${gates.detail} The agent-reported gate status for ${itemLabel} was wrong or is stale \u2014 reproduce the failure from the log, fix it, re-run the gates to green, and commit.`], `fix:${tag} ${itemLabel} gate a${attempt}`);
+        if (durability2) return durability2;
+        continue;
+      }
+      const cs = CS_CHECK2 ? await hostGateLock2(() => runCodeSceneCheck2(worktree, tag, `${itemLabel} a${attempt}`)) : { clean: true, skipped: true, detail: "", logFile: "" };
+      if (cs.clean) return { ok: true };
+      log(`[task ${tag}] CodeScene check red after ${itemLabel} (attempt ${attempt} of ${MAX_REVIEW_ROUNDS2})`);
+      if (attempt === MAX_REVIEW_ROUNDS2) {
+        return { fail: { id: tag, status: "failed", stage: "implement", detail: `CODESCENE RED after ${itemLabel}: ${cs.detail} The committed work item's code health could not be cleared after ${MAX_REVIEW_ROUNDS2} fix attempt(s).`, worktree, proposals: [], ...extra } };
+      }
+      const durability = await runFix([`CODESCENE RED: ${cs.detail} Clear these code-health regressions by refactoring, or \u2014 only where further refinement would be deleterious \u2014 suppress the specific smell with a justified @codescene(disable:"...") comment, then re-run the check to green and commit.`], `fix:${tag} ${itemLabel} cs a${attempt}`);
+      if (durability) return durability;
     }
     return { ok: true };
   }
@@ -2493,6 +2547,23 @@ function makeTaskPipeline(deps) {
           continue;
         }
       }
+      if (CS_CHECK2) {
+        const cs = await hostGateLock2(() => runCodeSceneCheck2(worktree, tag, `r${round}`));
+        if (!cs.clean) {
+          log(`[task ${tag}] CodeScene check red in round ${round}`);
+          const csBlocking = [`CODESCENE RED: ${cs.detail} Clear these code-health regressions by refactoring, or \u2014 only where further refinement would be deleterious \u2014 suppress the specific smell with a justified @codescene(disable:"...") comment, then re-run the check to green and commit.`];
+          reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: csBlocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null });
+          if (round === MAX_REVIEW_ROUNDS2) break;
+          phase("Implement");
+          const csFix = await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, csBlocking, round), buildAgentOptions2({ phase: "Implement", label: `fix:${tag} cs r${round}`, schema: FIX_SCHEMA })), `fix:${tag} cs r${round}`));
+          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(csFix);
+          const csFixCommitted = await verifyWorktreeCommitted(worktree);
+          if (!csFixCommitted.ok) {
+            return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeScene-fix round left uncommitted state (${csFixCommitted.detail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
+          }
+          continue;
+        }
+      }
       if (CODERABBIT_HOST_REVIEW2) {
         const coderabbit = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} r${round}`);
         await recordCoderabbitReview2(`${tag} r${round}`, coderabbit);
@@ -2692,6 +2763,12 @@ function makeTaskPipeline(deps) {
             return await attachAssessment2(task, wt, { id: tag, status: "failed", stage: "addendum", detail: `addendum reported green gates but the host could not reproduce them: ${hostGates.detail}`, openIssues, worktree, proposals, kind: "addendum" });
           }
         }
+        if (CS_CHECK2) {
+          const cs = await hostGateLock2(() => runCodeSceneCheck2(worktree, tag, "addendum"));
+          if (!cs.clean) {
+            return await attachAssessment2(task, wt, { id: tag, status: "failed", stage: "addendum", detail: `addendum committed work with unresolved CodeScene code-health issues: ${cs.detail}`, openIssues, worktree, proposals, kind: "addendum" });
+          }
+        }
         if (CODERABBIT_HOST_REVIEW2) {
           phase("Code Review");
           const coderabbit = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} addendum`);
@@ -2819,10 +2896,13 @@ var {
   CODERABBIT_FINDINGS_FILE,
   HOST_COMMIT_GATES,
   HOST_GATES_BETWEEN_WORK_ITEMS,
+  CS_CHECK,
+  CS_CHECK_COMMAND,
   COMMIT_GATE_TIMEOUT_SECONDS,
   COMMIT_GATES,
   COMMIT_GATE_TEXT,
-  COMMIT_GATE_GUIDANCE
+  COMMIT_GATE_GUIDANCE,
+  CS_CHECK_GUIDANCE
 } = CONFIG;
 if (PROJECT_ROOT !== process.cwd()) {
   const fs = process.getBuiltinModule("node:fs");
@@ -2901,14 +2981,17 @@ var {
   coderabbitBackoffMinutes,
   runCoderabbitHostReview,
   recordCoderabbitReview,
-  runHostCommitGates
+  runHostCommitGates,
+  runCodeSceneCheck
 } = makeHostReview({
   base: BASE,
   coderabbitAttempts: CODERABBIT_ATTEMPTS,
   coderabbitBackoffMinutes: CODERABBIT_BACKOFF_MINUTES,
   coderabbitFindingsFile: CODERABBIT_FINDINGS_FILE,
   commitGates: COMMIT_GATES,
-  commitGateTimeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS
+  commitGateTimeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
+  csCheck: CS_CHECK,
+  csCheckCommand: CS_CHECK_COMMAND
 });
 async function runAuthPreflight() {
   if (!AUTH_PREFLIGHT) return [];
@@ -3282,6 +3365,8 @@ var {
   runDualReviewAndIntegration,
   runTask
 } = makeTaskPipeline({
+  CS_CHECK,
+  runCodeSceneCheck,
   MAX_DESIGN_ROUNDS,
   MAX_REVIEW_ROUNDS,
   MAX_WORK_ITEM_ROUNDS,

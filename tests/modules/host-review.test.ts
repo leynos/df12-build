@@ -51,9 +51,60 @@ function hostReview(overrides: Partial<Parameters<typeof makeHostReview>[0]> = {
     coderabbitFindingsFile: '',
     commitGates: ['make all'],
     commitGateTimeoutSeconds: 5,
+    csCheck: false,
+    csCheckCommand: 'cs-check-changed',
     ...overrides,
   })
 }
+
+describe('runCodeSceneCheck', () => {
+  const junk: string[] = []
+  const tmp = (prefix: string) => {
+    const dir = mkdtempSync(path.join(tmpdir(), prefix))
+    junk.push(dir)
+    return dir
+  }
+  afterEach(() => {
+    for (const target of junk.splice(0)) if (target) rmSync(target, { recursive: true, force: true })
+  })
+
+  test('a clean check reports clean and not skipped', async () => {
+    const dir = tmp('cs-clean-')
+    // A command that exists and exits 0 stands in for a clean cs-check-changed.
+    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: 'true' })
+    const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
+    expect(result.clean).toBe(true)
+    expect(result.skipped).toBe(false)
+    junk.push(result.logFile)
+  })
+
+  test('a non-zero exit reports a code-health regression with the log tail', async () => {
+    const dir = tmp('cs-dirty-')
+    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: 'sh -c "echo Complex Method in foo; exit 1"' })
+    const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
+    expect(result.clean).toBe(false)
+    expect(result.skipped).toBe(false)
+    expect(result.detail).toMatch(/Complex Method/)
+    expect(result.detail).toContain(result.logFile)
+    junk.push(result.logFile)
+  })
+
+  test('an absent binary skips gracefully (clean, skipped) instead of failing', async () => {
+    const dir = tmp('cs-absent-')
+    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: 'df12-cs-not-installed-xyz' })
+    const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
+    expect(result.clean).toBe(true)
+    expect(result.skipped).toBe(true)
+    expect(result.detail).toMatch(/not on PATH/)
+  })
+
+  test('csCheck disabled skips without probing', async () => {
+    const dir = tmp('cs-off-')
+    const { runCodeSceneCheck } = hostReview({ csCheck: false })
+    const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
+    expect(result).toEqual({ clean: true, skipped: true, detail: '', logFile: '' })
+  })
+})
 
 describe('runHostCommitGates streaming', () => {
   // Track every temp dir and gate log so nothing leaks across repeated runs.

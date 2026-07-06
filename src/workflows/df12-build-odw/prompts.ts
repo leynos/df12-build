@@ -38,6 +38,8 @@ export function makePrompts(config: WorkflowConfig) {
     MEMTRACE_REPO_ID,
     COMMIT_GATE_TEXT,
     COMMIT_GATE_GUIDANCE,
+    CS_CHECK,
+    CS_CHECK_GUIDANCE,
     CODERABBIT_REVIEW_COMMAND,
     CODERABBIT_HOST_REVIEW,
     CODERABBIT_REVIEW_GUIDANCE,
@@ -213,6 +215,7 @@ export function makePrompts(config: WorkflowConfig) {
       '',
       'Then, in this exact order:',
       `  1. DETERMINISTIC GATE: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT}, plus any further gate targets AGENTS.md names; \`make markdownlint\` and \`make nixie\` for any markdown you touched). Fix failures yourself and re-run until green. ${COMMIT_GATE_GUIDANCE}`,
+      ...(CS_CHECK ? [`  1b. CODE HEALTH: after the gates are green, the host runs a CodeScene code-health check on your committed changes before CodeRabbit. Keep functions small, cohesive, and free of nested or overly complex conditionals so it passes; a regression bounces back to you with the specific smells and the option — only where refactoring would be deleterious — to suppress a smell with a justified \`@codescene(disable:"...")\` comment.`] : []),
       CODERABBIT_HOST_REVIEW
         ? `  2. ${CODERABBIT_REVIEW_GUIDANCE}`
         : `  2. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to confirm the gates are still green. ${CODERABBIT_REVIEW_GUIDANCE}`,
@@ -237,6 +240,7 @@ export function makePrompts(config: WorkflowConfig) {
       'The dual review returned the following BLOCKING items. Resolve every one:',
       ...blocking.map((b, i) => `  ${i + 1}. ${b}`),
       '',
+      ...(CS_CHECK_GUIDANCE ? [CS_CHECK_GUIDANCE, ''] : []),
       CODERABBIT_HOST_REVIEW
         ? `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT}, plus markdownlint/nixie for markdown) first and green, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth — never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`
         : `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT}, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND}\`, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth — never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
