@@ -1,6 +1,9 @@
 // Module tests for fresh-run recovery discovery (decomposition milestone 4):
 // makeRecoveryDiscovery against the shared recovery fixture repo, the
 // committed-ExecPlan reader, and the synthetic implementation bridge.
+import { chmodSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { describe, expect, test } from 'bun:test'
 
 import { makeRecoveryRepo, RECOVERY_ROADMAP } from '../fixtures/recovery-repo.mjs'
@@ -59,6 +62,28 @@ describe('makeRecoveryDiscovery', () => {
     const { candidates, errors } = await discover(RECOVERY_ROADMAP, '/nonexistent/nowhere')
     expect(candidates).toEqual([])
     expect(errors.join('; ')).toMatch(/for-each-ref failed/)
+  })
+
+  test('a worktree path that cannot be stat-probed is skipped as worktree-probe-fault', async () => {
+    // A permission fault (EACCES) on the worktree probe is neither present nor
+    // absent: it must skip the branch distinctly and record an error, not fall
+    // through to missing-worktree. Remove search permission on the worktrees
+    // parent so fs.stat of the registered worktree path raises EACCES. Root
+    // bypasses permission bits, so skip there.
+    if (typeof process.getuid === 'function' && process.getuid() === 0) return
+    const repo = makeRecoveryRepo()
+    const worktreesParent = join(repo.root, 'worktrees')
+    try {
+      chmodSync(worktreesParent, 0o000)
+      const { candidates, skipped, errors } = await makeRecoveryDiscovery(DEFAULT_LIMITS)(RECOVERY_ROADMAP, repo.dir)
+      expect(candidates.map((candidate) => candidate.taskId)).not.toContain('1.2.3')
+      const entry = skipped.find((item) => item.branchName === 'roadmap-1-2-3')
+      expect(entry?.reason).toBe('worktree-probe-fault')
+      expect(errors.some((error) => /worktree probe failed for roadmap-1-2-3/.test(error))).toBe(true)
+    } finally {
+      chmodSync(worktreesParent, 0o755)
+      repo.cleanup()
+    }
   })
 })
 

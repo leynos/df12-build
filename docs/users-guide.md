@@ -573,8 +573,10 @@ carrying the host's log evidence) and once per addendum implementation
 (addenda have no fix rounds, so an unreproducible green claim fails the
 addendum outright). Gate runs are serialized across the whole worker pool so
 sequential execution benefits from the target project's build caching, and
-each command's full output is teed to a `/tmp/df12-gate-<task>-<round>-…`
-log with a bounded tail quoted in the failure evidence. A command that
+each command's full output is streamed to a log in a secure per-run
+directory (`/tmp/df12-gates-XXXXXX/gate-<task>-<round>-N.out`, created with
+mode `0700` and opened exclusively without following symlinks) with a bounded
+tail quoted in the failure evidence. A command that
 exceeds `commitGateTimeoutSeconds` is killed and reported as a failure. The
 run result's `hostGates` object reports the configuration and bounded
 counters (gate runs, failures); per-round pass/fail detail appears in each

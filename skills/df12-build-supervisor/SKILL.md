@@ -209,8 +209,10 @@ provides the doc skills):
    round with the host log as evidence, and an addendum whose green claim
    the host cannot reproduce fails outright) and `commitGateTimeoutSeconds`
    (default 3600 — a gate exceeding it is killed and reported with the
-   timeout named). Host gate logs land at `/tmp/df12-gate-<task>-<round>-…`
-   on the runner; read them before re-running a gate by hand.
+   timeout named). Host gate logs land in a secure per-run directory,
+   `/tmp/df12-gates-XXXXXX/gate-<task>-<round>-N.out` on the runner (each
+   result carries its exact `logFile` path); read them before re-running a
+   gate by hand.
 
    Build-loop knobs: `perWorkItemBuild` (default on — the host dispatches
    one builder turn per unticked ExecPlan `## Progress` item, labelled
@@ -268,7 +270,8 @@ and `$SIDECAR/coderabbit-findings.jsonl` (accumulated findings across runs).
    verification: enabled flag, per-gate timeout, and run/failure counters;
    with host gates on, `gatesGreen` is host-verified at review time and
    per-round pass/fail sits in failed tasks' `reviewRounds[].hostGates`
-   with `/tmp/df12-gate-*` log paths), `workItemBuild` (whether the host
+   with per-run `/tmp/df12-gates-*/gate-*.out` log paths),
+   `workItemBuild` (whether the host
    drove the build one Progress item at a time, and the round cap),
    `stageAttempts` (the
    in-run retry budget for stage agents that die on infrastructure faults;
@@ -363,7 +366,7 @@ For every active `roadmap-*` worktree, check:
   failed` bounces mean the ENVIRONMENT blocks committing in that worktree
   (hooks, identity, permissions) — stop and repair rather than relaunch;
 - advertised gate logs exist (with `hostCommitGates` on, the decisive gate
-  evidence is the host's own `/tmp/df12-gate-*` logs, not agent claims);
+  evidence is the host's own `/tmp/df12-gates-*/gate-*.out` logs, not agent claims);
 - claimed commits, dirty files, or clean branches match the agent output.
 
 If a planner returns an ExecPlan path but the file is missing, inspect the

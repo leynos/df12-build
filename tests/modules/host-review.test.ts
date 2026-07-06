@@ -1,9 +1,15 @@
-// Module tests for the host-run CodeRabbit review (batch-2 remediation):
-// the NDJSON outcome classifier's terminal-completion guard.
-import { describe, expect, test } from 'bun:test'
+// Module tests for the host-run CodeRabbit review: the NDJSON outcome
+// classifier's terminal-completion guard, and the spawn-streamed host commit
+// gates (secure per-run log directory).
+import { afterEach, describe, expect, test } from 'bun:test'
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
 import {
   classifyCoderabbitOutcome,
+  hostGateLogPath,
+  makeHostReview,
   parseCoderabbitAgentOutput,
 } from '../../src/workflows/df12-build-odw/host-review.ts'
 
@@ -33,10 +39,6 @@ describe('classifyCoderabbitOutcome terminal completion', () => {
   })
 })
 
-import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
-import { hostGateLogPath, makeHostReview } from '../../src/workflows/df12-build-odw/host-review.ts'
 
 const g = globalThis as Record<string, unknown>
 g.log = () => {}
@@ -54,12 +56,26 @@ function hostReview(overrides: Partial<Parameters<typeof makeHostReview>[0]> = {
 }
 
 describe('runHostCommitGates streaming', () => {
+  // Track every temp dir and gate log so nothing leaks across repeated runs.
+  const junk: string[] = []
+  const tmp = (prefix: string) => {
+    const dir = mkdtempSync(path.join(tmpdir(), prefix))
+    junk.push(dir)
+    return dir
+  }
+  afterEach(() => {
+    for (const target of junk.splice(0)) {
+      if (target) rmSync(target, { recursive: true, force: true })
+    }
+  })
+
   test('handles output far larger than the old 16MB execFile ceiling', async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'gate-stream-'))
+    const dir = tmp('gate-stream-')
     // ~40MB of stdout would have tripped maxBuffer under execFile; streaming
     // must pass it through and still report green.
     const { runHostCommitGates } = hostReview({ commitGates: ['yes x | head -c 40000000; echo; echo DONE-OK'] })
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
+    junk.push(result.results[0]?.logFile)
     expect(result.green).toBe(true)
     expect(result.results[0].ok).toBe(true)
     // The log file holds the full stream, not a truncated buffer.
@@ -67,32 +83,37 @@ describe('runHostCommitGates streaming', () => {
   })
 
   test('a red gate carries the streamed tail and the log path', async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'gate-stream-red-'))
+    const dir = tmp('gate-stream-red-')
     const { runHostCommitGates } = hostReview({ commitGates: ['echo working; echo boom; exit 2'] })
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
+    junk.push(result.results[0]?.logFile)
     expect(result.green).toBe(false)
     expect(result.detail).toMatch(/boom/)
     expect(result.detail).toContain(result.results[0].logFile)
   })
 
-  test('a log-write fault settles the gate as failed instead of crashing', async () => {
-    // Pre-create a DIRECTORY at the exact log path the gate will use, so
-    // createWriteStream faults with EISDIR. The stream 'error' listener must
-    // route that into a failed gate result rather than an uncaught crash.
-    const dir = mkdtempSync(path.join(tmpdir(), 'gate-stream-logfault-'))
-    const command = 'echo hi'
-    const logPath = hostGateLogPath('1.2.3', 'r1', 0, command)
-    mkdirSync(logPath, { recursive: true })
-    const { runHostCommitGates } = hostReview({ commitGates: [command] })
+  test('a planted symlink at the log path cannot clobber its target (O_NOFOLLOW|O_EXCL)', async () => {
+    const dir = tmp('gate-stream-symlink-')
+    const victim = path.join(tmp('gate-victim-'), 'victim.txt')
+    writeFileSync(victim, 'original\n')
+    // Plant a symlink where the gate will write; the exclusive no-follow open
+    // must refuse it (fail the gate) rather than following it and clobbering
+    // the target, and must not crash the run.
+    const logPath = hostGateLogPath('1.2.3', 'r1', 0)
+    junk.push(logPath)
+    symlinkSync(victim, logPath)
+    const { runHostCommitGates } = hostReview({ commitGates: ['echo hi'] })
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
     expect(result.green).toBe(false)
     expect(result.detail).toMatch(/gate log write failed|failed/)
+    expect(readFileSync(victim, 'utf8')).toBe('original\n')
   })
 
   test('a hung gate is killed at the timeout', async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'gate-stream-hang-'))
+    const dir = tmp('gate-stream-hang-')
     const { runHostCommitGates } = hostReview({ commitGates: [`${process.execPath} -e "setInterval(()=>{},50)"`], commitGateTimeoutSeconds: 2 })
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
+    junk.push(result.results[0]?.logFile)
     expect(result.green).toBe(false)
     expect(result.detail).toMatch(/killed after the 2s gate timeout/)
   })

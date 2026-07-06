@@ -1814,9 +1814,20 @@ function coderabbitBlockingItems(findings) {
 }
 var coderabbitCapture = { reviews: 0, findings: 0, rateLimitedRuns: 0, deferred: 0, bySeverity: {}, sinkError: "" };
 var hostGateMetrics = { runs: 0, failures: 0 };
-function hostGateLogPath(tag, roundLabel, index, command) {
+var gateLogDirCache = null;
+function gateLogRoot() {
+  if (!gateLogDirCache) {
+    const fs = process.getBuiltinModule("node:fs");
+    const os = process.getBuiltinModule("node:os");
+    const path = process.getBuiltinModule("node:path");
+    gateLogDirCache = fs.mkdtempSync(path.join(os.tmpdir(), "df12-gates-"));
+  }
+  return gateLogDirCache;
+}
+function hostGateLogPath(tag, roundLabel, index) {
   const slug = (value) => String(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
-  return `/tmp/df12-gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}-${slug(command)}.out`;
+  const path = process.getBuiltinModule("node:path");
+  return path.join(gateLogRoot(), `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`);
 }
 function makeHostReview(config) {
   const {
@@ -1886,7 +1897,7 @@ function makeHostReview(config) {
     for (const [index, command] of commitGates.entries()) {
       hostGateMetrics.runs += 1;
       log(`[task ${tag}] host gate ${index + 1}/${commitGates.length} (${roundLabel}): ${command}`);
-      const logFile = hostGateLogPath(tag, roundLabel, index, command);
+      const logFile = hostGateLogPath(tag, roundLabel, index);
       const outcome = await streamGate(command, worktree, logFile);
       if (!outcome.ok) {
         hostGateMetrics.failures += 1;
@@ -1908,7 +1919,9 @@ ${outcome.tail}`
     const { spawn } = process.getBuiltinModule("node:child_process");
     const fs = process.getBuiltinModule("node:fs");
     return new Promise((resolve) => {
-      const stream = fs.createWriteStream(logFile);
+      const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
+      const openFlags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
+      const stream = fs.createWriteStream(logFile, { flags: openFlags, mode: 384 });
       const tail = [];
       let carry = "";
       let killed = false;

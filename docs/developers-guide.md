@@ -40,8 +40,10 @@ Relevant paths:
   `config.ts`, `schemas.ts`, `types.ts`, `roadmap.ts`, `exec.ts`,
   `faults.ts`, `git-evidence.ts`, `recovery-decision.ts`,
   `recovery-discovery.ts`, `prompts.ts`, `write-preflight.ts`,
-  `execplan-durability.ts`, `assessment.ts`, `remediation.ts`, and
-  `run-task.ts`, with the injected ODW primitives declared in
+  `execplan-durability.ts`, `assessment.ts`, `remediation.ts`,
+  `host-review.ts` (host-run CodeRabbit NDJSON parsing/classification and
+  the host commit gates), and `run-task.ts`, with the injected ODW
+  primitives declared in
   `odw-globals.d.ts`. TypeScript is restricted to erasable syntax by
   compiler flags (`erasableSyntaxOnly`, `verbatimModuleSyntax`).
 - `workflows/df12-build-odw.js`: GENERATED ODW/Codex workflow artefact, built
@@ -194,8 +196,12 @@ Host-run commit gates (`hostCommitGates`, default on) apply the same
 philosophy to gate greenness: `runHostCommitGates` executes the configured
 `commitGates` commands via `sh -c` in the task worktree, serialized pool-wide
 behind `hostGateLock` (width 1, for build-cache friendliness), with a
-per-command timeout (`commitGateTimeoutSeconds`) and output streamed to
-`/tmp/df12-gate-*` logs. Gates run via `spawn`, streaming stdout/stderr to
+per-command timeout (`commitGateTimeoutSeconds`) and output streamed to logs
+in a secure per-run directory (`mkdtempSync`, mode `0700`, e.g.
+`/tmp/df12-gates-XXXXXX/gate-<task>-<round>-N.out`) — an unpredictable name
+plus an `O_EXCL|O_NOFOLLOW`, mode-`0600` open, so a local symlink cannot
+clobber or leak the logs, and the raw gate command is kept out of the
+filename. Gates run via `spawn`, streaming stdout/stderr to
 the log as they run (evidence is visible during a long gate, and there is no
 `maxBuffer` ceiling for a noisy `make all` to trip) while a bounded
 ring-buffer keeps the last lines for the structured `detail` tail; the

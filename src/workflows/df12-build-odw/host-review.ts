@@ -143,9 +143,27 @@ export const coderabbitCapture: {
 
 export const hostGateMetrics = { runs: 0, failures: 0 }
 
-export function hostGateLogPath(tag: string, roundLabel: string, index: number, command: string): string {
+// Per-process gate-log directory, created lazily with mkdtempSync so its name
+// is unpredictable and its mode is 0700: a local attacker cannot pre-plant a
+// symlink at a guessable path to clobber or leak the logs. Combined with the
+// O_EXCL|O_NOFOLLOW open in streamGate, this closes the predictable-/tmp-path
+// symlink hazard. The raw gate command is kept OUT of the filename (it is
+// attacker/operator-controlled text); uniqueness comes from the private dir.
+let gateLogDirCache: string | null = null
+function gateLogRoot(): string {
+  if (!gateLogDirCache) {
+    const fs = process.getBuiltinModule('node:fs')
+    const os = process.getBuiltinModule('node:os')
+    const path = process.getBuiltinModule('node:path')
+    gateLogDirCache = fs.mkdtempSync(path.join(os.tmpdir(), 'df12-gates-'))
+  }
+  return gateLogDirCache
+}
+
+export function hostGateLogPath(tag: string, roundLabel: string, index: number): string {
   const slug = (value: unknown) => String(value).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
-  return `/tmp/df12-gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}-${slug(command)}.out`
+  const path = process.getBuiltinModule('node:path')
+  return path.join(gateLogRoot(), `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`)
 }
 
 export function makeHostReview(config: HostReviewConfig) {
@@ -235,7 +253,7 @@ export function makeHostReview(config: HostReviewConfig) {
     for (const [index, command] of commitGates.entries()) {
       hostGateMetrics.runs += 1
       log(`[task ${tag}] host gate ${index + 1}/${commitGates.length} (${roundLabel}): ${command}`)
-      const logFile = hostGateLogPath(tag, roundLabel, index, command)
+      const logFile = hostGateLogPath(tag, roundLabel, index)
       const outcome = await streamGate(command, worktree, logFile)
       if (!outcome.ok) {
         hostGateMetrics.failures += 1
@@ -262,7 +280,15 @@ export function makeHostReview(config: HostReviewConfig) {
     const { spawn } = process.getBuiltinModule('node:child_process')
     const fs = process.getBuiltinModule('node:fs')
     return new Promise((resolve) => {
-      const stream = fs.createWriteStream(logFile)
+      // Exclusive, no-follow open (mode 0600): O_EXCL fails if anything already
+      // exists at the path (a planted symlink/file cannot be clobbered), and
+      // O_NOFOLLOW refuses to traverse a symlink. Any such fault surfaces on the
+      // stream 'error' listener below and settles the gate as failed.
+      const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants
+      // createWriteStream accepts numeric open flags at runtime; the ambient
+      // type only allows a string, so cast the OR-ed constants.
+      const openFlags = (O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW) as unknown as string
+      const stream = fs.createWriteStream(logFile, { flags: openFlags, mode: 0o600 })
       const tail: string[] = []
       let carry = ''
       let killed = false

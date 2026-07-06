@@ -655,84 +655,114 @@ artefact-slicing suites were retained as shipped-artefact coverage. The
 Surprises entry about the `checkJs: false` blind spot is resolved by the
 milestone 10 entry conversion.
 
+2026-07-06 (gate-log security and test hygiene): a wyvern team triaged a
+review batch. The security error was real: host gate logs were written to a
+predictable `/tmp/df12-gate-<...>-<command>.out` path via `createWriteStream`
+with default flags, so a local symlink could clobber or leak them, and the raw
+gate command was embedded in the filename. Fixed by writing gate logs into a
+lazily-created per-process `mkdtempSync` directory (mode 0700, unpredictable
+name) and opening each log `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` at mode 0600,
+with the command dropped from the filename; a module test plants a symlink at
+the log path and asserts the gate fails closed with its target untouched. Test
+hygiene: `host-review.test.ts` imports were hoisted to the top and the
+streaming tests gained `afterEach` cleanup of every temp dir and gate log; a
+new `recovery-discovery.test.ts` case drives the `worktree-probe-fault` skip
+end-to-end (chmod 0000 on the worktrees parent to force an EACCES stat,
+skipped when running as root). Docs: the developers guide roster now lists
+`host-review.ts`, the dated revision notes were tidied by scribe, and every
+`/tmp/df12-gate-*` reference was updated to the secure per-run directory.
+Skipped as already-covered: the compile-time-regression finding (tsc's
+erasable-syntax flags, the `workflow-parse` gate, and the build script's
+fail-closed no-import/single-workflowMain/rename-survival assertions already
+enforce the compile-time invariants; prompt-text snapshots are an odw-testing
+anti-pattern) and the tracing-spans finding (the ODW loader injects no
+span/trace primitive and imports are banned, while `log()` and `events.jsonl`
+already carry task id, stage, round, and attempt).
+
 2026-07-06 (model right-sizing): the operator flagged three places where an
 Opus/high-effort model was paying for near-zero-cognition work. (1) The
-write-preflight probe (write one exact token to one exact path) now keeps the
-plan/build ADAPTER but runs at `writeProbeEffort` (minimal) and never inherits
-`planModel`/`buildModel`; `writeProbeModelByAdapter` sets a cheaper per-adapter
-probe model. (2) Report-only partial-branch assessment gained a deterministic
-fast-classifier — an empty+clean branch is `discard` and an evidence-collection
-failure is `continue-manual`, both with zero tokens — and its model default
-dropped from the Opus review model to a medium `assessmentModel`
-(claude-sonnet-5); a branch that committed an ExecPlan (a strong adopt-complete
-candidate) uses `assessmentEscalationModel`. Dirty/ambiguous branches still
-reach the model so the recovery eligibility gate keeps owning the
-`dirty-worktree` downgrade. (3) Remediation triage gained a deterministic
-exact-duplicate dedup pre-pass and dropped from `gpt-5.5@high` to a medium
-`triageModel` (gpt-5.5), escalating to `triageEscalationModel` (gpt-5.5@high)
-only when the deduped proposals span more than one audit/review source.
-Module tests pin every new knob, the fast-classifier table, the deterministic
-zero-token paths, the evidence-based tiers, and dedup/escalation; users-guide
-and architecture document the routing. Design note: the assessment tier is a
-single evidence-based model choice (not medium-then-reconfirm) to avoid a
-redundant second call and preserve the recovery tests' single-call contract.
+write-preflight probe (writing one exact token to one exact path) now keeps
+the plan/build ADAPTER, but runs at `writeProbeEffort` (minimal) and no
+longer inherits `planModel`/`buildModel`; `writeProbeModelByAdapter` sets a
+cheaper per-adapter probe model. (2) Report-only partial-branch assessment
+gained a deterministic fast-classifier — an empty, clean branch is
+classified `discard`, and an evidence-collection failure is classified
+`continue-manual`, both at zero tokens — and its model default dropped from
+the Opus review model to a medium `assessmentModel` (claude-sonnet-5). A
+branch that committed an ExecPlan (a strong adopt-complete candidate) uses
+`assessmentEscalationModel`. Dirty or ambiguous branches still reach the
+model, so the recovery eligibility gate keeps owning the `dirty-worktree`
+downgrade. (3) Remediation triage gained a deterministic exact-duplicate
+dedup pre-pass and dropped from `gpt-5.5@high` to a medium `triageModel`
+(gpt-5.5), escalating to `triageEscalationModel` (gpt-5.5@high) only when
+the deduped proposals span more than one audit or review source. Module
+tests pin every new knob, the fast-classifier table, the deterministic
+zero-token paths, the evidence-based tiers, and the dedup/escalation
+behaviour; the users-guide and architecture document the routing. Design
+note: the assessment tier is a single evidence-based model choice (not
+medium-then-reconfirm), to avoid a redundant second call and to preserve
+the recovery tests' single-call contract.
 
 2026-07-06 (cost-hierarchy review ordering): the operator confirmed the
-spend hierarchy — deterministic gates are free, CodeRabbit is a fixed weekly
-quota, and the reviewer agents (code + expert review) spend tokens, the one
-non-replenishable resource — and stated a preference to trade wall-clock for
-tokens. Two changes: (1) within the per-work-item build the host commit gates
-now re-run after each committed item BEFORE the between-item CodeRabbit review
-(hostGatesBetweenWorkItems, default on), closing the window where a committed
-red item could ride the agent's gatesGreen claim across later items; and (2)
-the dual-review round was reordered to spend cheapest-first — host gates, then
-CodeRabbit, then the reviewer agents — short-circuiting to a fix round the
-moment a cheaper stage blocks, so a CodeRabbit-blocking round no longer
-dispatches the reviewer agents (a CodeRabbit deferral still falls through to
-them as the decisive review). Module tests pin the per-item gate ordering, the
-red-gate fail, and the CodeRabbit-before-agents short-circuit; users-guide,
-architecture, and the developers guide document the cost-ordered stage.
+spend hierarchy — deterministic gates are free, CodeRabbit is a fixed
+weekly quota, and the reviewer agents (code and expert review) spend
+tokens, the one non-replenishable resource — and stated a preference to
+trade wall-clock time for tokens. Two changes followed. (1) Within the
+per-work-item build, the host commit gates now re-run after each committed
+item, before the between-item CodeRabbit review (hostGatesBetweenWorkItems,
+default on), closing the window where a committed red item could ride the
+agent's gatesGreen claim across later items. (2) The dual-review round was
+reordered to spend cheapest-first — host gates, then CodeRabbit, then the
+reviewer agents — short-circuiting to a fix round the moment a cheaper
+stage blocks, so a CodeRabbit-blocking round no longer dispatches the
+reviewer agents (a CodeRabbit deferral still falls through to them as the
+decisive review). Module tests pin the per-item gate ordering, the
+red-gate fail, and the CodeRabbit-before-agents short-circuit; the
+users-guide, architecture, and developers guide document the cost-ordered
+stage.
 
 2026-07-06 (review remediation, batch 3): a wyvern team triaged another
 findings batch. Fixed: `streamGate` (host-review.ts) gained a write-stream
 `error` listener and a settled-once guard, so a gate-log open/write fault
-(ENOSPC/EACCES/EISDIR) settles as a failed gate result instead of crashing
-the run on an uncaught stream error (pinned by an EISDIR test); and
-`directoryExists` now returns `{ ok, exists, detail }` mirroring `fileState`,
-so an I/O fault on a recovery worktree path surfaces as a new
-`worktree-probe-fault` skip reason (held out of normal selection) rather than
-being silently recorded as `missing-worktree`. The write-preflight
+(ENOSPC/EACCES/EISDIR) now settles as a failed gate result instead of
+crashing the run on an uncaught stream error (pinned by an EISDIR test).
+`directoryExists` now returns `{ ok, exists, detail }`, mirroring
+`fileState`, so an I/O fault on a recovery worktree path surfaces as a new
+`worktree-probe-fault` skip reason (held out of normal selection) rather
+than being silently recorded as `missing-worktree`. The write-preflight
 source-invariant was scoped to `run-task.ts` via a new `readModuleSource`
-helper so its ordered regex cannot span module boundaries in the concatenated
-tree. Docs: `coderabbitBetweenWorkItems` documented in users-guide and
-architecture; two grammar fixes and a `readWorkflowSource` doc-comment via
-scribe. Skipped as stale: the recurring "getBuiltinModule breaks Bun"
-findings (Bun 1.3.14 implements it — re-confirmed by runtime probe and passing
-bun suites; established authoritatively via firecrawl in batch 2 that support
-landed in bun-v1.2.6), and the developers-guide dependency list (already
-complete). The write-preflight cross-boundary regex was verified theoretical
-(tokens co-located) but scoped anyway as a cheap robustness win.
+helper, so its ordered regex cannot span module boundaries in the
+concatenated tree. Docs: `coderabbitBetweenWorkItems` is documented in the
+users-guide and architecture; two grammar fixes and a `readWorkflowSource`
+doc-comment were made via scribe. Skipped as stale: the recurring
+"getBuiltinModule breaks Bun" findings (Bun 1.3.14 implements it —
+re-confirmed by a runtime probe and passing bun suites; established
+authoritatively via firecrawl in batch 2 that support landed in
+bun-v1.2.6), and the developers-guide dependency list (already complete).
+The write-preflight cross-boundary regex was verified theoretical (the
+tokens are co-located) but was scoped anyway, as a cheap robustness win.
 
 2026-07-06 (design-review remediation): a reviewer flagged that "CodeRabbit
 between each ExecPlan stage" was not yet real — host CodeRabbit ran only
-once after the whole implementation stage, not between per-work-item build
-turns. Five concerns were validated against the code and addressed: (1) the
-per-work-item build loop now runs a deterministic host CodeRabbit gate after
-each committed work item (`coderabbitBetweenWorkItems`, default on) with a
-bounded fix loop; the gate fails closed — unresolved blocking findings fail
-the item (`code-review`), and a terminal rate-limit/CLI deferral HALTS the
-task for assessment instead of silently continuing. (2) Every fix round
-(gate fix, dual-review fix, between-item fix) now runs
-`verifyWorktreeCommitted`; a dirty fix fails `FIX DURABILITY` rather than
-reaching integration. (3) Host commit gates stream stdout/stderr via `spawn`
-to the log with a bounded ring-buffer tail, removing the 16MB `execFile`
-`maxBuffer` ceiling that a noisy `make all` could trip and streaming
-evidence during long gates. (4) `coderabbitReviewCommand` is documented as
+once, after the whole implementation stage, rather than between
+per-work-item build turns. Five concerns were validated against the code
+and addressed. (1) The per-work-item build loop now runs a deterministic
+host CodeRabbit gate after each committed work item
+(`coderabbitBetweenWorkItems`, default on), with a bounded fix loop; the
+gate fails closed — unresolved blocking findings fail the item
+(`code-review`), and a terminal rate-limit or CLI deferral HALTS the task
+for assessment instead of silently continuing. (2) Every fix round (gate
+fix, dual-review fix, between-item fix) now runs `verifyWorktreeCommitted`;
+a dirty fix fails `FIX DURABILITY` rather than reaching integration. (3)
+Host commit gates stream stdout and stderr via `spawn` to the log with a
+bounded ring-buffer tail, removing the 16MB `execFile` `maxBuffer` ceiling
+that a noisy `make all` could trip, and streaming evidence during long
+gates. (4) `coderabbitReviewCommand` is documented as
 legacy-agent-mode-only (host mode uses a fixed committed-diff invocation).
-(5) `make verify-modules-strict` fails when Dafny is absent, for CI to use as
-a real PR gate while `make all` keeps the lenient skip for local runs. New
-module tests cover the between-item pass/block/defer paths, the fix
-durability gate, the >16MB streaming path, and the config flag.
+(5) `make verify-modules-strict` fails when Dafny is absent, so CI can use
+it as a real PR gate, while `make all` keeps the lenient skip for local
+runs. New module tests cover the between-item pass/block/defer paths, the
+fix durability gate, the >16MB streaming path, and the config flag.
 
 2026-07-06 (review remediation, batch 2): a second findings batch was
 triaged by a wyvern verification team, with firecrawl used to settle the
