@@ -655,6 +655,22 @@ artefact-slicing suites were retained as shipped-artefact coverage. The
 Surprises entry about the `checkJs: false` blind spot is resolved by the
 milestone 10 entry conversion.
 
+2026-07-06 (cost-hierarchy review ordering): the operator confirmed the
+spend hierarchy — deterministic gates are free, CodeRabbit is a fixed weekly
+quota, and the reviewer agents (code + expert review) spend tokens, the one
+non-replenishable resource — and stated a preference to trade wall-clock for
+tokens. Two changes: (1) within the per-work-item build the host commit gates
+now re-run after each committed item BEFORE the between-item CodeRabbit review
+(hostGatesBetweenWorkItems, default on), closing the window where a committed
+red item could ride the agent's gatesGreen claim across later items; and (2)
+the dual-review round was reordered to spend cheapest-first — host gates, then
+CodeRabbit, then the reviewer agents — short-circuiting to a fix round the
+moment a cheaper stage blocks, so a CodeRabbit-blocking round no longer
+dispatches the reviewer agents (a CodeRabbit deferral still falls through to
+them as the decisive review). Module tests pin the per-item gate ordering, the
+red-gate fail, and the CodeRabbit-before-agents short-circuit; users-guide,
+architecture, and the developers guide document the cost-ordered stage.
+
 2026-07-06 (review remediation, batch 3): a wyvern team triaged another
 findings batch. Fixed: `streamGate` (host-review.ts) gained a write-stream
 `error` listener and a settled-once guard, so a gate-log open/write fault

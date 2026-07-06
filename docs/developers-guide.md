@@ -154,8 +154,21 @@ CLI invocation from agent prompts to the control loop: `coderabbit review
 `coderabbitReviewCommand` knob applies only to the legacy agent-run mode and
 does NOT override it) runs BETWEEN each per-work-item build turn
 (`coderabbitBetweenWorkItems`, default on) as a deterministic gate on each
-committed work item, and again per dual-review round and per addendum. Its
-NDJSON events are parsed host-side (the CLI exits 0 even on fatal errors, so
+committed work item, and again per dual-review round and per addendum.
+
+The review stage spends by a strict cost hierarchy — deterministic gates are
+free, CodeRabbit is a fixed weekly quota, and the reviewer agents (code
+review and expert review) spend the scarcest resource, tokens. So each
+dual-review round runs cheapest-first: host gates, then CodeRabbit, then the
+reviewer agents, and short-circuits to a fix round as soon as a cheaper stage
+blocks. A red gate or a CodeRabbit blocking finding drives a fix WITHOUT
+dispatching the reviewer agents that round; the agents run only once the gates
+and CodeRabbit are clean (a CodeRabbit deferral falls through to them, since
+they remain the decisive review). The workflow deliberately trades wall-clock
+(re-running gates, CodeRabbit and its backoff) for tokens, which do not
+replenish.
+
+Its NDJSON events are parsed host-side (the CLI exits 0 even on fatal errors, so
 classification must read events, never exit codes — see
 `docs/coderabbit-wire-contract.md` for captured live sessions documenting
 every observed event shape and the success-status set), `critical`/`major`

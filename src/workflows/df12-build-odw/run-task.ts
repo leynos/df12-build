@@ -612,6 +612,44 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
           continue
         }
       }
+      // Cost hierarchy: the deterministic gates (free) already ran above. Run
+      // the host CodeRabbit review (a fixed weekly quota — cheaper than agent
+      // tokens) BEFORE the reviewer agents, so a CodeRabbit-blocking round
+      // never spends reviewer-agent tokens. We trade wall-clock (CodeRabbit
+      // and its backoff) for tokens, which do not replenish.
+      if (CODERABBIT_HOST_REVIEW) {
+        const coderabbit = await runCoderabbitHostReview(worktree, `coderabbit:${tag} r${round}`)
+        await recordCoderabbitReview(`${tag} r${round}`, coderabbit)
+        if (coderabbit.outcome === 'auth') {
+          return { id: tag, status: 'fatal-auth', stage: 'review', detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, reviewRounds, worktree, proposals, ...kindExtra }
+        }
+        if (coderabbit.outcome === 'rate-limited' || coderabbit.outcome === 'error') {
+          // Deferred: CodeRabbit could not complete, so fall through to the
+          // reviewer agents — they remain the decisive review.
+          coderabbitCapture.deferred += 1
+          coderabbitDeferred.push(`CodeRabbit review deferred in round ${round} (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`)
+          log(`[task ${tag}] CodeRabbit host review deferred in round ${round}: ${coderabbit.outcome} (${coderabbit.detail})`)
+        } else {
+          const coderabbitBlocking = coderabbitBlockingItems(coderabbit.findings)
+          log(`[task ${tag}] CodeRabbit host review round ${round}: ${coderabbit.findings.length} finding(s), ${coderabbitBlocking.length} blocking`)
+          if (coderabbitBlocking.length) {
+            // Short-circuit before the reviewer agents: fix the CodeRabbit
+            // blockers first, spending zero agent tokens this round.
+            reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: coderabbitBlocking, ...(hostGates ? { hostGates: hostGates.results } : {}), fix: null })
+            if (round === MAX_REVIEW_ROUNDS) break
+            phase('Implement')
+            const crFix = await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, coderabbitBlocking, round), buildAgentOptions({ phase: 'Implement', label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`))
+            reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(crFix as Record<string, unknown> | null)
+            const crFixCommitted = await verifyWorktreeCommitted(worktree)
+            if (!crFixCommitted.ok) {
+              return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the CodeRabbit-fix round left uncommitted state (${crFixCommitted.detail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
+            }
+            continue
+          }
+        }
+      }
+      // Reviewer agents (tokens — the scarcest resource) run only once the
+      // free gates and the cheaper CodeRabbit review are clean this round.
       // parallel() resolves a thrown thunk to null, which would make an adapter
       // timeout indistinguishable from a reviewer that returned nothing — so
       // each reviewer retries infra faults and records any residual one here.
@@ -661,31 +699,9 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
           ...kindExtra,
         }
       }
-      // Host-run CodeRabbit review of the committed diff, sequential after the
-      // reviewer agents (its rate-limit backoff must never outlive the round).
-      // Blocking severities join the fix round; a persistent rate limit or CLI
-      // fault defers with a documented open issue, the same contract as the
-      // legacy agent-run flow — the dual reviewers remain decisive.
-      let coderabbitBlocking: string[] = []
-      if (CODERABBIT_HOST_REVIEW) {
-        const coderabbit = await runCoderabbitHostReview(worktree, `coderabbit:${tag} r${round}`)
-        await recordCoderabbitReview(`${tag} r${round}`, coderabbit)
-        if (coderabbit.outcome === 'auth') {
-          return { id: tag, status: 'fatal-auth', stage: 'review', detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, reviewRounds, worktree, proposals, ...kindExtra }
-        }
-        if (coderabbit.outcome === 'rate-limited' || coderabbit.outcome === 'error') {
-          coderabbitCapture.deferred += 1
-          coderabbitDeferred.push(`CodeRabbit review deferred in round ${round} (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`)
-          log(`[task ${tag}] CodeRabbit host review deferred in round ${round}: ${coderabbit.outcome} (${coderabbit.detail})`)
-        } else {
-          coderabbitBlocking = coderabbitBlockingItems(coderabbit.findings)
-          log(`[task ${tag}] CodeRabbit host review round ${round}: ${coderabbit.findings.length} finding(s), ${coderabbitBlocking.length} blocking`)
-        }
-      }
       const blocking = [
         ...(codeReview.blocking || []),
         ...(expertReview.blocking || []),
-        ...coderabbitBlocking,
       ]
       const roundRecord: Record<string, unknown> = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, ...(hostGates ? { hostGates: hostGates.results } : {}), fix: null }
       reviewRounds.push(roundRecord)

@@ -440,6 +440,42 @@ describe('runTask', () => {
     expect(labels.some((label) => label.startsWith('integrate:'))).toBe(false)
   })
 
+  test('CodeRabbit runs before the reviewer agents and a blocking round spends no agent tokens', async () => {
+    const worktree = makeWorktree()
+    let crRound = 0
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('fix:')) {
+        git(worktree, 'commit', '-qm', 'fix CodeRabbit blocker', '--allow-empty')
+        return { gatesGreen: true, summary: 'fixed' }
+      }
+      // Reviewer agents pass whenever they are reached.
+      if (label.startsWith('code-review:') || label.startsWith('expert-review:')) return passReview
+      return happyScript()(label, prompt)
+    })
+    const pipe = subject(worktree, {
+      CODERABBIT_HOST_REVIEW: true,
+      runCoderabbitHostReview: async () => {
+        crRound += 1
+        // Round 1 blocks (agents must NOT run); round 2 is clean.
+        return crRound === 1
+          ? { outcome: 'findings' as const, attempts: 1, findings: [{ type: 'finding', severity: 'major', fileName: 'x.ts', comment: 'fix me' }], detail: '' }
+          : { outcome: 'clean' as const, attempts: 1, findings: [], detail: '' }
+      },
+    })
+    const outcome = await pipe.runTask(task, null)
+    expect(outcome.status).toBe('done')
+    // The reviewer agents ran exactly once (round 2), never in the
+    // CodeRabbit-blocking round 1 — the expensive tokens were not spent while
+    // a cheaper gate still had blockers.
+    expect(labels.filter((label) => label.startsWith('code-review:'))).toHaveLength(1)
+    expect(labels.filter((label) => label.startsWith('expert-review:'))).toHaveLength(1)
+    // The CodeRabbit blocker drove a fix before any reviewer agent ran.
+    const firstFix = labels.findIndex((label) => label.startsWith('fix:'))
+    const firstReview = labels.findIndex((label) => label.startsWith('code-review:'))
+    expect(firstFix).toBeGreaterThanOrEqual(0)
+    expect(firstFix).toBeLessThan(firstReview)
+  })
+
   test('a review fix that leaves the worktree dirty fails the FIX DURABILITY gate', async () => {
     const worktree = makeWorktree()
     let round = 0

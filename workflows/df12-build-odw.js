@@ -2397,6 +2397,33 @@ function makeTaskPipeline(deps) {
           continue;
         }
       }
+      if (CODERABBIT_HOST_REVIEW2) {
+        const coderabbit = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} r${round}`);
+        await recordCoderabbitReview2(`${tag} r${round}`, coderabbit);
+        if (coderabbit.outcome === "auth") {
+          return { id: tag, status: "fatal-auth", stage: "review", detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, reviewRounds, worktree, proposals, ...kindExtra };
+        }
+        if (coderabbit.outcome === "rate-limited" || coderabbit.outcome === "error") {
+          coderabbitCapture.deferred += 1;
+          coderabbitDeferred.push(`CodeRabbit review deferred in round ${round} (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`);
+          log(`[task ${tag}] CodeRabbit host review deferred in round ${round}: ${coderabbit.outcome} (${coderabbit.detail})`);
+        } else {
+          const coderabbitBlocking = coderabbitBlockingItems(coderabbit.findings);
+          log(`[task ${tag}] CodeRabbit host review round ${round}: ${coderabbit.findings.length} finding(s), ${coderabbitBlocking.length} blocking`);
+          if (coderabbitBlocking.length) {
+            reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: coderabbitBlocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null });
+            if (round === MAX_REVIEW_ROUNDS2) break;
+            phase("Implement");
+            const crFix = await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, coderabbitBlocking, round), buildAgentOptions2({ phase: "Implement", label: `fix:${tag} r${round}`, schema: FIX_SCHEMA })), `fix:${tag} r${round}`));
+            reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(crFix);
+            const crFixCommitted = await verifyWorktreeCommitted(worktree);
+            if (!crFixCommitted.ok) {
+              return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeRabbit-fix round left uncommitted state (${crFixCommitted.detail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
+            }
+            continue;
+          }
+        }
+      }
       const reviewInfraFaults = [];
       const runReviewAgent = (promptText, reviewPhase, label) => () => withInfraRetry2(() => agent(promptText, reviewAgentOptions2({ phase: reviewPhase, label, schema: REVIEW_SCHEMA })), label).catch((error) => {
         const message = error && error.message || String(error);
@@ -2441,26 +2468,9 @@ function makeTaskPipeline(deps) {
           ...kindExtra
         };
       }
-      let coderabbitBlocking = [];
-      if (CODERABBIT_HOST_REVIEW2) {
-        const coderabbit = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} r${round}`);
-        await recordCoderabbitReview2(`${tag} r${round}`, coderabbit);
-        if (coderabbit.outcome === "auth") {
-          return { id: tag, status: "fatal-auth", stage: "review", detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, reviewRounds, worktree, proposals, ...kindExtra };
-        }
-        if (coderabbit.outcome === "rate-limited" || coderabbit.outcome === "error") {
-          coderabbitCapture.deferred += 1;
-          coderabbitDeferred.push(`CodeRabbit review deferred in round ${round} (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`);
-          log(`[task ${tag}] CodeRabbit host review deferred in round ${round}: ${coderabbit.outcome} (${coderabbit.detail})`);
-        } else {
-          coderabbitBlocking = coderabbitBlockingItems(coderabbit.findings);
-          log(`[task ${tag}] CodeRabbit host review round ${round}: ${coderabbit.findings.length} finding(s), ${coderabbitBlocking.length} blocking`);
-        }
-      }
       const blocking = [
         ...codeReview.blocking || [],
-        ...expertReview.blocking || [],
-        ...coderabbitBlocking
+        ...expertReview.blocking || []
       ];
       const roundRecord = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null };
       reviewRounds.push(roundRecord);
