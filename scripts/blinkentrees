@@ -130,6 +130,9 @@ EVENT_WEIGHT = {
 
 SPARKS = "▁▂▃▄▅▆▇█"
 
+TRAIL_WIDTH = 16
+WORKTREE_MIN_WIDTH = 24
+
 
 @dataclass(frozen=True)
 class FsEvent:
@@ -159,6 +162,7 @@ class StatusNotice:
     watches: int
     message: str
     when_wall: float
+    root_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -189,7 +193,7 @@ class WorktreeStats:
     last_event: str = ""
     last_path: str = ""
     last_ts_wall: float = 0.0
-    history: Deque[float] = field(default_factory=lambda: deque(maxlen=28))
+    history: Deque[float] = field(default_factory=lambda: deque(maxlen=TRAIL_WIDTH))
 
 
 @dataclass
@@ -444,6 +448,7 @@ class InotifyWorktreeWatcher:
                 watches=sum(len(wds) for wds in self.root_to_wds.values()),
                 message=f"{reason}: {len(self.known_roots)} worktree(s)",
                 when_wall=now_wall(),
+                root_paths=tuple(str(root) for root in self.known_roots),
             )
         )
 
@@ -650,11 +655,11 @@ def render_lamps(heat: float, style: str) -> Text:
 
 
 def render_sparkline(history: Iterable[float], style: str) -> Text:
-    values = list(history)[-28:]
+    values = list(history)[-TRAIL_WIDTH:]
     text = Text()
 
-    if len(values) < 28:
-        text.append(" " * (28 - len(values)), style="dim")
+    if len(values) < TRAIL_WIDTH:
+        text.append(" " * (TRAIL_WIDTH - len(values)), style="dim")
 
     if not values:
         return text
@@ -869,6 +874,7 @@ class RoboLightsApp(App[None]):
             self.root_count = notice.roots
             self.watch_count = notice.watches
             self.status_message = notice.message
+            self.prune_stats(notice.root_paths)
         elif isinstance(notice, ErrorNotice):
             self.status_message = notice.message
             self.feed.appendleft(FeedLine(notice.when_wall, "ERROR", notice.message, "bold red"))
@@ -883,6 +889,21 @@ class RoboLightsApp(App[None]):
                 body = f"dropped {notice.count} dashboard notice(s) during event storm"
             self.feed.appendleft(FeedLine(notice.when_wall, label, body, EVENT_STYLE["overflow"]))
             self.status_message = body
+
+    def prune_stats(self, root_paths: tuple[str, ...]) -> None:
+        # A late FsEvent can resurrect a row after its removal notice, and the
+        # watcher will never re-announce a root it has already forgotten. Each
+        # StatusNotice carries the authoritative root set, so drop (or ghost)
+        # anything not in it.
+        known = set(root_paths)
+        for root in [root for root in self.stats if root not in known]:
+            if self.args.keep_gone:
+                stat = self.stats[root]
+                stat.active = False
+                stat.watches = 0
+                stat.heat = 0.0
+            else:
+                del self.stats[root]
 
     def apply_worktree_change(self, notice: WorktreeChange) -> None:
         if notice.active:
@@ -979,9 +1000,9 @@ class RoboLightsApp(App[None]):
             show_lines=False,
             pad_edge=False,
         )
-        table.add_column("worktree", no_wrap=True, ratio=2)
+        table.add_column("worktree", no_wrap=True, ratio=2, min_width=WORKTREE_MIN_WIDTH)
         table.add_column("lamps", no_wrap=True, width=12)
-        table.add_column("trail", no_wrap=True, width=28)
+        table.add_column("trail", no_wrap=True, width=TRAIL_WIDTH)
         table.add_column("events", justify="right", no_wrap=True)
         table.add_column("classes", no_wrap=True, ratio=2)
         table.add_column("last", no_wrap=True)
