@@ -160,6 +160,20 @@ describe('runHostCommitGates streaming', () => {
     expect(readFileSync(victim, 'utf8')).toBe('original\n')
   })
 
+  test('a backpressured gate that times out still settles instead of hanging', async () => {
+    const dir = tmp('gate-stream-bp-timeout-')
+    // `yes` produces output faster than the log stream can drain, so the child
+    // pipes are paused by backpressure at the moment the timeout kills the
+    // gate. The kill path must resume them so the child's 'close' fires and the
+    // gate settles; if it regresses, this await never resolves and the test's
+    // own timeout fails it.
+    const { runHostCommitGates } = hostReview({ commitGates: ['yes really-long-line-of-gate-output-xxxxxxxxxxxxxxxxxxxx'], commitGateTimeoutSeconds: 1 })
+    const result = await runHostCommitGates(dir, '1.2.3', 'r1')
+    if (result.results[0]?.logFile) junk.push(result.results[0].logFile)
+    expect(result.green).toBe(false)
+    expect(result.detail).toMatch(/killed after the 1s gate timeout/)
+  }, 20000)
+
   test('a hung gate is killed at the timeout', async () => {
     const dir = tmp('gate-stream-hang-')
     const { runHostCommitGates } = hostReview({ commitGates: [`${process.execPath} -e "setInterval(()=>{},50)"`], commitGateTimeoutSeconds: 2 })

@@ -655,6 +655,23 @@ artefact-slicing suites were retained as shipped-artefact coverage. The
 Surprises entry about the `checkJs: false` blind spot is resolved by the
 milestone 10 entry conversion.
 
+2026-07-07 (backpressure hang + doc polish): a review flagged one performance
+bug and several doc/test nits. Bug: `streamGate` paused the child pipes on
+write backpressure but the timeout kill path never resumed them, so a paused
+pipe kept the child's `close` from firing and a backpressured, timed-out gate
+hung behind a full log buffer. Fixed by resuming both pipes in the SIGTERM
+timeout handler (before the kill) and by not re-pausing once `killed` is set;
+a new regression test drives a continuously-producing gate to a 1s timeout and
+asserts it settles rather than hanging. Docs: removed the comma before the
+essential "because" clause in the developers-guide assessment/triage routing
+note, removed the second-person "you" from the users-guide "Workflow at a
+glance" intro, added the missing comma after "in continue mode" in the Figure 2
+caption, and aligned "anti-pattern" to the closed "antipattern" spelling in
+this file. Test: the implementWorkItemPrompt ordering test now verifies step 2
+actually contains the CodeRabbit command (`coderabbit review --agent`) between
+the step-2 and step-3 markers, so a renamed or replaced step 2 fails the test
+rather than passing on a bare numbered marker.
+
 2026-07-06 (CodeScene review batch): the review flagged one security error
 plus several consistency/perf issues. SECURITY: `runCodeSceneCheck`'s presence
 probe ran `command -v ${bin}` through `sh -c` with the operator-config binary
@@ -679,7 +696,7 @@ section documents the assessment/triage medium defaults and the
 ASSESSMENT_ESCALATION_MODEL / TRIAGE_ESCALATION_MODEL escalation tiers. Skipped:
 the tracing-spans warning (the ODW loader injects no span primitive, imports
 are banned, and log() plus events.jsonl already carry task id, stage, round,
-and attempt) and the prompt-snapshot suggestion (an odw-testing anti-pattern).
+and attempt) and the prompt-snapshot suggestion (an odw-testing antipattern).
 
 2026-07-06 (CodeScene follow-up fixes): a wyvern team confirmed five review
 findings valid. `dedupeProposals` and `triageNeedsEscalation`
@@ -743,7 +760,7 @@ Skipped as already-covered: the compile-time-regression finding (tsc's
 erasable-syntax flags, the `workflow-parse` gate, and the build script's
 fail-closed no-import/single-workflowMain/rename-survival assertions already
 enforce the compile-time invariants; prompt-text snapshots are an odw-testing
-anti-pattern) and the tracing-spans finding (the ODW loader injects no
+antipattern) and the tracing-spans finding (the ODW loader injects no
 span/trace primitive and imports are banned, while `log()` and `events.jsonl`
 already carry task id, stage, round, and attempt).
 

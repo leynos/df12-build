@@ -306,8 +306,11 @@ export function makeHostReview(config: HostReviewConfig) {
       const record = (chunk: Buffer) => {
         // Respect write backpressure: when the log stream's buffer is full,
         // pause the child's pipes and resume them on 'drain', so a slow disk
-        // or a huge gate log cannot over-allocate memory.
-        if (!stream.write(chunk)) {
+        // or a huge gate log cannot over-allocate memory. Never re-pause once
+        // killed — a paused pipe would keep the child's 'close' from firing and
+        // hang the gate (the timeout path below resumes them for the same
+        // reason).
+        if (!stream.write(chunk) && !killed) {
           child.stdout?.pause()
           child.stderr?.pause()
         }
@@ -344,6 +347,11 @@ export function makeHostReview(config: HostReviewConfig) {
       child.stderr.on('data', record)
       const sigterm = setTimeout(() => {
         killed = true
+        // Resume any pipes paused by backpressure BEFORE killing: a paused pipe
+        // never reaches EOF, so the child's 'close' would not fire and the gate
+        // promise would hang behind a full log buffer even after the kill.
+        child.stdout?.resume()
+        child.stderr?.resume()
         child.kill('SIGTERM')
         // Escalate if the child ignores SIGTERM; unref so it never holds the loop.
         setTimeout(() => child.kill('SIGKILL'), 2000).unref()

@@ -269,7 +269,7 @@ review, addendum fallback review, and audit. Because partial-branch assessment
 defaults to the review adapter, keep `assessmentAdapter` explicit in examples
 or operator notes when that stage must remain on Codex.
 
-Assessment and triage are model-tiered rather than pinned to `REVIEW_MODEL`,
+Assessment and triage are model-tiered rather than pinned to `REVIEW_MODEL`
 because most of their work is cheap. `ASSESSMENT_MODEL` has its own medium
 default (`claude-sonnet-5`, not the review model): a deterministic
 fast-classifier resolves the clear cases with zero tokens, and only a genuine

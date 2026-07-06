@@ -86,9 +86,14 @@ describe('implementation and fix prompts', () => {
     const gateStepAt = text.indexOf('  1. DETERMINISTIC GATE')
     const codeHealthStepAt = text.indexOf('  1b. CODE HEALTH')
     const coderabbitStepAt = text.indexOf('  2. ')
+    const step3At = text.indexOf('  3. ')
     expect(gateStepAt).toBeGreaterThanOrEqual(0)
     expect(codeHealthStepAt).toBeGreaterThan(gateStepAt)
     expect(coderabbitStepAt).toBeGreaterThan(codeHealthStepAt)
+    // Step 2 must actually BE the CodeRabbit step, not just the next numbered
+    // line — so the test fails if step 2 is renamed or replaced.
+    expect(step3At).toBeGreaterThan(coderabbitStepAt)
+    expect(text.slice(coderabbitStepAt, step3At)).toMatch(/coderabbit review --agent/i)
     expect(text).toContain('CodeScene')
   })
 })

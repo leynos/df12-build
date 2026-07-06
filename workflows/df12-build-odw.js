@@ -1950,7 +1950,7 @@ ${outcome.tail}`
       let killed = false;
       let settled = false;
       const record = (chunk) => {
-        if (!stream.write(chunk)) {
+        if (!stream.write(chunk) && !killed) {
           child.stdout?.pause();
           child.stderr?.pause();
         }
@@ -1982,6 +1982,8 @@ ${outcome.tail}`
       child.stderr.on("data", record);
       const sigterm = setTimeout(() => {
         killed = true;
+        child.stdout?.resume();
+        child.stderr?.resume();
         child.kill("SIGTERM");
         setTimeout(() => child.kill("SIGKILL"), 2e3).unref();
       }, commitGateTimeoutSeconds * 1e3);

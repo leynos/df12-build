@@ -9,7 +9,7 @@ the df12 skill/toolchain installed.
 
 ## Workflow at a glance
 
-Three sequence diagrams sketch the moving parts you will operate around: how
+Three sequence diagrams sketch the moving parts an operator works around: how
 the shipped workflow artefact is built, how a fresh launch recovers surviving
 branches, and how a single task moves from plan to integration. Each diagram is
 followed by a text description that conveys the same sequence.
@@ -48,7 +48,7 @@ sequenceDiagram
 *Figure 2 — fresh-run recovery.* Recovery discovery hands each surviving
 branch's candidate record and host-collected git evidence to the recovery
 decision. The decision returns either an eligible branch to resume or a
-report-only result to the main loop; in continue mode the main loop asks the
+report-only result to the main loop; in continue mode, the main loop asks the
 decision which stage to dispatch next from the committed ExecPlan state.
 
 Figure 3 shows how a single task moves from plan to integration.
