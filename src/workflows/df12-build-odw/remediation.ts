@@ -22,6 +22,7 @@ export interface RemediationDeps {
   base: string
   roadmap: string
   triageAgentOptions: (options: Record<string, unknown>) => Record<string, unknown>
+  triageEscalationModel: string
 }
 
 export const TRIAGE_SCHEMA = {
@@ -54,7 +55,42 @@ export const TRIAGE_SCHEMA = {
 
 export const stepOf = (id: unknown): string => String(id).split('.').slice(0, 2).join('.')
 
-export function makeRemediation({ preamble, base, roadmap, triageAgentOptions }: RemediationDeps) {
+// Deterministic pre-pass: collapse exact-duplicate proposals by normalized
+// title before the routing agent sees them, so the model spends nothing on
+// obvious repeats (multiple reviews/audits raising the same item). Order and
+// first-seen metadata are preserved; the deduped source tags are unioned so a
+// later multi-source escalation check still sees every origin.
+export function dedupeProposals(proposals: readonly RemediationProposal[]): RemediationProposal[] {
+  const byKey = new Map<string, RemediationProposal & { sources?: string[] }>()
+  for (const proposal of proposals || []) {
+    const key = String(proposal?.title || '').trim().toLowerCase().replace(/\s+/g, ' ')
+    if (!key) continue
+    const source = String(proposal?.rationale || '')
+    const existing = byKey.get(key)
+    if (existing) {
+      if (source && !(existing.sources || []).includes(source)) existing.sources = [...(existing.sources || []), source]
+      continue
+    }
+    byKey.set(key, { ...proposal, sources: source ? [source] : [] })
+  }
+  return [...byKey.values()]
+}
+
+// The escalation signal for the routing agent: proposals drawn from more than
+// one distinct audit/review source are the ones that can conflict or route
+// across phases, so they warrant the stronger model. A single-source, small
+// set is medium-model work.
+export function triageNeedsEscalation(deduped: readonly (RemediationProposal & { sources?: string[] })[]): boolean {
+  const sources = new Set<string>()
+  for (const proposal of deduped) {
+    for (const source of proposal.sources || []) sources.add(source)
+    // Fall back to the rationale tag when sources was not threaded.
+    if (!(proposal.sources || []).length && proposal.rationale) sources.add(String(proposal.rationale))
+  }
+  return sources.size > 1
+}
+
+export function makeRemediation({ preamble, base, roadmap, triageAgentOptions, triageEscalationModel }: RemediationDeps) {
   function triagePrompt(stepPrefix: string, proposals: readonly RemediationProposal[]): string {
     return [
       preamble(null),
@@ -90,8 +126,16 @@ export function makeRemediation({ preamble, base, roadmap, triageAgentOptions }:
 
   async function runTriage(stepPrefix: string, proposals: readonly RemediationProposal[]) {
     phase('Remediation')
-    return await agent(triagePrompt(stepPrefix, proposals), triageAgentOptions({ phase: 'Remediation', label: `triage:${stepPrefix}`, schema: TRIAGE_SCHEMA }))
+    // Deterministic dedup first (zero tokens), then route the remaining set at
+    // the medium default, escalating to the stronger model only when the set
+    // spans multiple audit/review sources (potential cross-phase / conflicting
+    // routing).
+    const deduped = dedupeProposals(proposals)
+    if (!deduped.length) return { ok: true, decisions: [], summary: 'no proposals to triage after de-duplication' }
+    const options: Record<string, unknown> = { phase: 'Remediation', label: `triage:${stepPrefix}`, schema: TRIAGE_SCHEMA }
+    if (triageNeedsEscalation(deduped)) options.model = triageEscalationModel
+    return await agent(triagePrompt(stepPrefix, deduped), triageAgentOptions(options))
   }
 
-  return { triagePrompt, runTriage }
+  return { triagePrompt, runTriage, dedupeProposals, triageNeedsEscalation }
 }

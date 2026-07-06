@@ -107,6 +107,35 @@ describe('hostWriteProbe', () => {
   })
 })
 
+describe('probe options right-sizing', () => {
+  test('the probe keeps the adapter, uses minimal effort, and passes no reasoning model', async () => {
+    const seen: Array<Record<string, unknown>> = []
+    globals.agent = async (_prompt: string, opts: Record<string, unknown> = {}) => {
+      seen.push(opts)
+      // Write the token so the host probe passes.
+      const file = /PROBE_FILE: (.+)/.exec(_prompt)?.[1] ?? ''
+      const token = /PROBE_TOKEN: (.+)/.exec(_prompt)?.[1] ?? ''
+      writeFileSync(file, token)
+      return { ok: true }
+    }
+    // Simulate the entry's probe-target wiring: adapter kept, minimal effort,
+    // NO inherited plan/build model, optional per-adapter probe model.
+    const probeTargets = () => [
+      { role: 'plan', adapter: 'claude', options: (o: Record<string, unknown>) => ({ adapter: 'claude', effort: 'minimal', ...o }) },
+      { role: 'build', adapter: 'codex', options: (o: Record<string, unknown>) => ({ adapter: 'codex', model: 'codex-cheap', effort: 'minimal', ...o }) },
+    ]
+    const { runTaskAgentWritePreflight } = makeWritePreflight({ enabled: true, targets: probeTargets })
+    await runTaskAgentWritePreflight(tmp(), '1.2.3')
+    // Every probe call carries minimal effort and never a plan/build model.
+    for (const opts of seen) {
+      expect(opts.effort).toBe('minimal')
+      expect(opts.model === 'claude-opus-4-8' || opts.model === 'gpt-5.5').toBe(false)
+    }
+    // The build adapter's optional cheap probe model rides through.
+    expect(seen.some((opts) => opts.model === 'codex-cheap')).toBe(true)
+  })
+})
+
 describe('makeWritePreflight', () => {
   test('passes when every adapter really writes its token', async () => {
     const dir = tmp()

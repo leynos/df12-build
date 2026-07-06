@@ -4,12 +4,13 @@
 // fixture repo.
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import {
   addendumImplementationNeedsManualMerge,
+  fastAssessmentClassification,
   hasOnlyDeferredReviewIssues,
   implementationAuthFailureDetail,
   isDeferredReviewIssue,
@@ -40,7 +41,14 @@ function makeRepo() {
   writeFileSync(path.join(dir, 'README.md'), '# Fixture\n')
   git(dir, 'add', 'README.md')
   git(dir, 'commit', '-m', 'Initial fixture')
-  return { dir, baseSha: git(dir, 'rev-parse', 'HEAD') }
+  const baseSha = git(dir, 'rev-parse', 'HEAD')
+  // Commit work AFTER the base and leave the tree clean, so the deterministic
+  // fast-classifier (empty/dirty/error cases) does not short-circuit — these
+  // tests exercise the MODEL path.
+  writeFileSync(path.join(dir, 'feature.txt'), 'work\n')
+  git(dir, 'add', 'feature.txt')
+  git(dir, 'commit', '-m', 'Implement the feature')
+  return { dir, baseSha }
 }
 
 function subject(overrides: Record<string, unknown> = {}) {
@@ -48,6 +56,7 @@ function subject(overrides: Record<string, unknown> = {}) {
     preamble: (worktree) => `PREAMBLE ${worktree || '<none>'}`,
     assessPartialBranches: true,
     assessmentAgentOptions: (options) => options,
+    assessmentEscalationModel: 'claude-opus-4-8',
     withInfraRetry: (run) => run(),
     ...overrides,
   })
@@ -114,6 +123,77 @@ describe('shouldAssessFailure gate', () => {
   test('the assessPartialBranches switch disables the gate entirely', () => {
     const disabled = subject({ assessPartialBranches: false })
     expect(disabled.shouldAssessFailure({ status: 'failed', stage: 'review', detail: 'gates red' }, wt)).toBe(false)
+  })
+})
+
+describe('fastAssessmentClassification', () => {
+  test('an empty branch with a clean worktree is a deterministic discard', () => {
+    expect(fastAssessmentClassification({ recentCommits: [], dirtyState: 'clean', collectionErrors: [] })).toEqual({
+      classification: 'discard',
+      reason: expect.stringContaining('no committed work'),
+    })
+  })
+
+  test('evidence collection errors are a deterministic continue-manual', () => {
+    const out = fastAssessmentClassification({ recentCommits: ['c'], dirtyState: 'clean', collectionErrors: ['git status failed'] })
+    expect(out?.classification).toBe('continue-manual')
+  })
+
+  test('a branch with committed work on a clean tree reaches the model (null)', () => {
+    expect(fastAssessmentClassification({ recentCommits: ['c'], dirtyState: 'clean', collectionErrors: [] })).toBeNull()
+  })
+
+  test('a dirty branch reaches the model so the eligibility gate owns the downgrade', () => {
+    expect(fastAssessmentClassification({ recentCommits: ['c'], dirtyState: 'dirty', collectionErrors: [] })).toBeNull()
+  })
+})
+
+describe('deterministic assessment path (zero tokens)', () => {
+  test('attachAssessment classifies an empty clean branch without calling the model', async () => {
+    const { dir, baseSha } = makeRepo()
+    // A branch at base with no work after it and a clean tree.
+    execFileSync('git', ['checkout', '-q', '-b', 'roadmap-9-9-9', baseSha], { cwd: dir, env: process.env })
+    let called = false
+    globals.agent = async () => {
+      called = true
+      return { classification: 'adopt-complete' }
+    }
+    const result = await subject().attachAssessment(
+      { id: '9.9.9', title: 'Empty' },
+      { branch: 'roadmap-9-9-9', worktreePath: dir, baseSha: git(dir, 'rev-parse', 'HEAD') },
+      { status: 'failed', stage: 'review', detail: 'gates red' },
+    )
+    expect(called).toBe(false)
+    const assessment = result.assessment as { classification?: string; classifier?: string } | undefined
+    expect(assessment?.classification).toBe('discard')
+    expect(assessment?.classifier).toBe('deterministic')
+  })
+})
+
+describe('assessment model tier', () => {
+  test('a branch that committed an ExecPlan uses the escalation model; others use the medium default', async () => {
+    const models: string[] = []
+    globals.agent = async (_prompt: string, opts: Record<string, unknown> = {}) => {
+      models.push(String(opts.model || '<default>'))
+      return { classification: 'continue-manual', taskScoped: true }
+    }
+    // The assessmentAgentOptions here echoes the incoming options AND records
+    // the medium default when no model override is passed.
+    const withModels = subject({
+      assessmentAgentOptions: (options: Record<string, unknown>) => ({ model: 'medium-default', ...options }),
+      assessmentEscalationModel: 'escalation-high',
+    })
+    const { dir, baseSha } = makeRepo()
+    // makeRepo commits a plain feature file (no execplan) -> medium tier.
+    await withModels.attachAssessment({ id: '1.2.3', title: 'T' }, { branch: 'roadmap-1-2-3', worktreePath: dir, baseSha }, { status: 'failed', stage: 'review', detail: 'x' })
+    // A second branch that committed an execplan -> escalation tier.
+    mkdirSync(path.join(dir, 'docs', 'execplans'), { recursive: true })
+    writeFileSync(path.join(dir, 'docs', 'execplans', 'roadmap-1-2-3.md'), '# Plan\n')
+    execFileSync('git', ['add', '.'], { cwd: dir, env: process.env })
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@e.i', 'commit', '-m', 'Add execplan'], { cwd: dir, env: process.env })
+    await withModels.attachAssessment({ id: '1.2.3', title: 'T' }, { branch: 'roadmap-1-2-3', worktreePath: dir, baseSha }, { status: 'failed', stage: 'review', detail: 'x' })
+    expect(models[0]).toBe('medium-default')
+    expect(models[1]).toBe('escalation-high')
   })
 })
 

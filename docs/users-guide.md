@@ -395,6 +395,27 @@ Common arguments:
   file recording every CodeRabbit finding (timestamp, task, severity, file,
   comment). Point it at a sidecar file to accumulate findings across runs and
   tune deterministic lint rules from the recurring classes.
+- `writeProbeEffort`: reasoning effort for the once-per-run write-preflight
+  probe (write an exact token to an exact path — no reasoning). Defaults to
+  `minimal`. The probe keeps the plan/build ADAPTER but never inherits
+  `planModel`/`buildModel`.
+- `writeProbeModelByAdapter`: optional `{ "<adapter>": "<model>" }` map to run
+  the probe on a cheaper model per adapter (adapter name lowercased). Defaults
+  to `{}` (the adapter's own default model at minimal effort).
+- `assessmentModel`: model for the report-only partial-branch assessment.
+  Defaults to a medium model (`claude-sonnet-5`) rather than inheriting the
+  Opus-class review model, because a deterministic fast-classifier already
+  handles the clear cases (empty branch, evidence-collection failure) with
+  zero tokens and only genuinely ambiguous branches reach the model.
+- `assessmentEscalationModel`: the stronger model used for a strong
+  adopt-complete candidate (a branch that committed an ExecPlan). Defaults to
+  the review model.
+- `triageModel`: model for remediation triage. Defaults to a medium model
+  (`gpt-5.5`); a deterministic pre-pass collapses exact-duplicate proposals
+  before the agent runs.
+- `triageEscalationModel`: the stronger model used when the deduped proposals
+  span more than one audit/review source (potential cross-phase or conflicting
+  routing). Defaults to `gpt-5.5@high`.
 - `taskId`: run exactly one roadmap task.
 - `dryRun`: when `true`, plan, review, and audit without implementation,
   integration, or document writes.

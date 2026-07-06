@@ -37,6 +37,9 @@ describe('makeConfig defaults', () => {
     expect(config.RESUME_PARTIAL_BRANCHES).toBe(false)
     expect(config.RESUME_MODE).toBe('assess')
     expect(config.WORKTREE_WRITE_PREFLIGHT).toBe(true)
+    // The write probe is right-sized: minimal effort, no reasoning-model map.
+    expect(config.WRITE_PROBE_EFFORT).toBe('minimal')
+    expect(config.WRITE_PROBE_MODEL_BY_ADAPTER).toEqual({})
   })
 
   test('adapter and model routing', () => {
@@ -46,7 +49,13 @@ describe('makeConfig defaults', () => {
     expect(config.TRIAGE_ADAPTER).toBe('codex')
     expect(config.ASSESSMENT_ADAPTER).toBe('claude')
     expect(config.BUILD_MODEL).toBe('gpt-5.5')
-    expect(config.ASSESSMENT_MODEL).toBe(config.REVIEW_MODEL)
+    // Assessment gets its own MEDIUM default and does not inherit the Opus
+    // review model; escalation is the Opus-class model.
+    expect(config.ASSESSMENT_MODEL).toBe('claude-sonnet-5')
+    expect(config.ASSESSMENT_ESCALATION_MODEL).toBe(config.REVIEW_MODEL)
+    // Triage runs at a MEDIUM default, escalating to high only for complex sets.
+    expect(config.TRIAGE_MODEL).toBe('gpt-5.5')
+    expect(config.TRIAGE_ESCALATION_MODEL).toBe('gpt-5.5@high')
     expect([...config.AUTH_REQUIRED_ADAPTERS].sort()).toEqual(['claude', 'codex', 'codex-medium'])
   })
 

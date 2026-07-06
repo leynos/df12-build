@@ -5,8 +5,10 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 
 import {
   TRIAGE_SCHEMA,
+  dedupeProposals,
   makeRemediation,
   stepOf,
+  triageNeedsEscalation,
 } from '../../src/workflows/df12-build-odw/remediation.ts'
 
 const globals = globalThis as Record<string, unknown>
@@ -25,6 +27,7 @@ function subject() {
     base: 'main',
     roadmap: 'docs/roadmap.md',
     triageAgentOptions: (options) => ({ adapter: 'codex', ...options }),
+    triageEscalationModel: 'gpt-5.5@high',
   })
 }
 
@@ -34,6 +37,76 @@ describe('stepOf', () => {
     expect(stepOf('1.2.3.4')).toBe('1.2')
     expect(stepOf('7.4')).toBe('7.4')
     expect(stepOf('3')).toBe('3')
+  })
+})
+
+describe('dedupeProposals', () => {
+  test('collapses exact-title duplicates and unions their sources', () => {
+    const deduped = dedupeProposals([
+      { title: 'Fix flaky teardown', rationale: 'audit:1.2.3' },
+      { title: 'fix flaky teardown', rationale: 'review:1.2.4' },
+      { title: 'Harden the queue', rationale: 'review:1.2.4' },
+    ])
+    expect(deduped).toHaveLength(2)
+    const flaky = deduped.find((p) => /flaky/i.test(String(p.title)))
+    expect((flaky as { sources?: string[] }).sources?.sort()).toEqual(['audit:1.2.3', 'review:1.2.4'])
+  })
+
+  test('drops titleless proposals', () => {
+    expect(dedupeProposals([{ rationale: 'audit:1.1.1' }])).toHaveLength(0)
+  })
+})
+
+describe('triageNeedsEscalation', () => {
+  test('escalates only when proposals span more than one source', () => {
+    expect(triageNeedsEscalation([{ title: 'a', sources: ['audit:1.2.3'] }])).toBe(false)
+    expect(triageNeedsEscalation([{ title: 'a', sources: ['audit:1.2.3', 'review:1.2.4'] }])).toBe(true)
+    expect(triageNeedsEscalation([
+      { title: 'a', sources: ['audit:1.2.3'] },
+      { title: 'b', sources: ['review:1.2.4'] },
+    ])).toBe(true)
+  })
+})
+
+describe('runTriage tiering', () => {
+  test('a single-source set stays on the medium default; a multi-source set escalates', async () => {
+    const models: string[] = []
+    globals.agent = async (_prompt: string, opts: Record<string, unknown> = {}) => {
+      models.push(String(opts.model || '<default>'))
+      return { ok: true, decisions: [], summary: 'triaged' }
+    }
+    const { runTriage } = makeRemediation({
+      preamble: () => 'P',
+      base: 'main',
+      roadmap: 'docs/roadmap.md',
+      triageAgentOptions: (options: Record<string, unknown>) => ({ adapter: 'codex', model: 'gpt-5.5', ...options }),
+      triageEscalationModel: 'gpt-5.5@high',
+    })
+    await runTriage('1.2', [{ title: 'x', rationale: 'audit:1.2.3' }])
+    await runTriage('1.2', [
+      { title: 'x', rationale: 'audit:1.2.3' },
+      { title: 'y', rationale: 'review:1.2.4' },
+    ])
+    expect(models[0]).toBe('gpt-5.5')
+    expect(models[1]).toBe('gpt-5.5@high')
+  })
+
+  test('an all-duplicate set is dropped deterministically with no agent call', async () => {
+    let called = false
+    globals.agent = async () => {
+      called = true
+      return { ok: true, decisions: [], summary: 'x' }
+    }
+    const { runTriage } = makeRemediation({
+      preamble: () => 'P',
+      base: 'main',
+      roadmap: 'docs/roadmap.md',
+      triageAgentOptions: (options: Record<string, unknown>) => options,
+      triageEscalationModel: 'gpt-5.5@high',
+    })
+    const outcome = await runTriage('1.2', [{ rationale: 'audit:1.2.3' }, { title: '', rationale: 'x' }])
+    expect(called).toBe(false)
+    expect((outcome as { decisions: unknown[] }).decisions).toEqual([])
   })
 })
 

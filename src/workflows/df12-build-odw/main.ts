@@ -146,6 +146,8 @@ const {
   RESUME_TASK_ID,
   RESUME_MAX_CANDIDATES,
   WORKTREE_WRITE_PREFLIGHT,
+  WRITE_PROBE_EFFORT,
+  WRITE_PROBE_MODEL_BY_ADAPTER,
   BUDGET_RESERVE,
   BUILD_ADAPTER,
   PLAN_ADAPTER,
@@ -156,7 +158,9 @@ const {
   PLAN_MODEL,
   REVIEW_MODEL,
   TRIAGE_MODEL,
+  TRIAGE_ESCALATION_MODEL,
   ASSESSMENT_MODEL,
+  ASSESSMENT_ESCALATION_MODEL,
   AUTH_REQUIRED_ADAPTERS,
   CODERABBIT_REVIEW_COMMAND,
   CODERABBIT_HOST_REVIEW,
@@ -254,6 +258,7 @@ const {
   preamble,
   assessPartialBranches: ASSESS_PARTIAL_BRANCHES,
   assessmentAgentOptions,
+  assessmentEscalationModel: ASSESSMENT_ESCALATION_MODEL,
   withInfraRetry,
 })
 const { triagePrompt, runTriage } = makeRemediation({
@@ -261,6 +266,7 @@ const { triagePrompt, runTriage } = makeRemediation({
   base: BASE,
   roadmap: ROADMAP,
   triageAgentOptions,
+  triageEscalationModel: TRIAGE_ESCALATION_MODEL,
 })
 
 // Host-run CodeRabbit review and host commit gates with the run wiring bound
@@ -631,9 +637,21 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
 }
 
 function writeProbeTargets() {
+  // The probe keeps the real adapter (it tests THAT adapter's launch/sandbox
+  // write permission) but right-sizes the model: minimal effort, an optional
+  // cheap per-adapter probe model, and deliberately NO PLAN_MODEL/BUILD_MODEL
+  // inheritance — writing an exact token to an exact path needs no reasoning.
+  const probeOptions = (realAdapter: string) => (options: Record<string, unknown>) => ({
+    adapter: realAdapter,
+    ...(WRITE_PROBE_MODEL_BY_ADAPTER[String(realAdapter).toLowerCase()]
+      ? { model: WRITE_PROBE_MODEL_BY_ADAPTER[String(realAdapter).toLowerCase()] }
+      : {}),
+    effort: WRITE_PROBE_EFFORT,
+    ...options,
+  })
   const targets = [
-    { role: 'plan', adapter: String(PLAN_ADAPTER).toLowerCase(), options: planAgentOptions },
-    { role: 'build', adapter: String(BUILD_ADAPTER).toLowerCase(), options: buildAgentOptions },
+    { role: 'plan', adapter: String(PLAN_ADAPTER).toLowerCase(), options: probeOptions(PLAN_ADAPTER) },
+    { role: 'build', adapter: String(BUILD_ADAPTER).toLowerCase(), options: probeOptions(BUILD_ADAPTER) },
   ]
   const seen = new Set()
   return targets.filter((target) => {

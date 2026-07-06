@@ -33,6 +33,8 @@ export interface RawWorkflowArgs {
   resumeTaskId?: string | number
   resumeMaxCandidates?: number | string
   worktreeWritePreflight?: boolean
+  writeProbeEffort?: string
+  writeProbeModelByAdapter?: Record<string, string>
   searchBackend?: string
   codeSearchBackend?: string
   grepaiWorkspace?: string
@@ -48,7 +50,9 @@ export interface RawWorkflowArgs {
   planModel?: string
   reviewModel?: string
   triageModel?: string
+  triageEscalationModel?: string
   assessmentModel?: string
+  assessmentEscalationModel?: string
   coderabbitReviewCommand?: string
   coderabbitHostReview?: boolean
   coderabbitBetweenWorkItems?: boolean
@@ -88,6 +92,8 @@ export interface WorkflowConfig {
   RESUME_TASK_ID: string | null
   RESUME_MAX_CANDIDATES: number
   WORKTREE_WRITE_PREFLIGHT: boolean
+  WRITE_PROBE_EFFORT: string
+  WRITE_PROBE_MODEL_BY_ADAPTER: Record<string, string>
   BUDGET_RESERVE: number
   SEARCH_BACKEND: string
   GREPAI_WORKSPACE: string
@@ -102,7 +108,9 @@ export interface WorkflowConfig {
   PLAN_MODEL: string
   REVIEW_MODEL: string
   TRIAGE_MODEL: string
+  TRIAGE_ESCALATION_MODEL: string
   ASSESSMENT_MODEL: string
+  ASSESSMENT_ESCALATION_MODEL: string
   AUTH_REQUIRED_ADAPTERS: Set<string>
   CODERABBIT_REVIEW_COMMAND: string
   CODERABBIT_HOST_REVIEW: boolean
@@ -163,6 +171,15 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     ? Math.max(1, Math.floor(RESUME_MAX_CANDIDATES_RAW))
     : 4 // bound startup recovery fan-in so a messy repository does not consume the whole run
   const WORKTREE_WRITE_PREFLIGHT = cfg.worktreeWritePreflight !== false // false => skip the once-per-run probe that proves task agents can write into sibling roadmap-* worktrees
+  // The write preflight probe asks an agent to write one exact token to one
+  // exact path; the host verifies the bytes. It tests launch/sandbox/write
+  // permission, not reasoning, so it keeps the plan/build ADAPTER but must NOT
+  // inherit PLAN_MODEL/BUILD_MODEL. Minimal effort by default; set a cheap
+  // per-adapter probe model to save more (adapter name lowercased).
+  const WRITE_PROBE_EFFORT = String(cfg.writeProbeEffort || 'minimal')
+  const WRITE_PROBE_MODEL_BY_ADAPTER: Record<string, string> = Object.fromEntries(
+    Object.entries(cfg.writeProbeModelByAdapter || {}).map(([adapter, model]) => [String(adapter).toLowerCase(), String(model)]),
+  )
   const BUDGET_RESERVE = 80_000 // stop opening new tasks when remaining budget falls below this
   const SEARCH_BACKEND = String(cfg.searchBackend || cfg.codeSearchBackend || (cfg.memtraceRepoId ? 'memtrace' : 'grepai')).toLowerCase()
   const GREPAI_WORKSPACE = cfg.grepaiWorkspace || 'Projects'
@@ -176,8 +193,20 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   const BUILD_MODEL = cfg.buildModel || 'gpt-5.5'
   const PLAN_MODEL = cfg.planModel || 'claude-opus-4-8'
   const REVIEW_MODEL = cfg.reviewModel || 'claude-opus-4-8'
-  const TRIAGE_MODEL = cfg.triageModel || 'gpt-5.5@high'
-  const ASSESSMENT_MODEL = cfg.assessmentModel || REVIEW_MODEL
+  // Remediation triage is mostly de-duplication plus hypothesis routing. A
+  // deterministic pre-pass collapses exact duplicates, and the routing agent
+  // runs at a MEDIUM default, escalating to the escalation model only for
+  // complex triage (proposals spanning multiple audit/review sources, i.e.
+  // potential cross-cutting or conflicting routing).
+  const TRIAGE_MODEL = cfg.triageModel || 'gpt-5.5'
+  const TRIAGE_ESCALATION_MODEL = cfg.triageEscalationModel || 'gpt-5.5@high'
+  // Assessment is report-only; a deterministic fast-classifier (assessment.ts)
+  // handles the clear cases with zero tokens, and only genuinely ambiguous
+  // adopt decisions reach a model — so assessment gets its own MEDIUM default
+  // rather than inheriting the Opus-class review model, escalating to the
+  // escalation model only when the medium pass lands on an adopt verdict.
+  const ASSESSMENT_MODEL = cfg.assessmentModel || 'claude-sonnet-5'
+  const ASSESSMENT_ESCALATION_MODEL = cfg.assessmentEscalationModel || REVIEW_MODEL
   const AUTH_REQUIRED_ADAPTERS = new Set([
     BUILD_ADAPTER,
     PLAN_ADAPTER,
@@ -271,6 +300,8 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     RESUME_TASK_ID,
     RESUME_MAX_CANDIDATES,
     WORKTREE_WRITE_PREFLIGHT,
+    WRITE_PROBE_EFFORT,
+    WRITE_PROBE_MODEL_BY_ADAPTER,
     BUDGET_RESERVE,
     SEARCH_BACKEND,
     GREPAI_WORKSPACE,
@@ -285,7 +316,9 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     PLAN_MODEL,
     REVIEW_MODEL,
     TRIAGE_MODEL,
+    TRIAGE_ESCALATION_MODEL,
     ASSESSMENT_MODEL,
+    ASSESSMENT_ESCALATION_MODEL,
     AUTH_REQUIRED_ADAPTERS,
     CODERABBIT_REVIEW_COMMAND,
     CODERABBIT_HOST_REVIEW,

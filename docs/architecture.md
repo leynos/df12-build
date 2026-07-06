@@ -144,18 +144,38 @@ The key argument groups are:
   host-verified task-agent write probe).
 - Agent routing: `buildAdapter`/`buildModel`, `planAdapter`/`planModel`, and
   `reviewAdapter`/`reviewModel`.
-- Assessment routing: `assessmentAdapter`/`assessmentModel`, defaulting to the
-  review adapter and model.
+- Assessment routing: `assessmentAdapter`/`assessmentModel` with
+  `assessmentEscalationModel`.
+- Triage routing: `triageAdapter`/`triageModel` with `triageEscalationModel`.
 
 The default routing separates execution from judgement. Build-side stages
-default to Codex: worktree creation, implementation, fix rounds, integration,
-remediation, and triage use the build or triage adapter/model defaults.
-Planning and review judgement default to Claude Code with
-`claude-opus-4-8`: the plan stage uses `planAdapter`/`planModel`, while design
-review, code review, expert review, addendum fallback review, and audit use
-`reviewAdapter`/`reviewModel`. Partial-branch assessment inherits the review
-route unless `assessmentAdapter`/`assessmentModel` are set explicitly, so a
-sidecar that wants Codex assessment must say so in `args.json`.
+default to Codex: worktree creation, implementation, fix rounds, and
+integration use the build adapter/model defaults. Planning and review
+judgement default to Claude Code with `claude-opus-4-8`: the plan stage uses
+`planAdapter`/`planModel`, while design review, code review, expert review,
+addendum fallback review, and audit use `reviewAdapter`/`reviewModel`.
+
+Model spend is right-sized to each task's cognitive load, not left at the
+Opus/high defaults:
+
+- The write-preflight probe writes one exact token to one exact path, so it
+  keeps the plan/build ADAPTER but runs at `writeProbeEffort` (`minimal` by
+  default) and never inherits `planModel`/`buildModel`; set
+  `writeProbeModelByAdapter` for a cheaper per-adapter probe model.
+- Partial-branch assessment is report-only, so a deterministic fast-classifier
+  handles the clear cases (empty branch, evidence-collection failure) with zero
+  tokens, and only genuinely ambiguous branches reach a model — at
+  `assessmentModel` (a medium default, `claude-sonnet-5`, not the review
+  model), escalating to `assessmentEscalationModel` only for a strong
+  adopt-complete candidate (a branch that committed an ExecPlan).
+- Remediation triage is mostly de-duplication plus hypothesis routing, so a
+  deterministic pre-pass collapses exact-duplicate proposals and the routing
+  agent runs at `triageModel` (a medium default, `gpt-5.5`), escalating to
+  `triageEscalationModel` (`gpt-5.5@high`) only when the proposals span
+  multiple audit/review sources (potential cross-phase or conflicting routing).
+
+A sidecar that wants a different assessment or triage route must say so in
+`args.json`.
 
 Auth preflight is adapter-aware. The workflow always checks Codex auth because
 build-side stages depend on it, checks CodeRabbit auth when implementation can

@@ -41,7 +41,62 @@ export interface AssessmentDeps {
   preamble: (worktree: string | null | undefined) => string
   assessPartialBranches: boolean
   assessmentAgentOptions: (options: Record<string, unknown>) => Record<string, unknown>
+  assessmentEscalationModel: string
   withInfraRetry: <T>(run: () => Promise<T>, label: string) => Promise<T>
+}
+
+// Deterministic fast-classifier for the two clear, non-judgement cases, run
+// before any model call: an empty branch with a clean worktree is `discard`
+// (nothing durable to adopt) and a host evidence-collection failure is
+// `continue-manual` (cannot judge without evidence). Everything else — a
+// branch with committed work, or a dirty worktree (whose downgrade the
+// recovery eligibility gate owns) — returns null and reaches the model. Never
+// yields an adopt verdict, so recovery review-mode resume is unaffected.
+export function fastAssessmentClassification(
+  evidence: { collectionErrors?: readonly string[]; dirtyState?: string; recentCommits?: readonly unknown[] } | null | undefined,
+): { classification: string; reason: string } | null {
+  const collectionErrors = evidence?.collectionErrors || []
+  if (collectionErrors.length) {
+    return { classification: 'continue-manual', reason: `host evidence collection reported error(s) (${collectionErrors.slice(0, 3).join('; ')}); operator judgement required` }
+  }
+  const hasCommittedWork = (evidence?.recentCommits || []).length > 0
+  const dirtyState = evidence?.dirtyState || 'unknown'
+  if (!hasCommittedWork && dirtyState === 'clean') {
+    return { classification: 'discard', reason: 'the branch has no committed work and a clean worktree; nothing durable to adopt' }
+  }
+  // Everything else — including dirty branches, whose downgrade is owned by the
+  // recovery eligibility gate — reaches the model.
+  return null
+}
+
+// Build a schema-shaped assessment object for a deterministic classification,
+// carrying host evidence and a `classifier: 'deterministic'` marker so
+// operators can see it was not a model judgement.
+function deterministicAssessment(
+  classification: string,
+  evidence: AssessmentEvidence,
+  reason: string,
+): Record<string, unknown> {
+  return {
+    classification,
+    branchName: evidence.branchName || '',
+    worktreePath: evidence.worktreePath || '',
+    baseCommit: evidence.baseCommit || '',
+    currentCommit: evidence.currentCommit || '',
+    dirtyState: evidence.dirtyState || 'unknown',
+    changedFiles: evidence.changedFiles || [],
+    taskScoped: false,
+    execPlan: '',
+    roadmap: '',
+    validation: '',
+    missingEvidence: [],
+    risks: [],
+    rationale: reason,
+    recommendation: reason,
+    nextActions: [],
+    classifier: 'deterministic',
+    hostEvidence: evidence,
+  }
 }
 
 export function isDeferredReviewIssue(issue: unknown): boolean {
@@ -88,7 +143,7 @@ export function addendumImplementationNeedsManualMerge(impl: ImplementationRepor
   return Number.isFinite(completed) && Number.isFinite(total) && total > 0 && completed >= total
 }
 
-export function makeAssessment({ preamble, assessPartialBranches, assessmentAgentOptions, withInfraRetry }: AssessmentDeps) {
+export function makeAssessment({ preamble, assessPartialBranches, assessmentAgentOptions, assessmentEscalationModel, withInfraRetry }: AssessmentDeps) {
   // Shared ADR 002 assessment prompt body — the classification contract is ONE
   // contract: in-run failure assessment and fresh-run recovery assessment feed
   // the same schema, enum, and evidence expectations. Only the task header and
@@ -170,6 +225,31 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     )
   }
 
+  // A committed ExecPlan on the branch marks a strong adopt-complete candidate,
+  // so the genuinely high-stakes adopt decision uses the escalation model;
+  // every other ambiguous branch uses the medium default. One model call
+  // either way (the tier is chosen from host evidence, not by re-running).
+  function assessmentModelTier(evidence: AssessmentEvidence): 'escalated' | 'medium' {
+    const hasExecplan = (evidence.changedFiles || []).some((entry) => /^docs\/execplans\/.+\.md$/.test(String(entry)))
+    return hasExecplan ? 'escalated' : 'medium'
+  }
+
+  // Run the assessment model on a genuinely-ambiguous branch at the
+  // evidence-chosen tier. Returns the assessment object (tier-tagged) or null.
+  async function runModelAssessment(
+    buildPrompt: () => string,
+    phaseName: string,
+    label: string,
+    evidence: AssessmentEvidence,
+  ): Promise<Record<string, unknown> | null> {
+    const tier = assessmentModelTier(evidence)
+    const options: Record<string, unknown> = { phase: phaseName, label, schema: ASSESSMENT_SCHEMA }
+    if (tier === 'escalated') options.model = assessmentEscalationModel
+    const assessment = (await withInfraRetry(() => agent(buildPrompt(), assessmentAgentOptions(options)), label)) as Record<string, unknown> | null
+    if (!assessment) return null
+    return { ...assessment, assessmentTier: tier }
+  }
+
   // Route a discovered candidate through the SAME ADR 002 assessment contract as
   // in-run failures: same evidence collector, same schema, same adapter routing.
   async function assessRecoveryCandidate(candidate: RecoveryCandidate) {
@@ -180,13 +260,13 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     // next candidate's assessment would be recorded under a stale phase.
     phase('Recovery')
     const evidence = await collectAssessmentEvidence(task, wt)
+    const fast = fastAssessmentClassification(evidence)
+    if (fast) {
+      return { evidence, assessment: deterministicAssessment(fast.classification, evidence, fast.reason), assessmentError: '' }
+    }
     try {
       const label = `recover-assess:${candidate.taskId}${candidate.isAddendum ? '-addendum' : ''}`
-      const assessment = (await withInfraRetry(() => agent(recoveryAssessmentPrompt(task, candidate, evidence), assessmentAgentOptions({
-        phase: 'Recovery',
-        label,
-        schema: ASSESSMENT_SCHEMA,
-      })), label)) as Record<string, unknown> | null
+      const assessment = await runModelAssessment(() => recoveryAssessmentPrompt(task, candidate, evidence), 'Recovery', label, evidence)
       if (!assessment) {
         return { evidence, assessment: null, assessmentError: 'assessment agent returned no structured output' }
       }
@@ -213,12 +293,12 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     if (!shouldAssessFailure(result, wt)) return result
     phase('Assess')
     const evidence = await collectAssessmentEvidence(task, wt)
+    const fast = fastAssessmentClassification(evidence)
+    if (fast) {
+      return { ...result, assessment: deterministicAssessment(fast.classification, evidence, fast.reason) }
+    }
     try {
-      const assessment = (await withInfraRetry(() => agent(assessmentPrompt(task, wt, result, evidence), assessmentAgentOptions({
-        phase: 'Assess',
-        label: `assess:${task.id}`,
-        schema: ASSESSMENT_SCHEMA,
-      })), `assess:${task.id}`)) as Record<string, unknown> | null
+      const assessment = await runModelAssessment(() => assessmentPrompt(task, wt, result, evidence), 'Assess', `assess:${task.id}`, evidence)
       if (!assessment) {
         return { ...result, assessmentError: 'assessment agent returned no structured output', assessmentEvidence: evidence }
       }

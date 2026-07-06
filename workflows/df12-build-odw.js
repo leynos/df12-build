@@ -936,6 +936,10 @@ function makeConfig(rawArgs) {
   const RESUME_MAX_CANDIDATES_RAW = Number(cfg.resumeMaxCandidates ?? 4);
   const RESUME_MAX_CANDIDATES2 = Number.isFinite(RESUME_MAX_CANDIDATES_RAW) ? Math.max(1, Math.floor(RESUME_MAX_CANDIDATES_RAW)) : 4;
   const WORKTREE_WRITE_PREFLIGHT2 = cfg.worktreeWritePreflight !== false;
+  const WRITE_PROBE_EFFORT2 = String(cfg.writeProbeEffort || "minimal");
+  const WRITE_PROBE_MODEL_BY_ADAPTER2 = Object.fromEntries(
+    Object.entries(cfg.writeProbeModelByAdapter || {}).map(([adapter, model]) => [String(adapter).toLowerCase(), String(model)])
+  );
   const BUDGET_RESERVE2 = 8e4;
   const SEARCH_BACKEND = String(cfg.searchBackend || cfg.codeSearchBackend || (cfg.memtraceRepoId ? "memtrace" : "grepai")).toLowerCase();
   const GREPAI_WORKSPACE = cfg.grepaiWorkspace || "Projects";
@@ -949,8 +953,10 @@ function makeConfig(rawArgs) {
   const BUILD_MODEL2 = cfg.buildModel || "gpt-5.5";
   const PLAN_MODEL2 = cfg.planModel || "claude-opus-4-8";
   const REVIEW_MODEL2 = cfg.reviewModel || "claude-opus-4-8";
-  const TRIAGE_MODEL2 = cfg.triageModel || "gpt-5.5@high";
-  const ASSESSMENT_MODEL2 = cfg.assessmentModel || REVIEW_MODEL2;
+  const TRIAGE_MODEL2 = cfg.triageModel || "gpt-5.5";
+  const TRIAGE_ESCALATION_MODEL2 = cfg.triageEscalationModel || "gpt-5.5@high";
+  const ASSESSMENT_MODEL2 = cfg.assessmentModel || "claude-sonnet-5";
+  const ASSESSMENT_ESCALATION_MODEL2 = cfg.assessmentEscalationModel || REVIEW_MODEL2;
   const AUTH_REQUIRED_ADAPTERS2 = new Set([
     BUILD_ADAPTER2,
     PLAN_ADAPTER2,
@@ -1005,6 +1011,8 @@ function makeConfig(rawArgs) {
     RESUME_TASK_ID: RESUME_TASK_ID2,
     RESUME_MAX_CANDIDATES: RESUME_MAX_CANDIDATES2,
     WORKTREE_WRITE_PREFLIGHT: WORKTREE_WRITE_PREFLIGHT2,
+    WRITE_PROBE_EFFORT: WRITE_PROBE_EFFORT2,
+    WRITE_PROBE_MODEL_BY_ADAPTER: WRITE_PROBE_MODEL_BY_ADAPTER2,
     BUDGET_RESERVE: BUDGET_RESERVE2,
     SEARCH_BACKEND,
     GREPAI_WORKSPACE,
@@ -1019,7 +1027,9 @@ function makeConfig(rawArgs) {
     PLAN_MODEL: PLAN_MODEL2,
     REVIEW_MODEL: REVIEW_MODEL2,
     TRIAGE_MODEL: TRIAGE_MODEL2,
+    TRIAGE_ESCALATION_MODEL: TRIAGE_ESCALATION_MODEL2,
     ASSESSMENT_MODEL: ASSESSMENT_MODEL2,
+    ASSESSMENT_ESCALATION_MODEL: ASSESSMENT_ESCALATION_MODEL2,
     AUTH_REQUIRED_ADAPTERS: AUTH_REQUIRED_ADAPTERS2,
     CODERABBIT_REVIEW_COMMAND: CODERABBIT_REVIEW_COMMAND2,
     CODERABBIT_HOST_REVIEW: CODERABBIT_HOST_REVIEW2,
@@ -1471,6 +1481,40 @@ function makeWritePreflight({ enabled, targets }) {
 }
 
 // src/workflows/df12-build-odw/assessment.ts
+function fastAssessmentClassification(evidence) {
+  const collectionErrors = evidence?.collectionErrors || [];
+  if (collectionErrors.length) {
+    return { classification: "continue-manual", reason: `host evidence collection reported error(s) (${collectionErrors.slice(0, 3).join("; ")}); operator judgement required` };
+  }
+  const hasCommittedWork = (evidence?.recentCommits || []).length > 0;
+  const dirtyState = evidence?.dirtyState || "unknown";
+  if (!hasCommittedWork && dirtyState === "clean") {
+    return { classification: "discard", reason: "the branch has no committed work and a clean worktree; nothing durable to adopt" };
+  }
+  return null;
+}
+function deterministicAssessment(classification, evidence, reason) {
+  return {
+    classification,
+    branchName: evidence.branchName || "",
+    worktreePath: evidence.worktreePath || "",
+    baseCommit: evidence.baseCommit || "",
+    currentCommit: evidence.currentCommit || "",
+    dirtyState: evidence.dirtyState || "unknown",
+    changedFiles: evidence.changedFiles || [],
+    taskScoped: false,
+    execPlan: "",
+    roadmap: "",
+    validation: "",
+    missingEvidence: [],
+    risks: [],
+    rationale: reason,
+    recommendation: reason,
+    nextActions: [],
+    classifier: "deterministic",
+    hostEvidence: evidence
+  };
+}
 function isDeferredReviewIssue(issue) {
   const text = String(issue || "").toLowerCase();
   const deferredReviewMarkers = [
@@ -1505,7 +1549,7 @@ function addendumImplementationNeedsManualMerge(impl) {
   const total = Number(impl.workItemsTotal);
   return Number.isFinite(completed) && Number.isFinite(total) && total > 0 && completed >= total;
 }
-function makeAssessment({ preamble: preamble2, assessPartialBranches, assessmentAgentOptions: assessmentAgentOptions2, withInfraRetry: withInfraRetry2 }) {
+function makeAssessment({ preamble: preamble2, assessPartialBranches, assessmentAgentOptions: assessmentAgentOptions2, assessmentEscalationModel, withInfraRetry: withInfraRetry2 }) {
   function assessmentPromptLines(taskHeader, worktreePath, evidence, contextTitle, contextValue) {
     return [
       preamble2(worktreePath),
@@ -1565,18 +1609,30 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
       candidate
     );
   }
+  function assessmentModelTier(evidence) {
+    const hasExecplan = (evidence.changedFiles || []).some((entry) => /^docs\/execplans\/.+\.md$/.test(String(entry)));
+    return hasExecplan ? "escalated" : "medium";
+  }
+  async function runModelAssessment(buildPrompt, phaseName, label, evidence) {
+    const tier = assessmentModelTier(evidence);
+    const options = { phase: phaseName, label, schema: ASSESSMENT_SCHEMA };
+    if (tier === "escalated") options.model = assessmentEscalationModel;
+    const assessment = await withInfraRetry2(() => agent(buildPrompt(), assessmentAgentOptions2(options)), label);
+    if (!assessment) return null;
+    return { ...assessment, assessmentTier: tier };
+  }
   async function assessRecoveryCandidate2(candidate) {
     const task = { id: candidate.taskId, title: candidate.taskTitle };
     const wt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit };
     phase("Recovery");
     const evidence = await collectAssessmentEvidence(task, wt);
+    const fast = fastAssessmentClassification(evidence);
+    if (fast) {
+      return { evidence, assessment: deterministicAssessment(fast.classification, evidence, fast.reason), assessmentError: "" };
+    }
     try {
       const label = `recover-assess:${candidate.taskId}${candidate.isAddendum ? "-addendum" : ""}`;
-      const assessment = await withInfraRetry2(() => agent(recoveryAssessmentPrompt2(task, candidate, evidence), assessmentAgentOptions2({
-        phase: "Recovery",
-        label,
-        schema: ASSESSMENT_SCHEMA
-      })), label);
+      const assessment = await runModelAssessment(() => recoveryAssessmentPrompt2(task, candidate, evidence), "Recovery", label, evidence);
       if (!assessment) {
         return { evidence, assessment: null, assessmentError: "assessment agent returned no structured output" };
       }
@@ -1597,12 +1653,12 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
     if (!shouldAssessFailure2(result, wt)) return result;
     phase("Assess");
     const evidence = await collectAssessmentEvidence(task, wt);
+    const fast = fastAssessmentClassification(evidence);
+    if (fast) {
+      return { ...result, assessment: deterministicAssessment(fast.classification, evidence, fast.reason) };
+    }
     try {
-      const assessment = await withInfraRetry2(() => agent(assessmentPrompt2(task, wt, result, evidence), assessmentAgentOptions2({
-        phase: "Assess",
-        label: `assess:${task.id}`,
-        schema: ASSESSMENT_SCHEMA
-      })), `assess:${task.id}`);
+      const assessment = await runModelAssessment(() => assessmentPrompt2(task, wt, result, evidence), "Assess", `assess:${task.id}`, evidence);
       if (!assessment) {
         return { ...result, assessmentError: "assessment agent returned no structured output", assessmentEvidence: evidence };
       }
@@ -1647,7 +1703,30 @@ var TRIAGE_SCHEMA = {
   required: ["ok", "decisions", "summary"]
 };
 var stepOf = (id) => String(id).split(".").slice(0, 2).join(".");
-function makeRemediation({ preamble: preamble2, base, roadmap, triageAgentOptions: triageAgentOptions2 }) {
+function dedupeProposals(proposals) {
+  const byKey = /* @__PURE__ */ new Map();
+  for (const proposal of proposals || []) {
+    const key = String(proposal?.title || "").trim().toLowerCase().replace(/\s+/g, " ");
+    if (!key) continue;
+    const source = String(proposal?.rationale || "");
+    const existing = byKey.get(key);
+    if (existing) {
+      if (source && !(existing.sources || []).includes(source)) existing.sources = [...existing.sources || [], source];
+      continue;
+    }
+    byKey.set(key, { ...proposal, sources: source ? [source] : [] });
+  }
+  return [...byKey.values()];
+}
+function triageNeedsEscalation(deduped) {
+  const sources = /* @__PURE__ */ new Set();
+  for (const proposal of deduped) {
+    for (const source of proposal.sources || []) sources.add(source);
+    if (!(proposal.sources || []).length && proposal.rationale) sources.add(String(proposal.rationale));
+  }
+  return sources.size > 1;
+}
+function makeRemediation({ preamble: preamble2, base, roadmap, triageAgentOptions: triageAgentOptions2, triageEscalationModel }) {
   function triagePrompt2(stepPrefix, proposals) {
     return [
       preamble2(null),
@@ -1682,9 +1761,13 @@ function makeRemediation({ preamble: preamble2, base, roadmap, triageAgentOption
   }
   async function runTriage2(stepPrefix, proposals) {
     phase("Remediation");
-    return await agent(triagePrompt2(stepPrefix, proposals), triageAgentOptions2({ phase: "Remediation", label: `triage:${stepPrefix}`, schema: TRIAGE_SCHEMA }));
+    const deduped = dedupeProposals(proposals);
+    if (!deduped.length) return { ok: true, decisions: [], summary: "no proposals to triage after de-duplication" };
+    const options = { phase: "Remediation", label: `triage:${stepPrefix}`, schema: TRIAGE_SCHEMA };
+    if (triageNeedsEscalation(deduped)) options.model = triageEscalationModel;
+    return await agent(triagePrompt2(stepPrefix, deduped), triageAgentOptions2(options));
   }
-  return { triagePrompt: triagePrompt2, runTriage: runTriage2 };
+  return { triagePrompt: triagePrompt2, runTriage: runTriage2, dedupeProposals, triageNeedsEscalation };
 }
 
 // src/workflows/df12-build-odw/host-review.ts
@@ -2699,6 +2782,8 @@ var {
   RESUME_TASK_ID,
   RESUME_MAX_CANDIDATES,
   WORKTREE_WRITE_PREFLIGHT,
+  WRITE_PROBE_EFFORT,
+  WRITE_PROBE_MODEL_BY_ADAPTER,
   BUDGET_RESERVE,
   BUILD_ADAPTER,
   PLAN_ADAPTER,
@@ -2709,7 +2794,9 @@ var {
   PLAN_MODEL,
   REVIEW_MODEL,
   TRIAGE_MODEL,
+  TRIAGE_ESCALATION_MODEL,
   ASSESSMENT_MODEL,
+  ASSESSMENT_ESCALATION_MODEL,
   AUTH_REQUIRED_ADAPTERS,
   CODERABBIT_REVIEW_COMMAND,
   CODERABBIT_HOST_REVIEW,
@@ -2787,13 +2874,15 @@ var {
   preamble,
   assessPartialBranches: ASSESS_PARTIAL_BRANCHES,
   assessmentAgentOptions,
+  assessmentEscalationModel: ASSESSMENT_ESCALATION_MODEL,
   withInfraRetry
 });
 var { triagePrompt, runTriage } = makeRemediation({
   preamble,
   base: BASE,
   roadmap: ROADMAP,
-  triageAgentOptions
+  triageAgentOptions,
+  triageEscalationModel: TRIAGE_ESCALATION_MODEL
 });
 var {
   coderabbitBackoffMinutes,
@@ -3089,9 +3178,15 @@ async function runRecovery(root, mergeLock2 = null) {
   return { summary, taskResults, held, fatal: null };
 }
 function writeProbeTargets() {
+  const probeOptions = (realAdapter) => (options) => ({
+    adapter: realAdapter,
+    ...WRITE_PROBE_MODEL_BY_ADAPTER[String(realAdapter).toLowerCase()] ? { model: WRITE_PROBE_MODEL_BY_ADAPTER[String(realAdapter).toLowerCase()] } : {},
+    effort: WRITE_PROBE_EFFORT,
+    ...options
+  });
   const targets = [
-    { role: "plan", adapter: String(PLAN_ADAPTER).toLowerCase(), options: planAgentOptions },
-    { role: "build", adapter: String(BUILD_ADAPTER).toLowerCase(), options: buildAgentOptions }
+    { role: "plan", adapter: String(PLAN_ADAPTER).toLowerCase(), options: probeOptions(PLAN_ADAPTER) },
+    { role: "build", adapter: String(BUILD_ADAPTER).toLowerCase(), options: probeOptions(BUILD_ADAPTER) }
   ];
   const seen = /* @__PURE__ */ new Set();
   return targets.filter((target) => {

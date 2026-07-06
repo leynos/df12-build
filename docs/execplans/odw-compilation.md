@@ -655,6 +655,28 @@ artefact-slicing suites were retained as shipped-artefact coverage. The
 Surprises entry about the `checkJs: false` blind spot is resolved by the
 milestone 10 entry conversion.
 
+2026-07-06 (model right-sizing): the operator flagged three places where an
+Opus/high-effort model was paying for near-zero-cognition work. (1) The
+write-preflight probe (write one exact token to one exact path) now keeps the
+plan/build ADAPTER but runs at `writeProbeEffort` (minimal) and never inherits
+`planModel`/`buildModel`; `writeProbeModelByAdapter` sets a cheaper per-adapter
+probe model. (2) Report-only partial-branch assessment gained a deterministic
+fast-classifier — an empty+clean branch is `discard` and an evidence-collection
+failure is `continue-manual`, both with zero tokens — and its model default
+dropped from the Opus review model to a medium `assessmentModel`
+(claude-sonnet-5); a branch that committed an ExecPlan (a strong adopt-complete
+candidate) uses `assessmentEscalationModel`. Dirty/ambiguous branches still
+reach the model so the recovery eligibility gate keeps owning the
+`dirty-worktree` downgrade. (3) Remediation triage gained a deterministic
+exact-duplicate dedup pre-pass and dropped from `gpt-5.5@high` to a medium
+`triageModel` (gpt-5.5), escalating to `triageEscalationModel` (gpt-5.5@high)
+only when the deduped proposals span more than one audit/review source.
+Module tests pin every new knob, the fast-classifier table, the deterministic
+zero-token paths, the evidence-based tiers, and dedup/escalation; users-guide
+and architecture document the routing. Design note: the assessment tier is a
+single evidence-based model choice (not medium-then-reconfirm) to avoid a
+redundant second call and preserve the recovery tests' single-call contract.
+
 2026-07-06 (cost-hierarchy review ordering): the operator confirmed the
 spend hierarchy — deterministic gates are free, CodeRabbit is a fixed weekly
 quota, and the reviewer agents (code + expert review) spend tokens, the one
