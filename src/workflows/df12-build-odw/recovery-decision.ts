@@ -113,6 +113,7 @@ export const RECOVERY_SKIP_REASONS = [
   'already-complete',
   'unreadable-commit',
   'missing-worktree',
+  'worktree-probe-fault',
   'candidate-cap',
   'assessment-error',
   'addendum-branch',

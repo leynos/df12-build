@@ -655,6 +655,26 @@ artefact-slicing suites were retained as shipped-artefact coverage. The
 Surprises entry about the `checkJs: false` blind spot is resolved by the
 milestone 10 entry conversion.
 
+2026-07-06 (review remediation, batch 3): a wyvern team triaged another
+findings batch. Fixed: `streamGate` (host-review.ts) gained a write-stream
+`error` listener and a settled-once guard, so a gate-log open/write fault
+(ENOSPC/EACCES/EISDIR) settles as a failed gate result instead of crashing
+the run on an uncaught stream error (pinned by an EISDIR test); and
+`directoryExists` now returns `{ ok, exists, detail }` mirroring `fileState`,
+so an I/O fault on a recovery worktree path surfaces as a new
+`worktree-probe-fault` skip reason (held out of normal selection) rather than
+being silently recorded as `missing-worktree`. The write-preflight
+source-invariant was scoped to `run-task.ts` via a new `readModuleSource`
+helper so its ordered regex cannot span module boundaries in the concatenated
+tree. Docs: `coderabbitBetweenWorkItems` documented in users-guide and
+architecture; two grammar fixes and a `readWorkflowSource` doc-comment via
+scribe. Skipped as stale: the recurring "getBuiltinModule breaks Bun"
+findings (Bun 1.3.14 implements it — re-confirmed by runtime probe and passing
+bun suites; established authoritatively via firecrawl in batch 2 that support
+landed in bun-v1.2.6), and the developers-guide dependency list (already
+complete). The write-preflight cross-boundary regex was verified theoretical
+(tokens co-located) but scoped anyway as a cheap robustness win.
+
 2026-07-06 (design-review remediation): a reviewer flagged that "CodeRabbit
 between each ExecPlan stage" was not yet real — host CodeRabbit ran only
 once after the whole implementation stage, not between per-work-item build

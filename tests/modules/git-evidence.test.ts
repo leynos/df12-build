@@ -124,9 +124,12 @@ describe('small readers', () => {
   test('readFileText and directoryExists behave on present and absent paths', async () => {
     const { dir } = makeRepo()
     expect(await readFileText(path.join(dir, 'README.md'))).toBe('# Fixture\n')
-    expect(await directoryExists(dir)).toBe(true)
-    expect(await directoryExists(path.join(dir, 'README.md'))).toBe(false)
-    expect(await directoryExists('')).toBe(false)
+    expect(await directoryExists(dir)).toEqual({ ok: true, exists: true, detail: '' })
+    expect(await directoryExists(path.join(dir, 'README.md'))).toEqual({ ok: true, exists: false, detail: '' })
+    expect(await directoryExists('')).toEqual({ ok: true, exists: false, detail: '' })
+    const fault = await directoryExists(`${dir}\0bad`)
+    expect(fault.ok).toBe(false)
+    expect(fault.detail).toMatch(/stat failed/)
   })
 
   test('readFileText refuses to follow a symlink at the read path', async () => {

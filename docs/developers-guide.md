@@ -174,7 +174,7 @@ and the between-item gate by an injected `runCoderabbitHostReview`.
 
 Every fix round — gate fix, dual-review fix, and between-item fix — is
 followed by `verifyWorktreeCommitted`; a fix that leaves the worktree dirty
-fails the task closed (`FIX DURABILITY`), because uncommitted fix output is
+fails the task closed (`FIX DURABILITY`) because uncommitted fix output is
 unreviewable and lost at the squash merge.
 
 Host-run commit gates (`hostCommitGates`, default on) apply the same
@@ -195,7 +195,7 @@ no `Makefile`); pipeline coverage uses a scripted fake gate command, and the
 streaming path is covered by a module test with output past the old buffer
 ceiling.
 
-`make verify-modules` skips when Dafny is absent so local runs stay friendly;
+`make verify-modules` skips when Dafny is absent, so local runs stay friendly;
 CI must run `make verify-modules-strict`, which FAILS when Dafny is not on
 `PATH`, so the LemmaScript/Dafny proof is a real PR gate rather than
 advisory. The CI job installs Dafny (see the toolchain notes).

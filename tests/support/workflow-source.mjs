@@ -8,6 +8,21 @@ import { readFile, readdir } from 'node:fs/promises'
 
 export const WORKFLOW_SRC_DIR = new URL('../../src/workflows/df12-build-odw/', import.meta.url)
 
+/**
+ * Returns a sorted, presence-oriented concatenation of the module source
+ * files (meta first, entry last, others alphabetical). This is suitable
+ * only for presence-style / single-module invariant checks, not for
+ * assertions that depend on cross-file relative ordering.
+ */
+/**
+ * Reads ONE module's verbatim source, for source invariants whose tokens all
+ * live in a single module — scoping avoids a cross-file `[\\s\\S]*?` match
+ * that readWorkflowSource()'s sorted concatenation could otherwise allow.
+ */
+export async function readModuleSource(name) {
+  return await readFile(new URL(name, WORKFLOW_SRC_DIR), 'utf8')
+}
+
 export async function readWorkflowSource() {
   const names = (await readdir(WORKFLOW_SRC_DIR))
     .filter(

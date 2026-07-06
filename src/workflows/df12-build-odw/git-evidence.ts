@@ -166,13 +166,21 @@ export async function readFileText(filePath: string, rootDir?: string): Promise<
   }
 }
 
-export async function directoryExists(pathValue: unknown): Promise<boolean> {
-  if (!pathValue) return false
+// Distinguish "not a directory" from "the filesystem would not answer",
+// mirroring fileState (exec.ts): ENOENT/ENOTDIR mean absent; any other stat
+// error is a fault the caller must surface rather than conflate with a
+// missing directory. Returns { ok, exists, detail }.
+export async function directoryExists(pathValue: unknown): Promise<{ ok: boolean; exists: boolean; detail: string }> {
+  if (!pathValue) return { ok: true, exists: false, detail: '' }
   const fs = process.getBuiltinModule('node:fs/promises')
   try {
     const stat = await fs.stat(String(pathValue))
-    return stat.isDirectory()
-  } catch {
-    return false
+    return { ok: true, exists: stat.isDirectory(), detail: '' }
+  } catch (error) {
+    const failure = error as (Error & { code?: string }) | null
+    if (failure && (failure.code === 'ENOENT' || failure.code === 'ENOTDIR')) {
+      return { ok: true, exists: false, detail: '' }
+    }
+    return { ok: false, exists: false, detail: `stat failed for ${String(pathValue)}: ${(failure && failure.message) || String(error)}` }
   }
 }

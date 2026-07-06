@@ -8,7 +8,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { readWorkflowSource } from './support/workflow-source.mjs'
+import { readModuleSource } from './support/workflow-source.mjs'
 
 import { makeRecoveryRepo, probeDetailsFromPrompt as parseProbeDetails } from './fixtures/recovery-repo.mjs'
 
@@ -261,7 +261,9 @@ test('worktree-write failures stay out of partial-branch assessment', async () =
 })
 
 test('runTask gates on the write preflight before any planning or addendum work', async () => {
-  const source = await readWorkflowSource()
+  // Scope to run-task.ts (which holds all three tokens) so the ordered match
+  // cannot span module boundaries in the concatenated tree.
+  const source = await readModuleSource('run-task.ts')
   assert.match(
     source,
     new RegExp(

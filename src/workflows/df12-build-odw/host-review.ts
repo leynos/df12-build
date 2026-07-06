@@ -266,6 +266,11 @@ export function makeHostReview(config: HostReviewConfig) {
       const tail: string[] = []
       let carry = ''
       let killed = false
+      // finish() is settled-once: the child's 'close' and 'error' are mutually
+      // exclusive, but the log stream is an independent emitter that can fault
+      // at any time, so more than one settle path can race. The guard keeps
+      // stream.end() (and resolve) from running twice.
+      let settled = false
       const record = (chunk: Buffer) => {
         stream.write(chunk)
         carry += chunk.toString('utf8')
@@ -277,6 +282,8 @@ export function makeHostReview(config: HostReviewConfig) {
         }
       }
       const finish = (ok: boolean, extraTail?: string) => {
+        if (settled) return
+        settled = true
         if (carry) {
           tail.push(carry)
           if (tail.length > TAIL_LINES) tail.shift()
@@ -284,6 +291,10 @@ export function makeHostReview(config: HostReviewConfig) {
         if (extraTail) tail.push(extraTail)
         stream.end(() => resolve({ ok, killed, tail: tail.slice(-TAIL_LINES).join('\n').trim() }))
       }
+      // A log open/write fault (ENOSPC, EACCES on the path) emits 'error' on
+      // the stream; without this listener Node would treat it as an uncaught
+      // exception and crash the run. Route it into a failed gate result.
+      stream.on('error', (error) => finish(false, `gate log write failed: ${(error as Error).message}`))
       const child = spawn('sh', ['-c', command], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
       child.stdout.on('data', record)
       child.stderr.on('data', record)

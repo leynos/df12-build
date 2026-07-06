@@ -67,6 +67,7 @@ var RECOVERY_SKIP_REASONS = [
   "already-complete",
   "unreadable-commit",
   "missing-worktree",
+  "worktree-probe-fault",
   "candidate-cap",
   "assessment-error",
   "addendum-branch",
@@ -769,13 +770,17 @@ async function readFileText(filePath, rootDir) {
   }
 }
 async function directoryExists(pathValue) {
-  if (!pathValue) return false;
+  if (!pathValue) return { ok: true, exists: false, detail: "" };
   const fs = process.getBuiltinModule("node:fs/promises");
   try {
     const stat = await fs.stat(String(pathValue));
-    return stat.isDirectory();
-  } catch {
-    return false;
+    return { ok: true, exists: stat.isDirectory(), detail: "" };
+  } catch (error) {
+    const failure = error;
+    if (failure && (failure.code === "ENOENT" || failure.code === "ENOTDIR")) {
+      return { ok: true, exists: false, detail: "" };
+    }
+    return { ok: false, exists: false, detail: `stat failed for ${String(pathValue)}: ${failure && failure.message || String(error)}` };
   }
 }
 
@@ -818,11 +823,17 @@ function makeRecoveryDiscovery(limits) {
       }
       const mergeBase = await execFileStatus("git", ["-C", root, "merge-base", `origin/${limits.base}`, branch]);
       const worktreePath = worktreeByBranch.get(branch) || "";
+      const worktreeDir = await directoryExists(worktreePath);
+      if (!worktreeDir.ok) {
+        skipped.push({ id: parsed.id, branchName: branch, reason: "worktree-probe-fault" });
+        errors.push(`worktree probe failed for ${branch}: ${worktreeDir.detail}`);
+        continue;
+      }
       mapped.push({
         taskId: parsed.id,
         taskTitle: task.title || "",
         branchName: branch,
-        worktreePath: await directoryExists(worktreePath) ? worktreePath : "",
+        worktreePath: worktreeDir.exists ? worktreePath : "",
         baseCommit: mergeBase.ok ? mergeBase.stdout.trim() : "",
         currentCommit: commit.stdout.trim(),
         roadmapComplete: false,
@@ -867,7 +878,7 @@ async function readExecplanState(candidate) {
     };
   }
 }
-var RECOVERY_HOLD_REASONS = /* @__PURE__ */ new Set(["missing-worktree", "candidate-cap", "unreadable-commit", "assessment-error"]);
+var RECOVERY_HOLD_REASONS = /* @__PURE__ */ new Set(["missing-worktree", "worktree-probe-fault", "candidate-cap", "unreadable-commit", "assessment-error"]);
 async function recoveryExecplanPath(candidate) {
   const canonicalPlan = `docs/execplans/${candidate.branchName}.md`;
   const state = await fileState(canonicalPlan, candidate.worktreePath);
@@ -1816,6 +1827,7 @@ ${outcome.tail}`
       const tail = [];
       let carry = "";
       let killed = false;
+      let settled = false;
       const record = (chunk) => {
         stream.write(chunk);
         carry += chunk.toString("utf8");
@@ -1827,6 +1839,8 @@ ${outcome.tail}`
         }
       };
       const finish = (ok, extraTail) => {
+        if (settled) return;
+        settled = true;
         if (carry) {
           tail.push(carry);
           if (tail.length > TAIL_LINES) tail.shift();
@@ -1834,6 +1848,7 @@ ${outcome.tail}`
         if (extraTail) tail.push(extraTail);
         stream.end(() => resolve({ ok, killed, tail: tail.slice(-TAIL_LINES).join("\n").trim() }));
       };
+      stream.on("error", (error) => finish(false, `gate log write failed: ${error.message}`));
       const child = spawn("sh", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
       child.stdout.on("data", record);
       child.stderr.on("data", record);

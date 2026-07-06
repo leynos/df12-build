@@ -33,10 +33,10 @@ describe('classifyCoderabbitOutcome terminal completion', () => {
   })
 })
 
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { makeHostReview } from '../../src/workflows/df12-build-odw/host-review.ts'
+import { hostGateLogPath, makeHostReview } from '../../src/workflows/df12-build-odw/host-review.ts'
 
 const g = globalThis as Record<string, unknown>
 g.log = () => {}
@@ -73,6 +73,20 @@ describe('runHostCommitGates streaming', () => {
     expect(result.green).toBe(false)
     expect(result.detail).toMatch(/boom/)
     expect(result.detail).toContain(result.results[0].logFile)
+  })
+
+  test('a log-write fault settles the gate as failed instead of crashing', async () => {
+    // Pre-create a DIRECTORY at the exact log path the gate will use, so
+    // createWriteStream faults with EISDIR. The stream 'error' listener must
+    // route that into a failed gate result rather than an uncaught crash.
+    const dir = mkdtempSync(path.join(tmpdir(), 'gate-stream-logfault-'))
+    const command = 'echo hi'
+    const logPath = hostGateLogPath('1.2.3', 'r1', 0, command)
+    mkdirSync(logPath, { recursive: true })
+    const { runHostCommitGates } = hostReview({ commitGates: [command] })
+    const result = await runHostCommitGates(dir, '1.2.3', 'r1')
+    expect(result.green).toBe(false)
+    expect(result.detail).toMatch(/gate log write failed|failed/)
   })
 
   test('a hung gate is killed at the timeout', async () => {

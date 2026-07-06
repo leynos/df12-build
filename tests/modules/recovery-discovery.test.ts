@@ -158,6 +158,7 @@ describe('RECOVERY_HOLD_REASONS', () => {
       'candidate-cap',
       'missing-worktree',
       'unreadable-commit',
+      'worktree-probe-fault',
     ])
   })
 })

@@ -370,6 +370,15 @@ Common arguments:
   asking agents to babysit CodeRabbit. Rate-limit backoff is absorbed as host
   wall-clock (zero agent tokens), and blocking findings feed the fix rounds.
   Set `false` to restore the legacy agent-run flow.
+- `coderabbitBetweenWorkItems`: when `true` (the default), and when both
+  `coderabbitHostReview` and `perWorkItemBuild` are on, the host runs a
+  CodeRabbit review after each committed work item — a deterministic gate
+  between build turns — rather than only once after the whole implementation
+  stage. Blocking findings drive a bounded fix loop; if they cannot be
+  cleared the work item fails, and if CodeRabbit stays rate-limited or errors
+  after its retries the task halts for assessment instead of continuing
+  unreviewed. Set `false` to review only once at the end of the
+  implementation stage.
 - `coderabbitAttempts`: total host review attempts when CodeRabbit rate
   limits. Defaults to `3`.
 - `coderabbitBackoffMinutes`: `[low, high]` range for the deterministic

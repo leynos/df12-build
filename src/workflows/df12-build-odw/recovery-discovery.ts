@@ -74,11 +74,20 @@ export function makeRecoveryDiscovery(limits: RecoveryDiscoveryLimits) {
       const mergeBase = await execFileStatus('git', ['-C', root, 'merge-base', `origin/${limits.base}`, branch])
 
       const worktreePath = worktreeByBranch.get(branch) || ''
+      // A stat FAULT on the worktree path is neither present nor absent:
+      // report it distinctly so a permissions/IO fault is not silently
+      // recorded as a missing worktree.
+      const worktreeDir = await directoryExists(worktreePath)
+      if (!worktreeDir.ok) {
+        skipped.push({ id: parsed.id, branchName: branch, reason: 'worktree-probe-fault' })
+        errors.push(`worktree probe failed for ${branch}: ${worktreeDir.detail}`)
+        continue
+      }
       mapped.push({
         taskId: parsed.id,
         taskTitle: task.title || '',
         branchName: branch,
-        worktreePath: (await directoryExists(worktreePath)) ? worktreePath : '',
+        worktreePath: worktreeDir.exists ? worktreePath : '',
         baseCommit: mergeBase.ok ? mergeBase.stdout.trim() : '',
         currentCommit: commit.stdout.trim(),
         roadmapComplete: false,
@@ -136,7 +145,7 @@ export async function readExecplanState(
 // Skip reasons whose branch still exists and still maps to a selectable
 // roadmap id — normal selection must not re-open these this run, because
 // `git worktree add -b` would collide with the surviving branch.
-export const RECOVERY_HOLD_REASONS = new Set(['missing-worktree', 'candidate-cap', 'unreadable-commit', 'assessment-error'])
+export const RECOVERY_HOLD_REASONS = new Set(['missing-worktree', 'worktree-probe-fault', 'candidate-cap', 'unreadable-commit', 'assessment-error'])
 
 // The canonical durable plan for a task branch, or '' when it does not exist
 // on disk in the worktree. An absent plan stays absent: nothing downstream may

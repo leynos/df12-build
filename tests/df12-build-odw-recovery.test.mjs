@@ -408,6 +408,7 @@ test('skip reasons are a stable published contract', async () => {
     'already-complete',
     'unreadable-commit',
     'missing-worktree',
+    'worktree-probe-fault',
     'candidate-cap',
     'assessment-error',
     'addendum-branch',
