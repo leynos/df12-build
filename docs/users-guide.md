@@ -212,7 +212,7 @@ they never enter a diff, trip `workflow-freshness`, or affect a gate:
   label, and phase), `result.json` (the final return, including every
   `reviewRounds`, `assessments`, host-gate result, and CodeRabbit summary), and
   `error.json`. This is entirely ODW's domain — no workflow involvement.
-  Regenerate the value per run, or use a shared `~/.odw/runs` if you prefer one
+  Regenerate the value per run, or use a shared `~/.odw/runs` for a single
   pool; the sidecar keeps each run's logs beside its config and notes.
 - **CodeRabbit findings** — set `coderabbitFindingsFile` (in `args.json`) to a
   sidecar JSONL path, e.g. `"$SIDECAR/coderabbit-findings.jsonl"`. Every parsed
