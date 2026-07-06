@@ -1,0 +1,2 @@
+[test]
+preload = ["./tests/modules/cucumber-plugin.ts"]

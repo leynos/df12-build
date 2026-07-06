@@ -10,6 +10,7 @@ import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { readWorkflowSource } from './support/workflow-source.mjs'
 
 import {
   git,
@@ -23,6 +24,7 @@ import {
 
 const WORKFLOW_PATH = new URL('../workflows/df12-build-odw.js', import.meta.url)
 const CONTROL_LOOP_MARKER = '// --- Worker-pool control loop'
+
 
 async function loadRecoverySurface(args = {}, agentImpl = async () => null) {
   let source = await readFile(WORKFLOW_PATH, 'utf8')
@@ -406,6 +408,7 @@ test('skip reasons are a stable published contract', async () => {
     'already-complete',
     'unreadable-commit',
     'missing-worktree',
+    'worktree-probe-fault',
     'candidate-cap',
     'assessment-error',
     'addendum-branch',
@@ -643,7 +646,7 @@ test('assess-only recovery leaves every piece of durable git state untouched', a
 })
 
 test('recovery marks processed only for pushed, integrated resume results', async () => {
-  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  const source = await readWorkflowSource()
   assert.match(
     source,
     new RegExp(
@@ -1550,7 +1553,7 @@ test('a green implementation with a committed clean worktree passes the durabili
 })
 
 test('normal tasks and recovery resume share one review and integration implementation', async () => {
-  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  const source = await readWorkflowSource()
 
   assert.match(
     source,
@@ -1559,13 +1562,15 @@ test('normal tasks and recovery resume share one review and integration implemen
   )
   assert.match(
     source,
-    /runDualReviewAndIntegration\(task, candidate\.worktreePath, plan, impl, mergeLock, \{ kind: 'recovery-resume' \}\)/,
+    // The optional `as …` groups tolerate TypeScript casts on the plan and
+    // implementation arguments in the src tree.
+    /runDualReviewAndIntegration\(task, candidate\.worktreePath, plan(?: as \w+)?, impl(?: as \w+)?, mergeLock, \{ kind: 'recovery-resume' \}\)/,
     'recovery resume must delegate to the same shared path',
   )
 })
 
 test('control loop wires recovery ahead of normal selection', async () => {
-  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  const source = await readWorkflowSource()
 
   assert.match(source, /\{ title: 'Recovery' \},/, 'meta.phases should declare the Recovery lane')
   assert.match(

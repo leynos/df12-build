@@ -96,6 +96,13 @@ provides the doc skills):
    - `args.json` — project-specific workflow args.
    - `operator-notes.md` — run id, launch command, patches, validations,
      status checks, failures, and operator decisions.
+   - `runs/` — ODW's per-run agent logs, when `runsRoot` points here (see
+     below): `events.jsonl` (`agent_started`/`agent_finished` per `agent()`
+     call, tagged by adapter, label, and phase), `result.json` (the final
+     return, including every `reviewRounds`, `assessments`, host-gate result,
+     and CodeRabbit summary), and `error.json`.
+   - `coderabbit-findings.jsonl` — appended CodeRabbit findings, when
+     `coderabbitFindingsFile` points here (see below).
 
    Bootstrap the workflow script once so later launches do not overwrite
    sidecar-local recovery edits:
@@ -114,7 +121,14 @@ provides the doc skills):
    proven change back to the `df12-build` repository as an ordinary branch.
    For normal Codex and Claude Code workshops, set ODW `concurrency` to `16`;
    keep `maxAgents` high (for example `1000`) because it is the per-run
-   dispatch guard, not the live process-pool size. With host-run CodeRabbit
+   dispatch guard, not the live process-pool size. Set `runsRoot` (in
+   `odw.config.json`) to an absolute path inside this sidecar, e.g.
+   `"$SIDECAR/runs"`, so ODW writes each run's `events.jsonl`, `result.json`,
+   and `error.json` beside the run's config and notes instead of pooling them
+   under a shared `~/.odw/runs`. These are inspectable agent logs written
+   entirely by ODW, decoupled from workflow control flow — a run that cannot
+   write them still proceeds. (A shared `~/.odw/runs` also works for a single
+   pool; the sidecar simply keeps each run self-contained.) With host-run CodeRabbit
    review (the default), agents never wait on CodeRabbit, so the adapter
    `timeout` only needs to cover honest stage work — see the timeout
    recommendation below. Only with `coderabbitHostReview=false` do agents
@@ -195,8 +209,23 @@ provides the doc skills):
    round with the host log as evidence, and an addendum whose green claim
    the host cannot reproduce fails outright) and `commitGateTimeoutSeconds`
    (default 3600 — a gate exceeding it is killed and reported with the
-   timeout named). Host gate logs land at `/tmp/df12-gate-<task>-<round>-…`
-   on the runner; read them before re-running a gate by hand.
+   timeout named). Host gate logs land in a secure per-run directory,
+   `/tmp/df12-gates-XXXXXX/gate-<task>-<round>-N.out` on the runner (each
+   result carries its exact `logFile` path); read them before re-running a
+   gate by hand.
+
+   CodeScene gate knobs: `csCheck` (default on — a CodeScene code-health
+   check on the committed changed files runs as a second deterministic gate
+   after the commit gates and before CodeRabbit at every gate point; a
+   regression drives a bounded fix round, and the build agent clears it by
+   refactoring, or — only where refactoring would be deleterious — by
+   suppressing the specific smell with a justified
+   `@codescene(disable:"...")` comment) and
+   `csCheckCommand` (default `cs-check-changed`, the operator-provided wrapper
+   — override with the exact invocation, e.g. `cs check --changed --base
+   main`). The check skips gracefully when its binary is absent, so a runner
+   without CodeScene is not blocked; install `cs-check-changed` on the runner
+   to make the gate active.
 
    Build-loop knobs: `perWorkItemBuild` (default on — the host dispatches
    one builder turn per unticked ExecPlan `## Progress` item, labelled
@@ -231,7 +260,12 @@ provides the doc skills):
 
 ## The supervision cycle
 
-Every time a run completes you do the same loop:
+Every time a run completes, follow the same loop. When `runsRoot` points at the
+sidecar, the durable copies to inspect are `$SIDECAR/runs/<run>/result.json`
+(parsed below), `$SIDECAR/runs/<run>/events.jsonl` (the per-`agent()` stream —
+count `agent_finished` by adapter to see where effort went, or trace a stuck
+phase), `$SIDECAR/runs/<run>/error.json` (present only on a terminal failure),
+and `$SIDECAR/coderabbit-findings.jsonl` (accumulated findings across runs).
 
 1. **Parse the result JSON.** Key fields: `processed` (ids merged this run),
    `results[]` (per-task `{id, status, stage, detail}` plus any
@@ -249,7 +283,8 @@ Every time a run completes you do the same loop:
    verification: enabled flag, per-gate timeout, and run/failure counters;
    with host gates on, `gatesGreen` is host-verified at review time and
    per-round pass/fail sits in failed tasks' `reviewRounds[].hostGates`
-   with `/tmp/df12-gate-*` log paths), `workItemBuild` (whether the host
+   with per-run `/tmp/df12-gates-*/gate-*.out` log paths),
+   `workItemBuild` (whether the host
    drove the build one Progress item at a time, and the round cap),
    `stageAttempts` (the
    in-run retry budget for stage agents that die on infrastructure faults;
@@ -344,7 +379,7 @@ For every active `roadmap-*` worktree, check:
   failed` bounces mean the ENVIRONMENT blocks committing in that worktree
   (hooks, identity, permissions) — stop and repair rather than relaunch;
 - advertised gate logs exist (with `hostCommitGates` on, the decisive gate
-  evidence is the host's own `/tmp/df12-gate-*` logs, not agent claims);
+  evidence is the host's own `/tmp/df12-gates-*/gate-*.out` logs, not agent claims);
 - claimed commits, dirty files, or clean branches match the agent output.
 
 If a planner returns an ExecPlan path but the file is missing, inspect the

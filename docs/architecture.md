@@ -99,8 +99,8 @@ GitHub permissions, and operator gates make violating it impossible or visible.
 | Task-agent writable root | Every task-phase `agent()` call must run with write access to the assigned task worktree before its output can be trusted as a durable side effect. | Agents are told to `cd` into the worktree and write ExecPlans, code, gate logs, commits, and integration state there. | Adapter sandbox scope is decisive. If the sandbox root is the control checkout while task worktrees are siblings, writes to `...worktrees/roadmap-*` can fail even when prompts and `workdir` values look correct. |
 | Implementation scope | With `perWorkItemBuild` on (the default), the host reads the committed ExecPlan's `## Progress` checklist and dispatches one builder turn per unticked work item, verifying a fully committed worktree and committed checklist movement after every turn (one named bounce, then fail-closed; `maxWorkItemRounds` bounds the loop). The control loop only advances statuses that satisfy schema and status checks. | Build agents are told to implement exactly one work item, use skills, keep scope narrow, tick the item in the execplan, run gates, and commit atomically. | Sandbox file scope, Git permissions, the host-run gates, and review gates are the real containment for bad edits. |
 | ExecPlan durability | The host verifies the plan exists committed and clean at `HEAD` after every planner round (host-committing a plan-only dirty draft, bouncing anything else), owns the `APPROVED` status flip as a deterministic commit, and fails an implementation that leaves uncommitted state. Agent-supplied plan paths are contained within the worktree before any filesystem or git access. | Planner, reviewer, and builder prompts state the durability contract. | Git identity is hermetic for machine commits; only `ENOENT`/`ENOTDIR` read as "absent" — other I/O faults fail closed. |
-| Tests and deterministic gates | With `hostCommitGates` on (the default), the host re-runs the configured `commitGates` commands against committed `HEAD` at the start of every dual-review round and once per addendum, serialized pool-wide, with per-command timeouts and `/tmp/df12-gate-*` logs; a red gate goes to a fix round with the host evidence and never spends reviewer agents. `impl.gatesGreen` is a claim, not the decision. | Implementers and fix agents are told to summon `scrutineer` for `make all` and markdown gates, and warned that the host re-runs the gates. | The gate commands must be runnable by the host process in the task worktree; `commitGateTimeoutSeconds` kills a hung gate. |
-| Code review | Review schemas require verdict and blocker fields; blocker arrays are checked regardless of verdict. With `coderabbitHostReview` on (the default), the host runs `coderabbit review --agent --type committed` per review round and per addendum, parses the NDJSON events (never exit codes), feeds `critical`/`major` findings into fix rounds, absorbs rate-limit backoff in host wall-clock, and defers with a documented open issue when the limit outlives `coderabbitAttempts`. | Code-review, expert-review, and fallback review instructions define what reviewers should inspect; agents are told not to run CodeRabbit themselves. | Model quality and CodeRabbit auth/quota determine usefulness; a CodeRabbit auth failure halts as `fatal-auth`. |
+| Tests and deterministic gates | With `hostCommitGates` on (the default), the host re-runs the configured `commitGates` commands against committed `HEAD` at the start of every dual-review round and once per addendum. These runs are serialized pool-wide, with per-command timeouts and logs streamed to a secure per-run directory (mode 0700, files opened exclusively without following symlinks so a planted symlink cannot clobber or leak them). A red gate goes to a fix round with the host evidence and never spends reviewer agents. With `hostGatesBetweenWorkItems` on (the default), the gates ALSO re-run after each committed work item during the per-work-item build — before the between-item CodeRabbit review — so a committed red work item is caught at the item boundary, not only at the review stage. With `csCheck` on (the default), a CodeScene code-health check (`csCheckCommand`, default `cs-check-changed`) runs as a second deterministic gate on the committed changed files, AFTER the commit gates and BEFORE CodeRabbit; a regression short-circuits to a fix round without spending CodeRabbit quota or reviewer-agent tokens, and the check skips gracefully when its binary is absent. `impl.gatesGreen` is a claim, not the decision. | Implementers and fix agents are told to summon `scrutineer` for `make all` and markdown gates, and warned that the host re-runs the gates. | The gate commands must be runnable by the host process in the task worktree; `commitGateTimeoutSeconds` kills a hung gate. |
+| Code review | Review schemas require verdict and blocker fields; blocker arrays are checked regardless of verdict. Each review round spends cheapest-first (deterministic gates free, CodeRabbit a fixed quota, reviewer agents the scarcest tokens): host gates, then CodeRabbit, then the reviewer agents, short-circuiting to a fix round the moment a cheaper stage blocks so a red gate or a CodeRabbit blocking finding never spends reviewer-agent tokens that round. With `coderabbitHostReview` on (the default), the host runs `coderabbit review --agent --type committed` per review round and per addendum, parses the NDJSON events (never exit codes), feeds `critical`/`major` findings into fix rounds, absorbs rate-limit backoff in host wall-clock, and defers with a documented open issue (falling through to the decisive reviewer agents) when the limit outlives `coderabbitAttempts`. With `coderabbitBetweenWorkItems` on (the default), that host review ALSO runs after each committed work item during the per-work-item build — a deterministic gate between build turns — and fails closed: unresolved blocking findings fail the work item, and a terminal deferral halts the task for assessment rather than continuing unreviewed. | Code-review, expert-review, and fallback review instructions define what reviewers should inspect; agents are told not to run CodeRabbit themselves. | Model quality and CodeRabbit auth/quota determine usefulness; a CodeRabbit auth failure halts as `fatal-auth`. |
 | Task-agent write preflight | The host verifies the probe token on disk and fails the task at stage `worktree-write` when any probed adapter cannot write into the worktree; the stage is excluded from partial-branch assessment. | Probe agents are asked to write one exact token file and nothing else. | Adapter sandbox scope is what the probe measures; disabling `worktreeWritePreflight` removes the enforcement, not the requirement. |
 | Fresh-run recovery | Discovery, roadmap-id mapping, completed-task skipping, the candidate cap, resume eligibility, and the fail-closed downgrade to `continue-manual` are host JavaScript. Continue mode (`resumeMode="continue"`) dispatches deterministically from the committed ExecPlan `Status` with no judgement agent; a plan the host cannot read reports `plan-unreadable` instead of resuming. Resume can only land through the shared dual-review + merge-lock integration path, `processed` gains an id only from a pushed integration, and held ids are excluded from selection deterministically; unresolved survivors surface as `recovery.unresolved` and a `needs-operator-recovery` halt. | The recovery assessment agent classifies durable branch evidence; reviewers and the integration agent handle a resumed branch exactly like ordinary work. | `resumePartialBranches` and `resumeMode` gate the pass; auth preflight failure blocks it entirely; review-mode and continue-mode resume need the same write and push permissions as ordinary integration. |
 | Partial branch assessment | Failed or halted task results with a surviving branch and worktree pass through an assessment guard. The host gathers branch name, worktree path, base/current commits, changed files, dirty state, recent commits, and command errors, then consumes a schema-bound classification. Assessment output is report-only and cannot update `processed`, merge branches, push, or mark roadmap checkboxes. | The assessment agent is instructed to inspect durable Git and on-disk evidence, read ExecPlans and roadmap state, and classify as `adopt-complete`, `adopt-partial`, `continue-manual`, or `discard`. | Assessment requires readable surviving worktrees and adapter access. It is skipped for auth failures, provider faults, dry runs, manual-merge-ready branches, successful tasks, and failures before worktree creation. |
@@ -128,9 +128,13 @@ The key argument groups are:
   `maxBuildParallel`, `maxDesignRounds`, `maxReviewRounds`, `dryRun`,
   `autoMerge`, `documentAudit`, and `assessPartialBranches`.
 - Host enforcement: `commitGates` (the deterministic gate command list),
-  `hostCommitGates`/`commitGateTimeoutSeconds` (host-run gate verification),
-  `coderabbitHostReview`/`coderabbitAttempts`/`coderabbitBackoffMinutes`/
-  `coderabbitFindingsFile` (host-run CodeRabbit review and findings capture),
+  `hostCommitGates`/`hostGatesBetweenWorkItems`/`commitGateTimeoutSeconds`
+  (host-run gate verification, including between work-item build turns),
+  `csCheck`/`csCheckCommand` (the CodeScene code-health gate that runs after
+  the commit gates and before CodeRabbit),
+  `coderabbitHostReview`/`coderabbitBetweenWorkItems`/`coderabbitAttempts`/
+  `coderabbitBackoffMinutes`/`coderabbitFindingsFile` (host-run CodeRabbit
+  review, between-work-item gating, and findings capture),
   `perWorkItemBuild`/`maxWorkItemRounds` (the host-driven work-item build
   loop), and `stageAttempts` (bounded in-run retry of stage agents on
   infrastructure faults).
@@ -142,18 +146,38 @@ The key argument groups are:
   host-verified task-agent write probe).
 - Agent routing: `buildAdapter`/`buildModel`, `planAdapter`/`planModel`, and
   `reviewAdapter`/`reviewModel`.
-- Assessment routing: `assessmentAdapter`/`assessmentModel`, defaulting to the
-  review adapter and model.
+- Assessment routing: `assessmentAdapter`/`assessmentModel` with
+  `assessmentEscalationModel`.
+- Triage routing: `triageAdapter`/`triageModel` with `triageEscalationModel`.
 
 The default routing separates execution from judgement. Build-side stages
-default to Codex: worktree creation, implementation, fix rounds, integration,
-remediation, and triage use the build or triage adapter/model defaults.
-Planning and review judgement default to Claude Code with
-`claude-opus-4-8`: the plan stage uses `planAdapter`/`planModel`, while design
-review, code review, expert review, addendum fallback review, and audit use
-`reviewAdapter`/`reviewModel`. Partial-branch assessment inherits the review
-route unless `assessmentAdapter`/`assessmentModel` are set explicitly, so a
-sidecar that wants Codex assessment must say so in `args.json`.
+default to Codex: worktree creation, implementation, fix rounds, and
+integration use the build adapter/model defaults. Planning and review
+judgement default to Claude Code with `claude-opus-4-8`: the plan stage uses
+`planAdapter`/`planModel`, while design review, code review, expert review,
+addendum fallback review, and audit use `reviewAdapter`/`reviewModel`.
+
+Model spend is right-sized to each task's cognitive load, not left at the
+Opus/high defaults:
+
+- The write-preflight probe writes one exact token to one exact path, so it
+  keeps the plan/build ADAPTER but runs at `writeProbeEffort` (`minimal` by
+  default) and never inherits `planModel`/`buildModel`; set
+  `writeProbeModelByAdapter` for a cheaper per-adapter probe model.
+- Partial-branch assessment is report-only, so a deterministic fast-classifier
+  handles the clear cases (empty branch, evidence-collection failure) with zero
+  tokens, and only genuinely ambiguous branches reach a model — at
+  `assessmentModel` (a medium default, `claude-sonnet-5`, not the review
+  model), escalating to `assessmentEscalationModel` only for a strong
+  adopt-complete candidate (a branch that committed an ExecPlan).
+- Remediation triage is mostly de-duplication plus hypothesis routing, so a
+  deterministic pre-pass collapses exact-duplicate proposals and the routing
+  agent runs at `triageModel` (a medium default, `gpt-5.5`), escalating to
+  `triageEscalationModel` (`gpt-5.5@high`) only when the proposals span
+  multiple audit/review sources (potential cross-phase or conflicting routing).
+
+A sidecar that wants a different assessment or triage route must say so in
+`args.json`.
 
 Auth preflight is adapter-aware. The workflow always checks Codex auth because
 build-side stages depend on it, checks CodeRabbit auth when implementation can

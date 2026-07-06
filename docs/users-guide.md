@@ -7,6 +7,70 @@ remediation work through isolated worker branches. Use it only for projects that
 already have a roadmap, design documentation, `AGENTS.md`, repository gates, and
 the df12 skill/toolchain installed.
 
+## Workflow at a glance
+
+Three sequence diagrams sketch the moving parts an operator works around: how
+the shipped workflow artefact is built, how a fresh launch recovers surviving
+branches, and how a single task moves from plan to integration. Each diagram is
+followed by a text description that conveys the same sequence.
+
+Figure 1 shows how the single-file workflow artefact is produced and kept
+honest.
+
+```mermaid
+sequenceDiagram
+  participant Makefile
+  participant scripts/build-workflow.mjs
+  participant workflows/df12-build-odw.js
+  Makefile->>scripts/build-workflow.mjs: run workflow-build
+  scripts/build-workflow.mjs->>workflows/df12-build-odw.js: regenerate artefact
+  Makefile->>scripts/build-workflow.mjs: run workflow-freshness
+```
+
+*Figure 1 — the build pipeline.* `make workflow-build` runs
+`scripts/build-workflow.mjs`, which regenerates the committed single-file
+artefact `workflows/df12-build-odw.js` from the module tree. `make
+workflow-freshness` then re-runs the build and fails if the committed artefact
+differs, so a stale artefact can never land.
+
+Figure 2 shows fresh-run recovery of surviving task branches.
+
+```mermaid
+sequenceDiagram
+  participant RecoveryDiscovery
+  participant RecoveryDecision
+  participant Main
+  RecoveryDiscovery->>RecoveryDecision: candidate + evidence
+  RecoveryDecision-->>Main: resume or report
+  Main->>RecoveryDecision: continue-mode dispatch
+```
+
+*Figure 2 — fresh-run recovery.* Recovery discovery hands each surviving
+branch's candidate record and host-collected git evidence to the recovery
+decision. The decision returns either an eligible branch to resume or a
+report-only result to the main loop; in continue mode, the main loop asks the
+decision which stage to dispatch next from the committed ExecPlan state.
+
+Figure 3 shows how a single task moves from plan to integration.
+
+```mermaid
+sequenceDiagram
+  participant runTask
+  participant runPlanDesignLoop
+  participant runImplementationStage
+  participant runDualReviewAndIntegration
+  runTask->>runPlanDesignLoop: approve ExecPlan
+  runPlanDesignLoop->>runImplementationStage: validated plan
+  runImplementationStage->>runDualReviewAndIntegration: gates-green implementation
+  runDualReviewAndIntegration-->>runTask: integrate or halt
+```
+
+*Figure 3 — the per-task pipeline.* `runTask` drives the plan and design-review
+loop until the ExecPlan is approved, hands the validated plan to the
+implementation stage, and that stage passes gates-green work to dual review and
+integration. The review-and-integration stage either integrates the branch
+through the merge lock or halts it for the operator.
+
 ## Launch model
 
 Current ODW launches use a `.workshop` sidecar outside the target project's Git
@@ -69,7 +133,7 @@ Minimal sidecar `odw.config.json` shape for the Claude/Codex split:
   "workspaceMode": "inplace",
   "timeout": 5400,
   "schemaRetries": 2,
-  "runsRoot": "~/.odw/runs",
+  "runsRoot": "/abs/path/to/example-project.workshop/df12-build-RUN/runs",
   "workflowsRoot": "~/.odw/workflows",
   "claudeJobsScope": "project",
   "adapters": {
@@ -133,6 +197,28 @@ Minimal sidecar `odw.config.json` shape for the Claude/Codex split:
   }
 }
 ```
+
+### Inspectable logs in the sidecar
+
+Point both log sinks at the sidecar so a run's agent transcripts and CodeRabbit
+findings are durably inspectable next to the run, without touching workflow
+behaviour — both are out-of-band sinks outside the project Git worktree, so
+they never enter a diff, trip `workflow-freshness`, or affect a gate:
+
+- **Agent logs** — set `runsRoot` (in `odw.config.json`) to an absolute path
+  inside the run's sidecar, e.g. `"$SIDECAR/runs"`. ODW writes each run's
+  durable artefacts there: `events.jsonl` (an ordered stream with
+  `agent_started`/`agent_finished` per `agent()` call, tagged by adapter,
+  label, and phase), `result.json` (the final return, including every
+  `reviewRounds`, `assessments`, host-gate result, and CodeRabbit summary), and
+  `error.json`. This is entirely ODW's domain — no workflow involvement.
+  Regenerate the value per run, or use a shared `~/.odw/runs` for a single
+  pool; the sidecar keeps each run's logs beside its config and notes.
+- **CodeRabbit findings** — set `coderabbitFindingsFile` (in `args.json`) to a
+  sidecar JSONL path, e.g. `"$SIDECAR/coderabbit-findings.jsonl"`. Every parsed
+  finding (timestamp, task label, severity, file, comment, codegen
+  instructions, suggestion count) is appended best-effort: a bad path or full
+  disk degrades logging with a warning and never fails a task.
 
 Patch the sidecar copy only to recover or tune a live workshop. Record the patch
 in `operator-notes.md`, validate it there, then promote the proven change back
@@ -370,6 +456,35 @@ Common arguments:
   asking agents to babysit CodeRabbit. Rate-limit backoff is absorbed as host
   wall-clock (zero agent tokens), and blocking findings feed the fix rounds.
   Set `false` to restore the legacy agent-run flow.
+- `hostGatesBetweenWorkItems`: when `true` (the default), and when both
+  `hostCommitGates` and `perWorkItemBuild` are on, the host re-runs the
+  commit gates after each committed work item — before the between-item
+  CodeRabbit review — so a committed work item whose gates are actually red
+  is caught at the item boundary instead of only at the dual-review stage.
+  A red gate drives a bounded fix loop; if it cannot be made green the work
+  item fails. Set `false` to verify gates only at the dual-review boundary
+  (cheaper: one gate run per review round rather than one per work item).
+- `csCheck`: when `true` (the default), the host runs a CodeScene code-health
+  check on the committed changed files as a deterministic gate AFTER the
+  commit gates and BEFORE CodeRabbit (both free checks precede the
+  quota-limited CodeRabbit and the token-spending reviewer agents). A
+  regression drives a bounded fix round; the build agent clears it by
+  refactoring or, only where refactoring would be deleterious, suppresses the
+  specific smell with a justified `@codescene(disable:"...")` comment. The
+  check skips gracefully when its binary is absent, like `make verify-modules`
+  without Dafny. Set `false` to disable it.
+- `csCheckCommand`: the command the CodeScene check runs in the worktree.
+  Defaults to `cs-check-changed` (an operator-provided wrapper); override it
+  with the exact invocation, e.g. `cs check --changed --base main`.
+- `coderabbitBetweenWorkItems`: when `true` (the default), and when both
+  `coderabbitHostReview` and `perWorkItemBuild` are on, the host runs a
+  CodeRabbit review after each committed work item — a deterministic gate
+  between build turns, after the host gates — rather than only once after the
+  whole implementation stage. Blocking findings drive a bounded fix loop; if
+  they cannot be cleared the work item fails, and if CodeRabbit stays
+  rate-limited or errors after its retries the task halts for assessment
+  instead of continuing unreviewed. Set `false` to review only once at the
+  end of the implementation stage.
 - `coderabbitAttempts`: total host review attempts when CodeRabbit rate
   limits. Defaults to `3`.
 - `coderabbitBackoffMinutes`: `[low, high]` range for the deterministic
@@ -378,6 +493,27 @@ Common arguments:
   file recording every CodeRabbit finding (timestamp, task, severity, file,
   comment). Point it at a sidecar file to accumulate findings across runs and
   tune deterministic lint rules from the recurring classes.
+- `writeProbeEffort`: reasoning effort for the once-per-run write-preflight
+  probe (write an exact token to an exact path — no reasoning). Defaults to
+  `minimal`. The probe keeps the plan/build ADAPTER but never inherits
+  `planModel`/`buildModel`.
+- `writeProbeModelByAdapter`: optional `{ "<adapter>": "<model>" }` map to run
+  the probe on a cheaper model per adapter (adapter name lowercased). Defaults
+  to `{}` (the adapter's own default model at minimal effort).
+- `assessmentModel`: model for the report-only partial-branch assessment.
+  Defaults to a medium model (`claude-sonnet-5`) rather than inheriting the
+  Opus-class review model, because a deterministic fast-classifier already
+  handles the clear cases (empty branch, evidence-collection failure) with
+  zero tokens and only genuinely ambiguous branches reach the model.
+- `assessmentEscalationModel`: the stronger model used for a strong
+  adopt-complete candidate (a branch that committed an ExecPlan). Defaults to
+  the review model.
+- `triageModel`: model for remediation triage. Defaults to a medium model
+  (`gpt-5.5`); a deterministic pre-pass collapses exact-duplicate proposals
+  before the agent runs.
+- `triageEscalationModel`: the stronger model used when the deduped proposals
+  span more than one audit/review source (potential cross-phase or conflicting
+  routing). Defaults to `gpt-5.5@high`.
 - `taskId`: run exactly one roadmap task.
 - `dryRun`: when `true`, plan, review, and audit without implementation,
   integration, or document writes.
@@ -513,8 +649,10 @@ carrying the host's log evidence) and once per addendum implementation
 (addenda have no fix rounds, so an unreproducible green claim fails the
 addendum outright). Gate runs are serialized across the whole worker pool so
 sequential execution benefits from the target project's build caching, and
-each command's full output is teed to a `/tmp/df12-gate-<task>-<round>-…`
-log with a bounded tail quoted in the failure evidence. A command that
+each command's full output is streamed to a log in a secure per-run
+directory (`/tmp/df12-gates-XXXXXX/gate-<task>-<round>-N.out`, created with
+mode `0700` and opened exclusively without following symlinks) with a bounded
+tail quoted in the failure evidence. A command that
 exceeds `commitGateTimeoutSeconds` is killed and reported as a failure. The
 run result's `hostGates` object reports the configuration and bounded
 counters (gate runs, failures); per-round pass/fail detail appears in each

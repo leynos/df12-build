@@ -27,11 +27,31 @@ Read these before changing launch or workflow behaviour:
 
 The repository contains workflow scripts, skill documentation, docs, operator
 scripts, focused test suites, a project roadmap with ExecPlans, and a small
-validation `Makefile`. It does not contain a package manifest.
+validation `Makefile`. Development dependencies (esbuild, fast-check,
+bun-test-cucumber, LemmaScript, TypeScript, and Bun's type definitions) are
+managed with `bun` via `package.json`.
 
 Relevant paths:
 
-- `workflows/df12-build-odw.js`: ODW/Codex workflow.
+- `src/workflows/df12-build-odw/`: source of truth for the ODW workflow — a
+  literal `meta.js` banner (plain JavaScript, concatenated verbatim), the
+  typed `main.ts` entry (configuration unpacking, factory bindings, and the
+  worker-pool control loop), and one TypeScript module per subsystem:
+  `config.ts`, `schemas.ts`, `types.ts`, `roadmap.ts`, `exec.ts`,
+  `faults.ts`, `git-evidence.ts`, `recovery-decision.ts`,
+  `recovery-discovery.ts`, `prompts.ts`, `write-preflight.ts`,
+  `execplan-durability.ts`, `assessment.ts`, `remediation.ts`,
+  `host-review.ts` (host-run CodeRabbit NDJSON parsing/classification and
+  the host commit gates), and `run-task.ts`, with the injected ODW
+  primitives declared in
+  `odw-globals.d.ts`. TypeScript is restricted to erasable syntax by
+  compiler flags (`erasableSyntaxOnly`, `verbatimModuleSyntax`).
+- `workflows/df12-build-odw.js`: GENERATED ODW/Codex workflow artefact, built
+  by `make workflow-build` (see `scripts/build-workflow.mjs`); this is the
+  single file the sidecar copies and ODW loads.
+- `verify/recovery-decision.model.ts`: LemmaScript-annotated verified twin of
+  the recovery decision tables, checked into Dafny by `make verify-modules`,
+  with its generated `.dfy.gen`/`.dfy` proof files alongside.
 - `workflows/df12-build.js`: baseline workflow.
 - `skills/df12-build-supervisor/SKILL.md`: operator skill.
 - `scripts/blinkentrees`, `scripts/git-commit-feed`, `scripts/odw-list-runs`,
@@ -39,6 +59,9 @@ Relevant paths:
   guide's "Monitoring runs" section).
 - `tests/`: Node suites for the ODW workflow plus
   `tests/run-odw-script-tests.py` for the operator scripts.
+- `tests/modules/`: bun-run suites for the individual src modules — Gherkin
+  features (bun-test-cucumber), fast-check properties, and the differential
+  test pinning the verified twin to production.
 - `docs/roadmap.md`: this repository's own GIST roadmap.
 - `docs/execplans/`: ExecPlans for landed roadmap work.
 - `docs/failure-resume-design.md`: the failure-resume design the recovery
@@ -56,8 +79,14 @@ branch lands planned work.
 
 ## ODW workflow contract
 
-`workflows/df12-build-odw.js` is an ODW script, not a conventional Node module.
-Keep the ODW script contract intact:
+`workflows/df12-build-odw.js` is an ODW script, not a conventional Node
+module, and it is generated: edit `src/workflows/df12-build-odw/` and run
+`make workflow-build` (the `workflow-freshness` gate fails a stale artefact).
+The build frames the artefact from a verbatim `meta.js` banner, a flat
+esbuild bundle of `main.ts` and its imports, and a generated
+`return await workflowMain()` footer, and it fails closed on anything the
+ODW loader would reject. Within the src tree, keep the ODW script contract
+intact:
 
 - Keep `meta` as a literal `export const meta = { ... }` object.
 - Do not import ODW primitives. `args`, `agent`, `parallel`, `phase`, `log`,
@@ -123,29 +152,91 @@ sites as unwrapped.
 
 Host-run CodeRabbit review (`coderabbitHostReview`, default on) moves the
 CLI invocation from agent prompts to the control loop: `coderabbit review
---agent --type committed` runs per dual-review round and per addendum, its
-NDJSON events are parsed host-side (the CLI exits 0 even on fatal errors, so
-classification must read events, never exit codes), `critical`/`major`
-findings join the fix-round blocking items, and rate-limit backoff sleeps in
-host wall-clock with deterministic jitter (`Math.random()`, `Date.now()`, and
+--agent --type committed --base <base>` (a FIXED host invocation; the
+`coderabbitReviewCommand` knob applies only to the legacy agent-run mode and
+does NOT override it) runs BETWEEN each per-work-item build turn
+(`coderabbitBetweenWorkItems`, default on) as a deterministic gate on each
+committed work item, and again per dual-review round and per addendum.
+
+The review stage spends by a strict cost hierarchy — deterministic gates are
+free, CodeRabbit is a fixed weekly quota, and the reviewer agents (code
+review and expert review) spend the scarcest resource, tokens. So each
+dual-review round runs cheapest-first: host gates, then CodeRabbit, then the
+reviewer agents, and short-circuits to a fix round as soon as a cheaper stage
+blocks. A red gate or a CodeRabbit blocking finding drives a fix WITHOUT
+dispatching the reviewer agents that round; the agents run only once the gates
+and CodeRabbit are clean (a CodeRabbit deferral falls through to them, since
+they remain the decisive review). The workflow deliberately trades wall-clock
+(re-running gates, CodeRabbit and its backoff) for tokens, which do not
+replenish.
+
+Its NDJSON events are parsed host-side (the CLI exits 0 even on fatal errors, so
+classification must read events, never exit codes — see
+`docs/coderabbit-wire-contract.md` for captured live sessions documenting
+every observed event shape and the success-status set), `critical`/`major`
+findings drive a bounded fix loop, and rate-limit backoff sleeps in host
+wall-clock with deterministic jitter (`Math.random()`, `Date.now()`, and
 arg-less `new Date()` are banned by ODW's `scanDualCompat` for Claude Code
 dual-compatibility — hash a seed instead, and shell out to `date` for
-timestamps). Test loaders and the simulation driver force
-`coderabbitHostReview: false` so fixture runs can never invoke the real CLI
-and burn review quota; the pipeline seam is covered by a fake NDJSON-emitting
-`coderabbit` on `PATH`.
+timestamps). The between-item gate fails closed: unresolved blocking findings
+fail the work item (`code-review`), and a terminal deferral (rate limit or
+CLI fault after the retries) HALTS the task for assessment rather than
+silently continuing — so "between each stage" is a real gate, not a label.
+Test loaders and the simulation driver force `coderabbitHostReview: false` so
+fixture runs can never invoke the real CLI and burn review quota; the
+pipeline seam is covered by a fake NDJSON-emitting `coderabbit` on `PATH`,
+and the between-item gate by an injected `runCoderabbitHostReview`.
+
+Every fix round — gate fix, dual-review fix, and between-item fix — is
+followed by `verifyWorktreeCommitted`; a fix that leaves the worktree dirty
+fails the task closed (`FIX DURABILITY`) because uncommitted fix output is
+unreviewable and lost at the squash merge.
 
 Host-run commit gates (`hostCommitGates`, default on) apply the same
 philosophy to gate greenness: `runHostCommitGates` executes the configured
 `commitGates` commands via `sh -c` in the task worktree, serialized pool-wide
 behind `hostGateLock` (width 1, for build-cache friendliness), with a
-per-command timeout (`commitGateTimeoutSeconds`) and full output teed to
-`/tmp/df12-gate-*` logs. In the dual-review loop the gates run FIRST each
-round — a red branch goes to a fix round with the host evidence without
-spending reviewer agents; in the addendum lane an unreproducible green claim
-fails the addendum before any review. Test loaders and the simulation driver
-force `hostCommitGates: false` (fixture repos have no `Makefile`); pipeline
-coverage uses a scripted fake gate command.
+per-command timeout (`commitGateTimeoutSeconds`) and output streamed to logs
+in a secure per-run directory (`mkdtempSync`, mode `0700`, e.g.
+`/tmp/df12-gates-XXXXXX/gate-<task>-<round>-N.out`) — an unpredictable name
+plus an `O_EXCL|O_NOFOLLOW`, mode-`0600` open, so a local symlink cannot
+clobber or leak the logs, and the raw gate command is kept out of the
+filename. Gates run via `spawn`, streaming stdout/stderr to
+the log as they run (evidence is visible during a long gate, and there is no
+`maxBuffer` ceiling for a noisy `make all` to trip) while a bounded
+ring-buffer keeps the last lines for the structured `detail` tail; the
+timeout fires `SIGTERM` and escalates to `SIGKILL`. In the dual-review loop
+the gates run FIRST each round — a red branch goes to a fix round with the
+host evidence without spending reviewer agents; in the addendum lane an
+unreproducible green claim fails the addendum before any review. With
+`hostGatesBetweenWorkItems` on (the default), the gates ALSO re-run after each
+committed work item during the per-work-item build, BEFORE the between-item
+CodeRabbit review, so a committed work item whose gates are really red is
+caught at the item boundary (bounded fix loop, then fail-closed) rather than
+only at the dual-review stage — closing the window where an intermediate red
+commit could persist across work items on the agent's `gatesGreen` claim
+alone.
+
+`runCodeSceneCheck` (`csCheck`, default on) is a SECOND deterministic gate,
+run after the commit gates and before CodeRabbit at every gate point (each
+work item, each dual-review round, and the addendum lane). It runs
+`csCheckCommand` (default `cs-check-changed`, an operator-provided wrapper)
+through the same secure-log spawn path as the commit gates, on the committed
+changed files. A code-health regression short-circuits to a fix round — free
+gates before the quota-limited CodeRabbit and the token-spending reviewer
+agents — and the build/fix prompts carry the smell glossary plus the
+`@codescene(disable:"...")` suppression escape hatch (`CS_CHECK_GUIDANCE`).
+Like `make verify-modules` without Dafny, it skips gracefully (clean, not
+failed) when the binary is absent. Test loaders
+and the simulation driver force `hostCommitGates: false` (fixture repos have
+no `Makefile`); pipeline coverage uses a scripted fake gate command, and the
+streaming path is covered by a module test with output past the old buffer
+ceiling.
+
+`make verify-modules` skips when Dafny is absent, so local runs stay friendly;
+CI must run `make verify-modules-strict`, which FAILS when Dafny is not on
+`PATH`, so the LemmaScript/Dafny proof is a real PR gate rather than
+advisory. The CI job installs Dafny (see the toolchain notes).
 
 The per-work-item build loop (`perWorkItemBuild`, default on) makes the
 committed ExecPlan's `## Progress` checklist the build's control surface:
@@ -177,6 +268,17 @@ the plan stage. `reviewAgentOptions` covers design review, code review, expert
 review, addendum fallback review, and audit. Because partial-branch assessment
 defaults to the review adapter, keep `assessmentAdapter` explicit in examples
 or operator notes when that stage must remain on Codex.
+
+Assessment and triage are model-tiered rather than pinned to `REVIEW_MODEL`
+because most of their work is cheap. `ASSESSMENT_MODEL` has its own medium
+default (`claude-sonnet-5`, not the review model): a deterministic
+fast-classifier resolves the clear cases with zero tokens, and only a genuine
+adopt candidate escalates to `ASSESSMENT_ESCALATION_MODEL` (defaulting to
+`REVIEW_MODEL`). `TRIAGE_MODEL` likewise runs at a medium default after a
+deterministic dedup pre-pass, escalating to `TRIAGE_ESCALATION_MODEL` only when
+the deduped proposals span more than one audit/review source. Each escalation
+model is an independent override, so a sidecar can tune the cheap tier and the
+escalation tier separately.
 
 ## Sidecar tooling contract
 
@@ -223,7 +325,19 @@ documentation changes:
 make all
 ```
 
-Run focused assessment tests while changing partial-branch recovery:
+Run the module suites (bun) or the whole-workflow suites (node, against a
+fresh artefact) separately when iterating:
+
+```bash
+make test-modules
+make test-workflow
+```
+
+`make verify-modules` re-checks the LemmaScript decision-table model with
+Dafny; it skips (loudly) when `dafny` is not on `PATH`.
+
+Run focused assessment tests while changing partial-branch recovery (rebuild
+the artefact first if the src tree changed):
 
 ```bash
 node --test tests/df12-build-odw-assessment.test.mjs

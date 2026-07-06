@@ -11,9 +11,11 @@ import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { readWorkflowSource } from './support/workflow-source.mjs'
 
 const WORKFLOW_PATH = new URL('../workflows/df12-build-odw.js', import.meta.url)
 const CONTROL_LOOP_MARKER = '// --- Worker-pool control loop'
+
 
 async function loadAssessmentSurface(args = {}) {
   let source = await readFile(WORKFLOW_PATH, 'utf8')
@@ -326,12 +328,16 @@ test('filesystem faults surface distinctly from absent files', async () => {
 })
 
 test('integration is never retried on infrastructure faults', async () => {
-  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  const source = await readWorkflowSource()
   // The push to origin/BASE is not idempotent: a hidden-success first
   // attempt re-run after an adapter death could integrate the task twice.
   assert.doesNotMatch(source, /withInfraRetry\([^\n]*integratePrompt/)
+  // Both lanes now route through the single integrateTask helper, so exactly
+  // one unwrapped call site must exist and both callers must use the helper.
   const bareCalls = source.match(/buildLock\(\(\) => agent\(integratePrompt\(task, worktree\)/g) || []
-  assert.equal(bareCalls.length, 2, 'both integrate call sites (normal and addendum) stay unwrapped')
+  assert.equal(bareCalls.length, 1, 'the shared integrateTask call site stays unwrapped')
+  const helperCalls = source.match(/await integrateTask\(task, worktree, mergeLock, proposals,/g) || []
+  assert.equal(helperCalls.length, 2, 'normal and addendum lanes both integrate through integrateTask')
 })
 
 test('the CodeRabbit NDJSON parser reads the pinned agent wire contract', async () => {
@@ -649,7 +655,7 @@ test('green addendum implementation contract drift is manual merge ready', async
 })
 
 test('addendum deferred-review manual handoff bypasses the assessment agent', async () => {
-  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  const source = await readWorkflowSource()
   // The manual-merge-ready return must be checked BEFORE the failure branch
   // that calls attachAssessment, so a bounded deferred-review handoff can
   // never fall through into an unbounded Assess agent (issue #27).
@@ -767,7 +773,7 @@ test('auth preflight reports a signed-out Claude as a failure', async () => {
 })
 
 test('normal and addendum implementations gate auth before integration', async () => {
-  const source = await readFile(WORKFLOW_PATH, 'utf8')
+  const source = await readWorkflowSource()
 
   assert.match(
     source,
@@ -775,7 +781,9 @@ test('normal and addendum implementations gate auth before integration', async (
   )
   assert.match(
     source,
-    /const impl = await buildLock\(\(\) => withInfraRetry\(\(\) => agent\(implementPrompt\(task, worktree, plan, opts\)[\s\S]*?const authDetail = implementationAuthFailureDetail\(impl\)[\s\S]*?status: 'fatal-auth'/,
+    // The optional paren tolerates the TypeScript result cast:
+    // `const impl = (await buildLock(...)) as StageImpl | null`.
+    /const impl = \(?await buildLock\(\(\) => withInfraRetry\(\(\) => agent\(implementPrompt\(task, worktree, plan, opts\)[\s\S]*?const authDetail = implementationAuthFailureDetail\(impl\)[\s\S]*?status: 'fatal-auth'/,
   )
 })
 
