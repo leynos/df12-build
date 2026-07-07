@@ -735,7 +735,21 @@ operator to relaunch with `resumePartialBranches=true` and
 retried, because a hidden-success first attempt may already have pushed —
 inspect `origin/<base>` and the roadmap before relaunching. The run result's
 `faultMetrics` object counts retries and terminal faults per class
-(`infraRetries`, `infraFaults`, `providerFaults`, `authFaults`).
+(`infraRetries`, `infraFaults`, `providerFaults`, `authFaults`,
+`usageLimitFaults`).
+
+Codex usage-limit exhaustion is a distinct class again. When a Codex build
+stage spends its rolling five-hour (or weekly) usage quota, the workflow does
+**not** retry it in place — the reset window is hours long, so a warm retry
+would waste the run's remaining time. The task terminates with status
+`usage-limit-fault`, the run halts, no assessment agent is spawned, and (as
+with provider faults) the final remediation flush is skipped so an exhausted
+quota never looks like task evidence. The halt detail directs the operator to
+relaunch with `resumePartialBranches=true` and `resumeMode="continue"` once the
+Codex usage limit resets; the committed ExecPlan makes that resume a warm
+start. This differs from a provider 429 (a momentary overload that defers the
+task) and from an infrastructure fault (a dead adapter that a warm retry
+recovers).
 
 That host-level caution is distinct from the integration agent's own retry
 loop, which is idempotent by construction. Because sibling tasks merge through

@@ -12,6 +12,7 @@ import {
   makeWithInfraRetry,
   providerFailureDetail,
   resultFromUnhandledAgentError,
+  usageLimitFailureDetail,
 } from '../../src/workflows/df12-build-odw/faults.ts'
 
 // withInfraRetry logs through the injected ODW `log` primitive; provide it
@@ -23,12 +24,13 @@ function resetMetrics() {
   faultMetrics.infraFaults = 0
   faultMetrics.providerFaults = 0
   faultMetrics.authFaults = 0
+  faultMetrics.usageLimitFaults = 0
 }
 
 beforeEach(resetMetrics)
 
 describe('failure classifiers', () => {
-  const table: Array<[string, string, 'auth' | 'provider' | 'infra' | 'none']> = [
+  const table: Array<[string, string, 'auth' | 'provider' | 'infra' | 'usage-limit' | 'none']> = [
     ['codex 401', 'API Error: 401 Unauthorized', 'auth'],
     ['claude signed out', 'You are signed out. Run claude auth login.', 'auth'],
     ['coderabbit login hint', 'Run `coderabbit auth login` to authenticate', 'auth'],
@@ -41,9 +43,15 @@ describe('failure classifiers', () => {
     ['adapter died', "adapter 'claude' exited with code 137", 'infra'],
     ['schema exhausted', 'reply did not satisfy the schema after 3 attempts', 'infra'],
     ['no JSON', 'no JSON value found in the reply', 'infra'],
+    ['codex usage limit hit', "You've hit your usage limit. Purchase more credits to continue.", 'usage-limit'],
+    ['codex usage limit reset window', 'Usage limit reached. Limits reset every 5 hours.', 'usage-limit'],
+    ['codex usage limit try again at', 'Usage limit reached; try again at 14:00 UTC', 'usage-limit'],
+    ['api rate_limit_exceeded', 'API Error: rate_limit_exceeded', 'usage-limit'],
+    ['api exceeded the rate limit', 'You have exceeded the rate limit for this account', 'usage-limit'],
     ['ordinary review failure', 'coderabbit found 3 blocking issues', 'none'],
     ['ordinary gate failure', 'make all failed: tests exited 1', 'none'],
     ['prose mentioning auth', 'documented the authorization design', 'none'],
+    ['prose mentioning usage and limit', 'documented the usage of the rate limiter and its limit', 'none'],
     ['empty', '', 'none'],
   ]
 
@@ -52,6 +60,7 @@ describe('failure classifiers', () => {
       expect(authFailureDetail(detail) !== '').toBe(expected === 'auth')
       expect(providerFailureDetail(detail) !== '').toBe(expected === 'provider')
       expect(infrastructureFailureDetail(detail) !== '').toBe(expected === 'infra')
+      expect(usageLimitFailureDetail(detail) !== '').toBe(expected === 'usage-limit')
     })
   }
 })
@@ -81,6 +90,18 @@ describe('makeWithInfraRetry', () => {
     expect(faultMetrics.infraRetries).toBe(0)
   })
 
+  test('a usage-limit exit that also matches the infra prefix is never retried', async () => {
+    const withInfraRetry = makeWithInfraRetry(3)
+    let calls = 0
+    const failing = async () => {
+      calls += 1
+      throw new Error("adapter 'codex' exited with code 1: You've hit your usage limit.")
+    }
+    await expect(withInfraRetry(failing, 'stage')).rejects.toThrow(/usage limit/)
+    expect(calls).toBe(1)
+    expect(faultMetrics.infraRetries).toBe(0)
+  })
+
   test('a transient fault that recovers returns the eventual value', async () => {
     const withInfraRetry = makeWithInfraRetry(2)
     let calls = 0
@@ -95,12 +116,20 @@ describe('makeWithInfraRetry', () => {
 })
 
 describe('resultFromUnhandledAgentError', () => {
-  test('routes auth, provider, infra, and unclassified failures distinctly', () => {
+  test('routes auth, usage-limit, provider, infra, and unclassified failures distinctly', () => {
     expect(resultFromUnhandledAgentError('1.1', 'Not logged in').status).toBe('fatal-auth')
     expect(resultFromUnhandledAgentError('1.1', 'API Error: 529 overloaded').status).toBe('provider-fault')
     expect(resultFromUnhandledAgentError('1.1', "adapter 'codex' timed out after 60s").status).toBe('infra-fault')
     expect(resultFromUnhandledAgentError('1.1', 'gates failed').status).toBe('failed')
-    expect(faultMetrics).toEqual({ infraRetries: 0, infraFaults: 1, providerFaults: 1, authFaults: 1 })
+    expect(faultMetrics).toEqual({ infraRetries: 0, infraFaults: 1, providerFaults: 1, authFaults: 1, usageLimitFaults: 0 })
+  })
+
+  test('a usage-limit exit is classified ahead of the infra prefix it also carries', () => {
+    const result = resultFromUnhandledAgentError('1.1', "adapter 'codex' exited with code 1: You've hit your usage limit.")
+    expect(result.status).toBe('usage-limit-fault')
+    expect(result.stage).toBe('usage-limit')
+    expect(faultMetrics.usageLimitFaults).toBe(1)
+    expect(faultMetrics.infraFaults).toBe(0)
   })
 
   test('extra fields ride along and proposals default empty', () => {

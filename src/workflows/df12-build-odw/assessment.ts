@@ -12,6 +12,7 @@ import {
   authFailureDetail,
   infrastructureFailureDetail,
   providerFailureDetail,
+  usageLimitFailureDetail,
 } from './faults.ts'
 import { collectAssessmentEvidence } from './git-evidence.ts'
 import type { AssessmentEvidence } from './git-evidence.ts'
@@ -483,9 +484,9 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     if (!assessPartialBranches) return false
     if (!wt?.branch || !wt?.worktreePath) return false
     if (!result || !['failed', 'halted'].includes(result.status || '')) return false
-    if (result.stage === 'worktree' || result.stage === 'worktree-write' || result.stage === 'auth' || result.stage === 'provider' || result.stage === 'infrastructure' || result.status === 'fatal-auth' || result.status === 'provider-fault' || result.status === 'infra-fault') return false
+    if (result.stage === 'worktree' || result.stage === 'worktree-write' || result.stage === 'auth' || result.stage === 'provider' || result.stage === 'infrastructure' || result.stage === 'usage-limit' || result.status === 'fatal-auth' || result.status === 'usage-limit-fault' || result.status === 'provider-fault' || result.status === 'infra-fault') return false
     const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
-    return !authFailureDetail(detail) && !providerFailureDetail(detail) && !infrastructureFailureDetail(detail)
+    return !authFailureDetail(detail) && !usageLimitFailureDetail(detail) && !providerFailureDetail(detail) && !infrastructureFailureDetail(detail)
   }
 
   // Schema-retry exhaustion — the exact failure issue #18 targets — is

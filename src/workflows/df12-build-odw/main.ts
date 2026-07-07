@@ -640,7 +640,12 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
     log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline (advisory residualRisk: ${residualRisk.length})`)
     const resume = { candidate, enriched, evidence, stage, residualRisk }
     const outcome = (await executeResume(task, resume, mergeLock)) as TaskOutcome
-    if (outcome.status === 'fatal-auth' || outcome.status === 'provider-fault' || outcome.status === 'infra-fault') {
+    if (
+      outcome.status === 'fatal-auth' ||
+      outcome.status === 'usage-limit-fault' ||
+      outcome.status === 'provider-fault' ||
+      outcome.status === 'infra-fault'
+    ) {
       summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status, residualRisk })
       return { summary, taskResults, held, fatal: outcome }
     }
@@ -1009,7 +1014,7 @@ if (RESUME_PARTIAL_BRANCHES && !halted) {
     if (outcome.fatal) {
       results.push(outcome.fatal)
       halted = `recovery ${outcome.fatal.status} at ${outcome.fatal.stage}: ${outcome.fatal.detail}`
-      if (outcome.fatal.status === 'provider-fault' || outcome.fatal.status === 'infra-fault') providerFaultHalt = true
+      if (outcome.fatal.status === 'usage-limit-fault' || outcome.fatal.status === 'provider-fault' || outcome.fatal.status === 'infra-fault') providerFaultHalt = true
       stop = true
     }
   } catch (error) {
@@ -1062,6 +1067,14 @@ while (true) {
     stop = true
   } else if (result.status === 'provider-fault') {
     halted = `task ${done.id} provider fault at ${result.stage}: ${result.detail}`
+    providerFaultHalt = true
+    stop = true
+  } else if (result.status === 'usage-limit-fault') {
+    // The Codex usage limit is spent and its reset window is hours long, so a
+    // warm in-window retry is wasted — halt the run instead. The fault carries
+    // no branch evidence, so skip the end-of-run roadmap flush. The committed
+    // ExecPlan makes the branch resumable once the limit resets.
+    halted = `task ${done.id} Codex usage-limit fault at ${result.stage}: ${result.detail}; branch state is durable — relaunch with resumeMode: "continue" once the Codex usage limit resets`
     providerFaultHalt = true
     stop = true
   } else if (result.status === 'infra-fault') {
