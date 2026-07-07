@@ -256,6 +256,15 @@ as `fatal-auth` before review or integration fallback. The focused assessment
 tests pass, the documentation updates are present, and `make all` passes. This
 milestone keeps all partial-branch adoption manual and report-only.
 
+Post-completion addendum (PR #57, issue #18): `continue-manual`,
+`adopt-partial`, and infra-fault handoffs now durably commit any dirty
+task-scoped `docs/execplans/*.md` artefacts onto the branch before worktree
+cleanup, so a planning or review artefact written just before a failure is
+preserved rather than lost. This extends preservation only through the
+branch's own Git history; it does not merge, push, or mark the roadmap, so
+the report-only, manual-adoption conclusion above still holds. See
+`docs/developers-guide.md` and `docs/users-guide.md`.
+
 ## Context and orientation
 
 `df12-build` is a workflow-asset repository. It does not own the target
@@ -657,3 +666,14 @@ plan complete.
 Revision 7 on 2026-06-30: Recorded review follow-up fixes for fatal auth
 handling, required assessment evidence fields, and stale ADR wording. Updated
 validation evidence to 6 focused Node tests.
+
+Revision 8 on 2026-07-07: Post-completion scope note (documentation only; the
+plan remains COMPLETE). Artefact salvage was added in PR #57 (issue #18) after
+this ExecPlan closed: `salvageTaskArtefacts` (`execplan-durability.ts`) plus
+`salvageAssessmentArtefacts` and `salvageInfraFaultArtefacts` (`assessment.ts`)
+durably commit dirty task-scoped `docs/execplans/*.md` artefacts onto the
+failing branch's own history before cleanup, for `continue-manual`,
+`adopt-partial`, and infra-fault (schema-retry exhaustion) handoffs. Salvage
+never merges, pushes, or ticks the roadmap, so it stays within this plan's
+report-only, manual-adoption boundary. See `docs/developers-guide.md` and
+`docs/users-guide.md` for the salvage flow.

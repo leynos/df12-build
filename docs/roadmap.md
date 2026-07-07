@@ -77,6 +77,10 @@ assessment contract instead of creating a second recovery classifier.
   - Requires 1.2.1.
   - See `docs/failure-resume-design.md` section "Assessment reuse" and
     `docs/adr-002-assess-partial-task-branches.md`.
+  - Note: the assessment feature now also salvages task-scoped
+    `docs/execplans/*.md` artefacts for `continue-manual` and `adopt-partial`
+    classifications (PR #57); see the salvage section of
+    `docs/developers-guide.md`.
   - Success: recovered candidates produce the same classification enum and
     evidence fields as in-run failed task assessments.
 - [x] 1.3.2. Add no-mutation regression coverage for assess-only recovery.
