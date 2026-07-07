@@ -2841,6 +2841,7 @@ function makeTaskPipeline(deps) {
     const tag = `${task.id}`;
     log(`[task ${tag}] ${task.title}`);
     if (DRY_RUN2) {
+      log(`[task ${tag}] dry run: stopping before worktree creation (lane=${task.isAddendum ? "addendum" : "normal"}, stage=pre-worktree)`);
       return {
         id: tag,
         status: "dry-run",

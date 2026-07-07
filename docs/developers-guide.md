@@ -115,6 +115,13 @@ intact:
   `processed`.
 - Skip assessment for auth failures, dry runs, successful tasks,
   manual-merge-ready branches, and failures before worktree creation.
+- Keep the dry-run short-circuit first in `runTask`. When `dryRun` is set the
+  task returns immediately with `status: 'dry-run'` and `stage: 'pre-worktree'`
+  — ahead of `createWorktree` and the write-access preflight — so no branch,
+  worktree, or probe write is created. It is the only mutation-free validation
+  path and covers both the normal and addendum lanes; recovery/continue-mode
+  resume keeps its own dry-run handling over pre-existing worktrees. The guard
+  must stay the first statement in `runTask`, before the addendum/normal split.
 - Keep fresh-run recovery fail-closed. Assess mode must stay non-mutating (the
   no-mutation regression suite pins this), review-mode resume may only land
   through `runDualReviewAndIntegration` and the merge lock, and eligibility

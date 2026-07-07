@@ -858,6 +858,10 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     // precedes the task.isAddendum branch, so it covers the addendum and
     // normal lanes alike; markDryRun keys off task.isAddendum, not the result.
     if (DRY_RUN) {
+      // Structured, parseable trace at the decision boundary so operators see
+      // WHY a task stopped, not just the terminal status. Lane is derived from
+      // task.isAddendum (the guard precedes the addendum/normal branch).
+      log(`[task ${tag}] dry run: stopping before worktree creation (lane=${task.isAddendum ? 'addendum' : 'normal'}, stage=pre-worktree)`)
       return {
         id: tag,
         status: 'dry-run',
