@@ -146,6 +146,15 @@ describe('integration and audit prompts', () => {
     expect(text).toContain(`origin/${config.BASE}`)
   })
 
+  test('integratePrompt creates the temp branch with a retry-safe force-reset', () => {
+    const text = prompts.integratePrompt(task, worktree)
+    // Force-reset (`-C`) so a redo on a non-fast-forward push reject reuses the
+    // temp branch instead of failing "a branch named 'integrate-…' already
+    // exists"; the plain create (`-c`) form must not survive.
+    expect(text).toContain(`git switch -C integrate-1-2-3 origin/${config.BASE}`)
+    expect(text).not.toContain('git switch -c integrate-1-2-3')
+  })
+
   test('auditPrompt names the task and writes findings when documentAudit is on', () => {
     const text = prompts.auditPrompt(task, worktree)
     expect(text).toContain(task.id)
