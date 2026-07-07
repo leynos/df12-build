@@ -17,14 +17,22 @@ import { salvageTaskArtefacts } from './execplan-durability.ts'
 import type { SalvageOutcome } from './execplan-durability.ts'
 import type { RecoveryCandidate } from './types.ts'
 
-// Classifications where the branch is kept but not fully adopted, so any
+// States in which the assessed branch is KEPT (not fully adopted), so any
 // untracked task-scoped ExecPlan/review artefact is worth durably committing
-// onto the branch before later cleanup. `adopt-partial` explicitly preserves
-// work "only through Git state" (ADR 002), which is exactly a branch-local
-// commit; `continue-manual` hands the branch to an operator who needs the
-// planning artefacts intact. `adopt-complete` proceeds through the ordinary
-// path and `discard` is thrown away, so neither salvages.
-const SALVAGE_CLASSIFICATIONS = new Set(['continue-manual', 'adopt-partial'])
+// onto the branch before later cleanup:
+//   - `adopt-partial`  — ADR 002 preserves work "only through Git state", which
+//     is exactly a branch-local commit;
+//   - `continue-manual` — hands the branch to an operator who needs the planning
+//     artefacts intact;
+//   - `infra-fault`    — schema-retry exhaustion / adapter death never reaches
+//     the model assessment (faults.ts), yet a planner or reviewer may have
+//     written the artefact just before the parse failure, which is exactly the
+//     case issue #18 targets. This is not a model classification (the schema
+//     enum cannot produce it), so it never collides with a model verdict; the
+//     infra-fault salvage path passes it explicitly.
+// `adopt-complete` proceeds through the ordinary path and `discard` is thrown
+// away, so neither salvages.
+const SALVAGE_CLASSIFICATIONS = new Set(['continue-manual', 'adopt-partial', 'infra-fault'])
 
 // A salvage record carrying the classification that triggered (or skipped) it,
 // spread onto the assessment result. The result types extend
@@ -133,7 +141,9 @@ async function salvageAssessmentArtefacts(
 ): Promise<SalvageRecord | null> {
   if (!SALVAGE_CLASSIFICATIONS.has(classification)) return null
   if (!worktree) {
-    return { classification, committed: [], skipped: [], sha: '', detail: 'salvage skipped: no worktree path in the assessment evidence' }
+    const record: SalvageRecord = { classification, committed: [], skipped: [], sha: '', detail: 'salvage skipped: no worktree path in the assessment evidence' }
+    log(`[salvage] task ${taskId} (${classification}): skipped — no worktree path in the assessment evidence`)
+    return record
   }
   try {
     // Candidates are the uncommitted entries the host observed: untracked (??)
@@ -144,16 +154,32 @@ async function salvageAssessmentArtefacts(
       ...(evidence.stagedChanges || []),
     ].map((entry) => entry.path)
     const outcome = await salvageTaskArtefacts(worktree, candidates, taskId)
+    // Salvage is otherwise silent structured data; emit one bounded operator
+    // line at the boundary so a commit, a "nothing to salvage", or a skipped
+    // path is diagnosable without scraping result.json.
+    if (outcome.committed.length) {
+      log(`[salvage] task ${taskId} (${classification}): committed ${outcome.committed.length} artefact(s) at ${outcome.sha || '<no sha>'}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ''}`)
+    } else {
+      log(`[salvage] task ${taskId} (${classification}): nothing committed — ${outcome.detail || 'no eligible artefacts'}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ''}`)
+    }
     return { classification, ...outcome }
   } catch (error) {
-    return {
-      classification,
-      committed: [],
-      skipped: [],
-      sha: '',
-      detail: `salvage errored: ${((error as Error | null) && (error as Error).message) || String(error)}`,
-    }
+    const detail = `salvage errored: ${((error as Error | null) && (error as Error).message) || String(error)}`
+    log(`[salvage] task ${taskId} (${classification}): ${detail}`)
+    return { classification, committed: [], skipped: [], sha: '', detail }
   }
+}
+
+// Mirror the infra-fault detection shouldAssessFailure uses to EXCLUDE a result
+// from model assessment: a status/stage the fault classifier stamped, or a
+// detail matching the ODW infrastructure patterns (schema-retry exhaustion,
+// adapter death). These branches never reach the model, but a planner or
+// reviewer may still have left a docs/execplans/*.md artefact dirty (#18).
+function isInfraFaultResult(result: AssessableResult | null | undefined): boolean {
+  if (!result) return false
+  if (result.status === 'infra-fault' || result.stage === 'infrastructure') return true
+  const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
+  return Boolean(infrastructureFailureDetail(detail))
 }
 
 export function isDeferredReviewIssue(issue: unknown): boolean {
@@ -342,12 +368,37 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     return !authFailureDetail(detail) && !providerFailureDetail(detail) && !infrastructureFailureDetail(detail)
   }
 
+  // Schema-retry exhaustion — the exact failure issue #18 targets — is
+  // classified as an infra-fault (faults.ts), which shouldAssessFailure rightly
+  // excludes from MODEL assessment: the error says nothing about the branch, so
+  // spending a judgement agent on it is wasted. But salvage is deterministic and
+  // needs no model call, and the branch may hold a docs/execplans/*.md artefact
+  // the planner/reviewer wrote just before the parse failure. Commit it here so
+  // it survives later worktree cleanup; every non-infra early-return is passed
+  // through untouched.
+  async function salvageInfraFaultArtefacts<T extends AssessableResult>(
+    task: { id: string; title?: string },
+    wt: AssessmentWorktree,
+    result: T,
+  ): Promise<T & { salvage?: SalvageRecord }> {
+    if (!assessPartialBranches || !wt?.branch) return result
+    if (!isInfraFaultResult(result)) return result
+    const worktree = wt.worktreePath || ''
+    // Only collect git evidence when there is a worktree to read; without one,
+    // salvage short-circuits on its no-worktree guard before touching evidence.
+    const evidence = worktree
+      ? await collectAssessmentEvidence(task, wt)
+      : ({ dirtyChanges: [], stagedChanges: [] } as unknown as AssessmentEvidence)
+    const salvage = await salvageAssessmentArtefacts(task.id, worktree, evidence, 'infra-fault')
+    return salvage ? { ...result, salvage } : result
+  }
+
   async function attachAssessment<T extends AssessableResult>(
     task: { id: string; title?: string },
     wt: AssessmentWorktree,
     result: T,
   ): Promise<T & { assessment?: Record<string, unknown>; assessmentError?: string; assessmentEvidence?: AssessmentEvidence; salvage?: SalvageRecord }> {
-    if (!shouldAssessFailure(result, wt)) return result
+    if (!shouldAssessFailure(result, wt)) return await salvageInfraFaultArtefacts(task, wt, result)
     phase('Assess')
     const evidence = await collectAssessmentEvidence(task, wt)
     const fast = fastAssessmentClassification(evidence)

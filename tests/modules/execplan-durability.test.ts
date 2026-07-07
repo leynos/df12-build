@@ -3,7 +3,7 @@
 // prompt-injectable data — so containment must fail closed BEFORE any
 // filesystem or git access, and durability checks must distinguish
 // "not committed" from "the environment would not answer".
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -19,6 +19,7 @@ import {
   verifyExecplanCommitted,
   verifyWorktreeCommitted,
 } from '../../src/workflows/df12-build-odw/execplan-durability.ts'
+import * as exec from '../../src/workflows/df12-build-odw/exec.ts'
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, {
@@ -249,6 +250,48 @@ describe('salvageTaskArtefacts', () => {
     const outcome = await salvageTaskArtefacts(dir, [], '1.2.3')
     expect(outcome).toEqual({ committed: [], skipped: [], sha: '', detail: expect.stringContaining('nothing to salvage') })
     expect(git(dir, 'log', '-1', '--format=%s')).toBe('Commit plan')
+  })
+
+  test('skips an artefact-shaped candidate that normalizes outside the artefact scope', async () => {
+    const dir = makeWorktree()
+    // `docs/execplans/../../README.md` passes the RAW artefact pattern but
+    // normalizes to `README.md` — still inside the worktree (so containment
+    // passes) yet outside the task-artefact scope. Leave README.md dirty so a
+    // missing re-check would sweep it into the salvage commit.
+    writeFileSync(path.join(dir, 'README.md'), '# top-level readme\n')
+    const outcome = await salvageTaskArtefacts(dir, ['docs/execplans/../../README.md'], '1.2.3')
+    expect(outcome.committed).toEqual([])
+    expect(outcome.detail).toMatch(/nothing to salvage/)
+    expect(outcome.skipped[0].reason).toMatch(/normalizes outside the docs\/execplans\/\*\.md artefact scope/)
+    // README.md is left dirty — the normalized path was never committed.
+    expect(git(dir, 'status', '--porcelain=v1')).toBe('?? README.md')
+    expect(git(dir, 'log', '-1', '--format=%s')).toBe('Commit plan')
+  })
+
+  test('surfaces a rev-parse failure after the commit instead of a clean empty sha', async () => {
+    const dir = makeWorktree()
+    writeFileSync(path.join(dir, REVIEW), '# Review notes\n')
+    // Fail ONLY the post-commit `git rev-parse HEAD`; the add and commit run for
+    // real, so the artefact is genuinely committed but the sha cannot be read.
+    const real = exec.execFileStatus
+    const spy = spyOn(exec, 'execFileStatus').mockImplementation(async (command, commandArgs, options) => {
+      if (Array.isArray(commandArgs) && commandArgs.includes('rev-parse')) {
+        return { ok: false, stdout: '', stderr: 'simulated rev-parse failure', message: 'simulated rev-parse failure' }
+      }
+      return real(command, commandArgs, options)
+    })
+    try {
+      const outcome = await salvageTaskArtefacts(dir, [REVIEW], '1.2.3')
+      // The commit still happened, so `committed` reflects the salvaged set...
+      expect(outcome.committed).toEqual([REVIEW])
+      expect(git(dir, 'log', '-1', '--format=%s')).toBe('Salvage task artefacts for task 1.2.3')
+      // ...but an empty sha must NOT read as a clean success: the failure is
+      // surfaced in `detail`, keeping empty sha reserved for nothing-committed.
+      expect(outcome.sha).toBe('')
+      expect(outcome.detail).toMatch(/reading HEAD failed: simulated rev-parse failure/)
+    } finally {
+      spy.mockRestore()
+    }
   })
 })
 

@@ -185,6 +185,15 @@ export async function salvageTaskArtefacts(worktree: string, candidatePaths: rea
       skipped.push({ path: raw, reason: contained.detail })
       continue
     }
+    // Re-check the artefact convention on the NORMALIZED path: the raw pattern
+    // accepts `docs/execplans/../../README.md`, which normalizes to `README.md`
+    // — still inside the worktree, so containment passes, but outside the
+    // task-artefact scope. Without this second gate an untrusted candidate
+    // source could make the host commit arbitrary in-worktree Markdown.
+    if (!isTaskArtefactPath(contained.relPath)) {
+      skipped.push({ path: raw, reason: `normalizes outside the docs/execplans/*.md artefact scope (${contained.relPath})` })
+      continue
+    }
     // fileState lstat-probes and requires a REGULAR file, so a committed or
     // planted symlink at the artefact path reads as absent and is skipped —
     // git never follows it out of the worktree.
@@ -213,8 +222,15 @@ export async function salvageTaskArtefacts(worktree: string, candidatePaths: rea
     'commit', '-m', `Salvage task artefacts for task ${tag}`, '--', ...verified,
   ])
   if (!commit.ok) return { committed: [], skipped, sha: '', detail: `git commit failed: ${(commit.message || commit.stderr || '').trim()}` }
+  // The commit succeeded, so `committed` is the salvaged set regardless of what
+  // follows. If the HEAD lookup then fails we cannot report the sha, but we must
+  // NOT collapse to a clean-success shape: surface the rev-parse failure in
+  // `detail` so an empty sha is never mistaken for "nothing was committed".
   const head = await execFileStatus('git', ['-C', worktree, 'rev-parse', 'HEAD'])
-  return { committed: verified, skipped, sha: head.ok ? String(head.stdout).trim() : '', detail: '' }
+  if (!head.ok) {
+    return { committed: verified, skipped, sha: '', detail: `salvage committed but reading HEAD failed: ${(head.message || head.stderr || '').trim()}` }
+  }
+  return { committed: verified, skipped, sha: String(head.stdout).trim(), detail: '' }
 }
 
 // Every path a successful implementation leaves uncommitted is unreviewable

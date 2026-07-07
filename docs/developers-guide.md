@@ -211,6 +211,31 @@ worktree after a planner round is salvaged host-side (`commitExecplanDraft`
 commits just the plan path) instead of bouncing; any other dirty path still
 bounces to the planner with the salvage-refusal evidence.
 
+Artefact salvage for failing branches is handled by two layers.
+`salvageTaskArtefacts` (`execplan-durability.ts`) is the primitive: it accepts
+a list of candidate paths, filters to those matching `TASK_ARTEFACT_PATTERN`
+(`docs/execplans/*.md`), re-checks that convention on the NORMALISED path (so
+`docs/execplans/../../README.md` is rejected after normalisation), containment-
+checks via `execplanRelPath` (rejects `../` escapes and absolute paths outside
+the worktree), and lstat-probes via `fileState` so a symlink at the path is
+never followed. Only the verified paths are committed onto the branch under a
+deterministic machine identity (`df12-build`). The function never throws — a git
+failure or ineligible state is recorded as a reason on the returned
+`SalvageOutcome` (`{ committed, skipped, sha, detail }`). `sha` is the salvage
+commit SHA; it is `''` when nothing was committed OR when the post-commit HEAD
+read failed (in which case `detail` explains the `rev-parse` failure).
+`salvageAssessmentArtefacts` and `salvageInfraFaultArtefacts` (`assessment.ts`)
+wire this primitive into the assessment path: the former runs for `continue-
+manual` or `adopt-partial` model verdicts, using the branch's dirty and staged
+changes from host evidence as candidates; the latter runs for `infra-fault`
+results (schema-retry exhaustion, adapter death) where no model assessment is
+spawned. Both record the outcome on `result.salvage`
+(`{ classification, committed, skipped, sha, detail }`) and surface it in the
+top-level `salvages` array. Salvage never runs for `adopt-complete` or `discard`
+(those leave `result.salvage` unset), and it skips when collection-error
+evidence is untrustworthy or when no worktree path is present in the assessment
+evidence.
+
 Failure classification is layered: `authFailureDetail` (fatal-auth), then
 `providerFailureDetail` (provider-fault), then `infrastructureFailureDetail`
 (infra-fault, pinned to ODW's own adapter-timeout / exit-code / schema-retry
