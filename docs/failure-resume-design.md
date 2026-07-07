@@ -339,19 +339,24 @@ loop enforces it host-side at every stage boundary, the same philosophy as the
 write probe:
 
 - after each planner round, the ExecPlan must exist at `HEAD` with no
-  uncommitted modifications. When the plan file is the only uncommitted path,
-  the host salvages it deterministically: it commits the plan path itself
-  (hermetic identity, `Draft ExecPlan for task <id>`) rather than spending a
-  30–90 minute planner round on git bookkeeping — live runs showed three
-  consecutive rounds burnt on exactly this. Anything else dirty declines the
-  salvage and bounces to the planner as an `EXECPLAN DURABILITY` blocking
-  item carrying the evidence (the foreign dirty paths, or the host's own git
-  error when the environment blocks committing), without spending the design
-  reviewer;
+  uncommitted modifications. When the only uncommitted paths are the plan and
+  its workflow-owned review siblings, the host salvages them deterministically:
+  it commits them path-scoped (hermetic identity, `Draft ExecPlan for task
+  <id>`) rather than spending a 30–90 minute planner round on git bookkeeping —
+  live runs showed three consecutive rounds burnt on exactly this. The review
+  sibling is a second workflow-owned artefact at
+  `docs/execplans/roadmap-<slug>.review-r<N>.md` (a sibling of the plan) where
+  the design reviewer leaves its notes; admitting it into the salvage set stops
+  a stale artefact from a dead run wedging continue-mode recovery in an endless
+  plan/salvage loop. Anything else dirty stays foreign: it declines the salvage
+  and bounces to the planner as an `EXECPLAN DURABILITY` blocking item carrying
+  the evidence (the foreign dirty paths, or the host's own git error when the
+  environment blocks committing), without spending the design reviewer;
 - when the design reviewer is satisfied, the control loop itself rewrites the
-  header to `Status: APPROVED` and commits only the plan path as a
-  deterministic machine commit, so the reviewer stays read-only and the
-  transition can never be skipped;
+  header to `Status: APPROVED` and commits the plan path as a deterministic
+  machine commit, then commits any dirty review sibling in the same boundary so
+  the final round's notes never leak dirty into the implementation stage; the
+  reviewer stays read-only and the transition can never be skipped;
 - when an implementation returns `ok`, the worktree must be fully committed;
   uncommitted state fails the stage with the exact paths, because uncommitted
   work is unreviewable and would be lost at the squash merge. A committed

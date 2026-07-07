@@ -1363,6 +1363,35 @@ test('the draft salvage commit is path-scoped and declines foreign dirt', async 
   assert.doesNotMatch(git(worktree, 'log', '-1', '--format=%s'), /second/, 'a declined salvage commits nothing')
 })
 
+const PARSER_REVIEW = 'docs/execplans/roadmap-1-2-3.review-r1.md'
+
+test('the draft salvage commit admits the workflow-owned review artefact', async () => {
+  const surface = await loadRecoverySurface({})
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+  const worktree = repo.parserWorktree
+
+  // Plan plus its review sibling, both dirty: the host salvages both together,
+  // path-scoped, leaving a clean tree.
+  writeFileSync(path.join(worktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nrevised but uncommitted\n')
+  writeFileSync(path.join(worktree, PARSER_REVIEW), '# Design review notes\n\nround 1 findings\n')
+  const salvaged = await surface.commitExecplanDraft(worktree, PARSER_PLAN, '1.2.3')
+  assert.equal(salvaged.ok, true, salvaged.detail)
+  assert.match(git(worktree, 'show', `HEAD:${PARSER_PLAN}`), /revised but uncommitted/)
+  assert.match(git(worktree, 'show', `HEAD:${PARSER_REVIEW}`), /round 1 findings/)
+  assert.equal(git(worktree, 'status', '--porcelain=v1'), '', 'the tree is clean after salvage')
+
+  // Plan plus review sibling plus genuinely foreign dirt: still declined, and
+  // only the foreign path is named as evidence.
+  writeFileSync(path.join(worktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nsecond revision\n')
+  writeFileSync(path.join(worktree, PARSER_REVIEW), '# Design review notes\n\nround 1 findings, again\n')
+  writeFileSync(path.join(worktree, 'scratch.txt'), 'planner scratch\n')
+  const declined = await surface.commitExecplanDraft(worktree, PARSER_PLAN, '1.2.3')
+  assert.equal(declined.ok, false)
+  assert.match(declined.detail, /beyond the plan file/)
+  assert.match(declined.detail, /scratch\.txt/)
+  assert.doesNotMatch(declined.detail, /review-r1/, 'the workflow-owned review artefact is not named as foreign dirt')
+})
+
 test('the plan loop host-commits a plan-only dirty draft without spending a round', async () => {
   const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
   const worktree = repo.parserWorktree
@@ -1384,6 +1413,39 @@ test('the plan loop host-commits a plan-only dirty draft without spending a roun
   assert.ok(!outcome.fail, JSON.stringify(outcome.fail || {}))
   assert.deepEqual(labels, ['plan:1.2.3 r1', 'design-review:1.2.3 r1'], 'no planner round is spent on bookkeeping')
   assert.match(git(worktree, 'show', `HEAD:${PARSER_PLAN}`), /^Status: APPROVED$/m, 'approval leaves a committed APPROVED status')
+})
+
+test('the plan loop salvages a stale review artefact without spending a round', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'DRAFT' })
+  const worktree = repo.parserWorktree
+  // The reported continue-mode failure: a dead run left a dirty review artefact
+  // beside a dirty plan. The host must salvage both together — no planner
+  // round burnt, no `EXECPLAN DURABILITY` bounce — and reach a clean, approved
+  // tree.
+  writeFileSync(path.join(worktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nrevised draft\n')
+  writeFileSync(path.join(worktree, PARSER_REVIEW), '# Design review notes\n\nstale findings from a dead run\n')
+
+  const planPrompts = []
+  const labels = []
+  const agentImpl = async (prompt, opts = {}) => {
+    labels.push(opts.label || '')
+    if (opts.label?.startsWith('plan:')) {
+      planPrompts.push(prompt)
+      return { execplanPath: PARSER_PLAN, workItems: ['w1'], summary: 'plan' }
+    }
+    if (opts.label?.startsWith('design-review:')) return { satisfied: true, blocking: [] }
+    throw new Error(`unexpected label: ${opts.label}`)
+  }
+  const gated = await loadRecoverySurface({}, agentImpl)
+
+  const outcome = await gated.runPlanDesignLoop({ id: '1.2.3', title: 'Parser' }, worktree)
+
+  assert.ok(!outcome.fail, JSON.stringify(outcome.fail || {}))
+  assert.deepEqual(labels, ['plan:1.2.3 r1', 'design-review:1.2.3 r1'], 'no planner round is spent on the review artefact')
+  assert.doesNotMatch(planPrompts.join('\n'), /EXECPLAN DURABILITY/, 'the stale review artefact does not bounce the planner')
+  assert.match(git(worktree, 'show', `HEAD:${PARSER_PLAN}`), /^Status: APPROVED$/m, 'approval leaves a committed APPROVED status')
+  assert.match(git(worktree, 'show', `HEAD:${PARSER_REVIEW}`), /stale findings from a dead run/, 'the review artefact is committed')
+  assert.equal(git(worktree, 'status', '--porcelain=v1'), '', 'the tree is clean before implementation begins')
 })
 
 test('the plan loop bounces an uncommitted plan with foreign dirt back to the planner', async () => {

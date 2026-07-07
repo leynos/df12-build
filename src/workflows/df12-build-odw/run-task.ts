@@ -16,6 +16,7 @@ import {
   execplanRelPath,
   verifyExecplanCommitted,
   verifyWorktreeCommitted,
+  commitReviewArtefacts,
 } from './execplan-durability.ts'
 import {
   faultMetrics,
@@ -385,6 +386,25 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
               status: 'failed',
               stage: 'design-review',
               detail: `failed to record the committed ExecPlan approval: ${approved.detail}`,
+              plan,
+              worktree,
+              proposals: [],
+              ...extra,
+            },
+          }
+        }
+        // The reviewer's own notes live in a workflow-owned review sibling of
+        // the plan; commit them here so the approved plan and its notes both
+        // land durable before implementation, and neither lingers dirty to
+        // fail the whole-worktree commit gate downstream.
+        const reviewCommitted = await commitReviewArtefacts(worktree, plan.execplanPath, tag)
+        if (!reviewCommitted.ok) {
+          return {
+            fail: {
+              id: tag,
+              status: 'failed',
+              stage: 'design-review',
+              detail: `failed to commit the design-review notes: ${reviewCommitted.detail}`,
               plan,
               worktree,
               proposals: [],
