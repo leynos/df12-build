@@ -46,11 +46,12 @@ why.
   runtime namespaces).
 - `main.ts` is the entry: it binds each `makeX(deps)` subsystem factory once and
   runs the control loop. Compose new subsystems the same way.
-- A new module must be imported from `main.ts` (with the explicit `.ts` import
-  extension) or the build fails closed on its unused exports. Do not reuse a
-  top-level export name across modules (esbuild renames the collision and the
-  build rejects it), and keep the tree acyclic ESM (no import cycles, no
-  CommonJS).
+- A new module must be reachable through `main.ts`'s import graph — imported by
+  `main.ts` or by a module it transitively imports, each with the explicit
+  `.ts` import extension — or `scripts/build-workflow.mjs` fails closed because
+  the module's exports never enter the bundle. Do not reuse a top-level export
+  name across modules (esbuild renames the collision and the build rejects it),
+  and keep the tree acyclic ESM (no import cycles, no CommonJS).
 - Do not import ODW primitives (they are ambient in `odw-globals.d.ts`), and do
   not use `Date.now()`, `Math.random()`, or arg-less `new Date()`.
 - Run `make all` before committing; it includes `workflow-freshness`,
