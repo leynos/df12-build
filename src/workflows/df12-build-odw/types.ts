@@ -48,6 +48,7 @@ export interface RecoveryCandidate {
 // Fixed keys only — never keyed by task id or error text.
 export interface FaultMetrics {
   infraRetries: number
+  providerRetries: number
   infraFaults: number
   providerFaults: number
   authFaults: number

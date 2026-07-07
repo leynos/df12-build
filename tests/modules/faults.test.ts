@@ -8,8 +8,10 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 import {
   authFailureDetail,
   faultMetrics,
+  infraRetryBackoffSeconds,
   infrastructureFailureDetail,
   makeWithInfraRetry,
+  parseRetryAfterSeconds,
   providerFailureDetail,
   resultFromUnhandledAgentError,
 } from '../../src/workflows/df12-build-odw/faults.ts'
@@ -20,6 +22,7 @@ import {
 
 function resetMetrics() {
   faultMetrics.infraRetries = 0
+  faultMetrics.providerRetries = 0
   faultMetrics.infraFaults = 0
   faultMetrics.providerFaults = 0
   faultMetrics.authFaults = 0
@@ -92,6 +95,143 @@ describe('makeWithInfraRetry', () => {
     expect(await withInfraRetry(flaky, 'stage')).toBe('ok')
     expect(calls).toBe(2)
   })
+
+  test('infrastructure faults retry without any backoff sleep', async () => {
+    const sleeps: number[] = []
+    const withInfraRetry = makeWithInfraRetry(3, [5, 30], async (s) => {
+      sleeps.push(s)
+    })
+    let calls = 0
+    const failing = async () => {
+      calls += 1
+      throw new Error("adapter 'codex' timed out after 3600s")
+    }
+    await expect(withInfraRetry(failing, 'stage')).rejects.toThrow(/timed out/)
+    expect(calls).toBe(3)
+    expect(faultMetrics.infraRetries).toBe(2)
+    expect(faultMetrics.providerRetries).toBe(0)
+    expect(sleeps).toEqual([])
+  })
+})
+
+describe('makeWithInfraRetry provider-fault backoff', () => {
+  test('retries provider rate-limits up to the budget with a bounded backoff, then rethrows', async () => {
+    const sleeps: number[] = []
+    const withInfraRetry = makeWithInfraRetry(3, [5, 30], async (s) => {
+      sleeps.push(s)
+    })
+    let calls = 0
+    const failing = async () => {
+      calls += 1
+      throw new Error('API Error: 429 rate limited')
+    }
+    await expect(withInfraRetry(failing, 'stage')).rejects.toThrow(/429/)
+    expect(calls).toBe(3)
+    expect(faultMetrics.providerRetries).toBe(2)
+    expect(faultMetrics.infraRetries).toBe(0)
+    // One sleep before each of the two re-runs, each within the configured range.
+    expect(sleeps.length).toBe(2)
+    for (const wait of sleeps) {
+      expect(wait).toBeGreaterThanOrEqual(5)
+      expect(wait).toBeLessThanOrEqual(30)
+    }
+  })
+
+  test('a transient provider fault that recovers returns the eventual value', async () => {
+    const sleeps: number[] = []
+    const withInfraRetry = makeWithInfraRetry(3, [5, 30], async (s) => {
+      sleeps.push(s)
+    })
+    let calls = 0
+    const flaky = async () => {
+      calls += 1
+      if (calls === 1) throw new Error('model overloaded, try again in a moment')
+      return 'recovered'
+    }
+    expect(await withInfraRetry(flaky, 'stage')).toBe('recovered')
+    expect(calls).toBe(2)
+    expect(faultMetrics.providerRetries).toBe(1)
+    expect(sleeps.length).toBe(1)
+  })
+
+  test('an advertised retry-after drives the wait, clamped into the configured range', async () => {
+    const sleeps: number[] = []
+    const withInfraRetry = makeWithInfraRetry(2, [5, 30], async (s) => {
+      sleeps.push(s)
+    })
+    const failing = async () => {
+      throw new Error('API Error: 429 rate limited; retry-after: 12')
+    }
+    await expect(withInfraRetry(failing, 'stage')).rejects.toThrow(/429/)
+    expect(sleeps).toEqual([12])
+  })
+
+  test('a hostile retry-after is clamped to the range ceiling', async () => {
+    const sleeps: number[] = []
+    const withInfraRetry = makeWithInfraRetry(2, [5, 30], async (s) => {
+      sleeps.push(s)
+    })
+    const failing = async () => {
+      throw new Error('rate limited, try again in 999 seconds')
+    }
+    await expect(withInfraRetry(failing, 'stage')).rejects.toThrow(/rate limited/)
+    expect(sleeps).toEqual([30])
+  })
+
+  test('without a retry-after the wait falls back to deterministic seeded jitter', async () => {
+    const sleeps: number[] = []
+    const withInfraRetry = makeWithInfraRetry(2, [5, 30], async (s) => {
+      sleeps.push(s)
+    })
+    const failing = async () => {
+      throw new Error('503 service unavailable')
+    }
+    await expect(withInfraRetry(failing, 'stage')).rejects.toThrow(/unavailable/)
+    // Attempt 1 seeds `stage#1`; the jitter is deterministic and in range.
+    expect(sleeps).toEqual([infraRetryBackoffSeconds('stage#1', [5, 30])])
+  })
+
+  test('auth and product failures stay terminal with zero sleeps', async () => {
+    const sleeps: number[] = []
+    const withInfraRetry = makeWithInfraRetry(3, [5, 30], async (s) => {
+      sleeps.push(s)
+    })
+    let calls = 0
+    const authFail = async () => {
+      calls += 1
+      throw new Error('API Error: 401 Unauthorized')
+    }
+    await expect(withInfraRetry(authFail, 'stage')).rejects.toThrow(/401/)
+    const productFail = async () => {
+      calls += 1
+      throw new Error('review verdict: changes-requested')
+    }
+    await expect(withInfraRetry(productFail, 'stage')).rejects.toThrow(/changes-requested/)
+    expect(calls).toBe(2)
+    expect(faultMetrics.providerRetries).toBe(0)
+    expect(faultMetrics.infraRetries).toBe(0)
+    expect(sleeps).toEqual([])
+  })
+})
+
+describe('backoff helpers', () => {
+  test('infraRetryBackoffSeconds is deterministic and stays within range', () => {
+    for (const seed of ['stage#1', 'plan#2', 'build#3']) {
+      const first = infraRetryBackoffSeconds(seed, [5, 30])
+      expect(first).toBe(infraRetryBackoffSeconds(seed, [5, 30]))
+      expect(first).toBeGreaterThanOrEqual(5)
+      expect(first).toBeLessThanOrEqual(30)
+    }
+  })
+
+  test('parseRetryAfterSeconds reads the common advertised shapes, else 0', () => {
+    expect(parseRetryAfterSeconds('retry-after: 30')).toBe(30)
+    expect(parseRetryAfterSeconds('Retry-After 45')).toBe(45)
+    expect(parseRetryAfterSeconds('please try again in 2 minutes')).toBe(120)
+    expect(parseRetryAfterSeconds('try again in 15 seconds')).toBe(15)
+    expect(parseRetryAfterSeconds('model overloaded, try again in a moment')).toBe(0)
+    expect(parseRetryAfterSeconds('')).toBe(0)
+  })
 })
 
 describe('resultFromUnhandledAgentError', () => {
@@ -100,7 +240,7 @@ describe('resultFromUnhandledAgentError', () => {
     expect(resultFromUnhandledAgentError('1.1', 'API Error: 529 overloaded').status).toBe('provider-fault')
     expect(resultFromUnhandledAgentError('1.1', "adapter 'codex' timed out after 60s").status).toBe('infra-fault')
     expect(resultFromUnhandledAgentError('1.1', 'gates failed').status).toBe('failed')
-    expect(faultMetrics).toEqual({ infraRetries: 0, infraFaults: 1, providerFaults: 1, authFaults: 1 })
+    expect(faultMetrics).toEqual({ infraRetries: 0, providerRetries: 0, infraFaults: 1, providerFaults: 1, authFaults: 1 })
   })
 
   test('extra fields ride along and proposals default empty', () => {

@@ -127,6 +127,7 @@ import {
 // Configuration (all overridable through the ODW `args` object).
 // ---------------------------------------------------------------------------
 const CONFIG = makeConfig(args)
+
 const {
   PROJECT_ROOT,
   BASE,
@@ -139,6 +140,7 @@ const {
   MAX_DESIGN_ROUNDS,
   MAX_REVIEW_ROUNDS,
   STAGE_ATTEMPTS,
+  INFRA_RETRY_BACKOFF_SECONDS,
   PER_WORK_ITEM_BUILD,
   MAX_WORK_ITEM_ROUNDS,
   AUTO_MERGE,
@@ -220,8 +222,10 @@ function assessmentAgentOptions(options = {}) {
   return { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL, ...options }
 }
 
-// Stage-agent retry with the run's attempt budget bound once (see faults.ts).
-const withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS)
+// Stage-agent retry with the run's attempt budget and provider-fault backoff
+// range bound once; the default setTimeout-backed sleep stands in production
+// (see faults.ts).
+const withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS, INFRA_RETRY_BACKOFF_SECONDS)
 
 // Recovery discovery with the run's limits bound once (see recovery-discovery.ts).
 const discoverRecoveryCandidates = makeRecoveryDiscovery({

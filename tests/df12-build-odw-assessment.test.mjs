@@ -262,7 +262,7 @@ test('withInfraRetry retries infrastructure faults only, within the attempt cap'
 
 test('fault metrics count retries and terminal fault classes with fixed keys', async () => {
   const surface = await loadAssessmentSurface()
-  assert.deepEqual(surface.faultMetrics, { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 })
+  assert.deepEqual(surface.faultMetrics, { infraRetries: 0, providerRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 })
 
   let calls = 0
   await surface.withInfraRetry(async () => {
@@ -276,7 +276,7 @@ test('fault metrics count retries and terminal fault classes with fixed keys', a
   surface.resultFromUnhandledAgentError('1.1.1', 'API Error: 529 Overloaded, temporarily unavailable')
   surface.resultFromUnhandledAgentError('1.1.1', 'CodeRabbit auth failed')
   surface.resultFromUnhandledAgentError('1.1.1', 'make test failed: 3 assertions')
-  assert.deepEqual(surface.faultMetrics, { infraRetries: 1, infraFaults: 1, providerFaults: 1, authFaults: 1 })
+  assert.deepEqual(surface.faultMetrics, { infraRetries: 1, providerRetries: 0, infraFaults: 1, providerFaults: 1, authFaults: 1 })
 })
 
 test('ExecPlan paths are contained within the worktree before any filesystem access', async () => {

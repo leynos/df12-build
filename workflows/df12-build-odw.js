@@ -569,7 +569,7 @@ async function fileState(pathValue, baseDir = process.cwd()) {
 }
 
 // src/workflows/df12-build-odw/faults.ts
-var faultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 };
+var faultMetrics = { infraRetries: 0, providerRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 };
 function authFailureDetail(value) {
   const text = String(value || "");
   const patterns = [
@@ -612,23 +612,58 @@ function infrastructureFailureDetail(value) {
   ];
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
 }
-function makeWithInfraRetry(attempts) {
+async function hostSleepSeconds(seconds) {
+  await new Promise((resolve) => setTimeout(resolve, seconds * 1e3));
+}
+function infraRetryBackoffSeconds(seed, range) {
+  let hash = 5381;
+  for (const ch of String(seed)) hash = (hash * 33 ^ ch.codePointAt(0)) >>> 0;
+  const [low, high] = range;
+  return low + hash % (high - low + 1);
+}
+function parseRetryAfterSeconds(value) {
+  const text = String(value || "");
+  const header = text.match(/retry[-\s]?after[:\s]+(\d+(?:\.\d+)?)/i);
+  if (header) return Number(header[1]);
+  const phrase = text.match(/try again in (\d+(?:\.\d+)?)\s*(second|minute)/i);
+  if (phrase) {
+    const amount = Number(phrase[1]);
+    return /^minute/i.test(phrase[2]) ? amount * 60 : amount;
+  }
+  return 0;
+}
+function makeWithInfraRetry(attempts, backoffRange = [5, 30], sleep = hostSleepSeconds) {
+  const [low, high] = backoffRange;
+  const clampToRange = (seconds) => Math.min(high, Math.max(low, seconds));
   return async function withInfraRetry2(run, label) {
     for (let attempt = 1; ; attempt++) {
       try {
         return await run();
       } catch (error) {
         const message = error && error.message || String(error);
-        if (attempt >= attempts || !infrastructureFailureDetail(message)) {
-          if (infrastructureFailureDetail(message)) {
+        const isInfra = infrastructureFailureDetail(message) !== "";
+        const isProvider = !isInfra && providerFailureDetail(message) !== "";
+        if (attempt >= attempts || !isInfra && !isProvider) {
+          if (isInfra) {
             log(`[${label}] infrastructure fault persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`);
+          } else if (isProvider) {
+            log(`[${label}] provider rate-limit persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`);
           } else {
             log(`[${label}] non-infrastructure failure; not retried: ${message}`);
           }
           throw error;
         }
-        faultMetrics.infraRetries += 1;
-        log(`[${label}] infrastructure fault (${message}); retrying the stage agent (attempt ${attempt + 1} of ${attempts})`);
+        if (isProvider) {
+          faultMetrics.providerRetries += 1;
+          const advertised = parseRetryAfterSeconds(message);
+          const wait = advertised > 0 ? clampToRange(advertised) : infraRetryBackoffSeconds(`${label}#${attempt}`, backoffRange);
+          const source = advertised > 0 ? "retry-after" : "jitter";
+          log(`[${label}] provider rate-limit (${message}); backing off ${wait}s (${source}) before retrying the stage agent (attempt ${attempt + 1} of ${attempts})`);
+          await sleep(wait);
+        } else {
+          faultMetrics.infraRetries += 1;
+          log(`[${label}] infrastructure fault (${message}); retrying the stage agent (attempt ${attempt + 1} of ${attempts})`);
+        }
       }
     }
   };
@@ -927,6 +962,12 @@ function makeConfig(rawArgs) {
   const MAX_DESIGN_ROUNDS2 = cfg.maxDesignRounds || 4;
   const MAX_REVIEW_ROUNDS2 = cfg.maxReviewRounds || 3;
   const STAGE_ATTEMPTS2 = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2));
+  const INFRA_RETRY_BACKOFF_SECONDS2 = (() => {
+    const range = Array.isArray(cfg.infraRetryBackoffSeconds) ? cfg.infraRetryBackoffSeconds : [];
+    const low = Math.max(1, Math.trunc(Number(range[0]) || 5));
+    const high = Math.max(low, Math.trunc(Number(range[1]) || 30));
+    return [low, high];
+  })();
   const PER_WORK_ITEM_BUILD2 = cfg.perWorkItemBuild !== false;
   const MAX_WORK_ITEM_ROUNDS2 = Math.max(1, Math.trunc(Number(cfg.maxWorkItemRounds) || 16));
   const AUTO_MERGE2 = cfg.autoMerge !== false;
@@ -1015,6 +1056,7 @@ function makeConfig(rawArgs) {
     MAX_DESIGN_ROUNDS: MAX_DESIGN_ROUNDS2,
     MAX_REVIEW_ROUNDS: MAX_REVIEW_ROUNDS2,
     STAGE_ATTEMPTS: STAGE_ATTEMPTS2,
+    INFRA_RETRY_BACKOFF_SECONDS: INFRA_RETRY_BACKOFF_SECONDS2,
     PER_WORK_ITEM_BUILD: PER_WORK_ITEM_BUILD2,
     MAX_WORK_ITEM_ROUNDS: MAX_WORK_ITEM_ROUNDS2,
     AUTO_MERGE: AUTO_MERGE2,
@@ -3033,6 +3075,7 @@ var {
   MAX_DESIGN_ROUNDS,
   MAX_REVIEW_ROUNDS,
   STAGE_ATTEMPTS,
+  INFRA_RETRY_BACKOFF_SECONDS,
   PER_WORK_ITEM_BUILD,
   MAX_WORK_ITEM_ROUNDS,
   AUTO_MERGE,
@@ -3106,7 +3149,7 @@ function triageAgentOptions(options = {}) {
 function assessmentAgentOptions(options = {}) {
   return { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL, ...options };
 }
-var withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS);
+var withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS, INFRA_RETRY_BACKOFF_SECONDS);
 var discoverRecoveryCandidates = makeRecoveryDiscovery({
   base: BASE,
   resumeTaskId: RESUME_TASK_ID,

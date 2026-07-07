@@ -20,6 +20,7 @@ export interface RawWorkflowArgs {
   maxDesignRounds?: number
   maxReviewRounds?: number
   stageAttempts?: number | string
+  infraRetryBackoffSeconds?: unknown
   perWorkItemBuild?: boolean
   maxWorkItemRounds?: number | string
   autoMerge?: boolean
@@ -81,6 +82,7 @@ export interface WorkflowConfig {
   MAX_DESIGN_ROUNDS: number
   MAX_REVIEW_ROUNDS: number
   STAGE_ATTEMPTS: number
+  INFRA_RETRY_BACKOFF_SECONDS: [number, number]
   PER_WORK_ITEM_BUILD: boolean
   MAX_WORK_ITEM_ROUNDS: number
   AUTO_MERGE: boolean
@@ -149,6 +151,18 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   const MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4 // plan <-> design-review exchanges before halting
   const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review cycles
   const STAGE_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2)) // total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, schema-retry exhaustion); product failures are never retried
+  // Bounded backoff (seconds) between stage-agent retries when the previous
+  // attempt hit a provider rate-limit: retrying instantly just burns the
+  // attempt budget against a still-closed window, so pause a seeded-jitter
+  // interval in [low, high] (or the advertised retry-after, clamped into this
+  // range) before the warm re-run. Second-scale, unlike the minute-scale
+  // CodeRabbit host-review backoff, because provider limits recover fast.
+  const INFRA_RETRY_BACKOFF_SECONDS: [number, number] = (() => {
+    const range = Array.isArray(cfg.infraRetryBackoffSeconds) ? cfg.infraRetryBackoffSeconds : []
+    const low = Math.max(1, Math.trunc(Number(range[0]) || 5))
+    const high = Math.max(low, Math.trunc(Number(range[1]) || 30))
+    return [low, high]
+  })()
 
   // Per-work-item build loop: the host reads the committed ExecPlan's Progress
   // checklist and dispatches ONE builder turn per unticked work item, verifying
@@ -309,6 +323,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     MAX_DESIGN_ROUNDS,
     MAX_REVIEW_ROUNDS,
     STAGE_ATTEMPTS,
+    INFRA_RETRY_BACKOFF_SECONDS,
     PER_WORK_ITEM_BUILD,
     MAX_WORK_ITEM_ROUNDS,
     AUTO_MERGE,
