@@ -262,3 +262,9 @@ first recovery slice.
     "Deferred decisions".
   - Success: deletion, stash handling, and branch-retention policy are recorded
     before any automated cleanup lands.
+  - Note (issue #42, `docs/adr-003-reclaim-stale-addendum-worktree-branches.md`):
+    on-demand reclaim of a colliding addendum branch that is fully merged into
+    `origin/BASE` with a clean worktree now lands as a tightly-scoped exception.
+    It resets one deterministic name at the point of collision and never sweeps
+    branches speculatively; the general `discard`-branch sweeper remains
+    deferred under this item.
