@@ -46,6 +46,9 @@ export interface StageImpl extends Record<string, unknown> {
   gatesGreen?: boolean
   summary?: string
   openIssues?: string[]
+  // Advisory, non-blocking residual risk carried forward from an ADR 002
+  // recovery assessment; rendered as review/integration context only (#23).
+  residualRisk?: string[]
   workItemsCompleted?: unknown
   workItemsTotal?: unknown
 }
@@ -97,11 +100,11 @@ export interface TaskPipelineDeps {
   implementPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, opts?: Record<string, unknown>) => string
   implementWorkItemPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, item: { text: string }, opts?: Record<string, unknown>) => string
   fixPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, blocking: string[], round: number) => string
-  codeReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan) => string
-  expertReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan) => string
+  codeReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, impl?: StageImpl | null) => string
+  expertReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, impl?: StageImpl | null) => string
   addendumReviewPrompt: (task: SelectedTask, worktree: string, impl: StageImpl | null) => string
   implementAddendumPrompt: (task: SelectedTask, worktree: string) => string
-  integratePrompt: (task: SelectedTask, worktree: string) => string
+  integratePrompt: (task: SelectedTask, worktree: string, impl?: StageImpl | null) => string
   planAgentOptions: AgentOptions
   reviewAgentOptions: AgentOptions
   buildAgentOptions: AgentOptions
@@ -627,11 +630,12 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     mergeLock: MergeLock,
     proposals: Array<Record<string, unknown>>,
     kindExtra: Record<string, unknown>,
+    impl?: StageImpl | null,
   ): Promise<{ integration?: StageIntegration | null; fault?: StageResult }> {
     const tag = task.id
     const doIntegrate = () => {
       phase('Integrate')
-      return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
+      return buildLock(() => agent(integratePrompt(task, worktree, impl), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
     }
     try {
       return { integration: (mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()) as StageIntegration | null }
@@ -752,8 +756,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
             return null
           })
       const [codeReview, expertReview] = (await parallel([
-        runReviewAgent(codeReviewPrompt(task, worktree, plan), 'Code Review', `code-review:${tag} r${round}`),
-        runReviewAgent(expertReviewPrompt(task, worktree, plan), 'Expert Review', `expert-review:${tag} r${round}`),
+        runReviewAgent(codeReviewPrompt(task, worktree, plan, impl), 'Code Review', `code-review:${tag} r${round}`),
+        runReviewAgent(expertReviewPrompt(task, worktree, plan, impl), 'Expert Review', `expert-review:${tag} r${round}`),
       ])) as Array<StageReview | null>
       for (const r of [codeReview, expertReview]) {
         if (r?.proposedRoadmapItems?.length) proposals.push(...r.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
@@ -832,7 +836,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     // so at most one task touches origin/BASE at a time.
     let integration: StageIntegration | null = null
     if (AUTO_MERGE) {
-      const attempt = await integrateTask(task, worktree, mergeLock, proposals, kindExtra)
+      const attempt = await integrateTask(task, worktree, mergeLock, proposals, kindExtra, impl)
       if (attempt.fault) return attempt.fault
       integration = attempt.integration ?? null
       if (integrationIncomplete(integration)) {

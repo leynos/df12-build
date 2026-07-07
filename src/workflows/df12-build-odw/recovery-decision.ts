@@ -27,11 +27,16 @@ export interface RecoveryEvidence {
 
 // Agent-reported assessment fields the review-mode table consults. Host
 // evidence stays decisive; these can only disqualify, never force, a resume.
+// `missingEvidence` is the BLOCKING channel — genuinely missing validation or
+// review evidence that must prevent a resume. `residualRisk` is the ADVISORY
+// channel — non-blocking caveats carried forward as review/integration context;
+// the eligibility gate never consults it (issue #23).
 export interface RecoveryAssessmentFields {
   classification?: string
   taskScoped?: boolean
   validation?: string
   missingEvidence?: readonly string[]
+  residualRisk?: readonly string[]
 }
 
 export type ExecplanStatus =
@@ -144,6 +149,9 @@ export function recoveryResumeEligibility(
   if (!(evidence?.recentCommits || []).length) return 'no-committed-work'
   if (assessment?.taskScoped !== true) return 'not-task-scoped'
   if (!String(assessment?.validation || '').trim()) return 'missing-validation-evidence'
+  // Only BLOCKING missing evidence disqualifies. Advisory `residualRisk` is
+  // deliberately NOT consulted here — it is carried forward to the resumed
+  // reviewer/integrator instead of downgrading adopt-complete (issue #23).
   if ((assessment?.missingEvidence || []).length) return 'missing-validation-evidence'
   if (!candidate?.execplanPath) return 'missing-execplan'
   return ''

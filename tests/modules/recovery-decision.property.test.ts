@@ -34,6 +34,9 @@ const assessmentArb = fc.record({
   taskScoped: fc.oneof(fc.boolean(), fc.constant(undefined)),
   validation: fc.constantFrom('gates green: make all', '   ', ''),
   missingEvidence: fc.array(fc.string(), { maxLength: 2 }),
+  // Advisory residual risk is generated but must never affect the decision
+  // (issue #23); it is deliberately absent from the abstraction below.
+  residualRisk: fc.array(fc.string(), { maxLength: 2 }),
 })
 
 const flagsArb = fc.record({ dryRun: fc.boolean() })

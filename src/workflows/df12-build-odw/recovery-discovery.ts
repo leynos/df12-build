@@ -167,6 +167,7 @@ export async function recoveryExecplanPath(
 export async function syntheticRecoveryImpl(
   candidate: { branchName: string; worktreePath: string; execplanPath?: unknown },
   evidence: RecoveryEvidence | null | undefined,
+  residualRisk: readonly string[] | null | undefined = [],
 ) {
   const resolved =
     typeof candidate.execplanPath === 'string'
@@ -184,6 +185,9 @@ export async function syntheticRecoveryImpl(
       'recovered branch requires fresh review',
       ...(resolved.error ? [`could not verify the durable ExecPlan: ${resolved.error}`] : []),
     ],
+    // Advisory, non-blocking caveats the assessment carried forward: surfaced to
+    // the resumed reviewer/integrator without downgrading adopt-complete (#23).
+    residualRisk: [...(residualRisk || [])],
     summary: 'Recovered adopt-complete branch from durable git state.',
   }
 }

@@ -67,6 +67,10 @@ const assessmentArb = fc.record({
   taskScoped: fc.oneof(fc.boolean(), fc.constant(undefined)),
   validation: fc.constantFrom('gates green: make all', '   ', ''),
   missingEvidence: fc.array(fc.string({ minLength: 1 }), { maxLength: 2 }),
+  // Advisory residual risk is generated to exercise the production decision,
+  // but it maps to nothing in the boolean abstraction: only blocking
+  // missingEvidence feeds `hasMissingEvidence` (issue #23).
+  residualRisk: fc.array(fc.string({ minLength: 1 }), { maxLength: 2 }),
 })
 
 type ProdCandidate = typeof candidateArb extends fc.Arbitrary<infer T> ? T : never
