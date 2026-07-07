@@ -705,16 +705,22 @@ inspect `origin/<base>` and the roadmap before relaunching. The run result's
 (`infraRetries`, `infraFaults`, `providerFaults`, `authFaults`).
 
 That host-level caution is distinct from the integration agent's own retry
-loop. Because sibling tasks merge through a single merge lock, `origin/<base>`
-can advance between a task's rebase and its push. When the squash push is
-rejected non-fast-forward, the agent re-fetches, re-rebases the task branch
-onto the fresh `origin/<base>`, and redoes the squash — force-resetting its
-temporary `integrate-<id>` branch onto that fresh base and discarding any
-staged or working-tree state from the half-finished attempt. The redo is
-therefore idempotent: it neither collides with the branch the previous
-attempt left behind nor carries its stale squash forward, and it retries until
-the push lands. The host simply does not extend that idempotence across a
-process crash, where a hidden success may already have merged.
+loop, which is idempotent by construction. Because sibling tasks merge through
+a single merge lock, `origin/<base>` can advance between a task's rebase and
+its squash push. The agent lands each squash on a throwaway branch created
+with `git switch --discard-changes -C integrate-<slug> origin/<base>`: the
+`-C` force-resets `integrate-<slug>` onto the freshly fetched base whether or
+not the branch already exists, and `--discard-changes` restores the index and
+working tree to that base, throwing away any half-finished squash a prior
+attempt left staged. (The earlier `git switch -c` form instead failed with
+`a branch named 'integrate-<slug>' already exists` the moment a first attempt
+had created the branch.) So when the push is rejected non-fast-forward, the
+agent re-fetches, re-rebases the task branch onto the new `origin/<base>`,
+re-runs that reset, and retries the push — with no manual cleanup, no
+collision with the branch the previous attempt left behind, and no stale
+squash carried forward. It retries until the push lands. The host simply does
+not extend that idempotence across a process crash, where a hidden success may
+already have merged.
 
 Addendum implementations have one extra recovery state. If an addendum agent
 reports all work items complete, green gates, and no open issues, but fails to
