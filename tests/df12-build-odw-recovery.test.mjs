@@ -1442,7 +1442,11 @@ test('the plan loop salvages a stale review artefact without spending a round', 
 
   assert.ok(!outcome.fail, JSON.stringify(outcome.fail || {}))
   assert.deepEqual(labels, ['plan:1.2.3 r1', 'design-review:1.2.3 r1'], 'no planner round is spent on the review artefact')
-  assert.doesNotMatch(planPrompts.join('\n'), /EXECPLAN DURABILITY/, 'the stale review artefact does not bounce the planner')
+  // The single planner round proves no bounce; and the durability-bounce
+  // evidence (`host salvage declined`) — distinct from the planner prompt's
+  // standing `EXECPLAN DURABILITY CONTRACT` — never reaches the planner.
+  assert.equal(planPrompts.length, 1, 'the stale review artefact does not spend a second planner round')
+  assert.doesNotMatch(planPrompts[0], /host salvage declined/, 'the stale review artefact does not bounce the planner')
   assert.match(git(worktree, 'show', `HEAD:${PARSER_PLAN}`), /^Status: APPROVED$/m, 'approval leaves a committed APPROVED status')
   assert.match(git(worktree, 'show', `HEAD:${PARSER_REVIEW}`), /stale findings from a dead run/, 'the review artefact is committed')
   assert.equal(git(worktree, 'status', '--porcelain=v1'), '', 'the tree is clean before implementation begins')
