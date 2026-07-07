@@ -530,8 +530,11 @@ Common arguments:
   span more than one audit/review source (potential cross-phase or conflicting
   routing). Defaults to `gpt-5.5@high`.
 - `taskId`: run exactly one roadmap task.
-- `dryRun`: when `true`, plan, review, and audit without implementation,
-  integration, or document writes.
+- `dryRun`: when `true`, a fresh task stops before worktree creation — and so
+  before planning, review, implementation, integration, or document writes —
+  making it a read-only validation path that mutates no git state. (Recovery
+  and continue-mode resume keep their own dry-run handling over pre-existing
+  worktrees.)
 - `autoMerge`: when `false`, leave reviewed task branches for manual
   integration.
 - `documentAudit`: when `false`, return audit findings without writing audit
