@@ -868,7 +868,7 @@ host gates and host review in the review rounds and addendum lane), and
 114 artefact tests (18 new upstream suites included), 231 module tests, and
 `make all` green; the branch was then rebased onto `origin/main`.
 
-## Revision note
+## Revision note (issue #33)
 
 2026-07-07 (issue #33): the stale-branch guard existed only inside
 `runRecovery`, which runs only when `resumePartialBranches` is on. With
