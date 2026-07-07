@@ -455,6 +455,34 @@ accepted plan.
 | Accepted plan build fails | Halt through the existing implementation failure path with the task branch left intact. |
 | Auth preflight fails | Stop as `fatal-auth`; do not assess or resume branches. |
 | Stage agent dies on an infrastructure fault | Retry the stage agent in place up to `stageAttempts` total attempts; if the fault persists, stop as `infra-fault` without an assessment. |
+| Codex build stage exhausts its usage limit | Stop as `usage-limit-fault` without an in-window retry or an assessment; the operator resumes once the quota window resets. |
+
+
+### Usage-limit faults
+
+A usage-limit fault is a Codex build stage that exhausted its rolling
+five-hour (or weekly) usage quota. The adapter exits carrying Codex's own
+usage-limit wording under the `exited with code N` prefix (`You've hit your
+usage limit`, `Limits reset every …`, or the API-style `rate_limit_exceeded` /
+`exceeded the rate limit` phrasing), so the raw text is available to the
+classifier.
+
+This is neither a transient infrastructure death nor a provider 429:
+
+- A **provider 429** is a momentary server-side overload that clears in
+  seconds; it defers the task and lets the pool move on.
+- An **infrastructure fault** is a dead adapter that a warm retry can recover
+  in place.
+- A **usage-limit fault** has a reset window measured in hours, so an in-window
+  warm retry is wasted. The classifier (`usageLimitFailureDetail`) is matched
+  ahead of the infra pattern, and `withInfraRetry` deliberately skips the
+  retry (logging the skipped boundary) rather than burning an attempt inside
+  the window. The task terminates as `status: "usage-limit-fault"`,
+  `stage: "usage-limit"`; no assessment agent is spawned and, as with provider
+  and infra faults, end-of-run remediation triage skips its roadmap writes. The
+  `halted` detail directs the operator to relaunch with `resumeMode:
+  "continue"` once the Codex usage limit resets — the committed ExecPlan makes
+  that resume a warm start.
 
 ### Infrastructure faults
 
@@ -492,9 +520,9 @@ unlike a product failure:
    dispatches the branch back into the pipeline at the stage where it died.
 
 The run result carries bounded-cardinality `faultMetrics` (`infraRetries`,
-`infraFaults`, `providerFaults`, `authFaults` — fixed keys, never keyed by
-task id or error text) so operators can read retry pressure and terminal
-fault classes straight from the result instead of scraping logs.
+`infraFaults`, `providerFaults`, `authFaults`, `usageLimitFaults` — fixed keys,
+never keyed by task id or error text) so operators can read retry pressure and
+terminal fault classes straight from the result instead of scraping logs.
 
 Host filesystem access around the durable ExecPlan fails closed. Agent-supplied
 plan paths pass through a containment check (`execplanRelPath`) that rejects

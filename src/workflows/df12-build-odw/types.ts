@@ -51,4 +51,5 @@ export interface FaultMetrics {
   infraFaults: number
   providerFaults: number
   authFaults: number
+  usageLimitFaults: number
 }
