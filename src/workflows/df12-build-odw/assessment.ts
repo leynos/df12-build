@@ -13,7 +13,26 @@ import {
 } from './faults.ts'
 import { collectAssessmentEvidence } from './git-evidence.ts'
 import type { AssessmentEvidence } from './git-evidence.ts'
+import { salvageTaskArtefacts } from './execplan-durability.ts'
+import type { SalvageOutcome } from './execplan-durability.ts'
 import type { RecoveryCandidate } from './types.ts'
+
+// Classifications where the branch is kept but not fully adopted, so any
+// untracked task-scoped ExecPlan/review artefact is worth durably committing
+// onto the branch before later cleanup. `adopt-partial` explicitly preserves
+// work "only through Git state" (ADR 002), which is exactly a branch-local
+// commit; `continue-manual` hands the branch to an operator who needs the
+// planning artefacts intact. `adopt-complete` proceeds through the ordinary
+// path and `discard` is thrown away, so neither salvages.
+const SALVAGE_CLASSIFICATIONS = new Set(['continue-manual', 'adopt-partial'])
+
+// A salvage record carrying the classification that triggered (or skipped) it,
+// spread onto the assessment result. The result types extend
+// Record<string, unknown>, so this rides through run-task.ts without a breaking
+// type change.
+export interface SalvageRecord extends SalvageOutcome {
+  classification: string
+}
 
 export interface ImplementationReport {
   ok?: boolean
@@ -96,6 +115,44 @@ function deterministicAssessment(
     nextActions: [],
     classifier: 'deterministic',
     hostEvidence: evidence,
+  }
+}
+
+// Commit any untracked/uncommitted task-scoped planning or review artefact the
+// assessed branch left behind, so a `continue-manual`/`adopt-partial` handoff
+// keeps the ExecPlan and review files the operator (or a later resume) needs.
+// Salvage runs only on a kept-but-not-adopted classification; every other
+// classification records a skip reason instead. It is deliberately total: a
+// git failure or an unexpected throw records a reason rather than escaping,
+// because salvage must never turn a failed task into a run-halting error.
+async function salvageAssessmentArtefacts(
+  taskId: string,
+  worktree: string,
+  evidence: AssessmentEvidence,
+  classification: string,
+): Promise<SalvageRecord | null> {
+  if (!SALVAGE_CLASSIFICATIONS.has(classification)) return null
+  if (!worktree) {
+    return { classification, committed: [], skipped: [], sha: '', detail: 'salvage skipped: no worktree path in the assessment evidence' }
+  }
+  try {
+    // Candidates are the uncommitted entries the host observed: untracked (??)
+    // and modified-but-unstaged (dirtyChanges) plus staged-but-uncommitted
+    // (stagedChanges). The primitive filters them to the artefact convention.
+    const candidates = [
+      ...(evidence.dirtyChanges || []),
+      ...(evidence.stagedChanges || []),
+    ].map((entry) => entry.path)
+    const outcome = await salvageTaskArtefacts(worktree, candidates, taskId)
+    return { classification, ...outcome }
+  } catch (error) {
+    return {
+      classification,
+      committed: [],
+      skipped: [],
+      sha: '',
+      detail: `salvage errored: ${((error as Error | null) && (error as Error).message) || String(error)}`,
+    }
   }
 }
 
@@ -289,20 +346,27 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     task: { id: string; title?: string },
     wt: AssessmentWorktree,
     result: T,
-  ): Promise<T & { assessment?: Record<string, unknown>; assessmentError?: string; assessmentEvidence?: AssessmentEvidence }> {
+  ): Promise<T & { assessment?: Record<string, unknown>; assessmentError?: string; assessmentEvidence?: AssessmentEvidence; salvage?: SalvageRecord }> {
     if (!shouldAssessFailure(result, wt)) return result
     phase('Assess')
     const evidence = await collectAssessmentEvidence(task, wt)
     const fast = fastAssessmentClassification(evidence)
     if (fast) {
-      return { ...result, assessment: deterministicAssessment(fast.classification, evidence, fast.reason) }
+      // The deterministic continue-manual fires only when host evidence
+      // collection failed, so the evidence is untrustworthy — do NOT salvage
+      // against it; record the skip so operators see why.
+      const salvage: SalvageRecord | null = fast.classification === 'continue-manual'
+        ? { classification: fast.classification, committed: [], skipped: [], sha: '', detail: 'salvage skipped: deterministic continue-manual fires on untrustworthy host evidence' }
+        : null
+      return { ...result, assessment: deterministicAssessment(fast.classification, evidence, fast.reason), ...(salvage ? { salvage } : {}) }
     }
     try {
       const assessment = await runModelAssessment(() => assessmentPrompt(task, wt, result, evidence), 'Assess', `assess:${task.id}`, evidence)
       if (!assessment) {
         return { ...result, assessmentError: 'assessment agent returned no structured output', assessmentEvidence: evidence }
       }
-      return { ...result, assessment: { ...assessment, hostEvidence: evidence } }
+      const salvage = await salvageAssessmentArtefacts(task.id, wt.worktreePath || '', evidence, String(assessment.classification || ''))
+      return { ...result, assessment: { ...assessment, hostEvidence: evidence }, ...(salvage ? { salvage } : {}) }
     } catch (error) {
       return {
         ...result,

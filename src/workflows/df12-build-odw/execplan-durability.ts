@@ -3,12 +3,34 @@
 // without committing the status flip. The control loop therefore verifies
 // durable state at every stage boundary, the same philosophy as the
 // write-probe: prompts request, the host verifies.
-import { execFileStatus } from './exec.ts'
+import { execFileStatus, fileState } from './exec.ts'
 import { parseExecplanState } from './recovery-decision.ts'
 
 export interface DurabilityVerdict {
   ok: boolean
   detail: string
+}
+
+export interface SalvageOutcome {
+  // Task-scoped artefact paths committed onto the branch (relative to the
+  // worktree), the paths skipped with a reason, and the resulting commit sha
+  // ('' when nothing was committed). `detail` is empty on a clean success and
+  // otherwise carries the "nothing to salvage" or git-failure reason.
+  committed: string[]
+  skipped: Array<{ path: string; reason: string }>
+  sha: string
+  detail: string
+}
+
+// Task-scoped planning/review artefacts follow the canonical ExecPlan
+// convention: Markdown under docs/execplans/ (the ExecPlan itself, the
+// roadmap-<id> plan, and adjacent review-file variants). Anything else a
+// failing branch leaves dirty is out of scope for salvage — the host must not
+// guess at arbitrary uncommitted work.
+const TASK_ARTEFACT_PATTERN = /^docs\/execplans\/.+\.md$/
+
+export function isTaskArtefactPath(candidate: unknown): boolean {
+  return TASK_ARTEFACT_PATTERN.test(String(candidate || ''))
 }
 
 // Contain an agent-supplied ExecPlan path within the task worktree. Plan
@@ -128,6 +150,71 @@ export async function commitExecplanDraft(worktree: string, relPath: string, tag
   ])
   if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || '').trim()}` }
   return { ok: true, detail: '' }
+}
+
+// Salvage useful, task-scoped planning/review artefacts a failing branch left
+// uncommitted, by committing them onto the branch's OWN history — never
+// merging, pushing, or ticking the roadmap — so they survive any later
+// agent-driven worktree cleanup (the issue: a planner writes an ExecPlan or a
+// review file, then fails schema parsing, and the untracked artefact is lost).
+// Each candidate is filtered to the artefact convention, contained
+// (execplanRelPath), and probed (fileState — a regular file, symlinks rejected)
+// BEFORE any git call, matching the anti-spoof discipline the rest of this
+// module uses on untrusted worktree content. A git failure or an ineligible
+// state is a recorded reason, never a throw, so salvage can never convert a
+// failed task into a run-halting error. Returns committed paths, skipped paths
+// with reasons, and the salvage commit sha (or a "nothing to salvage" detail
+// when no eligible artefact is dirty).
+export async function salvageTaskArtefacts(worktree: string, candidatePaths: readonly string[], tag: string): Promise<SalvageOutcome> {
+  const skipped: Array<{ path: string; reason: string }> = []
+  const verified: string[] = []
+  const seen = new Set<string>()
+  for (const candidate of candidatePaths) {
+    const raw = String(candidate || '')
+    if (!raw || seen.has(raw)) continue
+    seen.add(raw)
+    if (!isTaskArtefactPath(raw)) {
+      skipped.push({ path: raw, reason: 'not a task-scoped docs/execplans/*.md artefact' })
+      continue
+    }
+    // Containment before any filesystem or git access: a dirty path that
+    // resolves outside the worktree (a ../ escape smuggled past the pattern)
+    // fails closed here.
+    const contained = execplanRelPath(worktree, raw)
+    if (!contained.ok) {
+      skipped.push({ path: raw, reason: contained.detail })
+      continue
+    }
+    // fileState lstat-probes and requires a REGULAR file, so a committed or
+    // planted symlink at the artefact path reads as absent and is skipped —
+    // git never follows it out of the worktree.
+    const probe = await fileState(contained.relPath, worktree)
+    if (!probe.ok) {
+      skipped.push({ path: contained.relPath, reason: probe.detail })
+      continue
+    }
+    if (!probe.exists) {
+      skipped.push({ path: contained.relPath, reason: 'no regular file at the path (absent, or a symlink)' })
+      continue
+    }
+    verified.push(contained.relPath)
+  }
+  if (!verified.length) {
+    return { committed: [], skipped, sha: '', detail: 'nothing to salvage: no eligible task-scoped artefacts are dirty' }
+  }
+  const add = await execFileStatus('git', ['-C', worktree, 'add', '--', ...verified])
+  if (!add.ok) return { committed: [], skipped, sha: '', detail: `git add failed: ${(add.message || add.stderr || '').trim()}` }
+  // Deterministic machine identity, mirroring commitExecplanDraft: the commit
+  // must succeed even on hosts with no global git identity configured.
+  const commit = await execFileStatus('git', [
+    '-C', worktree,
+    '-c', 'user.name=df12-build',
+    '-c', 'user.email=df12-build@workflow.invalid',
+    'commit', '-m', `Salvage task artefacts for task ${tag}`, '--', ...verified,
+  ])
+  if (!commit.ok) return { committed: [], skipped, sha: '', detail: `git commit failed: ${(commit.message || commit.stderr || '').trim()}` }
+  const head = await execFileStatus('git', ['-C', worktree, 'rev-parse', 'HEAD'])
+  return { committed: verified, skipped, sha: head.ok ? String(head.stdout).trim() : '', detail: '' }
 }
 
 // Every path a successful implementation leaves uncommitted is unreviewable

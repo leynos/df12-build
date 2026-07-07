@@ -197,6 +197,92 @@ describe('assessment model tier', () => {
   })
 })
 
+// A branch whose docs/execplans directory is already tracked, so a fresh
+// artefact under it surfaces as an individual untracked (??) path rather than
+// a collapsed untracked directory — mirroring a real task branch.
+function makeRepoWithExecplans() {
+  const { dir, baseSha } = makeRepo()
+  mkdirSync(path.join(dir, 'docs', 'execplans'), { recursive: true })
+  writeFileSync(path.join(dir, 'docs', 'execplans', 'roadmap-1-2-3.md'), '# Plan\n')
+  git(dir, 'add', '.')
+  git(dir, 'commit', '-m', 'Add execplan')
+  return { dir, baseSha }
+}
+
+const REVIEW_REL = 'docs/execplans/roadmap-1-2-3-review.md'
+
+function addUntrackedReview(dir: string) {
+  writeFileSync(path.join(dir, REVIEW_REL), '# Review notes left before the schema-parse failure\n')
+}
+
+type SalvageShape = { classification: string; committed: string[]; skipped: unknown[]; sha: string; detail: string }
+
+describe('continue-manual/adopt-partial artefact salvage', () => {
+  for (const classification of ['continue-manual', 'adopt-partial']) {
+    test(`${classification} commits an eligible untracked artefact and records it on result.salvage`, async () => {
+      const { dir, baseSha } = makeRepoWithExecplans()
+      addUntrackedReview(dir)
+      globals.agent = async () => ({ classification, taskScoped: true })
+      const result = await subject().attachAssessment(
+        { id: '1.2.3', title: 'Parser' },
+        { branch: 'roadmap-1-2-3', worktreePath: dir, baseSha },
+        { status: 'failed', stage: 'review', detail: 'gates red' },
+      )
+      const salvage = result.salvage as SalvageShape | undefined
+      expect(salvage?.classification).toBe(classification)
+      expect(salvage?.committed).toEqual([REVIEW_REL])
+      expect(salvage?.sha).toMatch(/^[0-9a-f]{40}$/)
+      // The artefact is durably committed onto the branch; the tree is clean.
+      expect(git(dir, 'log', '-1', '--format=%s')).toBe('Salvage task artefacts for task 1.2.3')
+      expect(git(dir, 'status', '--porcelain=v1')).toBe('')
+    })
+  }
+
+  for (const classification of ['adopt-complete', 'discard']) {
+    test(`${classification} salvages nothing and leaves the branch untouched`, async () => {
+      const { dir, baseSha } = makeRepoWithExecplans()
+      addUntrackedReview(dir)
+      globals.agent = async () => ({ classification, taskScoped: true })
+      const result = await subject().attachAssessment(
+        { id: '1.2.3', title: 'Parser' },
+        { branch: 'roadmap-1-2-3', worktreePath: dir, baseSha },
+        { status: 'failed', stage: 'review', detail: 'gates red' },
+      )
+      expect(result.salvage).toBeUndefined()
+      // The artefact stays untracked and HEAD is unchanged.
+      expect(git(dir, 'status', '--porcelain=v1')).toBe(`?? ${REVIEW_REL}`)
+      expect(git(dir, 'log', '-1', '--format=%s')).toBe('Add execplan')
+    })
+  }
+
+  test('the deterministic (collection-error) continue-manual skips salvage on untrustworthy evidence', async () => {
+    const { dir } = makeRepoWithExecplans()
+    addUntrackedReview(dir)
+    let called = false
+    globals.agent = async () => {
+      called = true
+      return { classification: 'continue-manual' }
+    }
+    // Omitting baseSha makes the base-relative git probes fail, so evidence
+    // collection reports errors and the deterministic fast-path fires.
+    const result = await subject().attachAssessment(
+      { id: '1.2.3', title: 'T' },
+      { branch: 'roadmap-1-2-3', worktreePath: dir },
+      { status: 'failed', stage: 'review', detail: 'x' },
+    )
+    expect(called).toBe(false)
+    const assessment = result.assessment as { classification?: string; classifier?: string } | undefined
+    expect(assessment?.classification).toBe('continue-manual')
+    expect(assessment?.classifier).toBe('deterministic')
+    const salvage = result.salvage as SalvageShape | undefined
+    expect(salvage?.committed).toEqual([])
+    expect(salvage?.detail).toMatch(/skipped/)
+    // The artefact is NOT committed — nothing was salvaged against bad evidence.
+    expect(git(dir, 'status', '--porcelain=v1')).toBe(`?? ${REVIEW_REL}`)
+    expect(git(dir, 'log', '-1', '--format=%s')).toBe('Add execplan')
+  })
+})
+
 describe('recovery assessment entry points', () => {
   const candidate = (dir: string, baseSha: string) => ({
     taskId: '1.2.3',

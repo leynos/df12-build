@@ -1509,8 +1509,11 @@ function makeWritePreflight({ enabled, targets }) {
   }
   return { runTaskAgentWritePreflight: runTaskAgentWritePreflight2, ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2 };
 }
+var TASK_ARTEFACT_PATTERN = /^docs\/execplans\/.+\.md$/;
 
-// src/workflows/df12-build-odw/assessment.ts
+function isTaskArtefactPath(candidate) {
+  return TASK_ARTEFACT_PATTERN.test(String(candidate || ""));
+}
 function fastAssessmentClassification(evidence) {
   const collectionErrors = evidence?.collectionErrors || [];
   if (collectionErrors.length) {
@@ -1544,6 +1547,29 @@ function deterministicAssessment(classification, evidence, reason) {
     classifier: "deterministic",
     hostEvidence: evidence
   };
+}
+
+async function salvageAssessmentArtefacts(taskId, worktree, evidence, classification) {
+  if (!SALVAGE_CLASSIFICATIONS.has(classification)) return null;
+  if (!worktree) {
+    return { classification, committed: [], skipped: [], sha: "", detail: "salvage skipped: no worktree path in the assessment evidence" };
+  }
+  try {
+    const candidates = [
+      ...evidence.dirtyChanges || [],
+      ...evidence.stagedChanges || []
+    ].map((entry) => entry.path);
+    const outcome = await salvageTaskArtefacts(worktree, candidates, taskId);
+    return { classification, ...outcome };
+  } catch (error) {
+    return {
+      classification,
+      committed: [],
+      skipped: [],
+      sha: "",
+      detail: `salvage errored: ${error && error.message || String(error)}`
+    };
+  }
 }
 function isDeferredReviewIssue(issue) {
   const text = String(issue || "").toLowerCase();
@@ -1685,14 +1711,16 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
     const evidence = await collectAssessmentEvidence(task, wt);
     const fast = fastAssessmentClassification(evidence);
     if (fast) {
-      return { ...result, assessment: deterministicAssessment(fast.classification, evidence, fast.reason) };
+      const salvage = fast.classification === "continue-manual" ? { classification: fast.classification, committed: [], skipped: [], sha: "", detail: "salvage skipped: deterministic continue-manual fires on untrustworthy host evidence" } : null;
+      return { ...result, assessment: deterministicAssessment(fast.classification, evidence, fast.reason), ...salvage ? { salvage } : {} };
     }
     try {
       const assessment = await runModelAssessment(() => assessmentPrompt2(task, wt, result, evidence), "Assess", `assess:${task.id}`, evidence);
       if (!assessment) {
         return { ...result, assessmentError: "assessment agent returned no structured output", assessmentEvidence: evidence };
       }
-      return { ...result, assessment: { ...assessment, hostEvidence: evidence } };
+      const salvage = await salvageAssessmentArtefacts(task.id, wt.worktreePath || "", evidence, String(assessment.classification || ""));
+      return { ...result, assessment: { ...assessment, hostEvidence: evidence }, ...salvage ? { salvage } : {} };
     } catch (error) {
       return {
         ...result,
@@ -2033,8 +2061,6 @@ ${outcome.tail}`, logFile };
   }
   return { coderabbitBackoffMinutes: coderabbitBackoffMinutes2, runCoderabbitHostReview: runCoderabbitHostReview2, recordCoderabbitReview: recordCoderabbitReview2, runHostCommitGates: runHostCommitGates2, runCodeSceneCheck: runCodeSceneCheck2 };
 }
-
-// src/workflows/df12-build-odw/execplan-durability.ts
 function execplanRelPath(worktree, planPath) {
   const path = process.getBuiltinModule("node:path");
   const raw = String(planPath || "");
@@ -2139,6 +2165,57 @@ async function commitExecplanDraft(worktree, relPath, tag) {
   if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
   return { ok: true, detail: "" };
 }
+
+async function salvageTaskArtefacts(worktree, candidatePaths, tag) {
+  const skipped = [];
+  const verified = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const candidate of candidatePaths) {
+    const raw = String(candidate || "");
+    if (!raw || seen.has(raw)) continue;
+    seen.add(raw);
+    if (!isTaskArtefactPath(raw)) {
+      skipped.push({ path: raw, reason: "not a task-scoped docs/execplans/*.md artefact" });
+      continue;
+    }
+    const contained = execplanRelPath(worktree, raw);
+    if (!contained.ok) {
+      skipped.push({ path: raw, reason: contained.detail });
+      continue;
+    }
+    const probe = await fileState(contained.relPath, worktree);
+    if (!probe.ok) {
+      skipped.push({ path: contained.relPath, reason: probe.detail });
+      continue;
+    }
+    if (!probe.exists) {
+      skipped.push({ path: contained.relPath, reason: "no regular file at the path (absent, or a symlink)" });
+      continue;
+    }
+    verified.push(contained.relPath);
+  }
+  if (!verified.length) {
+    return { committed: [], skipped, sha: "", detail: "nothing to salvage: no eligible task-scoped artefacts are dirty" };
+  }
+  const add = await execFileStatus("git", ["-C", worktree, "add", "--", ...verified]);
+  if (!add.ok) return { committed: [], skipped, sha: "", detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
+  const commit = await execFileStatus("git", [
+    "-C",
+    worktree,
+    "-c",
+    "user.name=df12-build",
+    "-c",
+    "user.email=df12-build@workflow.invalid",
+    "commit",
+    "-m",
+    `Salvage task artefacts for task ${tag}`,
+    "--",
+    ...verified
+  ]);
+  if (!commit.ok) return { committed: [], skipped, sha: "", detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
+  const head = await execFileStatus("git", ["-C", worktree, "rev-parse", "HEAD"]);
+  return { committed: verified, skipped, sha: head.ok ? String(head.stdout).trim() : "", detail: "" };
+}
 async function verifyWorktreeCommitted(worktree) {
   const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
   if (!status.ok) {
@@ -2149,8 +2226,7 @@ async function verifyWorktreeCommitted(worktree) {
   const sample = lines.slice(0, 8).map((line) => line.trim()).join("; ");
   return { ok: false, detail: `${lines.length} uncommitted path(s): ${sample}${lines.length > 8 ? "; \u2026" : ""}` };
 }
-
-// src/workflows/df12-build-odw/run-task.ts
+var SALVAGE_CLASSIFICATIONS = /* @__PURE__ */ new Set(["continue-manual", "adopt-partial"]);
 function summarizeReviewVerdict(review) {
   if (!review) return null;
   return {
