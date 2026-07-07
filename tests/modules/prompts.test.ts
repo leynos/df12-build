@@ -5,7 +5,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { makeConfig } from '../../src/workflows/df12-build-odw/config.ts'
-import { makePrompts } from '../../src/workflows/df12-build-odw/prompts.ts'
+import { makePrompts, worktreeSafetyNet } from '../../src/workflows/df12-build-odw/prompts.ts'
 
 const config = makeConfig({})
 const prompts = makePrompts(config)
@@ -33,6 +33,17 @@ describe('code search guidance', () => {
     expect(memtrace.codeSearchGuidance()).toContain("repo_id 'repo-1'")
     const broken = makePrompts(makeConfig({ searchBackend: 'sourcegraph' }))
     expect(() => broken.codeSearchGuidance()).toThrow(/Unsupported searchBackend/)
+  })
+})
+
+describe('worktreeSafetyNet', () => {
+  test('pins the verified fetch/no-parent/verify-reset tokens for the given base', () => {
+    const text = worktreeSafetyNet('trunk')
+    expect(text).toContain('git fetch origin trunk')
+    expect(text).toContain('git reset --hard origin/trunk')
+    expect(text).toContain('git -C <worktree> rev-parse HEAD')
+    expect(text).toContain('git rev-parse origin/trunk')
+    expect(text).toContain('NO parent ref')
   })
 })
 
@@ -150,6 +161,14 @@ describe('integration and audit prompts', () => {
     const text = prompts.auditPrompt(task, worktree)
     expect(text).toContain(task.id)
     expect(text).toContain(`docs/issues/audit-${task.id}.md`)
+  })
+
+  test('auditPrompt threads the verified git-donkey safety-net for the base branch', () => {
+    const text = prompts.auditPrompt(task, worktree)
+    expect(text).toContain(worktreeSafetyNet(config.BASE))
+    expect(text).toContain(`git reset --hard origin/${config.BASE}`)
+    expect(text).toContain(`git -C <worktree> rev-parse HEAD`)
+    expect(text).toContain(`git rev-parse origin/${config.BASE}`)
   })
 
   test('auditPrompt with documentAudit=false reports findings without writing', () => {

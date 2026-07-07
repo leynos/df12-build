@@ -54,7 +54,7 @@ import {
   syntheticRecoveryImpl,
 } from './recovery-discovery.ts'
 import { makeConfig } from './config.ts'
-import { makePrompts } from './prompts.ts'
+import { makePrompts, worktreeSafetyNet } from './prompts.ts'
 import { makeWritePreflight } from './write-preflight.ts'
 import {
   addendumImplementationNeedsManualMerge,
@@ -266,6 +266,7 @@ const {
 })
 const { triagePrompt, runTriage } = makeRemediation({
   preamble,
+  worktreeSafetyNet,
   base: BASE,
   roadmap: ROADMAP,
   triageAgentOptions,

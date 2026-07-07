@@ -24,6 +24,23 @@ export interface PromptImpl {
   openIssues?: readonly string[]
 }
 
+// The verified git-donkey worktree-creation sequence, shared verbatim by every
+// prompt that tells an agent to build its own inspection worktree (audit here,
+// triage via injection). It mirrors the Worktree phase's fetch → no-parent →
+// verify/reset → re-verify discipline so an inspection worktree can never
+// silently root on a stale local BASE. Parameterised only on the base branch,
+// so it can be injected into the import-free remediation module without pulling
+// config across the boundary.
+export function worktreeSafetyNet(base: string): string {
+  return [
+    `Create a fresh git-donkey worktree for your inspection, rooted on the CURRENT tip of origin/${base} — do no work in the root/control worktree. The control worktree's local ${base} is frequently stale (a remediation flush pushes origin/${base} without advancing local ${base}), so follow this verified sequence:`,
+    `  1. \`git fetch origin ${base}\` to retrieve the current origin/${base} tip.`,
+    `  2. Create the worktree with \`git donkey <slug>\` and NO parent ref: with no second argument git donkey pulls local ${base} forward to origin/${base} and roots the branch there. Do NOT pass \`origin/${base}\` (git donkey misparses a remote-qualified ref and fails looking for \`origin/origin/${base}\`), and do NOT pass a bare \`${base}\` parent (that pins to the possibly-stale local ref).`,
+    `  3. SAFETY NET: git donkey advances ${base} through an interactive pull-rebase prompt that defaults to "no" under non-interactive stdin, so the new worktree may still root on a stale commit. If \`git -C <worktree> rev-parse HEAD\` does not already equal \`git rev-parse origin/${base}\`, re-root from INSIDE the new worktree (it has no work yet, so this loses nothing): \`cd <worktree>\` then \`git reset --hard origin/${base}\`. This mutates ONLY the new worktree — never the root/control worktree.`,
+    `  4. VERIFY the base: \`git -C <worktree> rev-parse HEAD\` MUST equal \`git rev-parse origin/${base}\` before you inspect anything; if they differ, stop and explain.`,
+  ].join('\n')
+}
+
 export function makePrompts(config: WorkflowConfig) {
   const {
     BASE,
@@ -356,7 +373,11 @@ export function makePrompts(config: WorkflowConfig) {
       : `Do NOT write any file; return findings only.`
     return [
       preamble(worktree),
-      `TASK: Post-step codebase audit, run after roadmap task ${task.id} merged. Create a fresh git-donkey worktree off origin/${BASE} for your inspection (no work in the root worktree); explore with leta and trace history with sem.`,
+      `TASK: Post-step codebase audit, run after roadmap task ${task.id} merged.`,
+      '',
+      worktreeSafetyNet(BASE),
+      '',
+      'Explore with leta and trace history with sem.',
       '',
       'Run this audit verbatim:',
       '"""',

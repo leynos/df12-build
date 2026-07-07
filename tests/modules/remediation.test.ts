@@ -24,6 +24,7 @@ beforeEach(() => {
 function subject() {
   return makeRemediation({
     preamble: (worktree) => `PREAMBLE ${worktree || '<none>'}`,
+    worktreeSafetyNet: (base) => `SAFETY-NET ${base}`,
     base: 'main',
     roadmap: 'docs/roadmap.md',
     triageAgentOptions: (options) => ({ adapter: 'codex', ...options }),
@@ -77,6 +78,7 @@ describe('runTriage tiering', () => {
     }
     const { runTriage } = makeRemediation({
       preamble: () => 'P',
+      worktreeSafetyNet: () => 'SN',
       base: 'main',
       roadmap: 'docs/roadmap.md',
       triageAgentOptions: (options: Record<string, unknown>) => ({ adapter: 'codex', model: 'gpt-5.5', ...options }),
@@ -99,6 +101,7 @@ describe('runTriage tiering', () => {
     }
     const { runTriage } = makeRemediation({
       preamble: () => 'P',
+      worktreeSafetyNet: () => 'SN',
       base: 'main',
       roadmap: 'docs/roadmap.md',
       triageAgentOptions: (options: Record<string, unknown>) => options,
@@ -139,6 +142,12 @@ describe('makeRemediation', () => {
     expect(prompt).toContain('Fix flaky fixture teardown')
     expect(prompt).toContain('Harden the merge queue')
     expect(prompt).toContain('PREAMBLE <none>')
+  })
+
+  test('triagePrompt threads the injected worktree safety-net for the base branch', () => {
+    const { triagePrompt } = subject()
+    const prompt = triagePrompt('1.2', proposals)
+    expect(prompt).toContain('SAFETY-NET main')
   })
 
   test('runTriage dispatches one triage agent with the schema and Remediation phase', async () => {

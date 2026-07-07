@@ -672,8 +672,10 @@ reviewer.
 - **Worktree base-skew:** git-donkey can root a worktree on a stale local `BASE`
   (its pull-rebase prompt defaults to "no" non-interactively). The workflow's
   worktree step already mitigates this (no-param `git donkey` + an in-worktree
-  `git reset --hard origin/BASE` + a base-sha verify). When "based on a
-  stale commit" failures appear, that mitigation is the place to look.
+  `git reset --hard origin/BASE` + a base-sha verify), and the audit and triage
+  prompts now reuse the same verified fetch/no-parent/verify-reset sequence for
+  their inspection worktrees. When "based on a stale commit" failures appear,
+  that mitigation is the place to look.
 - **A run that dies mid-flight:** do not try to resume transcripts or cached
   scheduler state. Worker interleaving is non-deterministic, so prefix-resume
   is unreliable by design. Three recovery options exist, in order of

@@ -1063,6 +1063,15 @@ function makeConfig(rawArgs) {
 }
 
 // src/workflows/df12-build-odw/prompts.ts
+function worktreeSafetyNet(base) {
+  return [
+    `Create a fresh git-donkey worktree for your inspection, rooted on the CURRENT tip of origin/${base} \u2014 do no work in the root/control worktree. The control worktree's local ${base} is frequently stale (a remediation flush pushes origin/${base} without advancing local ${base}), so follow this verified sequence:`,
+    `  1. \`git fetch origin ${base}\` to retrieve the current origin/${base} tip.`,
+    `  2. Create the worktree with \`git donkey <slug>\` and NO parent ref: with no second argument git donkey pulls local ${base} forward to origin/${base} and roots the branch there. Do NOT pass \`origin/${base}\` (git donkey misparses a remote-qualified ref and fails looking for \`origin/origin/${base}\`), and do NOT pass a bare \`${base}\` parent (that pins to the possibly-stale local ref).`,
+    `  3. SAFETY NET: git donkey advances ${base} through an interactive pull-rebase prompt that defaults to "no" under non-interactive stdin, so the new worktree may still root on a stale commit. If \`git -C <worktree> rev-parse HEAD\` does not already equal \`git rev-parse origin/${base}\`, re-root from INSIDE the new worktree (it has no work yet, so this loses nothing): \`cd <worktree>\` then \`git reset --hard origin/${base}\`. This mutates ONLY the new worktree \u2014 never the root/control worktree.`,
+    `  4. VERIFY the base: \`git -C <worktree> rev-parse HEAD\` MUST equal \`git rev-parse origin/${base}\` before you inspect anything; if they differ, stop and explain.`
+  ].join("\n");
+}
 function makePrompts(config) {
   const {
     BASE: BASE2,
@@ -1349,7 +1358,11 @@ function makePrompts(config) {
     const writeClause = DOCUMENT_AUDIT2 ? `Record your findings as a structured markdown file at docs/issues/audit-${task.id}.md (create docs/issues/ if absent), one section per finding with location and a concrete proposed fix. Run \`make markdownlint\` and \`make nixie\` on it, then commit it on your own worktree branch and push it straight to the integration branch with \`git push origin HEAD:${BASE2}\` (re-fetch and rebase on a non-fast-forward reject, then retry). NEVER \`git switch ${BASE2}\` or touch the control/root worktree.` : `Do NOT write any file; return findings only.`;
     return [
       preamble2(worktree),
-      `TASK: Post-step codebase audit, run after roadmap task ${task.id} merged. Create a fresh git-donkey worktree off origin/${BASE2} for your inspection (no work in the root worktree); explore with leta and trace history with sem.`,
+      `TASK: Post-step codebase audit, run after roadmap task ${task.id} merged.`,
+      "",
+      worktreeSafetyNet(BASE2),
+      "",
+      "Explore with leta and trace history with sem.",
       "",
       "Run this audit verbatim:",
       '"""',
@@ -1746,13 +1759,15 @@ function triageNeedsEscalation(deduped) {
   }
   return sources.size > 1;
 }
-function makeRemediation({ preamble: preamble2, base, roadmap, triageAgentOptions: triageAgentOptions2, triageEscalationModel }) {
+function makeRemediation({ preamble: preamble2, worktreeSafetyNet: worktreeSafetyNet2, base, roadmap, triageAgentOptions: triageAgentOptions2, triageEscalationModel }) {
   function triagePrompt2(stepPrefix, proposals) {
     return [
       preamble2(null),
       `TASK: GIST-triage the remediation proposals accrued during step ${stepPrefix} (now settled) and file each onto the correct roadmap lane. They came from the reviews and audits of step ${stepPrefix}'s tasks. RECORD them correctly; do NOT implement them.`,
       "",
-      `Create a fresh git-donkey worktree off origin/${base} (no edits in the root worktree); do all work there. Read ${roadmap} in full first. It is a GIST roadmap: each PHASE states an "Idea:", each STEP states a hypothesis it confirms or falsifies ("This step answers whether\u2026"), and each TASK has Success criteria. Route by hypothesis. Re-read step ${stepPrefix}'s hypothesis specifically.`,
+      worktreeSafetyNet2(base),
+      "",
+      `Do all work in that worktree. Read ${roadmap} in full first. It is a GIST roadmap: each PHASE states an "Idea:", each STEP states a hypothesis it confirms or falsifies ("This step answers whether\u2026"), and each TASK has Success criteria. Route by hypothesis. Re-read step ${stepPrefix}'s hypothesis specifically.`,
       "",
       "For EACH proposal below: first DE-DUPLICATE (merge near-identical items; DROP any already covered by an existing task or sub-task), then choose exactly ONE lane:",
       "",
@@ -2982,6 +2997,7 @@ var {
 });
 var { triagePrompt, runTriage } = makeRemediation({
   preamble,
+  worktreeSafetyNet,
   base: BASE,
   roadmap: ROADMAP,
   triageAgentOptions,
