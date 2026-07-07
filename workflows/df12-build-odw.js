@@ -583,7 +583,13 @@ function authFailureDetail(value) {
     /\bnot authenticated\b/i,
     /"loggedIn"\s*:\s*false/i,
     /Run `?coderabbit auth login`?/i,
-    /Run codex login/i
+    /Run codex login/i,
+    // CodeRabbit's non-interactive login abandonment: "Automatic login timed
+    // out. Use the printed fallback URL to finish authentication." Anchored on
+    // the login/authentication context so unrelated "timeout" prose is not
+    // misclassified as an auth failure.
+    /\blogin tim(?:ed out|eout)\b/i,
+    /\bfinish authentication\b/i
   ];
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
 }

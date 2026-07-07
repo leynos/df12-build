@@ -34,6 +34,7 @@ describe('failure classifiers', () => {
     ['coderabbit login hint', 'Run `coderabbit auth login` to authenticate', 'auth'],
     ['logged-in false JSON', '{"loggedIn": false}', 'auth'],
     ['token expired', 'the token expired yesterday', 'auth'],
+    ['coderabbit login timeout', 'Automatic login timed out. Use the printed fallback URL to finish authentication.', 'auth'],
     ['rate limited', 'API Error: 429 rate limit reached', 'provider'],
     ['overloaded', 'model overloaded, try again in a moment', 'provider'],
     ['gateway timeout', '504 gateway timeout from upstream', 'provider'],
@@ -44,6 +45,7 @@ describe('failure classifiers', () => {
     ['ordinary review failure', 'coderabbit found 3 blocking issues', 'none'],
     ['ordinary gate failure', 'make all failed: tests exited 1', 'none'],
     ['prose mentioning auth', 'documented the authorization design', 'none'],
+    ['benign timeout prose', 'the HTTP request timeout was raised to 30 seconds', 'none'],
     ['empty', '', 'none'],
   ]
 
