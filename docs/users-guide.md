@@ -442,8 +442,12 @@ Common arguments:
 - `stageAttempts`: total attempts per stage agent when the previous attempt
   died on an infrastructure fault (an ODW adapter timeout or crash, or
   schema-retry exhaustion). Defaults to `2`. Product failures are never
-  retried, and integration is never retried because its push to
-  `origin/<base>` is not idempotent.
+  retried, and the host never re-dispatches a faulted integration stage: a
+  crash between the squash push and the agent's return can leave a hidden
+  success already landed on `origin/<base>`, which the host cannot detect, so
+  repeating the stage risks a double merge. (The integration agent still
+  redoes its own squash idempotently on a non-fast-forward push rejection
+  within a single turn — see the recovery model.)
 - `perWorkItemBuild`: when `true` (the default), the workflow host reads the
   approved ExecPlan's `## Progress` checklist and dispatches one builder turn
   per unticked work item, verifying committed progress after every turn.
@@ -699,6 +703,18 @@ retried, because a hidden-success first attempt may already have pushed —
 inspect `origin/<base>` and the roadmap before relaunching. The run result's
 `faultMetrics` object counts retries and terminal faults per class
 (`infraRetries`, `infraFaults`, `providerFaults`, `authFaults`).
+
+That host-level caution is distinct from the integration agent's own retry
+loop. Because sibling tasks merge through a single merge lock, `origin/<base>`
+can advance between a task's rebase and its push. When the squash push is
+rejected non-fast-forward, the agent re-fetches, re-rebases the task branch
+onto the fresh `origin/<base>`, and redoes the squash — force-resetting its
+temporary `integrate-<id>` branch onto that fresh base and discarding any
+staged or working-tree state from the half-finished attempt. The redo is
+therefore idempotent: it neither collides with the branch the previous
+attempt left behind nor carries its stale squash forward, and it retries until
+the push lands. The host simply does not extend that idempotence across a
+process crash, where a hidden success may already have merged.
 
 Addendum implementations have one extra recovery state. If an addendum agent
 reports all work items complete, green gates, and no open issues, but fails to
