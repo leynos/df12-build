@@ -9,6 +9,7 @@ import { describe, expect, test } from 'bun:test'
 import { makeRecoveryRepo, RECOVERY_ROADMAP } from '../fixtures/recovery-repo.mjs'
 import {
   RECOVERY_HOLD_REASONS,
+  computeHeldFromDiscovery,
   makeRecoveryDiscovery,
   readExecplanState,
   recoveryExecplanPath,
@@ -173,6 +174,41 @@ describe('recoveryExecplanPath and syntheticRecoveryImpl', () => {
     } finally {
       repo.cleanup()
     }
+  })
+})
+
+describe('computeHeldFromDiscovery', () => {
+  test('holds resumable and hold-reason branches out of selection, but not completed ones', async () => {
+    // This is the guard the always-on stale-branch path (issue #33) relies on:
+    // a surviving `roadmap-*` branch with no live worktree (roadmap-1-2-4)
+    // must be held so ordinary selection never re-opens it and collides on
+    // `git worktree add -b`, whereas an already-complete branch (roadmap-2-1-1)
+    // and unmapped branches must NOT be held.
+    const repo = makeRecoveryRepo()
+    try {
+      const discovery = await makeRecoveryDiscovery(DEFAULT_LIMITS)(RECOVERY_ROADMAP, repo.dir)
+      const held = computeHeldFromDiscovery(discovery)
+      // roadmap-1-2-3 is a resumable candidate (has a worktree); roadmap-1-2-4
+      // survives with no worktree (missing-worktree, a hold reason).
+      expect([...held.normal].sort()).toEqual(['1.2.3', '1.2.4'])
+      expect(held.normal.has('2.1.1')).toBe(false)
+      expect(held.addendum.size).toBe(0)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  test('routes an addendum branch to the addendum lane only', () => {
+    // A cap skip keeps the branch mapped to a selectable id; an addendum branch
+    // (roadmap-2-1-2-addendum) must hold only the addendum lane so the normal
+    // lane for the same parent id stays free.
+    const held = computeHeldFromDiscovery({
+      candidates: [],
+      skipped: [{ id: '2.1.2', branchName: 'roadmap-2-1-2-addendum', reason: 'candidate-cap' }],
+      errors: [],
+    })
+    expect(held.addendum.has('2.1.2')).toBe(true)
+    expect(held.normal.has('2.1.2')).toBe(false)
   })
 })
 

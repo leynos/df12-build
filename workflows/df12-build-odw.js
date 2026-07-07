@@ -884,6 +884,22 @@ async function readExecplanState(candidate) {
   }
 }
 var RECOVERY_HOLD_REASONS = /* @__PURE__ */ new Set(["missing-worktree", "worktree-probe-fault", "candidate-cap", "unreadable-commit", "assessment-error"]);
+
+function computeHeldFromDiscovery(discovery) {
+  const held = { normal: /* @__PURE__ */ new Set(), addendum: /* @__PURE__ */ new Set() };
+  const holdCandidate = (branchName, taskId) => {
+    const parsed = branchToRoadmapId(branchName);
+    if (!parsed) return;
+    (parsed.isAddendum ? held.addendum : held.normal).add(taskId || parsed.id);
+  };
+  for (const entry of discovery.skipped) {
+    if (RECOVERY_HOLD_REASONS.has(entry.reason)) holdCandidate(entry.branchName, entry.id);
+  }
+  for (const candidate of discovery.candidates) {
+    holdCandidate(candidate.branchName, candidate.taskId);
+  }
+  return held;
+}
 async function recoveryExecplanPath(candidate) {
   const canonicalPlan = `docs/execplans/${candidate.branchName}.md`;
   const state = await fileState(canonicalPlan, candidate.worktreePath);
@@ -3324,6 +3340,24 @@ async function executeResume(task, resume, mergeLock2) {
     return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: "recovery-resume" });
   }
 }
+
+async function discoverHeldBranches(root) {
+  const errors = [];
+  const fetched = await execFileStatus("git", ["-C", root, "fetch", "origin", BASE]);
+  if (!fetched.ok) {
+    errors.push(`fetch origin ${BASE} failed (continuing with local refs): ${(fetched.message || fetched.stderr || "").trim()}`);
+  }
+  let roadmap;
+  try {
+    roadmap = await readRoadmapForSelection(root);
+  } catch (error) {
+    errors.push(error && error.message || String(error));
+    return { held: { normal: /* @__PURE__ */ new Set(), addendum: /* @__PURE__ */ new Set() }, errors };
+  }
+  const discovery = await discoverRecoveryCandidates(roadmap.text, root);
+  errors.push(...discovery.errors);
+  return { held: computeHeldFromDiscovery(discovery), errors };
+}
 async function runRecovery(root, mergeLock2 = null) {
   const summary = {
     enabled: true,
@@ -3354,16 +3388,10 @@ async function runRecovery(root, mergeLock2 = null) {
   summary.candidates = discovery.candidates.length;
   summary.skipped.push(...discovery.skipped);
   summary.errors.push(...discovery.errors);
-  const holdCandidate = (branchName, taskId) => {
-    const parsed = branchToRoadmapId(branchName);
-    if (!parsed) return;
-    (parsed.isAddendum ? held.addendum : held.normal).add(taskId || parsed.id);
-  };
-  for (const entry of discovery.skipped) {
-    if (RECOVERY_HOLD_REASONS.has(entry.reason)) holdCandidate(entry.branchName, entry.id);
-  }
+  const discoveredHeld = computeHeldFromDiscovery(discovery);
+  for (const id of discoveredHeld.normal) held.normal.add(id);
+  for (const id of discoveredHeld.addendum) held.addendum.add(id);
   for (const candidate of discovery.candidates) {
-    holdCandidate(candidate.branchName, candidate.taskId);
     const task = {
       id: candidate.taskId,
       title: candidate.taskTitle,
@@ -3736,6 +3764,18 @@ async function workflowMain() {
       const detail = error && error.message || String(error);
       recovery.errors.push(`recovery pass failed: ${detail}`);
       log(`[recovery] failed (${detail}); continuing with normal roadmap selection`);
+    }
+  }
+  if (!RESUME_PARTIAL_BRANCHES) {
+    try {
+      const guard = await discoverHeldBranches(process.cwd());
+      for (const id of guard.held.normal) recoveryHeldNormal.add(id);
+      for (const id of guard.held.addendum) recoveryHeldAddendum.add(id);
+      for (const detail of guard.errors) recovery.errors.push(`stale-branch guard: ${detail}`);
+    } catch (error) {
+      const detail = error && error.message || String(error);
+      recovery.errors.push(`stale-branch guard failed: ${detail}`);
+      log(`[recovery] stale-branch guard failed (${detail}); continuing with normal roadmap selection`);
     }
   }
   while (true) {
