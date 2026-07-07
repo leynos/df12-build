@@ -783,9 +783,14 @@ Rules that make this safe:
 You will frequently edit `docs/roadmap.md` (adding tasks, fixing a halted task,
 restructuring). While a run may be live:
 
-- **Never edit in the root/control worktree.** The workflow's integrate step
-  does `git switch BASE` in the root — switching it to a branch will collide.
-  Always work in a **separate** worktree created off `origin/BASE`.
+- **Never edit in the root/control worktree.** The integrate step never
+  switches `BASE` in the root: it lands each task via a disposable
+  `integrate-<id>` branch cut from `origin/BASE` inside the task's own worktree,
+  pushed with `git push origin HEAD:BASE`. The root/control worktree is
+  deliberately parked on local `BASE` for read-only inspection and hoovering
+  (see "Hoover orphan worktrees"), so switching branches there would collide
+  with that expectation. Always work in a **separate** worktree created off
+  `origin/BASE`.
 - **Gate before you commit.** Run `make markdownlint` and `make nixie` and
   confirm they are clean *before* committing — do not push a lint error to
   `BASE`.
