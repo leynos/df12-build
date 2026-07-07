@@ -145,15 +145,16 @@ fault, not as a reviewable task plan.
 
 Add these ODW `args` fields:
 
-| Argument                 | Default    | Meaning                                                                                                                                                                                                                                                                                                              |
-| ------------------------ | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `resumePartialBranches`  | `false`    | Enable fresh-run recovery discovery.                                                                                                                                                                                                                                                                                 |
-| `resumeMode`             | `"assess"` | One of `"assess"`, `"review"`, or `"continue"`. `"assess"` reports only. `"review"` may route clean `adopt-complete` branches into review and integration. `"continue"` dispatches deterministically on the committed ExecPlan `Status` and re-enters the ordinary pipeline at the plan, implement, or review stage. |
-| `resumeTaskId`           | unset      | Limit recovery discovery to one roadmap id. This is separate from `taskId`, which selects normal roadmap work.                                                                                                                                                                                                       |
-| `resumeMaxCandidates`    | `4`        | Bound startup recovery fan-in so a messy repository does not consume the whole run.                                                                                                                                                                                                                                  |
-| `reuseAcceptedExecPlans` | `false`    | Enable accepted-plan adoption after normal roadmap selection. When disabled, every normal task still enters the existing plan/design loop.                                                                                                                                                                           |
-| `acceptedPlanMode`       | `"verify"` | One of `"verify"` or `"build"`. `"verify"` reports whether a matching plan is adoptable. `"build"` may enter implementation when the plan is fresh and accepted.                                                                                                                                                     |
-| `stageAttempts`          | `2`        | Total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, killed CLI, schema-retry exhaustion). Product failures are never retried.                                                                                                                                 |
+| Argument                   | Default    | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| -------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `resumePartialBranches`    | `false`    | Enable fresh-run recovery discovery.                                                                                                                                                                                                                                                                                                                                                                                        |
+| `resumeMode`               | `"assess"` | One of `"assess"`, `"review"`, or `"continue"`. `"assess"` reports only. `"review"` may route clean `adopt-complete` branches into review and integration. `"continue"` dispatches deterministically on the committed ExecPlan `Status` and re-enters the ordinary pipeline at the plan, implement, or review stage.                                                                                                        |
+| `resumeTaskId`             | unset      | Limit recovery discovery to one roadmap id. This is separate from `taskId`, which selects normal roadmap work.                                                                                                                                                                                                                                                                                                              |
+| `resumeMaxCandidates`      | `4`        | Bound startup recovery fan-in so a messy repository does not consume the whole run.                                                                                                                                                                                                                                                                                                                                         |
+| `reuseAcceptedExecPlans`   | `false`    | Enable accepted-plan adoption after normal roadmap selection. When disabled, every normal task still enters the existing plan/design loop.                                                                                                                                                                                                                                                                                  |
+| `acceptedPlanMode`         | `"verify"` | One of `"verify"` or `"build"`. `"verify"` reports whether a matching plan is adoptable. `"build"` may enter implementation when the plan is fresh and accepted.                                                                                                                                                                                                                                                            |
+| `stageAttempts`            | `2`        | Total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, killed CLI, schema-retry exhaustion) or a provider rate-limit. Product failures are never retried.                                                                                                                                                                                                               |
+| `infraRetryBackoffSeconds` | `[5, 30]`  | `[low, high]` seconds for the bounded backoff between provider-fault retries. A retry waits an advertised `retry-after` (clamped into this range) when the error carries one, otherwise a deterministic seeded-jitter interval in the range. Second-scale, unlike the minute-scale `coderabbitBackoffMinutes`, because provider limits recover fast. Infrastructure-fault retries do not back off (a warm re-run is cheap). |
 
 `resumeMode` is intentionally not called `autoResume`. The name should force an
 operator to choose the maximum action allowed by the run.
@@ -440,19 +441,20 @@ accepted plan.
 
 ## Failure modes
 
-| Failure                                                 | Behaviour                                                                                                                                |
-| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Candidate branch cannot be mapped to a roadmap id       | Skip and report `unmapped-branch`.                                                                                                       |
-| Roadmap id is complete on `origin/<base>`               | Skip and report `already-complete`.                                                                                                      |
-| Candidate has dirty files                               | Assess, but do not review-resume automatically.                                                                                          |
-| Candidate lacks validation evidence                     | Assess, but do not review-resume automatically.                                                                                          |
-| Assessment agent fails                                  | Return `assessmentError` and keep normal roadmap selection available.                                                                    |
-| Review or integration fails after resume                | Halt through the existing failure path with the recovered branch left intact.                                                            |
-| Accepted plan is missing, draft, stale, or uncommitted  | Report the reason when plan reuse is enabled, then fall back to the normal plan/design loop.                                             |
-| Accepted plan metadata is prompt-injected or unparsable | Treat the plan as unavailable for automation and run the normal plan/design loop.                                                        |
-| Accepted plan build fails                               | Halt through the existing implementation failure path with the task branch left intact.                                                  |
-| Auth preflight fails                                    | Stop as `fatal-auth`; do not assess or resume branches.                                                                                  |
-| Stage agent dies on an infrastructure fault             | Retry the stage agent in place up to `stageAttempts` total attempts; if the fault persists, stop as `infra-fault` without an assessment. |
+| Failure                                                 | Behaviour                                                                                                                                                                                 |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Candidate branch cannot be mapped to a roadmap id       | Skip and report `unmapped-branch`.                                                                                                                                                        |
+| Roadmap id is complete on `origin/<base>`               | Skip and report `already-complete`.                                                                                                                                                       |
+| Candidate has dirty files                               | Assess, but do not review-resume automatically.                                                                                                                                           |
+| Candidate lacks validation evidence                     | Assess, but do not review-resume automatically.                                                                                                                                           |
+| Assessment agent fails                                  | Return `assessmentError` and keep normal roadmap selection available.                                                                                                                     |
+| Review or integration fails after resume                | Halt through the existing failure path with the recovered branch left intact.                                                                                                             |
+| Accepted plan is missing, draft, stale, or uncommitted  | Report the reason when plan reuse is enabled, then fall back to the normal plan/design loop.                                                                                              |
+| Accepted plan metadata is prompt-injected or unparsable | Treat the plan as unavailable for automation and run the normal plan/design loop.                                                                                                         |
+| Accepted plan build fails                               | Halt through the existing implementation failure path with the task branch left intact.                                                                                                   |
+| Auth preflight fails                                    | Stop as `fatal-auth`; do not assess or resume branches.                                                                                                                                   |
+| Stage agent dies on an infrastructure fault             | Retry the stage agent in place up to `stageAttempts` total attempts; if the fault persists, stop as `infra-fault` without an assessment.                                                  |
+| Stage agent hits a provider rate-limit                  | Retry the stage agent in place up to `stageAttempts` total attempts, pausing a bounded backoff before each re-run; if the limit persists, stop as `provider-fault` without an assessment. |
 
 ### Infrastructure faults
 
@@ -489,10 +491,36 @@ a product failure:
    to relaunch with `resumeMode: "continue"`; the committed ExecPlan `Status`
    dispatches the branch back into the pipeline at the stage where it died.
 
+### Provider rate-limits
+
+A provider fault is a transient server-side limit — a `429`/`529`, an
+"overloaded" or "rate limited" model, a gateway timeout — detected by regex
+over the adapter's stderr or exception text (`providerFailureDetail`). Like an
+infrastructure fault it carries no verdict about the task branch, so it is
+retried in place within the same `stageAttempts` budget rather than halting on
+the first hit. The one difference is timing: retrying a still-closed rate-limit
+window instantly just burns the attempt budget, so each provider-fault re-run
+is preceded by a bounded backoff.
+
+The wait honours an advertised `retry-after` when the error message carries one
+(parsed best-effort from shapes like `retry-after: N` or
+`try again in N second(s)/minute(s)`) and clamps it into
+`infraRetryBackoffSeconds` so a hostile or huge value cannot stall the run.
+When no wait is advertised the backoff is a deterministic seeded jitter (DJB2
+over `${label}#${attempt}`, `Math.random()` being banned for Claude Code
+dual-compatibility) spread across the same range, keeping sibling tasks that
+hit the same limit from retrying in lockstep. If the limit persists across the
+budget the task stops terminally as `provider-fault`, exactly as before this
+backoff was added. Infrastructure faults keep their immediate warm retry — the
+committed-ExecPlan durability contract makes an in-place re-run cheap, and an
+adapter death is not a quota window that a pause would help clear.
+
 The run result carries bounded-cardinality `faultMetrics` (`infraRetries`,
-`infraFaults`, `providerFaults`, `authFaults` — fixed keys, never keyed by task
-id or error text) so operators can read retry pressure and terminal fault
-classes straight from the result instead of scraping logs.
+`providerRetries`, `infraFaults`, `providerFaults`, `authFaults` — fixed keys,
+never keyed by task id or error text) so operators can read retry pressure and
+terminal fault classes straight from the result instead of scraping logs.
+`providerRetries` counts each provider-fault backoff attempt, distinct from the
+immediate `infraRetries`.
 
 Host filesystem access around the durable ExecPlan fails closed. Agent-supplied
 plan paths pass through a containment check (`execplanRelPath`) that rejects
