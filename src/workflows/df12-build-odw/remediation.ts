@@ -23,6 +23,10 @@ export interface RemediationProposal extends Record<string, unknown> {
 
 export interface RemediationDeps {
   preamble: (worktree: string | null | undefined) => string
+  // The verified git-donkey worktree-creation sequence, sourced from
+  // prompts.ts so audit and triage share one authority and cannot drift.
+  // Injected (rather than imported) to keep this module import-free.
+  worktreeSafetyNet: (base: string) => string
   base: string
   roadmap: string
   triageAgentOptions: (options: Record<string, unknown>) => Record<string, unknown>
@@ -100,13 +104,15 @@ export function triageNeedsEscalation(deduped: readonly (RemediationProposal & {
   return sources.size > 1
 }
 
-export function makeRemediation({ preamble, base, roadmap, triageAgentOptions, triageEscalationModel }: RemediationDeps) {
+export function makeRemediation({ preamble, worktreeSafetyNet, base, roadmap, triageAgentOptions, triageEscalationModel }: RemediationDeps) {
   function triagePrompt(stepPrefix: string, proposals: readonly RemediationProposal[]): string {
     return [
       preamble(null),
       `TASK: GIST-triage the remediation proposals accrued during step ${stepPrefix} (now settled) and file each onto the correct roadmap lane. They came from the reviews and audits of step ${stepPrefix}'s tasks. RECORD them correctly; do NOT implement them.`,
       '',
-      `Create a fresh git-donkey worktree off origin/${base} (no edits in the root worktree); do all work there. Read ${roadmap} in full first. It is a GIST roadmap: each PHASE states an "Idea:", each STEP states a hypothesis it confirms or falsifies ("This step answers whether…"), and each TASK has Success criteria. Route by hypothesis. Re-read step ${stepPrefix}'s hypothesis specifically.`,
+      worktreeSafetyNet(base),
+      '',
+      `Do all work in that worktree. Read ${roadmap} in full first. It is a GIST roadmap: each PHASE states an "Idea:", each STEP states a hypothesis it confirms or falsifies ("This step answers whether…"), and each TASK has Success criteria. Route by hypothesis. Re-read step ${stepPrefix}'s hypothesis specifically.`,
       '',
       'For EACH proposal below: first DE-DUPLICATE (merge near-identical items; DROP any already covered by an existing task or sub-task), then choose exactly ONE lane:',
       '',

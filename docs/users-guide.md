@@ -301,6 +301,17 @@ scripts/blinkentrees --pattern 'roadmap-*' .
 scripts/blinkentrees --any-matching-dir /path/to/worktrees
 ```
 
+A task's post-merge audit and a settled step's remediation triage each create
+their own throwaway inspection worktree, which appears in `blinkentrees`
+alongside the `roadmap-*` build worktrees. These inspection worktrees are built
+with the same verified sequence the build worktrees use: fetch `origin/<base>`,
+create with `git donkey <slug> <base>` (the configured base is passed
+explicitly, because git donkey's no-argument default is always `main`), then
+`git reset --hard origin/<base>` inside the new worktree and re-verify its base
+sha. So audit and triage always inspect the current `origin/<base>` and can
+never silently root on a stale local base. If an audit or triage agent reports a
+"based on a stale commit" style failure, that sequence is where to look.
+
 ## Roadmap format
 
 `df12-build` expects the target roadmap to follow the df12-house GIST shape:
