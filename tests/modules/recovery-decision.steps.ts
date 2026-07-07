@@ -28,6 +28,7 @@ interface Assessment {
   taskScoped: boolean
   validation: string
   missingEvidence: string[]
+  residualRisk: string[]
 }
 
 interface Decision {
@@ -52,7 +53,7 @@ Before((state) => ({
   ...state,
   candidate: { isAddendum: false, execplanPath: 'docs/execplans/roadmap-1-2-3.md' },
   evidence: { collectionErrors: [], dirtyState: 'clean', recentCommits: ['abc123 Implement the task'] },
-  assessment: { classification: '', taskScoped: true, validation: 'gates green: make all', missingEvidence: [] },
+  assessment: { classification: '', taskScoped: true, validation: 'gates green: make all', missingEvidence: [], residualRisk: [] },
   planState: parseExecplanState(''),
   decision: null,
 }))
@@ -67,6 +68,16 @@ Given('the assessment classifies the branch as {string}', (state, [classificatio
 Given('the committed ExecPlan says {string}', (state, [statusLine]) => ({
   ...state,
   planState: parseExecplanState(`# ExecPlan\n\n${statusLine}\n`),
+}))
+
+Given('the assessment carries advisory residual risk', (state) => ({
+  ...state,
+  assessment: { ...state.assessment, residualRisk: ['advisory: telemetry counter not yet wired up'] },
+}))
+
+Given('the assessment reports blocking missing evidence', (state) => ({
+  ...state,
+  assessment: { ...state.assessment, missingEvidence: ['no gate log for the final commit'] },
 }))
 
 Given('the worktree is dirty', (state) => ({

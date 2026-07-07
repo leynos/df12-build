@@ -34,6 +34,21 @@ Feature: Fresh-run recovery decision tables
     And the decision classification is "continue-manual"
     And the decision skips with reason "dirty-worktree"
 
+  Scenario: advisory residual risk alone does not block an adopt-complete resume
+    Given the assessment classifies the branch as "adopt-complete"
+    But the assessment carries advisory residual risk
+    When the review-mode decision runs in "review" mode
+    Then the decision action is "resume"
+    And the decision does not skip
+
+  Scenario: blocking missing evidence still downgrades an adopt-complete branch
+    Given the assessment classifies the branch as "adopt-complete"
+    But the assessment reports blocking missing evidence
+    When the review-mode decision runs in "review" mode
+    Then the decision action is "report"
+    And the decision classification is "continue-manual"
+    And the decision skips with reason "missing-validation-evidence"
+
   Scenario: dry-run reports instead of resuming
     Given the assessment classifies the branch as "adopt-complete"
     When the review-mode decision runs in "review" mode with dry-run

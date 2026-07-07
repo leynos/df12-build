@@ -139,11 +139,18 @@ test('assessment schema exposes only ADR 002 classifications', async () => {
     'roadmap',
     'validation',
     'missingEvidence',
+    'residualRisk',
     'risks',
     'rationale',
     'recommendation',
     'nextActions',
   ])
+  assert.deepEqual(surface.ASSESSMENT_SCHEMA.properties.residualRisk, {
+    type: 'array',
+    items: { type: 'string' },
+    description:
+      'ADVISORY, non-blocking residual risk carried forward as review/integration context; must NOT downgrade an otherwise-eligible adopt-complete resume',
+  })
 })
 
 test('auth-shaped implementation issues are fatal, not deferred review', async () => {

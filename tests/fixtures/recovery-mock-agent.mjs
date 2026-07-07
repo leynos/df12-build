@@ -58,6 +58,7 @@ function replyFor(schema, prompt) {
       roadmap: 'task unchecked',
       validation: 'make all green at HEAD',
       missingEvidence: [],
+      residualRisk: [],
       risks: [],
       rationale: 'mock assessment for smoke testing',
       recommendation: 'review and integrate',

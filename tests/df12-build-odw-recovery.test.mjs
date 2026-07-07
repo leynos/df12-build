@@ -449,6 +449,27 @@ test('resume eligibility admits only clean, committed, task-scoped, validated br
 
   assert.equal(surface.recoveryResumeEligibility(eligibleCandidate(), eligibleEvidence(), assessment), '')
 
+  // Advisory residual risk is NOT a disqualifier: an otherwise-eligible
+  // adopt-complete branch remains eligible even with non-empty residualRisk,
+  // provided blocking missingEvidence stays empty (issue #23).
+  assert.equal(
+    surface.recoveryResumeEligibility(
+      eligibleCandidate(),
+      eligibleEvidence(),
+      sampleAssessment({ residualRisk: ['flaky integration test observed once'] }),
+    ),
+    '',
+  )
+  // Blocking missingEvidence still disqualifies even when residualRisk is set.
+  assert.equal(
+    surface.recoveryResumeEligibility(
+      eligibleCandidate(),
+      eligibleEvidence(),
+      sampleAssessment({ missingEvidence: ['no gate log'], residualRisk: ['advisory note'] }),
+    ),
+    'missing-validation-evidence',
+  )
+
   const rows = [
     [{ candidate: { ...eligibleCandidate(), isAddendum: true } }, 'addendum-branch'],
     [{ evidence: eligibleEvidence({ collectionErrors: ['diff failed'] }) }, 'evidence-collection-error'],
@@ -507,6 +528,7 @@ test('decision-table sweep: resume happens only when every eligibility fact hold
     taskScoped: [true, false],
     validation: ['make all green', '   '],
     missingEvidence: [[], ['no gate log']],
+    residualRisk: [[], ['residual note']],
     execplanPath: ['docs/execplans/roadmap-1-2-3.md', ''],
     classification: ['adopt-complete', 'adopt-partial', 'continue-manual', 'discard'],
     mode: ['assess', 'review'],
@@ -530,7 +552,10 @@ test('decision-table sweep: resume happens only when every eligibility fact hold
       taskScoped: combo.taskScoped,
       validation: combo.validation,
       missingEvidence: combo.missingEvidence,
+      residualRisk: combo.residualRisk,
     })
+    // Eligibility depends only on blocking missingEvidence — advisory
+    // residualRisk must never affect the resume decision (issue #23).
     const eligible =
       !combo.isAddendum &&
       combo.collectionErrors.length === 0 &&
@@ -556,7 +581,7 @@ test('decision-table sweep: resume happens only when every eligibility fact hold
     if (shouldResume) resumes += 1
   }
   assert.ok(resumes > 0, 'the sweep must include the fully eligible corner')
-  assert.equal(combos.length, 2 * 2 * 3 * 2 * 2 * 2 * 2 * 2 * 4 * 2 * 2, 'the sweep must cover the whole domain')
+  assert.equal(combos.length, 2 * 2 * 3 * 2 * 2 * 2 * 2 * 2 * 2 * 4 * 2 * 2, 'the sweep must cover the whole domain')
 })
 
 test('review-mode resume fails closed: ineligible adopt-complete downgrades to continue-manual', async () => {
@@ -601,7 +626,14 @@ test('synthetic recovery implementation bridges into review without faking evide
   assert.deepEqual(missingPlan.commits, ['abc1234 Work on roadmap-1-2-3'])
   assert.equal(missingPlan.coderabbitRuns, 0)
   assert.deepEqual(missingPlan.openIssues, ['recovered branch requires fresh review'])
+  assert.deepEqual(missingPlan.residualRisk, [], 'residualRisk defaults to an empty carry-forward channel')
   assert.match(missingPlan.summary, /Recovered adopt-complete branch from durable git state/)
+
+  // Advisory residual risk from the assessment is carried forward verbatim
+  // (issue #23) without touching any blocking field.
+  const withRisk = await surface.syntheticRecoveryImpl(candidate, evidence, ['flaky teardown seen once'])
+  assert.deepEqual(withRisk.residualRisk, ['flaky teardown seen once'])
+  assert.deepEqual(withRisk.openIssues, ['recovered branch requires fresh review'])
 
   mkdirSync(path.join(repo.parserWorktree, 'docs', 'execplans'), { recursive: true })
   writeFileSync(
@@ -611,9 +643,12 @@ test('synthetic recovery implementation bridges into review without faking evide
   const withPlan = await surface.syntheticRecoveryImpl(candidate, evidence)
   assert.equal(withPlan.execplanPath, 'docs/execplans/roadmap-1-2-3.md')
 
-  const allowed = new Set(Object.keys(surface.IMPL_SCHEMA.properties))
+  // The synthetic report mirrors IMPL_SCHEMA, plus the host-only `residualRisk`
+  // carry-forward channel that is rendered as review/integration context but is
+  // never sent back to an agent under IMPL_SCHEMA.
+  const allowed = new Set([...Object.keys(surface.IMPL_SCHEMA.properties), 'residualRisk'])
   for (const key of Object.keys(withPlan)) {
-    assert.ok(allowed.has(key), `synthetic field ${key} must exist in IMPL_SCHEMA`)
+    assert.ok(allowed.has(key), `synthetic field ${key} must exist in IMPL_SCHEMA or be the residualRisk carry-forward`)
   }
 })
 
@@ -755,6 +790,42 @@ test('review-mode resume routes an eligible branch through review and integratio
     ],
     'resume must pass the write preflight, then use the ordinary review labels and the integration agent',
   )
+})
+
+test('review-mode resume carries advisory residualRisk into the review and integration prompts', async () => {
+  const calls = []
+  const prompts = { codeReview: '', expertReview: '', integrate: '' }
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review' },
+    reviewModeAgent(calls, {
+      assess: async () => sampleAssessment({ residualRisk: ['telemetry counter not yet wired up'] }),
+      review: async (prompt, opts) => {
+        if ((opts.label || '').startsWith('code-review:')) prompts.codeReview = prompt
+        else prompts.expertReview = prompt
+        return { verdict: 'pass', blocking: [], summary: 'ship it' }
+      },
+      integrate: async (prompt) => {
+        prompts.integrate = prompt
+        return { ok: true, roadmapMarkedDone: true, rebased: true, squashMerged: true, mergeSha: 'feedfeed', pushed: true, conflicts: '', summary: 'squash merged and pushed' }
+      },
+    }),
+  )
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.fatal, null)
+  assert.equal(outcome.summary.resumed, 1, 'advisory residualRisk must not block the resume')
+  const { result } = outcome.taskResults[0]
+  assert.equal(result.status, 'done')
+  // The advisory context must survive onto the synthetic impl report...
+  assert.deepEqual(result.impl.residualRisk, ['telemetry counter not yet wired up'])
+  // ...and be rendered as an explicitly non-blocking section in every prompt.
+  const advisoryLabel = 'Advisory residual risk (non-blocking'
+  for (const [name, text] of Object.entries(prompts)) {
+    assert.ok(text.includes(advisoryLabel), `${name} prompt must carry the advisory residual-risk section`)
+    assert.ok(text.includes('telemetry counter not yet wired up'), `${name} prompt must list the residual-risk item`)
+  }
 })
 
 test('review-mode resume enforces the write preflight before any review agent', async () => {

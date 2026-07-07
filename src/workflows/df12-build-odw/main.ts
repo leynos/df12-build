@@ -440,6 +440,7 @@ async function executeResume(
   evidence: AssessmentEvidence | AnyRecord | undefined,
   stage: string,
   mergeLock: MergeLockFn,
+  assessment: AnyRecord | null | undefined,
 ): Promise<StageResult> {
   const worktree = candidate.worktreePath
   const extra = { kind: 'recovery-resume' }
@@ -467,7 +468,11 @@ async function executeResume(
       if (built.fail) return built.fail
       impl = built.impl
     } else {
-      const synthetic = await syntheticRecoveryImpl(enriched, evidence)
+      // Carry the ADR 002 assessment's advisory residual risk forward into the
+      // synthetic implementation report so the resumed reviewer/integrator sees
+      // the caveats — without the resume having been blocked for them (#23).
+      const residualRisk = Array.isArray(assessment?.residualRisk) ? (assessment?.residualRisk as string[]) : []
+      const synthetic = await syntheticRecoveryImpl(enriched, evidence, residualRisk)
       impl = synthetic
       plan = { execplanPath: synthetic.execplanPath, workItems: [], summary: synthetic.summary }
     }
@@ -624,7 +629,7 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
     // and integration ticks the roadmap under the merge lock.
     const stage = decision.stage || 'review'
     log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline`)
-    const outcome = (await executeResume(task, candidate, enriched, evidence, stage, mergeLock)) as TaskOutcome
+    const outcome = (await executeResume(task, candidate, enriched, evidence, stage, mergeLock, assessment)) as TaskOutcome
     if (outcome.status === 'fatal-auth' || outcome.status === 'provider-fault' || outcome.status === 'infra-fault') {
       summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status })
       return { summary, taskResults, held, fatal: outcome }

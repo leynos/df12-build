@@ -22,6 +22,17 @@ export interface PromptPlan {
 export interface PromptImpl {
   summary?: string
   openIssues?: readonly string[]
+  residualRisk?: readonly string[]
+}
+
+function residualRiskLines(impl: PromptImpl | null | undefined): string[] {
+  const items = impl?.residualRisk || []
+  if (!items.length) return []
+  return [
+    '',
+    'Advisory residual risk (non-blocking — weigh during review, do not treat as an automatic block):',
+    ...items.map((risk, index) => `  ${index + 1}. ${risk}`),
+  ]
 }
 
 // The verified git-donkey worktree-creation sequence, shared verbatim by every
@@ -270,7 +281,7 @@ export function makePrompts(config: WorkflowConfig) {
     ].join('\n')
   }
 
-  function codeReviewPrompt(task: PromptTask, worktree: string, plan: PromptPlan) {
+  function codeReviewPrompt(task: PromptTask, worktree: string, plan: PromptPlan, impl?: PromptImpl | null) {
     return [
       preamble(worktree),
       `TASK: Benchmark the implementation of roadmap task ${task.id} against its plan using the \`code-review\` skill.`,
@@ -280,19 +291,21 @@ export function makePrompts(config: WorkflowConfig) {
       '- plan adherence (were all work items delivered as planned; were deviations justified and recorded?),',
       '- documentation coverage (docstrings, developers/users guide, ADR/design updates per AGENTS.md),',
       '- validation coverage (unit, behavioural, property, snapshot, e2e per AGENTS.md; do the gates actually exercise the new behaviour?).',
+      ...residualRiskLines(impl),
       '',
       `Use leta to inspect the code and sem to inspect the change history. Use the commit-gate output (${COMMIT_GATE_TEXT}) as evidence but do not rely on it alone.`,
       'Return verdict=pass only if you would ship it. List precise blocking items otherwise. Any follow-up ideas go in proposedRoadmapItems (PROPOSAL ONLY — do not touch the roadmap).',
     ].join('\n')
   }
 
-  function expertReviewPrompt(task: PromptTask, worktree: string, plan: PromptPlan) {
+  function expertReviewPrompt(task: PromptTask, worktree: string, plan: PromptPlan, impl?: PromptImpl | null) {
     return [
       preamble(worktree),
       `TASK: Run an ADVERSARIAL community-of-experts review of roadmap task ${task.id}, scoped STRICTLY to the work delivered for this task.`,
       '',
       'Invoke the `logisphere-experts` skill and bring the full crew to bear (architecture, alternatives, performance/observability, type-safety/contracts, reliability/ops, developer experience). Be adversarial: actively try to find what is wrong, brittle, or under-tested in THIS task\'s diff only — do not review unrelated code.',
       `Ground the review in the execplan at ${plan.execplanPath}, the design documents, and AGENTS.md. Use leta and sem.`,
+      ...residualRiskLines(impl),
       '',
       'Return verdict=pass only when the crew is collectively satisfied the task is correct, conformant, and production-ready within its scope. List precise blocking items otherwise. Surface broader follow-ups as proposedRoadmapItems (PROPOSAL ONLY — never edit the roadmap).',
     ].join('\n')
@@ -351,7 +364,7 @@ export function makePrompts(config: WorkflowConfig) {
     ].join('\n')
   }
 
-  function integratePrompt(task: PromptTask, worktree: string) {
+  function integratePrompt(task: PromptTask, worktree: string, impl?: PromptImpl | null) {
     const markStep = task.isAddendum
       ? `Tick each completed sub-task in ${ROADMAP}: for every id in [${(task.subtasks || []).join(', ')}], change its nested \`- [ ] ${task.id}.<n>.\` to \`- [x] …\`. LEAVE the parent ${task.id} as \`[x]\` (it was already done). Run \`make markdownlint\` and \`make nixie\`; commit the roadmap update (en-GB).`
       : `Mark the task done in ${ROADMAP}: change its \`- [ ] ${task.id}.\` to \`- [x] ${task.id}.\`. Run \`make markdownlint\` and \`make nixie\`; commit the roadmap update (en-GB).`
@@ -366,6 +379,7 @@ export function makePrompts(config: WorkflowConfig) {
       `  2. Fetch and rebase the branch onto the current origin/${BASE} (\`git fetch origin ${BASE}\` then rebase). Use the \`rebase\` skill for functionality-aware conflict resolution: resolve each conflict by preserving the INTENT of both sides (favour the design docs and existing contracts), not by blindly taking one side. If a conflict genuinely cannot be resolved safely, set ok=false, describe it in conflicts, and STOP without merging.`,
       `  3. Re-run the project commit gates (${COMMIT_GATE_TEXT}) after the rebase to confirm the branch is still green.`,
       `  4. Land the squash ENTIRELY inside this worktree. NEVER \`git switch ${BASE}\` and never touch the control/root worktree or its checked-out ${BASE}: that switch fails when ${BASE} is checked out elsewhere, and it pollutes the control worktree (the root of recurring detritus). Step 2 left the task branch rebased on the current origin/${BASE}; from here, create or force-reset a temp branch there (\`git switch --discard-changes -C integrate-${roadmapIdSlug(task.id)} origin/${BASE}\` — \`-C\` force-resets the branch onto the freshly fetched origin/${BASE} whether or not it already exists, and \`--discard-changes\` throws away any staged or working-tree state so a half-finished squash left by a prior aborted run or a host-level resume cannot block the reset or bleed into this attempt; the command therefore starts from a pristine origin/${BASE} every time it runs), squash-merge the task branch onto it (\`git merge --squash <task-branch>\` then \`git commit\` with a clear squash message summarising the task), and push it straight to the integration branch with \`git push origin HEAD:${BASE}\`. If the push is rejected non-fast-forward (a sibling advanced origin/${BASE} since step 2), go back to step 2 — re-fetch and re-rebase the task branch onto the new origin/${BASE} — then redo this step: re-running it discards the previous attempt's staged squash and force-resets the same temp branch onto the new origin/${BASE}, rather than failing because the branch already exists or carrying the earlier squash forward. Retry until it lands.`,
+      ...residualRiskLines(impl),
       '',
       'Return what you actually did (roadmapMarkedDone, rebased, squashMerged, mergeSha, pushed) and any conflict notes. Do not delete the worktree unless git donkey expects you to; leave the repo in a clean state.',
     ].join('\n')
