@@ -18,6 +18,8 @@ Read these before changing launch or workflow behaviour:
 - `docs/adr-002-assess-partial-task-branches.md` for the accepted partial
   branch assessment and adoption model.
 - `docs/users-guide.md` for the public launch flow and configuration surface.
+- `docs/odw-compilation-and-compile-time-testing.md` for how the ODW artefact
+  is compiled from the module tree and how compile-time behaviour is tested.
 - `skills/df12-build-supervisor/SKILL.md` for the detailed operator playbook.
 - `workflows/df12-build-odw.js` for the ODW/Codex workflow implementation.
 - `workflows/df12-build.js` for the baseline roadmap workflow that the ODW
@@ -123,6 +125,54 @@ intact:
 
 Changes to workflow behaviour must update all relevant prompts, schemas, docs,
 and validation notes in the same branch.
+
+## Submodule architecture and composition
+
+`workflows/df12-build-odw.js` is compiled from the module tree under
+`src/workflows/df12-build-odw/` by `scripts/build-workflow.mjs`. The compiler
+frames the artefact from a verbatim `meta.js` banner, a flat esbuild bundle of
+`main.ts` and its imports, and a generated `return await workflowMain()` footer,
+then fails closed on every loader-contract hazard it can detect. The
+[compilation monograph](odw-compilation-and-compile-time-testing.md) is the
+reference for *why* the mechanism is shaped this way; this section is the set of
+rules a contributor must keep when editing the tree.
+
+- **`meta.js` stays plain JavaScript, forever.** It is concatenated verbatim
+  (never parsed by the bundler) so the `export const meta` literal reaches the
+  artefact byte-for-byte. It must contain exactly one literal
+  `export const meta`; do not convert it to TypeScript or compute the metadata.
+- **`main.ts` is the entry.** It unpacks the run configuration once, binds each
+  subsystem factory (`makeConfig`, `makeTaskPipeline`, `makeHostReview`,
+  `makeRecoveryDiscovery`, `makePrompts`, `makeAssessment`, `makeRemediation`, …)
+  exactly once, and runs the worker-pool control loop.
+- **Compose through `makeX(deps)` factories.** Configuration flows one way, from
+  `main.ts` into the factories. This keeps each module's public surface small,
+  keeps the top-level namespace collision-free, and preserves the call-site
+  shapes the source-invariant tests pin.
+- **No two modules may export the same top-level name.** esbuild renames a
+  colliding top-level symbol (`foo` → `foo2`), which silently rewires a flat
+  artefact — the build's rename-survival check fails closed on it. Use unique
+  helper names and the factory surface.
+- **A new module only ships once `main.ts` imports from it.** If nothing in the
+  import graph reaches it, its exported names never enter the bundle and the
+  rename-survival check fails, rather than shipping an artefact that omits the
+  new code. Author-and-wire in the same change.
+- **Keep the tree acyclic ESM.** An import cycle or CommonJS makes esbuild emit
+  a module-closure wrapper (`__esm(`, `__commonJS(`, …), which the build rejects.
+- **TypeScript restricted to erasable syntax.** `tsconfig.json` sets
+  `erasableSyntaxOnly` (no enums, parameter properties, or runtime namespaces),
+  `verbatimModuleSyntax`, and `isolatedModules`; `make typecheck` enforces them.
+  Because esbuild does not resolve `.js` to `.ts`, **relative imports carry the
+  explicit `.ts` extension** (`from './config.ts'`). The injected ODW primitives
+  are declared ambiently in `odw-globals.d.ts` and never imported.
+- **The artefact is generated and committed.** Edit the source and run
+  `make workflow-build`; never hand-edit `workflows/df12-build-odw.js`. The
+  `workflow-freshness` gate fails a stale artefact.
+- **Source-invariant tests read the source, not the artefact.** esbuild
+  normalises quotes and strips comments, so pin invariants against the `src`
+  tree via `readWorkflowSource()` / `readModuleSource()`
+  (`tests/support/workflow-source.mjs`); scope to one module when an ordered
+  match must not span module boundaries.
 
 ## Recovery, fault, and result contract
 
