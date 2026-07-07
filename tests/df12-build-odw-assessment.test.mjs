@@ -341,7 +341,7 @@ test('integration is never retried on infrastructure faults', async () => {
   assert.doesNotMatch(source, /withInfraRetry\([^\n]*integratePrompt/)
   // Both lanes now route through the single integrateTask helper, so exactly
   // one unwrapped call site must exist and both callers must use the helper.
-  const bareCalls = source.match(/buildLock\(\(\) => agent\(integratePrompt\(task, worktree\)/g) || []
+  const bareCalls = source.match(/buildLock\(\(\) => agent\(integratePrompt\(task, worktree, impl\)/g) || []
   assert.equal(bareCalls.length, 1, 'the shared integrateTask call site stays unwrapped')
   const helperCalls = source.match(/await integrateTask\(task, worktree, mergeLock, proposals,/g) || []
   assert.equal(helperCalls.length, 2, 'normal and addendum lanes both integrate through integrateTask')
