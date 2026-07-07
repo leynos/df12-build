@@ -486,6 +486,11 @@ async function runTask(task, mergeLock) {
       if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
         return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals: [], kind: 'addendum' }
       }
+    } else {
+      // Auto-merge is disabled: the branch is deliberately left unmerged, so do
+      // NOT report 'done'. A 'done' status would make the control loop mark the
+      // id processed and audit against origin/BASE (which lacks this work).
+      return { id: tag, status: 'halted', stage: 'integrate', detail: 'auto-merge disabled; branch left unmerged for manual merge', impl, integration, worktree, proposals: [], kind: 'addendum' }
     }
     return { id: tag, status: 'done', impl, integration, worktree, proposals: [], kind: 'addendum' }
   }
@@ -592,6 +597,11 @@ async function runTask(task, mergeLock) {
     if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
       return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals }
     }
+  } else {
+    // Auto-merge is disabled: the branch is deliberately left unmerged, so do
+    // NOT report 'done'. A 'done' status would make the control loop mark the
+    // id processed and audit against origin/BASE (which lacks this work).
+    return { id: tag, status: 'halted', stage: 'integrate', detail: 'auto-merge disabled; branch left unmerged for manual merge', plan, impl, integration, worktree, proposals }
   }
 
   return { id: tag, status: 'done', plan, impl, integration, worktree, proposals }
