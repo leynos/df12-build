@@ -98,6 +98,17 @@ intact:
 - Keep target-project mutation inside agent prompts and real git worktrees;
   ODW copy isolation is not a persistent handoff mechanism for this workflow.
 - Serialize operations that advance `origin/<base>` through the merge lock.
+- Build every agent-created inspection worktree (post-integration audit,
+  remediation triage) through the shared `worktreeSafetyNet(base)` helper
+  exported from `prompts.ts`. It carries the verified fetch → base-arg →
+  reset → re-verify sequence: fetch `origin/<base>`, create the worktree with
+  `git donkey <slug> <base>` — the configured base MUST be passed because git
+  donkey's no-argument default is always `main`
+  (`git_donkey.donkey.choose_base_branch` returns `"main"` for a null origin
+  arg), which would root a non-`main` base on the wrong tree or fail when the
+  repo has no `main` — then `git reset --hard origin/<base>` inside the new
+  worktree and re-verify the base sha. Audit and triage share this one helper
+  so their worktree discipline cannot drift.
 - Keep partial-branch assessment report-only. Assessment helpers may gather
   deterministic git evidence in the ODW host script, but classification output
   must not directly merge, push, cherry-pick, mark roadmap checkboxes, or alter
@@ -149,6 +160,17 @@ rules a contributor must keep when editing the tree.
   `main.ts` into the factories. This keeps each module's public surface small,
   keeps the top-level namespace collision-free, and preserves the call-site
   shapes the source-invariant tests pin.
+- **Share cross-module prompt authorities by injection, not import.** Some
+  modules stay deliberately import-free so the bundle graph stays flat and
+  acyclic; `remediation.ts` is one. When such a module needs a helper that lives
+  elsewhere, `main.ts` threads it in through the factory's `deps` rather than the
+  module importing it. The audit and triage prompts share one worktree-creation
+  authority this way: `prompts.ts` exports `worktreeSafetyNet`, `auditPrompt`
+  calls it directly, and `main.ts` passes the same function into
+  `makeRemediation` as `RemediationDeps.worktreeSafetyNet` (mirroring how
+  `preamble` is injected) so `triagePrompt` reuses it verbatim. One authority,
+  two call sites, no drift — and `remediation.ts` keeps its import-free
+  invariant.
 - **No two modules may export the same top-level name.** esbuild renames a
   colliding top-level symbol (`foo` → `foo2`), which silently rewires a flat
   artefact — the build's rename-survival check fails closed on it. Use unique

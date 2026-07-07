@@ -37,13 +37,23 @@ describe('code search guidance', () => {
 })
 
 describe('worktreeSafetyNet', () => {
-  test('pins the verified fetch/no-parent/verify-reset tokens for the given base', () => {
+  test('pins the verified fetch/base-arg/verify-reset tokens for the given base', () => {
     const text = worktreeSafetyNet('trunk')
     expect(text).toContain('git fetch origin trunk')
     expect(text).toContain('git reset --hard origin/trunk')
     expect(text).toContain('git -C <worktree> rev-parse HEAD')
     expect(text).toContain('git rev-parse origin/trunk')
-    expect(text).toContain('NO parent ref')
+    // The configured base MUST be passed to git donkey: its no-argument default
+    // is `main`, which roots a non-main base on the wrong tree.
+    expect(text).toContain('git donkey <slug> trunk')
+    // And the remote-qualified ref must still be refused (git donkey misparses
+    // it as origin/origin/trunk).
+    expect(text).toContain('origin/origin/trunk')
+  })
+
+  test('passes the base even when it IS main, uniformly avoiding the no-arg default', () => {
+    const text = worktreeSafetyNet('main')
+    expect(text).toContain('git donkey <slug> main')
   })
 })
 
