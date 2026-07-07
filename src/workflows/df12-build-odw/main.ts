@@ -48,6 +48,7 @@ import {
   resultFromUnhandledAgentError,
 } from './faults.ts'
 import { collectAssessmentEvidence } from './git-evidence.ts'
+import { decideWorktreeDisposition } from './worktree-collision.ts'
 import {
   RECOVERY_HOLD_REASONS,
   makeRecoveryDiscovery,
@@ -78,6 +79,7 @@ import {
 } from './host-review.ts'
 import { makeTaskPipeline, summarizeFixReport, summarizeReviewVerdict } from './run-task.ts'
 import type { AssessmentEvidence } from './git-evidence.ts'
+import type { WorktreeCollisionFacts } from './worktree-collision.ts'
 import type { ExecplanState, RecoveryAssessmentFields } from './recovery-decision.ts'
 import type { SelectionResult } from './roadmap.ts'
 import type { StagePlan, StageResult } from './run-task.ts'
@@ -361,6 +363,80 @@ function worktreeParentPath() {
   return path.join(path.dirname(cwd), `${path.basename(cwd)}.worktrees`)
 }
 
+// The host-observed collision, carrying both the pure decision facts and the
+// live worktree path a reclaim must reset (empty when the branch is orphaned).
+interface WorktreeCollision {
+  facts: WorktreeCollisionFacts
+  existingWorktreePath: string
+}
+
+// Probe for a pre-existing branch without throwing: a missing ref is the
+// common, expected case on the fresh-worktree path, not an error.
+async function worktreeBranchExists(branch: string): Promise<boolean> {
+  const probe = await execFileStatus('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])
+  return probe.ok
+}
+
+// Read the git facts a collision disposition is decided from. Only invoked on
+// the rare path where the deterministic branch already exists, so the roadmap
+// read (a corroborating signal only) stays off the common no-collision path.
+async function inspectWorktreeCollision(branch: string): Promise<WorktreeCollision> {
+  const merged = await execFileStatus('git', ['merge-base', '--is-ancestor', branch, `origin/${BASE}`])
+  const list = await execFileStatus('git', ['worktree', 'list', '--porcelain'])
+  const entry = list.ok ? parseWorktreeList(list.stdout).find((candidate) => candidate.branch === branch) : undefined
+  const existingWorktreePath = entry?.worktreePath || ''
+  let worktreeDirty = false
+  if (existingWorktreePath) {
+    const status = await execFileStatus('git', ['-C', existingWorktreePath, 'status', '--porcelain'])
+    // A worktree the host cannot probe is treated as dirty: fail closed rather
+    // than reset a tree whose cleanliness is unverifiable.
+    worktreeDirty = !status.ok || status.stdout.trim() !== ''
+  }
+  let candidateComplete = false
+  const parsed = branchToRoadmapId(branch)
+  if (parsed) {
+    try {
+      const roadmap = await readRoadmapForSelection()
+      const roadmapTask = roadmapTaskIndex(roadmap.text).get(parsed.id)
+      if (roadmapTask) candidateComplete = candidateRoadmapComplete(roadmapTask, parsed.isAddendum)
+    } catch {
+      // Roadmap completeness only corroborates a reclaim; a read failure must
+      // never upgrade a fail to a reclaim, so it simply stays false here.
+    }
+  }
+  return {
+    facts: {
+      branchExists: true,
+      branchMergedIntoBase: merged.ok,
+      worktreeExists: Boolean(existingWorktreePath),
+      worktreeDirty,
+      candidateRoadmapComplete: candidateComplete,
+    },
+    existingWorktreePath,
+  }
+}
+
+// Reclaim a stale, fully-merged branch onto origin/BASE using only
+// sandbox-permitted git commands (see the supervisor skill's environment
+// safety-net constraints — no `worktree remove --force`, no `branch -D`):
+// reset an existing clean worktree in place, or force the orphaned branch to
+// the base and attach a fresh worktree at the deterministic path. Returns the
+// reclaimed worktree path so the caller can verify its HEAD.
+async function reclaimStaleWorktree(
+  branch: string,
+  worktreePath: string,
+  existingWorktreePath: string,
+): Promise<string> {
+  await execFileStatus('git', ['worktree', 'prune'])
+  if (existingWorktreePath) {
+    await execFileText('git', ['-C', existingWorktreePath, 'reset', '--hard', `origin/${BASE}`])
+    return existingWorktreePath
+  }
+  await execFileText('git', ['branch', '-f', branch, `origin/${BASE}`])
+  await execFileText('git', ['worktree', 'add', worktreePath, branch])
+  return worktreePath
+}
+
 async function createWorktree(task: SelectedTask) {
   const fs = process.getBuiltinModule('node:fs/promises')
   const path = process.getBuiltinModule('node:path')
@@ -372,12 +448,37 @@ async function createWorktree(task: SelectedTask) {
     await execFileText('git', ['fetch', 'origin', BASE])
     const baseSha = (await execFileText('git', ['rev-parse', `origin/${BASE}`])).trim()
     await fs.mkdir(path.dirname(worktreePath), { recursive: true })
-    await execFileText('git', ['worktree', 'add', '-b', branch, worktreePath, `origin/${BASE}`])
-    const worktreeSha = (await execFileText('git', ['-C', worktreePath, 'rev-parse', 'HEAD'])).trim()
+
+    // A deterministic branch name (roadmap-<id>[-addendum], no unique suffix)
+    // collides with a stale completed branch from a prior round. Detect that,
+    // and reclaim the leftover when it is safely mergeable rather than letting
+    // `git worktree add -b` throw and halt the whole run (issue #42).
+    let resolvedWorktreePath = worktreePath
+    let createdNote = 'created deterministically by the ODW control loop; no setup agent required'
+    if (await worktreeBranchExists(branch)) {
+      const collision = await inspectWorktreeCollision(branch)
+      const decision = decideWorktreeDisposition(collision.facts)
+      if (decision.disposition === 'fail') {
+        return {
+          ok: false,
+          worktreePath,
+          branch,
+          baseSha,
+          donkeyInvocation: setupCommand,
+          notes: `stale branch ${branch} is unsafe to reclaim: ${decision.reason}`,
+        }
+      }
+      resolvedWorktreePath = await reclaimStaleWorktree(branch, worktreePath, collision.existingWorktreePath)
+      createdNote = `reclaimed stale branch ${branch}: ${decision.reason}`
+    } else {
+      await execFileText('git', ['worktree', 'add', '-b', branch, worktreePath, `origin/${BASE}`])
+    }
+
+    const worktreeSha = (await execFileText('git', ['-C', resolvedWorktreePath, 'rev-parse', 'HEAD'])).trim()
     if (worktreeSha !== baseSha) {
       return {
         ok: false,
-        worktreePath,
+        worktreePath: resolvedWorktreePath,
         branch,
         baseSha,
         donkeyInvocation: setupCommand,
@@ -386,11 +487,11 @@ async function createWorktree(task: SelectedTask) {
     }
     return {
       ok: true,
-      worktreePath,
+      worktreePath: resolvedWorktreePath,
       branch,
       baseSha,
       donkeyInvocation: setupCommand,
-      notes: 'created deterministically by the ODW control loop; no setup agent required',
+      notes: createdNote,
     }
   } catch (error) {
     const failure = error as (Error & { stderr?: string; stdout?: string }) | null
