@@ -66,6 +66,14 @@ later review-mode resume.
   - See `docs/failure-resume-design.md` section "Returned result shape".
   - Success: an assess-only run reports candidates, skipped branches, and
     assessment outcomes without changing `processed`.
+- [x] 1.2.3. Guard ordinary selection from surviving `roadmap-*` branches
+  regardless of `resumePartialBranches`.
+  - Requires 1.2.1.
+  - See `docs/execplans/odw-compilation.md` revision note dated 2026-07-07.
+  - Success: with recovery disabled, a read-only discovery-only pass still holds
+    every surviving `roadmap-*` branch (candidate or hold-reason skip) out of
+    selection, so `git worktree add -b` cannot collide with a stale branch that
+    has no live worktree.
 
 ### 1.3. Reuse ADR 002 assessment for recovered candidates
 
