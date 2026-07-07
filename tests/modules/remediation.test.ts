@@ -138,7 +138,10 @@ describe('makeRemediation', () => {
     const prompt = triagePrompt('1.2', proposals)
     expect(prompt).toContain('step 1.2')
     expect(prompt).toContain('docs/roadmap.md')
-    expect(prompt).toContain('origin/main')
+    // The base branch is named directly in the push target; the fuller
+    // `origin/${base}` fetch/reset references live in the injected
+    // worktreeSafetyNet helper (stubbed here, asserted in the next test).
+    expect(prompt).toContain('HEAD:main')
     expect(prompt).toContain('Fix flaky fixture teardown')
     expect(prompt).toContain('Harden the merge queue')
     expect(prompt).toContain('PREAMBLE <none>')
