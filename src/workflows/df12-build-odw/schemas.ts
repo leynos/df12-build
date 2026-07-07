@@ -111,7 +111,7 @@ export const INTEGRATE_SCHEMA = {
     conflicts: { type: 'string', description: 'description of any conflict encountered and how it was handled, empty if none' },
     summary: { type: 'string' },
   },
-  required: ['ok', 'summary'],
+  required: ['ok', 'roadmapMarkedDone', 'rebased', 'squashMerged', 'pushed', 'summary'],
 }
 
 export const AUDIT_SCHEMA = {

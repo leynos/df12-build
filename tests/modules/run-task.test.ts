@@ -112,7 +112,7 @@ beforeEach(() => {
 
 const passReview = { verdict: 'pass', blocking: [] }
 const greenImpl = { ok: true, gatesGreen: true, execplanPath: PLAN_PATH, summary: 'done' }
-const cleanIntegration = { ok: true, pushed: true, squashMerged: true, roadmapMarkedDone: true }
+const cleanIntegration = { ok: true, rebased: true, pushed: true, squashMerged: true, roadmapMarkedDone: true }
 
 function happyScript(): Script {
   return (label) => {
@@ -150,6 +150,23 @@ describe('runTask', () => {
     expect(outcome.status).toBe('done')
     expect(labels.some((label) => label.startsWith('plan:'))).toBe(true)
     expect(labels.filter((label) => label.startsWith('code-review:'))).toHaveLength(1)
+    expect(labels.filter((label) => label.startsWith('integrate:'))).toHaveLength(1)
+  })
+
+  test('a partial integration that was not rebased halts at the integrate stage', async () => {
+    const worktree = makeWorktree()
+    scriptAgent((label, prompt) => {
+      // Structurally valid, but the branch was never rebased onto BASE: every
+      // other completion flag is set, so only the rebased gate can catch it.
+      if (label.startsWith('integrate:')) {
+        return { ok: true, rebased: false, pushed: true, squashMerged: true, roadmapMarkedDone: true, summary: 'merged without rebasing' }
+      }
+      return happyScript()(label, prompt)
+    })
+    const outcome = await subject(worktree).runTask(task, null)
+    expect(outcome.status).toBe('halted')
+    expect(outcome.stage).toBe('integrate')
+    expect(outcome.assessed).toBe(true) // halted outcomes route through attachAssessment
     expect(labels.filter((label) => label.startsWith('integrate:'))).toHaveLength(1)
   })
 

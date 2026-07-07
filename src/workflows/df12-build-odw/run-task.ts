@@ -59,8 +59,10 @@ interface StageReview extends Record<string, unknown> {
 
 interface StageIntegration extends Record<string, unknown> {
   ok?: boolean
+  rebased?: boolean
   pushed?: boolean
   squashMerged?: boolean
+  mergeSha?: string
   roadmapMarkedDone?: boolean
   conflicts?: string
   summary?: string
@@ -811,8 +813,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       const attempt = await integrateTask(task, worktree, mergeLock, proposals, kindExtra)
       if (attempt.fault) return attempt.fault
       integration = attempt.integration ?? null
-      if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
-        return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, ...kindExtra }
+      if (!integration?.ok || !integration.rebased || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
+        return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+rebased+squashMerged+pushed+roadmapMarkedDone)', worktree, proposals, ...kindExtra }
       }
     } else {
       return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals, ...(coderabbitDeferred.length ? { openIssues: coderabbitDeferred } : {}), ...kindExtra }
@@ -967,8 +969,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         const attempt = await integrateTask(task, worktree, mergeLock, proposals, { kind: 'addendum' })
         if (attempt.fault) return attempt.fault
         integration = attempt.integration ?? null
-        if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
-          return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals, kind: 'addendum' })
+        if (!integration?.ok || !integration.rebased || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
+          return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+rebased+squashMerged+pushed+roadmapMarkedDone)', worktree, proposals, kind: 'addendum' })
         }
       } else {
         return { id: tag, status: 'manual-merge-ready', impl, addendumReview, integration, worktree, proposals, ...(addendumOpenIssues.length ? { openIssues: addendumOpenIssues } : {}), kind: 'addendum' }
