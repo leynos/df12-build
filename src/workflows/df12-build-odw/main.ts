@@ -38,7 +38,7 @@ import {
   roadmapTaskIndex,
   selectRoadmapTask,
 } from './roadmap.ts'
-import { execFileStatus, execFileText, fileState, shellQuote } from './exec.ts'
+import { execFailureDetail, execFileStatus, execFileText, fileState, shellQuote } from './exec.ts'
 import {
   authFailureDetail,
   faultMetrics,
@@ -437,6 +437,43 @@ async function reclaimStaleWorktree(
   return worktreePath
 }
 
+// The deterministic branch and the path its worktree lives at — a data clump
+// the provisioning helpers carry together.
+interface WorktreeTarget {
+  branch: string
+  worktreePath: string
+}
+
+// Provision the worktree for a deterministic branch: attach a fresh one, or,
+// when a stale completed branch from a prior round already holds the name,
+// reclaim the leftover when it is safely mergeable rather than letting
+// `git worktree add -b` throw and halt the whole run (issue #42). Returns the
+// path the caller must verify plus its provenance note, or a fail disposition
+// (fail-closed reason unchanged) the caller surfaces verbatim.
+async function provisionWorktreeForBranch(
+  target: WorktreeTarget,
+): Promise<
+  | { ok: true; resolvedWorktreePath: string; createdNote: string }
+  | { ok: false; reason: string }
+> {
+  const { branch, worktreePath } = target
+  if (!(await worktreeBranchExists(branch))) {
+    await execFileText('git', ['worktree', 'add', '-b', branch, worktreePath, `origin/${BASE}`])
+    return {
+      ok: true,
+      resolvedWorktreePath: worktreePath,
+      createdNote: 'created deterministically by the ODW control loop; no setup agent required',
+    }
+  }
+  const collision = await inspectWorktreeCollision(branch)
+  const decision = decideWorktreeDisposition(collision.facts)
+  if (decision.disposition === 'fail') {
+    return { ok: false, reason: `stale branch ${branch} is unsafe to reclaim: ${decision.reason}` }
+  }
+  const resolvedWorktreePath = await reclaimStaleWorktree(branch, worktreePath, collision.existingWorktreePath)
+  return { ok: true, resolvedWorktreePath, createdNote: `reclaimed stale branch ${branch}: ${decision.reason}` }
+}
+
 async function createWorktree(task: SelectedTask) {
   const fs = process.getBuiltinModule('node:fs/promises')
   const path = process.getBuiltinModule('node:path')
@@ -449,30 +486,18 @@ async function createWorktree(task: SelectedTask) {
     const baseSha = (await execFileText('git', ['rev-parse', `origin/${BASE}`])).trim()
     await fs.mkdir(path.dirname(worktreePath), { recursive: true })
 
-    // A deterministic branch name (roadmap-<id>[-addendum], no unique suffix)
-    // collides with a stale completed branch from a prior round. Detect that,
-    // and reclaim the leftover when it is safely mergeable rather than letting
-    // `git worktree add -b` throw and halt the whole run (issue #42).
-    let resolvedWorktreePath = worktreePath
-    let createdNote = 'created deterministically by the ODW control loop; no setup agent required'
-    if (await worktreeBranchExists(branch)) {
-      const collision = await inspectWorktreeCollision(branch)
-      const decision = decideWorktreeDisposition(collision.facts)
-      if (decision.disposition === 'fail') {
-        return {
-          ok: false,
-          worktreePath,
-          branch,
-          baseSha,
-          donkeyInvocation: setupCommand,
-          notes: `stale branch ${branch} is unsafe to reclaim: ${decision.reason}`,
-        }
+    const disposition = await provisionWorktreeForBranch({ branch, worktreePath })
+    if (!disposition.ok) {
+      return {
+        ok: false,
+        worktreePath,
+        branch,
+        baseSha,
+        donkeyInvocation: setupCommand,
+        notes: disposition.reason,
       }
-      resolvedWorktreePath = await reclaimStaleWorktree(branch, worktreePath, collision.existingWorktreePath)
-      createdNote = `reclaimed stale branch ${branch}: ${decision.reason}`
-    } else {
-      await execFileText('git', ['worktree', 'add', '-b', branch, worktreePath, `origin/${BASE}`])
     }
+    const { resolvedWorktreePath, createdNote } = disposition
 
     const worktreeSha = (await execFileText('git', ['-C', resolvedWorktreePath, 'rev-parse', 'HEAD'])).trim()
     if (worktreeSha !== baseSha) {
@@ -494,19 +519,13 @@ async function createWorktree(task: SelectedTask) {
       notes: createdNote,
     }
   } catch (error) {
-    const failure = error as (Error & { stderr?: string; stdout?: string }) | null
-    const details = [
-      (failure && failure.message) || String(error),
-      failure?.stderr ? `stderr: ${failure.stderr.trim()}` : '',
-      failure?.stdout ? `stdout: ${failure.stdout.trim()}` : '',
-    ].filter(Boolean).join('; ')
     return {
       ok: false,
       worktreePath,
       branch,
       baseSha: '',
       donkeyInvocation: setupCommand,
-      notes: details,
+      notes: execFailureDetail(error),
     }
   }
 }
@@ -520,13 +539,7 @@ async function readRoadmapForSelection(root: string = process.cwd()) {
       fallbackReason: '',
     }
   } catch (error) {
-    const failure = error as (Error & { stderr?: string; stdout?: string }) | null
-    const details = [
-      (failure && failure.message) || String(error),
-      failure?.stderr ? `stderr: ${failure.stderr.trim()}` : '',
-      failure?.stdout ? `stdout: ${failure.stdout.trim()}` : '',
-    ].filter(Boolean).join('; ')
-    throw new Error(`Failed to read canonical roadmap ref ${canonicalRef}: ${details}`)
+    throw new Error(`Failed to read canonical roadmap ref ${canonicalRef}: ${execFailureDetail(error)}`)
   }
 }
 
