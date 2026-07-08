@@ -861,7 +861,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       // Structured, parseable trace at the decision boundary so operators see
       // WHY a task stopped, not just the terminal status. Lane is derived from
       // task.isAddendum (the guard precedes the addendum/normal branch).
-      log(`[task ${tag}] dry run: stopping before worktree creation (lane=${task.isAddendum ? 'addendum' : 'normal'}, stage=pre-worktree)`)
+      log(`[task ${tag}] dry run: stopping before worktree creation (lane=${task.isAddendum ? 'addendum' : 'normal'}, stage=pre-worktree, reason=dry-run)`)
       return {
         id: tag,
         status: 'dry-run',
