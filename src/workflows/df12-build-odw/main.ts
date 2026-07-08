@@ -502,6 +502,25 @@ async function discoverHeldBranches(root: string): Promise<{
   errors.push(...discovery.errors)
   return { held: computeHeldFromDiscovery(discovery), errors }
 }
+
+async function applyStaleBranchGuard(
+  root: string,
+  heldNormal: Set<string>,
+  heldAddendum: Set<string>,
+  errors: string[],
+): Promise<void> {
+  if (RESUME_PARTIAL_BRANCHES) return
+  try {
+    const guard = await discoverHeldBranches(root)
+    for (const id of guard.held.normal) heldNormal.add(id)
+    for (const id of guard.held.addendum) heldAddendum.add(id)
+    for (const detail of guard.errors) errors.push(`stale-branch guard: ${detail}`)
+  } catch (error) {
+    const detail = ((error as Error | null) && (error as Error).message) || String(error)
+    errors.push(`stale-branch guard failed: ${detail}`)
+    log(`[recovery] stale-branch guard failed (${detail}); continuing with normal roadmap selection`)
+  }
+}
 async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise<{
   summary: RecoveryRunSummary
   taskResults: Array<{ task: SelectedTask; result: TaskOutcome }>
@@ -1027,26 +1046,9 @@ if (RESUME_PARTIAL_BRANCHES && !halted) {
     log(`[recovery] failed (${detail}); continuing with normal roadmap selection`)
   }
 }
-if (!RESUME_PARTIAL_BRANCHES) {
-  // Always-on stale-branch guard: with recovery disabled, runRecovery never
-  // runs and nothing else holds surviving roadmap-* branches out of selection.
-  // A branch left by an interrupted earlier run would then be re-selected and
-  // collide on `git worktree add -b`. Discovery is pure git evidence with no
-  // agent dependency, so it runs even when the auth preflight has halted the
-  // run — a halted run opens no new work, so this is harmless but keeps the
-  // held-set invariant honest. A discovery failure must never abort the run:
-  // degrade to a warning, mirroring the recovery catch above.
-  try {
-    const guard = await discoverHeldBranches(process.cwd())
-    for (const id of guard.held.normal) recoveryHeldNormal.add(id)
-    for (const id of guard.held.addendum) recoveryHeldAddendum.add(id)
-    for (const detail of guard.errors) recovery.errors.push(`stale-branch guard: ${detail}`)
-  } catch (error) {
-    const detail = ((error as Error | null) && (error as Error).message) || String(error)
-    recovery.errors.push(`stale-branch guard failed: ${detail}`)
-    log(`[recovery] stale-branch guard failed (${detail}); continuing with normal roadmap selection`)
-  }
-}
+// Hold surviving roadmap-* branches out of selection when recovery is disabled
+// (a no-op otherwise). See applyStaleBranchGuard for the full rationale.
+await applyStaleBranchGuard(process.cwd(), recoveryHeldNormal, recoveryHeldAddendum, recovery.errors)
 
 while (true) {
   if (!stop && !halted) {

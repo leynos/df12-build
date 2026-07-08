@@ -884,7 +884,6 @@ async function readExecplanState(candidate) {
   }
 }
 var RECOVERY_HOLD_REASONS = /* @__PURE__ */ new Set(["missing-worktree", "worktree-probe-fault", "candidate-cap", "unreadable-commit", "assessment-error"]);
-
 function computeHeldFromDiscovery(discovery) {
   const held = { normal: /* @__PURE__ */ new Set(), addendum: /* @__PURE__ */ new Set() };
   const holdCandidate = (branchName, taskId) => {
@@ -3340,7 +3339,6 @@ async function executeResume(task, resume, mergeLock2) {
     return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: "recovery-resume" });
   }
 }
-
 async function discoverHeldBranches(root) {
   const errors = [];
   const fetched = await execFileStatus("git", ["-C", root, "fetch", "origin", BASE]);
@@ -3357,6 +3355,19 @@ async function discoverHeldBranches(root) {
   const discovery = await discoverRecoveryCandidates(roadmap.text, root);
   errors.push(...discovery.errors);
   return { held: computeHeldFromDiscovery(discovery), errors };
+}
+async function applyStaleBranchGuard(root, heldNormal, heldAddendum, errors) {
+  if (RESUME_PARTIAL_BRANCHES) return;
+  try {
+    const guard = await discoverHeldBranches(root);
+    for (const id of guard.held.normal) heldNormal.add(id);
+    for (const id of guard.held.addendum) heldAddendum.add(id);
+    for (const detail of guard.errors) errors.push(`stale-branch guard: ${detail}`);
+  } catch (error) {
+    const detail = error && error.message || String(error);
+    errors.push(`stale-branch guard failed: ${detail}`);
+    log(`[recovery] stale-branch guard failed (${detail}); continuing with normal roadmap selection`);
+  }
 }
 async function runRecovery(root, mergeLock2 = null) {
   const summary = {
@@ -3766,18 +3777,7 @@ async function workflowMain() {
       log(`[recovery] failed (${detail}); continuing with normal roadmap selection`);
     }
   }
-  if (!RESUME_PARTIAL_BRANCHES) {
-    try {
-      const guard = await discoverHeldBranches(process.cwd());
-      for (const id of guard.held.normal) recoveryHeldNormal.add(id);
-      for (const id of guard.held.addendum) recoveryHeldAddendum.add(id);
-      for (const detail of guard.errors) recovery.errors.push(`stale-branch guard: ${detail}`);
-    } catch (error) {
-      const detail = error && error.message || String(error);
-      recovery.errors.push(`stale-branch guard failed: ${detail}`);
-      log(`[recovery] stale-branch guard failed (${detail}); continuing with normal roadmap selection`);
-    }
-  }
+  await applyStaleBranchGuard(process.cwd(), recoveryHeldNormal, recoveryHeldAddendum, recovery.errors);
   while (true) {
     if (!stop && !halted) {
       try {
