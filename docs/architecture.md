@@ -113,6 +113,35 @@ Any change that moves a contract from host enforcement into prompt text weakens
 the system. Document that deliberately, add the missing runtime permission or
 gate, or keep the contract in JavaScript.
 
+Figure 1 shows the host-enforced integration completeness gate from the
+Integration row. `runTask` treats the integration agent's report as a claim:
+it marks the task integrated only when `rebased` — alongside `ok`, `pushed`,
+`squashMerged`, and `roadmapMarkedDone` — is truthy, and otherwise halts at the
+`integrate` stage so a squash-merged, pushed, but unrebased branch is never
+counted as done.
+
+```mermaid
+sequenceDiagram
+  accTitle: Integration completeness gate in runTask
+  accDescr {
+    The integrate agent sends runTask an integration report carrying ok,
+    pushed, squashMerged, roadmapMarkedDone, and rebased. runTask checks
+    integration.rebased. When rebased is falsy it hands off to the halt
+    handler, which halts the task at the integrate stage because a rebase is
+    required. When every condition is truthy it marks the task integrated.
+  }
+  participant IntegrateAgent
+  participant runTask
+  participant HaltHandler
+  IntegrateAgent->>runTask: integration report (ok, pushed, squashMerged, roadmapMarkedDone, rebased)
+  runTask->>runTask: check integration.rebased
+  alt rebased is falsy
+    runTask->>HaltHandler: halt at integrate stage (need rebased)
+  else all conditions truthy
+    runTask->>runTask: mark task integrated
+  end
+```
+
 ## Configuration contract
 
 Runtime configuration comes from the ODW `args` object. The checked-in workflow
