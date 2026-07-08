@@ -89,6 +89,53 @@ the task. The normal pattern is:
 Auth failures remain fatal. The assessment stage must not reinterpret an
 authentication failure as an adoptable implementation failure.
 
+The assessment stage also salvages task-scoped planning and review artefacts a
+kept branch left uncommitted, so an ExecPlan or review file written just before
+a failure is preserved rather than lost to later worktree cleanup. Salvage runs
+for a model-based `continue-manual` or `adopt-partial` classification (and for
+infra-fault results that never reach the model); it commits only the eligible
+`docs/execplans/*.md` artefacts onto the branch's own history and never merges,
+pushes, or marks the roadmap. A deterministic `continue-manual` raised on
+untrustworthy host evidence records a salvage-skipped note instead of touching
+Git.
+
+Figure 1 shows the salvage control flow within `attachAssessment`.
+
+```mermaid
+sequenceDiagram
+  accTitle: Artefact salvage during partial-branch assessment
+  accDescr {
+    attachAssessment first classifies the failed task branch. When the
+    classification is a deterministic continue-manual raised on untrustworthy
+    host evidence, attachAssessment returns a salvage-skipped record without
+    touching Git. Otherwise, for a model-based continue-manual or adopt-partial
+    classification, attachAssessment calls salvageAssessmentArtefacts with the
+    classification, the host evidence, and the worktree path. That function
+    calls salvageTaskArtefacts with the candidate artefact paths and a commit
+    tag. salvageTaskArtefacts checks path containment and file state, then adds
+    and commits the eligible docs/execplans artefacts to Git, which returns the
+    commit SHA. salvageTaskArtefacts returns a SalvageOutcome, and
+    salvageAssessmentArtefacts wraps it as a SalvageRecord back to
+    attachAssessment.
+  }
+  participant attachAssessment
+  participant salvageAssessmentArtefacts
+  participant salvageTaskArtefacts
+  participant Git
+
+  attachAssessment->>attachAssessment: classify branch
+  alt continue-manual (untrustworthy evidence)
+    attachAssessment->>attachAssessment: return salvage-skipped record
+  else model-based classification (continue-manual/adopt-partial)
+    attachAssessment->>salvageAssessmentArtefacts: classification, evidence, worktree
+    salvageAssessmentArtefacts->>salvageTaskArtefacts: candidate paths, tag
+    salvageTaskArtefacts->>Git: check containment, file state, add, commit
+    Git-->>salvageTaskArtefacts: commit SHA
+    salvageTaskArtefacts-->>salvageAssessmentArtefacts: SalvageOutcome
+    salvageAssessmentArtefacts-->>attachAssessment: SalvageRecord
+  end
+```
+
 ## Consequences
 
 Positive consequences:
