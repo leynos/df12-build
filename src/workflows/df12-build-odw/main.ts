@@ -429,19 +429,19 @@ async function readRoadmapForSelection(root: string = process.cwd()) {
   }
 }
 
-// Execute a resume at the dispatched stage through the ordinary pipeline.
-// Every stage funnels into the SAME dual-review + merge-lock integration path
-// as fresh work; the host-verified write gate runs first because plan, build,
-// fix, and integration agents all write into the recovered worktree.
+interface ResumeContext {
+  candidate: RecoveryCandidate
+  enriched: RecoveryCandidate
+  evidence: AssessmentEvidence | AnyRecord | undefined
+  stage: string
+  residualRisk: string[]
+}
 async function executeResume(
   task: SelectedTask,
-  candidate: RecoveryCandidate,
-  enriched: RecoveryCandidate,
-  evidence: AssessmentEvidence | AnyRecord | undefined,
-  stage: string,
+  resume: ResumeContext,
   mergeLock: MergeLockFn,
-  assessment: AnyRecord | null | undefined,
 ): Promise<StageResult> {
+  const { candidate, enriched, evidence, stage, residualRisk } = resume
   const worktree = candidate.worktreePath
   const extra = { kind: 'recovery-resume' }
   const writeAccess = await ensureTaskAgentWriteAccess(worktree, candidate.taskId)
@@ -471,7 +471,6 @@ async function executeResume(
       // Carry the ADR 002 assessment's advisory residual risk forward into the
       // synthetic implementation report so the resumed reviewer/integrator sees
       // the caveats — without the resume having been blocked for them (#23).
-      const residualRisk = Array.isArray(assessment?.residualRisk) ? (assessment?.residualRisk as string[]) : []
       const synthetic = await syntheticRecoveryImpl(enriched, evidence, residualRisk)
       impl = synthetic
       plan = { execplanPath: synthetic.execplanPath, workItems: [], summary: synthetic.summary }
@@ -629,7 +628,8 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
     // and integration ticks the roadmap under the merge lock.
     const stage = decision.stage || 'review'
     log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline`)
-    const outcome = (await executeResume(task, candidate, enriched, evidence, stage, mergeLock, assessment)) as TaskOutcome
+    const resume = { candidate, enriched, evidence, stage, residualRisk: advisoryResidualRisk(assessment) }
+    const outcome = (await executeResume(task, resume, mergeLock)) as TaskOutcome
     if (outcome.status === 'fatal-auth' || outcome.status === 'provider-fault' || outcome.status === 'infra-fault') {
       summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status })
       return { summary, taskResults, held, fatal: outcome }

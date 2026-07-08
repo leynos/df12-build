@@ -39,6 +39,16 @@ export interface RecoveryAssessmentFields {
   residualRisk?: readonly string[]
 }
 
+// Read the ADVISORY residual risk off an assessment record, tolerating the
+// continue-mode case where there is no assessment at all. Kept here beside the
+// residualRisk contract so the resume caller stays a plain field read rather
+// than repeating the shape guard inline (issue #23).
+export function advisoryResidualRisk(
+  assessment: { residualRisk?: unknown } | null | undefined,
+): string[] {
+  return Array.isArray(assessment?.residualRisk) ? (assessment.residualRisk as string[]) : []
+}
+
 export type ExecplanStatus =
   | 'draft'
   | 'approved'

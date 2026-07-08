@@ -626,12 +626,20 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
   // result the caller must return as-is.
   async function integrateTask(
     task: SelectedTask,
-    worktree: string,
     mergeLock: MergeLock,
-    proposals: Array<Record<string, unknown>>,
-    kindExtra: Record<string, unknown>,
-    impl?: StageImpl | null,
+    // The integration call's context: the recovered worktree, the accumulated
+    // review proposals and result-kind decoration carried onto any fault
+    // result, and the implementation report the prompt renders (its advisory
+    // residualRisk reaches the integrator this way, #23). Grouped so the entry
+    // point stays a readable command rather than a long positional list.
+    context: {
+      worktree: string
+      proposals: Array<Record<string, unknown>>
+      kindExtra: Record<string, unknown>
+      impl?: StageImpl | null
+    },
   ): Promise<{ integration?: StageIntegration | null; fault?: StageResult }> {
+    const { worktree, proposals, kindExtra, impl } = context
     const tag = task.id
     const doIntegrate = () => {
       phase('Integrate')
@@ -836,7 +844,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     // so at most one task touches origin/BASE at a time.
     let integration: StageIntegration | null = null
     if (AUTO_MERGE) {
-      const attempt = await integrateTask(task, worktree, mergeLock, proposals, kindExtra, impl)
+      const attempt = await integrateTask(task, mergeLock, { worktree, proposals, kindExtra, impl })
       if (attempt.fault) return attempt.fault
       integration = attempt.integration ?? null
       if (integrationIncomplete(integration)) {
@@ -992,7 +1000,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       }
       let integration: StageIntegration | null = null
       if (AUTO_MERGE) {
-        const attempt = await integrateTask(task, worktree, mergeLock, proposals, { kind: 'addendum' })
+        const attempt = await integrateTask(task, mergeLock, { worktree, proposals, kindExtra: { kind: 'addendum' } })
         if (attempt.fault) return attempt.fault
         integration = attempt.integration ?? null
         if (integrationIncomplete(integration)) {

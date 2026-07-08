@@ -343,7 +343,7 @@ test('integration is never retried on infrastructure faults', async () => {
   // one unwrapped call site must exist and both callers must use the helper.
   const bareCalls = source.match(/buildLock\(\(\) => agent\(integratePrompt\(task, worktree, impl\)/g) || []
   assert.equal(bareCalls.length, 1, 'the shared integrateTask call site stays unwrapped')
-  const helperCalls = source.match(/await integrateTask\(task, worktree, mergeLock, proposals,/g) || []
+  const helperCalls = source.match(/await integrateTask\(task, mergeLock, \{ worktree, proposals,/g) || []
   assert.equal(helperCalls.length, 2, 'normal and addendum lanes both integrate through integrateTask')
 })
 
