@@ -117,6 +117,33 @@ export interface AssessmentWorktree {
   baseSha?: string
 }
 
+const NON_ASSESSABLE_STAGES = new Set([
+  'worktree',
+  'worktree-write',
+  'auth',
+  'provider',
+  'infrastructure',
+  'usage-limit',
+])
+
+const NON_ASSESSABLE_STATUSES = new Set([
+  'fatal-auth',
+  'usage-limit-fault',
+  'provider-fault',
+  'infra-fault',
+])
+
+function isNonAssessableFaultResult(result: AssessableResult): boolean {
+  if (NON_ASSESSABLE_STAGES.has(result.stage || '')) return true
+  if (NON_ASSESSABLE_STATUSES.has(result.status || '')) return true
+  const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
+  return Boolean(
+    authFailureDetail(detail) ||
+      usageLimitFailureDetail(detail) ||
+      providerFailureDetail(detail) ||
+      infrastructureFailureDetail(detail),
+  )
+}
 /** The run wiring `makeAssessment` binds once: the prompt preamble, the enable switch, adapter routing, the escalation model, and the shared infra-retry wrapper. */
 export interface AssessmentDeps {
   preamble: (worktree: string | null | undefined) => string
@@ -484,9 +511,7 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     if (!assessPartialBranches) return false
     if (!wt?.branch || !wt?.worktreePath) return false
     if (!result || !['failed', 'halted'].includes(result.status || '')) return false
-    if (result.stage === 'worktree' || result.stage === 'worktree-write' || result.stage === 'auth' || result.stage === 'provider' || result.stage === 'infrastructure' || result.stage === 'usage-limit' || result.status === 'fatal-auth' || result.status === 'usage-limit-fault' || result.status === 'provider-fault' || result.status === 'infra-fault') return false
-    const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
-    return !authFailureDetail(detail) && !usageLimitFailureDetail(detail) && !providerFailureDetail(detail) && !infrastructureFailureDetail(detail)
+    return !isNonAssessableFaultResult(result)
   }
 
   // Schema-retry exhaustion — the exact failure issue #18 targets — is
