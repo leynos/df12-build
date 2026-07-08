@@ -453,6 +453,31 @@ function auditPrompt(task, worktree) {
 // ---------------------------------------------------------------------------
 // Per-task pipeline
 // ---------------------------------------------------------------------------
+
+// Terminal result for a task whose branch is deliberately left unmerged because
+// auto-merge is disabled. Never reports 'done': a 'done' status would make the
+// control loop mark the id processed and audit against origin/BASE, which lacks
+// this work. Both the addendum and full lanes share this shape; `extra` carries
+// the lane-specific artefacts (plan/impl/integration/proposals/kind).
+function unmergedManualMergeResult(tag, worktree, extra) {
+  return {
+    id: tag,
+    status: 'halted',
+    stage: 'integrate',
+    detail: 'auto-merge disabled; branch left unmerged for manual merge',
+    worktree,
+    ...extra,
+  }
+}
+
+// Run the serialized integrate agent (rebase + squash-merge + push) for a task.
+// Shared verbatim by the addendum and full lanes; the caller wraps this in the
+// merge lock so at most one task touches origin/BASE at a time.
+function runIntegrate(task, worktree) {
+  phase('Integrate')
+  return agent(integratePrompt(task, worktree), { phase: 'Integrate', label: `integrate:${task.id}`, schema: INTEGRATE_SCHEMA })
+}
+
 async function runTask(task, mergeLock) {
   const tag = `${task.id}`
   log(`[task ${tag}] ${task.title}`)
@@ -478,19 +503,12 @@ async function runTask(task, mergeLock) {
     }
     let integration = null
     if (AUTO_MERGE) {
-      const doIntegrate = () => {
-        phase('Integrate')
-        return agent(integratePrompt(task, worktree), { phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })
-      }
-      integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
+      integration = mergeLock ? await mergeLock(() => runIntegrate(task, worktree)) : await runIntegrate(task, worktree)
       if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
         return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals: [], kind: 'addendum' }
       }
     } else {
-      // Auto-merge is disabled: the branch is deliberately left unmerged, so do
-      // NOT report 'done'. A 'done' status would make the control loop mark the
-      // id processed and audit against origin/BASE (which lacks this work).
-      return { id: tag, status: 'halted', stage: 'integrate', detail: 'auto-merge disabled; branch left unmerged for manual merge', impl, integration, worktree, proposals: [], kind: 'addendum' }
+      return unmergedManualMergeResult(tag, worktree, { impl, integration, proposals: [], kind: 'addendum' })
     }
     return { id: tag, status: 'done', impl, integration, worktree, proposals: [], kind: 'addendum' }
   }
@@ -589,19 +607,12 @@ async function runTask(task, mergeLock) {
   // so at most one task touches origin/BASE at a time.
   let integration = null
   if (AUTO_MERGE) {
-    const doIntegrate = () => {
-      phase('Integrate')
-      return agent(integratePrompt(task, worktree), { phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })
-    }
-    integration = mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()
+    integration = mergeLock ? await mergeLock(() => runIntegrate(task, worktree)) : await runIntegrate(task, worktree)
     if (!integration?.ok || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
       return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+pushed+squashMerged+roadmapMarkedDone)', worktree, proposals }
     }
   } else {
-    // Auto-merge is disabled: the branch is deliberately left unmerged, so do
-    // NOT report 'done'. A 'done' status would make the control loop mark the
-    // id processed and audit against origin/BASE (which lacks this work).
-    return { id: tag, status: 'halted', stage: 'integrate', detail: 'auto-merge disabled; branch left unmerged for manual merge', plan, impl, integration, worktree, proposals }
+    return unmergedManualMergeResult(tag, worktree, { plan, impl, integration, proposals })
   }
 
   return { id: tag, status: 'done', plan, impl, integration, worktree, proposals }
