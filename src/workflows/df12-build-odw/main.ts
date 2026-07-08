@@ -970,7 +970,32 @@ async function fillPool() {
   }
 }
 
-// --- Worker-pool control loop -----------------------------------------------
+interface HaltState {
+  halted: string | null
+  providerFaultHalt: boolean
+}
+
+function nextHaltState(id: string, result: TaskOutcome, current: HaltState): HaltState {
+  const { halted, providerFaultHalt } = current
+  switch (result.status) {
+    case 'fatal-auth':
+      return { halted: `task ${id} fatal auth failure at ${result.stage}: ${result.detail}`, providerFaultHalt }
+    case 'provider-fault':
+      return { halted: `task ${id} provider fault at ${result.stage}: ${result.detail}`, providerFaultHalt: true }
+    case 'usage-limit-fault':
+      return {
+        halted: `task ${id} Codex usage-limit fault at ${result.stage}: ${result.detail}; branch state is durable — relaunch with resumeMode: "continue" once the Codex usage limit resets`,
+        providerFaultHalt: true,
+      }
+    case 'infra-fault':
+      return {
+        halted: `task ${id} infrastructure fault at ${result.stage}: ${result.detail}; branch state is durable — relaunch with resumeMode: "continue" to resume from the committed ExecPlan`,
+        providerFaultHalt: true,
+      }
+    default:
+      return { halted: halted || `task ${id} ${result.status} at ${result.stage}: ${result.detail}`, providerFaultHalt }
+  }
+}
 async function workflowMain() {
 // Fill the pool, then await whichever task finishes first (Promise.race),
 // record it, and refill — re-running select the instant any flow completes. A
@@ -1062,33 +1087,14 @@ while (true) {
     markDryRun(done.task)
   } else if (result.status === 'manual-merge-ready') {
     markManualMergeReady(done.task)
-  } else if (result.status === 'fatal-auth') {
-    halted = `task ${done.id} fatal auth failure at ${result.stage}: ${result.detail}`
-    stop = true
-  } else if (result.status === 'provider-fault') {
-    halted = `task ${done.id} provider fault at ${result.stage}: ${result.detail}`
-    providerFaultHalt = true
-    stop = true
-  } else if (result.status === 'usage-limit-fault') {
-    // The Codex usage limit is spent and its reset window is hours long, so a
-    // warm in-window retry is wasted — halt the run instead. The fault carries
-    // no branch evidence, so skip the end-of-run roadmap flush. The committed
-    // ExecPlan makes the branch resumable once the limit resets.
-    halted = `task ${done.id} Codex usage-limit fault at ${result.stage}: ${result.detail}; branch state is durable — relaunch with resumeMode: "continue" once the Codex usage limit resets`
-    providerFaultHalt = true
-    stop = true
-  } else if (result.status === 'infra-fault') {
-    // The agent process died (hung stream, killed CLI, reply-channel failure)
-    // after in-run retries — no evidence about the branch, so no assessment
-    // and no roadmap triage writes. The committed ExecPlan makes the branch
-    // resumable: relaunch with resumeMode "continue" to pick up where it died.
-    halted = `task ${done.id} infrastructure fault at ${result.stage}: ${result.detail}; branch state is durable — relaunch with resumeMode: "continue" to resume from the committed ExecPlan`
-    providerFaultHalt = true
-    stop = true
-  } else if (!halted) {
-    // Record the failure, stop opening new work, and let in-flight siblings
-    // finish rather than abandoning their (possibly mergeable) branches.
-    halted = `task ${done.id} ${result.status} at ${result.stage}: ${result.detail}`
+  } else {
+    // Every remaining status is a failure or fault: fold it into the halt state
+    // (see nextHaltState), stop opening new work, and let in-flight siblings
+    // drain rather than abandoning their (possibly mergeable) branches. Kept as
+    // flat assignments so the loop body gains no extra nesting.
+    const next = nextHaltState(done.id, result, { halted, providerFaultHalt })
+    halted = next.halted
+    providerFaultHalt = next.providerFaultHalt
     stop = true
   }
 }

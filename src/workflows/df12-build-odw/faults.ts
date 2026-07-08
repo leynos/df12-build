@@ -90,6 +90,30 @@ export function infrastructureFailureDetail(value: unknown): string {
 // never retried here; they flow through the ordinary failure paths. The
 // attempt budget is bound once by the caller (run configuration), so call
 // sites keep the two-argument shape.
+// A retry attempt terminates when the budget is spent, when the failure is a
+// usage-limit exit, or when it is not an infrastructure fault at all. A
+// usage-limit exit shares the infra `exited with code N` prefix, but a warm
+// retry inside its hours-long reset window is wasted — never retry it, so the
+// caller can classify and halt for operator-driven resume.
+function shouldStopInfraRetry(message: string, attempt: number, attempts: number): boolean {
+  if (attempt >= attempts) return true
+  if (usageLimitFailureDetail(message)) return true
+  return !infrastructureFailureDetail(message)
+}
+
+// Log the terminal boundary distinctly from the retry path so operators can see
+// where the retry budget actually gave up, keeping a deliberately-skipped
+// usage-limit halt separate from genuine infrastructure exhaustion.
+function logTerminalInfraRetry(label: string, message: string, attempt: number, attempts: number): void {
+  if (usageLimitFailureDetail(message)) {
+    log(`[${label}] usage-limit fault; retry deliberately skipped inside the reset window: ${message}`)
+  } else if (infrastructureFailureDetail(message)) {
+    log(`[${label}] infrastructure fault persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`)
+  } else {
+    log(`[${label}] non-infrastructure failure; not retried: ${message}`)
+  }
+}
+
 export function makeWithInfraRetry(attempts: number) {
   return async function withInfraRetry<T>(run: () => Promise<T>, label: string): Promise<T> {
     for (let attempt = 1; ; attempt++) {
@@ -97,20 +121,8 @@ export function makeWithInfraRetry(attempts: number) {
         return await run()
       } catch (error) {
         const message = ((error as Error | null) && (error as Error).message) || String(error)
-        // A usage-limit exit also matches the infra `exited with code N`
-        // prefix, but a warm retry inside the hours-long reset window is
-        // wasted — never retry it, so the caller can classify and halt.
-        const usageLimit = usageLimitFailureDetail(message)
-        if (attempt >= attempts || !infrastructureFailureDetail(message) || usageLimit) {
-          // Log the terminal boundary distinctly from the retry path so
-          // operators can see where the retry budget actually gave up.
-          if (usageLimit) {
-            log(`[${label}] usage-limit fault; retry deliberately skipped inside the reset window: ${message}`)
-          } else if (infrastructureFailureDetail(message)) {
-            log(`[${label}] infrastructure fault persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`)
-          } else {
-            log(`[${label}] non-infrastructure failure; not retried: ${message}`)
-          }
+        if (shouldStopInfraRetry(message, attempt, attempts)) {
+          logTerminalInfraRetry(label, message, attempt, attempts)
           throw error
         }
         faultMetrics.infraRetries += 1

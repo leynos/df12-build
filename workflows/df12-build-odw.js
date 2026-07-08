@@ -624,6 +624,22 @@ function infrastructureFailureDetail(value) {
   ];
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
 }
+
+function shouldStopInfraRetry(message, attempt, attempts) {
+  if (attempt >= attempts) return true;
+  if (usageLimitFailureDetail(message)) return true;
+  return !infrastructureFailureDetail(message);
+}
+
+function logTerminalInfraRetry(label, message, attempt, attempts) {
+  if (usageLimitFailureDetail(message)) {
+    log(`[${label}] usage-limit fault; retry deliberately skipped inside the reset window: ${message}`);
+  } else if (infrastructureFailureDetail(message)) {
+    log(`[${label}] infrastructure fault persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`);
+  } else {
+    log(`[${label}] non-infrastructure failure; not retried: ${message}`);
+  }
+}
 function makeWithInfraRetry(attempts) {
   return async function withInfraRetry2(run, label) {
     for (let attempt = 1; ; attempt++) {
@@ -631,15 +647,8 @@ function makeWithInfraRetry(attempts) {
         return await run();
       } catch (error) {
         const message = error && error.message || String(error);
-        const usageLimit = usageLimitFailureDetail(message);
-        if (attempt >= attempts || !infrastructureFailureDetail(message) || usageLimit) {
-          if (usageLimit) {
-            log(`[${label}] usage-limit fault; retry deliberately skipped inside the reset window: ${message}`);
-          } else if (infrastructureFailureDetail(message)) {
-            log(`[${label}] infrastructure fault persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`);
-          } else {
-            log(`[${label}] non-infrastructure failure; not retried: ${message}`);
-          }
+        if (shouldStopInfraRetry(message, attempt, attempts)) {
+          logTerminalInfraRetry(label, message, attempt, attempts);
           throw error;
         }
         faultMetrics.infraRetries += 1;
@@ -1562,6 +1571,31 @@ function makeWritePreflight({ enabled, targets }) {
   return { runTaskAgentWritePreflight: runTaskAgentWritePreflight2, ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2 };
 }
 
+var NON_ASSESSABLE_STAGES = /* @__PURE__ */ new Set([
+  "worktree",
+  "worktree-write",
+  "auth",
+  "provider",
+  "infrastructure",
+  "usage-limit"
+]);
+
+var NON_ASSESSABLE_STATUSES = /* @__PURE__ */ new Set([
+  "fatal-auth",
+  "usage-limit-fault",
+  "provider-fault",
+  "infra-fault"
+]);
+
+function isNonAssessableFaultResult(result) {
+  if (NON_ASSESSABLE_STAGES.has(result.stage || "")) return true;
+  if (NON_ASSESSABLE_STATUSES.has(result.status || "")) return true;
+  const detail = [result.detail, ...result.openIssues || []].filter(Boolean).join("\n");
+  return Boolean(
+    authFailureDetail(detail) || usageLimitFailureDetail(detail) || providerFailureDetail(detail) || infrastructureFailureDetail(detail)
+  );
+}
+
 // src/workflows/df12-build-odw/execplan-durability.ts
 var TASK_ARTEFACT_PATTERN = /^docs\/execplans\/.+\.md$/;
 function isTaskArtefactPath(candidate) {
@@ -1961,9 +1995,7 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
     if (!assessPartialBranches) return false;
     if (!wt?.branch || !wt?.worktreePath) return false;
     if (!result || !["failed", "halted"].includes(result.status || "")) return false;
-    if (result.stage === "worktree" || result.stage === "worktree-write" || result.stage === "auth" || result.stage === "provider" || result.stage === "infrastructure" || result.stage === "usage-limit" || result.status === "fatal-auth" || result.status === "usage-limit-fault" || result.status === "provider-fault" || result.status === "infra-fault") return false;
-    const detail = [result.detail, ...result.openIssues || []].filter(Boolean).join("\n");
-    return !authFailureDetail(detail) && !usageLimitFailureDetail(detail) && !providerFailureDetail(detail) && !infrastructureFailureDetail(detail);
+    return !isNonAssessableFaultResult(result);
   }
   async function salvageInfraFaultArtefacts(task, wt, result) {
     if (!assessPartialBranches || !wt?.branch) return result;
@@ -3725,7 +3757,28 @@ async function fillPool() {
     );
   }
 }
-// --- Worker-pool control loop -----------------------------------------------
+
+function nextHaltState(id, result, current) {
+  const { halted: halted2, providerFaultHalt } = current;
+  switch (result.status) {
+    case "fatal-auth":
+      return { halted: `task ${id} fatal auth failure at ${result.stage}: ${result.detail}`, providerFaultHalt };
+    case "provider-fault":
+      return { halted: `task ${id} provider fault at ${result.stage}: ${result.detail}`, providerFaultHalt: true };
+    case "usage-limit-fault":
+      return {
+        halted: `task ${id} Codex usage-limit fault at ${result.stage}: ${result.detail}; branch state is durable \u2014 relaunch with resumeMode: "continue" once the Codex usage limit resets`,
+        providerFaultHalt: true
+      };
+    case "infra-fault":
+      return {
+        halted: `task ${id} infrastructure fault at ${result.stage}: ${result.detail}; branch state is durable \u2014 relaunch with resumeMode: "continue" to resume from the committed ExecPlan`,
+        providerFaultHalt: true
+      };
+    default:
+      return { halted: halted2 || `task ${id} ${result.status} at ${result.stage}: ${result.detail}`, providerFaultHalt };
+  }
+}
 async function workflowMain() {
   const authPreflight = await runAuthPreflight();
   if (authPreflight.length) {
@@ -3799,23 +3852,10 @@ async function workflowMain() {
       markDryRun(done.task);
     } else if (result.status === "manual-merge-ready") {
       markManualMergeReady(done.task);
-    } else if (result.status === "fatal-auth") {
-      halted = `task ${done.id} fatal auth failure at ${result.stage}: ${result.detail}`;
-      stop = true;
-    } else if (result.status === "provider-fault") {
-      halted = `task ${done.id} provider fault at ${result.stage}: ${result.detail}`;
-      providerFaultHalt = true;
-      stop = true;
-    } else if (result.status === "usage-limit-fault") {
-      halted = `task ${done.id} Codex usage-limit fault at ${result.stage}: ${result.detail}; branch state is durable \u2014 relaunch with resumeMode: "continue" once the Codex usage limit resets`;
-      providerFaultHalt = true;
-      stop = true;
-    } else if (result.status === "infra-fault") {
-      halted = `task ${done.id} infrastructure fault at ${result.stage}: ${result.detail}; branch state is durable \u2014 relaunch with resumeMode: "continue" to resume from the committed ExecPlan`;
-      providerFaultHalt = true;
-      stop = true;
-    } else if (!halted) {
-      halted = `task ${done.id} ${result.status} at ${result.stage}: ${result.detail}`;
+    } else {
+      const next = nextHaltState(done.id, result, { halted, providerFaultHalt });
+      halted = next.halted;
+      providerFaultHalt = next.providerFaultHalt;
       stop = true;
     }
   }
