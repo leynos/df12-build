@@ -32,7 +32,9 @@ export const meta = {
   ],
 }
 
-// src/workflows/df12-build-odw/recovery-decision.ts
+function advisoryResidualRisk(assessment) {
+  return Array.isArray(assessment?.residualRisk) ? assessment.residualRisk : [];
+}
 var TASK_BRANCH_RE = /^roadmap-((?:\d+-)*\d+)(-addendum)?$/;
 function branchToRoadmapId(branch) {
   const match = TASK_BRANCH_RE.exec(String(branch || ""));
@@ -2680,7 +2682,8 @@ function makeTaskPipeline(deps) {
     }
     return { impl };
   }
-  async function integrateTask(task, worktree, mergeLock2, proposals, kindExtra, impl) {
+  async function integrateTask(task, mergeLock2, context) {
+    const { worktree, proposals, kindExtra, impl } = context;
     const tag = task.id;
     const doIntegrate = () => {
       phase("Integrate");
@@ -2848,7 +2851,7 @@ function makeTaskPipeline(deps) {
     }
     let integration = null;
     if (AUTO_MERGE2) {
-      const attempt = await integrateTask(task, worktree, mergeLock2, proposals, kindExtra, impl);
+      const attempt = await integrateTask(task, mergeLock2, { worktree, proposals, kindExtra, impl });
       if (attempt.fault) return attempt.fault;
       integration = attempt.integration ?? null;
       if (integrationIncomplete(integration)) {
@@ -2976,7 +2979,7 @@ function makeTaskPipeline(deps) {
         }
         let integration = null;
         if (AUTO_MERGE2) {
-          const attempt = await integrateTask(task, worktree, mergeLock2, proposals, { kind: "addendum" });
+          const attempt = await integrateTask(task, mergeLock2, { worktree, proposals, kindExtra: { kind: "addendum" } });
           if (attempt.fault) return attempt.fault;
           integration = attempt.integration ?? null;
           if (integrationIncomplete(integration)) {
@@ -3276,7 +3279,8 @@ async function readRoadmapForSelection(root = process.cwd()) {
     throw new Error(`Failed to read canonical roadmap ref ${canonicalRef}: ${details}`);
   }
 }
-async function executeResume(task, candidate, enriched, evidence, stage, mergeLock2, assessment) {
+async function executeResume(task, resume, mergeLock2) {
+  const { candidate, enriched, evidence, stage, residualRisk } = resume;
   const worktree = candidate.worktreePath;
   const extra = { kind: "recovery-resume" };
   const writeAccess = await ensureTaskAgentWriteAccess(worktree, candidate.taskId);
@@ -3303,7 +3307,6 @@ async function executeResume(task, candidate, enriched, evidence, stage, mergeLo
       if (built.fail) return built.fail;
       impl = built.impl;
     } else {
-      const residualRisk = Array.isArray(assessment?.residualRisk) ? assessment?.residualRisk : [];
       const synthetic = await syntheticRecoveryImpl(enriched, evidence, residualRisk);
       impl = synthetic;
       plan = { execplanPath: synthetic.execplanPath, workItems: [], summary: synthetic.summary };
@@ -3420,7 +3423,8 @@ async function runRecovery(root, mergeLock2 = null) {
     }
     const stage = decision.stage || "review";
     log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline`);
-    const outcome = await executeResume(task, candidate, enriched, evidence, stage, mergeLock2, assessment);
+    const resume = { candidate, enriched, evidence, stage, residualRisk: advisoryResidualRisk(assessment) };
+    const outcome = await executeResume(task, resume, mergeLock2);
     if (outcome.status === "fatal-auth" || outcome.status === "provider-fault" || outcome.status === "infra-fault") {
       summary.results.push({ ...resultBase, resumeStage: stage, action: "resume-failed", reason: outcome.detail || outcome.status });
       return { summary, taskResults, held, fatal: outcome };
