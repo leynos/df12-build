@@ -1535,6 +1535,43 @@ function makeWritePreflight({ enabled, targets }) {
   return { runTaskAgentWritePreflight: runTaskAgentWritePreflight2, ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2 };
 }
 
+// src/workflows/df12-build-odw/git-worktree.ts
+function porcelainPath(line) {
+  return line.slice(3).replace(/^"(.*)"$/, "$1");
+}
+function isReviewSibling(relPath, planRelPath) {
+  const path = process.getBuiltinModule("node:path");
+  if (path.dirname(relPath) !== path.dirname(planRelPath)) return false;
+  const stem = path.basename(planRelPath).replace(/\.md$/, "");
+  if (!stem) return false;
+  const escaped = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped}\\.review-r\\d+\\.md$`).test(path.basename(relPath));
+}
+async function porcelainLines(worktree) {
+  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
+  if (!status.ok) return { ok: false, lines: [], detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
+  return { ok: true, lines: String(status.stdout).split(/\r?\n/).filter(Boolean), detail: "" };
+}
+async function addAndCommit(worktree, paths, message) {
+  const add = await execFileStatus("git", ["-C", worktree, "add", "--", ...paths]);
+  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
+  const commit = await execFileStatus("git", [
+    "-C",
+    worktree,
+    "-c",
+    "user.name=df12-build",
+    "-c",
+    "user.email=df12-build@workflow.invalid",
+    "commit",
+    "-m",
+    message,
+    "--",
+    ...paths
+  ]);
+  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
+  return { ok: true, detail: "" };
+}
+
 // src/workflows/df12-build-odw/execplan-durability.ts
 var TASK_ARTEFACT_PATTERN = /^docs\/execplans\/.+\.md$/;
 function isTaskArtefactPath(candidate) {
@@ -1562,7 +1599,7 @@ async function verifyExecplanCommitted(worktree, planPath) {
   if (String(status.stdout).trim()) return { ok: false, detail: `the plan file ${relPath} has uncommitted modifications` };
   return { ok: true, detail: "" };
 }
-async function commitExecplanApproval(worktree, planPath, tag) {
+async function commitExecplanApproval({ worktree, planPath, tag }) {
   const fs = process.getBuiltinModule("node:fs/promises");
   const path = process.getBuiltinModule("node:path");
   const contained = execplanRelPath(worktree, planPath);
@@ -1598,28 +1635,15 @@ Status: APPROVED
     return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || "").trim()}` };
   }
   if (!String(status.stdout).trim()) return { ok: true, detail: "already committed as APPROVED" };
-  const add = await execFileStatus("git", ["-C", worktree, "add", "--", relPath]);
-  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
-  const commit = await execFileStatus("git", [
-    "-C",
-    worktree,
-    "-c",
-    "user.name=df12-build",
-    "-c",
-    "user.email=df12-build@workflow.invalid",
-    "commit",
-    "-m",
-    `Approve ExecPlan for task ${tag}`,
-    "--",
-    relPath
-  ]);
-  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
-  return { ok: true, detail: "" };
+  return addAndCommit(worktree, [relPath], `Approve ExecPlan for task ${tag}`);
 }
-async function commitExecplanDraft(worktree, relPath, tag) {
-  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
-  if (!status.ok) return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
-  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
+async function commitExecplanDraft({ worktree, planPath, tag }) {
+  const contained = execplanRelPath(worktree, planPath);
+  if (!contained.ok) return { ok: false, detail: contained.detail };
+  const relPath = contained.relPath;
+  const status = await porcelainLines(worktree);
+  if (!status.ok) return { ok: false, detail: status.detail };
+  const lines = status.lines;
   if (!lines.length) return { ok: false, detail: "nothing to commit: the worktree is already clean" };
   const foreign = lines.filter((line) => {
     const dirty = porcelainPath(line);
@@ -1630,50 +1654,17 @@ async function commitExecplanDraft(worktree, relPath, tag) {
     return { ok: false, detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? "; \u2026" : ""})` };
   }
   const allowed = lines.map(porcelainPath);
-  const add = await execFileStatus("git", ["-C", worktree, "add", "--", ...allowed]);
-  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
-  const commit = await execFileStatus("git", [
-    "-C",
-    worktree,
-    "-c",
-    "user.name=df12-build",
-    "-c",
-    "user.email=df12-build@workflow.invalid",
-    "commit",
-    "-m",
-    `Draft ExecPlan for task ${tag}`,
-    "--",
-    ...allowed
-  ]);
-  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
-  return { ok: true, detail: "" };
+  return addAndCommit(worktree, allowed, `Draft ExecPlan for task ${tag}`);
 }
-
-async function commitReviewArtefacts(worktree, planPath, tag) {
+async function commitReviewArtefacts({ worktree, planPath, tag }) {
   const contained = execplanRelPath(worktree, planPath);
   if (!contained.ok) return { ok: false, detail: contained.detail };
   const relPath = contained.relPath;
-  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
-  if (!status.ok) return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
-  const siblings = String(status.stdout).split(/\r?\n/).filter(Boolean).map(porcelainPath).filter((dirty) => isReviewSibling(dirty, relPath));
+  const status = await porcelainLines(worktree);
+  if (!status.ok) return { ok: false, detail: status.detail };
+  const siblings = status.lines.map(porcelainPath).filter((dirty) => isReviewSibling(dirty, relPath));
   if (!siblings.length) return { ok: true, detail: "" };
-  const add = await execFileStatus("git", ["-C", worktree, "add", "--", ...siblings]);
-  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
-  const commit = await execFileStatus("git", [
-    "-C",
-    worktree,
-    "-c",
-    "user.name=df12-build",
-    "-c",
-    "user.email=df12-build@workflow.invalid",
-    "commit",
-    "-m",
-    `Commit design-review notes for task ${tag}`,
-    "--",
-    ...siblings
-  ]);
-  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
-  return { ok: true, detail: "" };
+  return addAndCommit(worktree, siblings, `Commit design-review notes for task ${tag}`);
 }
 async function salvageTaskArtefacts(worktree, candidatePaths, tag) {
   const skipped = [];
@@ -1733,11 +1724,9 @@ async function salvageTaskArtefacts(worktree, candidatePaths, tag) {
   return { committed: verified, skipped, sha: String(head.stdout).trim(), detail: "" };
 }
 async function verifyWorktreeCommitted(worktree) {
-  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
-  if (!status.ok) {
-    return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
-  }
-  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
+  const status = await porcelainLines(worktree);
+  if (!status.ok) return { ok: false, detail: status.detail };
+  const lines = status.lines;
   if (!lines.length) return { ok: true, detail: "" };
   const sample = lines.slice(0, 8).map((line) => line.trim()).join("; ");
   return { ok: false, detail: `${lines.length} uncommitted path(s): ${sample}${lines.length > 8 ? "; \u2026" : ""}` };
@@ -2334,19 +2323,6 @@ ${outcome.tail}`, logFile };
   return { coderabbitBackoffMinutes: coderabbitBackoffMinutes2, runCoderabbitHostReview: runCoderabbitHostReview2, recordCoderabbitReview: recordCoderabbitReview2, runHostCommitGates: runHostCommitGates2, runCodeSceneCheck: runCodeSceneCheck2 };
 }
 
-function porcelainPath(line) {
-  return line.slice(3).replace(/^"(.*)"$/, "$1");
-}
-
-function isReviewSibling(relPath, planRelPath) {
-  const path = process.getBuiltinModule("node:path");
-  if (path.dirname(relPath) !== path.dirname(planRelPath)) return false;
-  const stem = path.basename(planRelPath).replace(/\.md$/, "");
-  if (!stem) return false;
-  const escaped = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^${escaped}\\.review-r\\d+\\.md$`).test(path.basename(relPath));
-}
-
 // src/workflows/df12-build-odw/run-task.ts
 function summarizeReviewVerdict(review) {
   if (!review) return null;
@@ -2414,6 +2390,18 @@ function makeTaskPipeline(deps) {
     runCoderabbitHostReview: runCoderabbitHostReview2,
     recordCoderabbitReview: recordCoderabbitReview2
   } = deps;
+  async function commitDesignApproval(task, worktree, plan, extra) {
+    const tag = task.id;
+    const approved = await commitExecplanApproval({ worktree, planPath: plan.execplanPath, tag });
+    if (!approved.ok) {
+      return { id: tag, status: "failed", stage: "design-review", detail: `failed to record the committed ExecPlan approval: ${approved.detail}`, plan, worktree, proposals: [], ...extra };
+    }
+    const reviewCommitted = await commitReviewArtefacts({ worktree, planPath: plan.execplanPath, tag });
+    if (!reviewCommitted.ok) {
+      return { id: tag, status: "failed", stage: "design-review", detail: `failed to commit the design-review notes: ${reviewCommitted.detail}`, plan, worktree, proposals: [], ...extra };
+    }
+    return null;
+  }
   async function runPlanDesignLoop2(task, worktree, opts = {}) {
     const tag = task.id;
     const extra = opts.extra || {};
@@ -2452,7 +2440,7 @@ function makeTaskPipeline(deps) {
       let durability = await verifyExecplanCommitted(worktree, plan.execplanPath);
       let salvageNote = "";
       if (!durability.ok) {
-        const salvage = await commitExecplanDraft(worktree, contained.relPath, tag);
+        const salvage = await commitExecplanDraft({ worktree, planPath: plan.execplanPath, tag });
         if (salvage.ok) {
           log(`[task ${tag}] plan round ${round}: ${durability.detail}; host committed the drafted plan`);
           durability = await verifyExecplanCommitted(worktree, plan.execplanPath);
@@ -2478,36 +2466,8 @@ function makeTaskPipeline(deps) {
       })), `design-review:${tag} r${round}`));
       if (designVerdict?.satisfied) {
         log(`[task ${tag}] design approved in round ${round}`);
-        const approved = await commitExecplanApproval(worktree, plan.execplanPath, tag);
-        if (!approved.ok) {
-          return {
-            fail: {
-              id: tag,
-              status: "failed",
-              stage: "design-review",
-              detail: `failed to record the committed ExecPlan approval: ${approved.detail}`,
-              plan,
-              worktree,
-              proposals: [],
-              ...extra
-            }
-          };
-        }
-        const reviewCommitted = await commitReviewArtefacts(worktree, plan.execplanPath, tag);
-        if (!reviewCommitted.ok) {
-          return {
-            fail: {
-              id: tag,
-              status: "failed",
-              stage: "design-review",
-              detail: `failed to commit the design-review notes: ${reviewCommitted.detail}`,
-              plan,
-              worktree,
-              proposals: [],
-              ...extra
-            }
-          };
-        }
+        const approvalFail = await commitDesignApproval(task, worktree, plan, extra);
+        if (approvalFail) return { fail: approvalFail };
         return { plan };
       }
       log(`[task ${tag}] design round ${round}: ${(designVerdict?.blocking || []).length} blocking point(s)`);

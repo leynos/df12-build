@@ -303,6 +303,26 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     recordCoderabbitReview,
   } = deps
 
+  // Deterministic bookkeeping owned by the control loop at the satisfied
+  // design-review boundary: record the committed APPROVED transition, then
+  // commit the reviewer's own notes — a workflow-owned review sibling of the
+  // plan — so the approved plan and its notes both land durable before
+  // implementation, and neither lingers dirty to fail the whole-worktree commit
+  // gate downstream. Returns a failing StageResult when either host commit
+  // fails, or null on success.
+  async function commitDesignApproval(task: SelectedTask, worktree: string, plan: StagePlan, extra: Record<string, unknown>): Promise<StageResult | null> {
+    const tag = task.id
+    const approved = await commitExecplanApproval({ worktree, planPath: plan.execplanPath, tag })
+    if (!approved.ok) {
+      return { id: tag, status: 'failed', stage: 'design-review', detail: `failed to record the committed ExecPlan approval: ${approved.detail}`, plan, worktree, proposals: [], ...extra }
+    }
+    const reviewCommitted = await commitReviewArtefacts({ worktree, planPath: plan.execplanPath, tag })
+    if (!reviewCommitted.ok) {
+      return { id: tag, status: 'failed', stage: 'design-review', detail: `failed to commit the design-review notes: ${reviewCommitted.detail}`, plan, worktree, proposals: [], ...extra }
+    }
+    return null
+  }
+
   async function runPlanDesignLoop(task: SelectedTask, worktree: string, opts: Record<string, unknown> = {}): Promise<{ plan?: StagePlan; fail?: StageResult }> {
     const tag = task.id
     const extra = (opts.extra as Record<string, unknown>) || {}
@@ -349,7 +369,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       let durability = await verifyExecplanCommitted(worktree, plan.execplanPath)
       let salvageNote = ''
       if (!durability.ok) {
-        const salvage = await commitExecplanDraft(worktree, contained.relPath, tag)
+        const salvage = await commitExecplanDraft({ worktree, planPath: plan.execplanPath, tag })
         if (salvage.ok) {
           log(`[task ${tag}] plan round ${round}: ${durability.detail}; host committed the drafted plan`)
           durability = await verifyExecplanCommitted(worktree, plan.execplanPath)
@@ -376,42 +396,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       })), `design-review:${tag} r${round}`))) as DesignVerdict | null
       if (designVerdict?.satisfied) {
         log(`[task ${tag}] design approved in round ${round}`)
-        // Deterministic bookkeeping owned by the control loop: record the
-        // committed APPROVED transition the moment the reviewer is satisfied.
-        const approved = await commitExecplanApproval(worktree, plan.execplanPath, tag)
-        if (!approved.ok) {
-          return {
-            fail: {
-              id: tag,
-              status: 'failed',
-              stage: 'design-review',
-              detail: `failed to record the committed ExecPlan approval: ${approved.detail}`,
-              plan,
-              worktree,
-              proposals: [],
-              ...extra,
-            },
-          }
-        }
-        // The reviewer's own notes live in a workflow-owned review sibling of
-        // the plan; commit them here so the approved plan and its notes both
-        // land durable before implementation, and neither lingers dirty to
-        // fail the whole-worktree commit gate downstream.
-        const reviewCommitted = await commitReviewArtefacts(worktree, plan.execplanPath, tag)
-        if (!reviewCommitted.ok) {
-          return {
-            fail: {
-              id: tag,
-              status: 'failed',
-              stage: 'design-review',
-              detail: `failed to commit the design-review notes: ${reviewCommitted.detail}`,
-              plan,
-              worktree,
-              proposals: [],
-              ...extra,
-            },
-          }
-        }
+        const approvalFail = await commitDesignApproval(task, worktree, plan as StagePlan, extra)
+        if (approvalFail) return { fail: approvalFail }
         return { plan }
       }
       log(`[task ${tag}] design round ${round}: ${(designVerdict?.blocking || []).length} blocking point(s)`)

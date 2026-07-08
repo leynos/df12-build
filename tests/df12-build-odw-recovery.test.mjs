@@ -1319,7 +1319,7 @@ test('the approval flip is host-committed, path-scoped, and idempotent', async (
   // Unrelated dirt must survive the approval commit untouched.
   writeFileSync(path.join(repo.parserWorktree, 'unrelated-dirt.txt'), 'agent scratch\n')
 
-  const flipped = await surface.commitExecplanApproval(repo.parserWorktree, PARSER_PLAN, '1.2.3')
+  const flipped = await surface.commitExecplanApproval({ worktree: repo.parserWorktree, planPath: PARSER_PLAN, tag: '1.2.3' })
   assert.equal(flipped.ok, true, flipped.detail)
   const committed = git(repo.parserWorktree, 'show', `HEAD:${PARSER_PLAN}`)
   assert.match(committed, /^Status: APPROVED$/m)
@@ -1330,7 +1330,7 @@ test('the approval flip is host-committed, path-scoped, and idempotent', async (
     'the approval commit must not sweep unrelated files',
   )
 
-  const again = await surface.commitExecplanApproval(repo.parserWorktree, PARSER_PLAN, '1.2.3')
+  const again = await surface.commitExecplanApproval({ worktree: repo.parserWorktree, planPath: PARSER_PLAN, tag: '1.2.3' })
   assert.equal(again.ok, true)
   assert.match(again.detail, /already committed/)
 })
@@ -1341,13 +1341,13 @@ test('the draft salvage commit is path-scoped and declines foreign dirt', async 
   const worktree = repo.parserWorktree
 
   // Clean tree: nothing to salvage.
-  const clean = await surface.commitExecplanDraft(worktree, PARSER_PLAN, '1.2.3')
+  const clean = await surface.commitExecplanDraft({ worktree, planPath: PARSER_PLAN, tag: '1.2.3' })
   assert.equal(clean.ok, false)
   assert.match(clean.detail, /already clean/)
 
   // Plan-only dirt: the host commits it, path-scoped, hermetic identity.
   writeFileSync(path.join(worktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nrevised but uncommitted\n')
-  const salvaged = await surface.commitExecplanDraft(worktree, PARSER_PLAN, '1.2.3')
+  const salvaged = await surface.commitExecplanDraft({ worktree, planPath: PARSER_PLAN, tag: '1.2.3' })
   assert.equal(salvaged.ok, true, salvaged.detail)
   assert.match(git(worktree, 'log', '-1', '--format=%s'), /Draft ExecPlan for task 1\.2\.3/)
   assert.match(git(worktree, 'show', `HEAD:${PARSER_PLAN}`), /revised but uncommitted/)
@@ -1356,7 +1356,7 @@ test('the draft salvage commit is path-scoped and declines foreign dirt', async 
   // Foreign dirt alongside the plan: declined, with the paths as evidence.
   writeFileSync(path.join(worktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nsecond revision\n')
   writeFileSync(path.join(worktree, 'scratch.txt'), 'planner scratch\n')
-  const declined = await surface.commitExecplanDraft(worktree, PARSER_PLAN, '1.2.3')
+  const declined = await surface.commitExecplanDraft({ worktree, planPath: PARSER_PLAN, tag: '1.2.3' })
   assert.equal(declined.ok, false)
   assert.match(declined.detail, /beyond the plan file/)
   assert.match(declined.detail, /scratch\.txt/)
@@ -1374,7 +1374,7 @@ test('the draft salvage commit admits the workflow-owned review artefact', async
   // path-scoped, leaving a clean tree.
   writeFileSync(path.join(worktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nrevised but uncommitted\n')
   writeFileSync(path.join(worktree, PARSER_REVIEW), '# Design review notes\n\nround 1 findings\n')
-  const salvaged = await surface.commitExecplanDraft(worktree, PARSER_PLAN, '1.2.3')
+  const salvaged = await surface.commitExecplanDraft({ worktree, planPath: PARSER_PLAN, tag: '1.2.3' })
   assert.equal(salvaged.ok, true, salvaged.detail)
   assert.match(git(worktree, 'show', `HEAD:${PARSER_PLAN}`), /revised but uncommitted/)
   assert.match(git(worktree, 'show', `HEAD:${PARSER_REVIEW}`), /round 1 findings/)
@@ -1385,7 +1385,7 @@ test('the draft salvage commit admits the workflow-owned review artefact', async
   writeFileSync(path.join(worktree, PARSER_PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nsecond revision\n')
   writeFileSync(path.join(worktree, PARSER_REVIEW), '# Design review notes\n\nround 1 findings, again\n')
   writeFileSync(path.join(worktree, 'scratch.txt'), 'planner scratch\n')
-  const declined = await surface.commitExecplanDraft(worktree, PARSER_PLAN, '1.2.3')
+  const declined = await surface.commitExecplanDraft({ worktree, planPath: PARSER_PLAN, tag: '1.2.3' })
   assert.equal(declined.ok, false)
   assert.match(declined.detail, /beyond the plan file/)
   assert.match(declined.detail, /scratch\.txt/)
