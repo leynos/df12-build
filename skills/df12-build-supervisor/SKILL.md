@@ -655,7 +655,7 @@ reviewer.
   contradicts the recommendation. Either hand-fix and merge, or fold the
   findings back into the roadmap and re-file.
 - **Roadmap-prose-fix halt** (an addendum/task whose sole deliverable is editing
-  the roadmap's *own* text — a wrong success criterion, a mis-stated contract):
+  the roadmap's *own* text — a wrong success criterion, a misstated contract):
   this is structurally un-runnable, because sub-agents are forbidden to edit
   the roadmap, so it hard-blocks. The triage's **`editorial` lane** is meant to
   catch these and apply them inline (triage is the one step that may edit the

@@ -117,7 +117,7 @@ with the single-file compile:
   survive refactors that move a helper between modules.
 - **It keeps the wiring explicit.** Configuration flows in one direction, from
   `main.ts` into the factories, so there is a single place to see how a run is
-  parameterised.
+  parameterized.
 
 ## The fail-closed build checks
 
@@ -253,7 +253,7 @@ command-line file instead of erroring on the repository config.
 The helper-surface and wiring-invariant suites read the **`src` tree**
 (via `readWorkflowSource()` / `readModuleSource()` in
 `tests/support/workflow-source.mjs`), not the reprinted artefact. esbuild
-normalises quotes and strips comments, so an assertion pinned against the
+normalizes quotes and strips comments, so an assertion pinned against the
 artefact would break on cosmetic reprinting; pinning against the source keeps
 those invariants meaningful, and `make workflow-freshness` ties the artefact
 back to that source. When an invariant's tokens all live in one module, scope

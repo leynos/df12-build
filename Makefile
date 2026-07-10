@@ -5,8 +5,10 @@ MARKDOWN_FILES := $(shell find . \
 	-path './image_out' -prune -o \
 	-name '*.md' -print | sort)
 WORKFLOW_FILES := workflows/df12-build-odw.js workflows/df12-build.js
+TYPOS_VERSION ?= 1.48.0
+TYPOS := uv tool run typos@$(TYPOS_VERSION)
 
-.PHONY: all clean check-fmt lint typecheck markdownlint nixie test test-modules test-workflow verify-modules verify-modules-strict workflow-parse workflow-build workflow-freshness
+.PHONY: all clean check-fmt lint typecheck markdownlint nixie spelling test test-modules test-workflow verify-modules verify-modules-strict workflow-parse workflow-build workflow-freshness
 
 all: check-fmt lint typecheck markdownlint nixie test workflow-freshness verify-modules
 
@@ -16,6 +18,7 @@ all: check-fmt lint typecheck markdownlint nixie test workflow-freshness verify-
 # staleness.
 clean:
 	rm -rf node_modules
+	rm -f .typos-oxendict-base.json .typos-oxendict-base.toml
 
 # Regenerate the ODW workflow artifact from the module tree under src/.
 workflow-build:
@@ -37,6 +40,12 @@ typecheck: workflow-parse
 
 markdownlint:
 	markdownlint-cli2 $(MARKDOWN_FILES)
+	+$(MAKE) spelling
+
+spelling:
+	@uv run scripts/generate_typos_config.py
+	@printf '%s\0' $(MARKDOWN_FILES) | \
+		xargs -0 -r $(TYPOS) --config typos.toml --force-exclude
 
 nixie:
 	nixie $(MARKDOWN_FILES)
