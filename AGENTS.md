@@ -154,6 +154,10 @@ passing every gate.
 
 - Validate with `make markdownlint` (or `bunx markdownlint-cli2 "**/*.md"`) and
   validate Mermaid diagrams with `make nixie`.
+- `make markdownlint` also refreshes the shared en-GB-oxendict base,
+  regenerates `typos.toml`, and checks maintained prose with the pinned `typos`
+  release. Put narrow repository-only exceptions in `typos.local.toml`; never
+  edit the generated configuration by hand.
 - Wrap prose and bullet points at 80 columns; wrap code blocks at 120 columns;
   do not wrap tables or headings.
 - Use dashes (`-`) for list bullets and GitHub-flavoured footnotes (`[^1]`) for
@@ -183,7 +187,7 @@ Apply the general clarity and strictness goals, subject to these ODW rules:
   agent output is contracted through the schemas in `schemas.ts` (which ODW
   enforces at the agent boundary). Do not reach for `zod` or similar — the
   dialect forbids the import, and the schema is also the cross-adapter contract.
-- **Time and randomness are forbidden, not merely centralised.** `Date.now()`,
+- **Time and randomness are forbidden, not merely centralized.** `Date.now()`,
   `Math.random()`, and arg-less `new Date()` are banned by ODW's dual-compat
   scan (they break deterministic run resumption under Claude Code). Hash a seed
   instead of `Math.random()`, and shell out to `date` for timestamps.

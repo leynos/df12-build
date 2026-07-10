@@ -333,7 +333,7 @@ dotted numeric id:
   - Success: Parser failures include a stable diagnostic code and source span.
 ```
 
-The selector recognises checked and unchecked task lines in this form:
+The selector recognizes checked and unchecked task lines in this form:
 
 ```markdown
 - [ ] 1.2.3. Task title.

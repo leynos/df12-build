@@ -40,6 +40,10 @@ Verify the checked-in workflow assets before launching a workshop:
 make all
 ```
 
+The Markdown gate refreshes the shared en-GB-oxendict dictionary when newer,
+regenerates `typos.toml`, and checks maintained prose with a pinned `typos`
+release. A valid committed config remains usable without network access.
+
 ### Basic usage
 
 Create a sidecar next to the target project, copy the ODW workflow into it,
@@ -90,7 +94,7 @@ ______________________________________________________________________
 
 For each unblocked roadmap task the host creates an isolated git worktree,
 verifies the task agent can write into it, then drives the task through
-planning, implementation, review, and integration — serialising only the
+planning, implementation, review, and integration — serializing only the
 steps that advance `origin/<base>`. Failed or halted branches are assessed
 report-only rather than discarded.
 

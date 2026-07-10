@@ -191,7 +191,7 @@ rules a contributor must keep when editing the tree.
   `make workflow-build`; never hand-edit `workflows/df12-build-odw.js`. The
   `workflow-freshness` gate fails a stale artefact.
 - **Source-invariant tests read the source, not the artefact.** esbuild
-  normalises quotes and strips comments, so pin invariants against the `src`
+  normalizes quotes and strips comments, so pin invariants against the `src`
   tree via `readWorkflowSource()` / `readModuleSource()`
   (`tests/support/workflow-source.mjs`); scope to one module when an ordered
   match must not span module boundaries.
@@ -396,6 +396,12 @@ documentation changes:
 ```bash
 make all
 ```
+
+`make all` reaches `make spelling` through the Markdown gate. The spelling
+target refreshes the shared en-GB-oxendict base when newer, regenerates
+`typos.toml`, and checks maintained prose with the pinned `typos` release. Put
+narrow repository-only exceptions in `typos.local.toml`; never edit the
+generated configuration by hand.
 
 Run the module suites (bun) or the whole-workflow suites (node, against a
 fresh artefact) separately when iterating:

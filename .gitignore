@@ -4,4 +4,6 @@
 .*.sw?
 __pycache__/
 *.pyc
+.typos-oxendict-base.json
+.typos-oxendict-base.toml
 node_modules/
