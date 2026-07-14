@@ -133,6 +133,12 @@ intact:
   `unreadable`, and the continue/recovery boundary reports it
   (`plan-unreadable`, `execplan-stat-error`) instead of dispatching over
   durable work.
+- Satisfy the integration completeness gate. Both normal and addendum lanes
+  share `integrationIncomplete()`, which requires `ok`, `rebased`,
+  `squashMerged`, `pushed`, and `roadmapMarkedDone` to all be truthy in the
+  `INTEGRATE_SCHEMA` result; any falsy field halts the task at
+  `stage: integrate`. `rebased` is mandatory so a squash-merged, pushed
+  branch that was never rebased onto BASE cannot be treated as integrated.
 
 Changes to workflow behaviour must update all relevant prompts, schemas, docs,
 and validation notes in the same branch.

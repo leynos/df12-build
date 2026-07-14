@@ -144,6 +144,28 @@ export function summarizeFixReport(fix: Record<string, unknown> | string | null 
   }
 }
 
+// The host treats the integration agent's report as a claim: a task counts as
+// integrated only when every field below lands true. `rebased` guards against a
+// squash-merged, pushed branch that was never realigned onto BASE. Both the
+// normal and addendum lanes share this gate, so keep the check and its detail
+// in one place to stop the lanes drifting when the required fields change.
+export const INTEGRATION_INCOMPLETE_DETAIL =
+  'integration incomplete (need ok+rebased+squashMerged+pushed+roadmapMarkedDone)'
+
+export function integrationIncomplete(integration: StageIntegration | null): boolean {
+  return (
+    !integration?.ok ||
+    !integration.rebased ||
+    !integration.pushed ||
+    !integration.squashMerged ||
+    !integration.roadmapMarkedDone
+  )
+}
+
+export function integrationHaltDetail(integration: StageIntegration | null): string {
+  return integration?.conflicts || integration?.summary || INTEGRATION_INCOMPLETE_DETAIL
+}
+
 export function makeTaskPipeline(deps: TaskPipelineDeps) {
   const {
     MAX_DESIGN_ROUNDS,
@@ -813,8 +835,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       const attempt = await integrateTask(task, worktree, mergeLock, proposals, kindExtra)
       if (attempt.fault) return attempt.fault
       integration = attempt.integration ?? null
-      if (!integration?.ok || !integration.rebased || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
-        return { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+rebased+squashMerged+pushed+roadmapMarkedDone)', worktree, proposals, ...kindExtra }
+      if (integrationIncomplete(integration)) {
+        return { id: tag, status: 'halted', stage: 'integrate', detail: integrationHaltDetail(integration), worktree, proposals, ...kindExtra }
       }
     } else {
       return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals, ...(coderabbitDeferred.length ? { openIssues: coderabbitDeferred } : {}), ...kindExtra }
@@ -969,8 +991,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         const attempt = await integrateTask(task, worktree, mergeLock, proposals, { kind: 'addendum' })
         if (attempt.fault) return attempt.fault
         integration = attempt.integration ?? null
-        if (!integration?.ok || !integration.rebased || !integration.pushed || !integration.squashMerged || !integration.roadmapMarkedDone) {
-          return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'integrate', detail: integration?.conflicts || integration?.summary || 'integration incomplete (need ok+rebased+squashMerged+pushed+roadmapMarkedDone)', worktree, proposals, kind: 'addendum' })
+        if (integrationIncomplete(integration)) {
+          return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'integrate', detail: integrationHaltDetail(integration), worktree, proposals, kind: 'addendum' })
         }
       } else {
         return { id: tag, status: 'manual-merge-ready', impl, addendumReview, integration, worktree, proposals, ...(addendumOpenIssues.length ? { openIssues: addendumOpenIssues } : {}), kind: 'addendum' }

@@ -125,6 +125,47 @@ function happyScript(): Script {
   }
 }
 
+// The five booleans the host requires before a task counts as integrated. The
+// gate is shared by the normal and addendum lanes, so the matrix below drives
+// every combination through both.
+const INTEGRATION_FLAGS = ['ok', 'rebased', 'pushed', 'squashMerged', 'roadmapMarkedDone'] as const
+
+// A clean addendum implementation report (green, no open issues), so the lane
+// skips the deferred-review fallback and reaches the shared integrate gate.
+const greenAddendum = { ok: true, gatesGreen: true, workItemsCompleted: 1, workItemsTotal: 1, openIssues: [], summary: 'addendum done' }
+
+type MatrixOutcome = { report: Record<string, boolean>; gated: boolean; status: unknown }
+
+// Run every combination of the five integration flags through one lane and
+// record which combinations the host gated at the integrate stage.
+async function integrationGateMatrix(isAddendum: boolean): Promise<MatrixOutcome[]> {
+  const results: MatrixOutcome[] = []
+  // One worktree, reused across every combination: the stubbed pipeline reads
+  // the worktree (durability gates) but never mutates it, so a fresh git init
+  // per combination would only add cost — enough to time the test out.
+  const worktree = makeWorktree()
+  const subjectTask = isAddendum ? { ...task, isAddendum: true, subtasks: ['1.2.3.1'] } : task
+  for (let mask = 0; mask < 1 << INTEGRATION_FLAGS.length; mask++) {
+    labels = []
+    const report: Record<string, boolean> = {}
+    INTEGRATION_FLAGS.forEach((flag, i) => {
+      report[flag] = Boolean(mask & (1 << i))
+    })
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('integrate:')) return { ...report, summary: 'integration report' }
+      if (isAddendum && label.startsWith('addendum:')) return greenAddendum
+      return happyScript()(label, prompt)
+    })
+    const outcome = await subject(worktree).runTask(subjectTask, null)
+    results.push({ report, gated: outcome.status === 'halted' && outcome.stage === 'integrate', status: outcome.status })
+  }
+  return results
+}
+
+function integrationComplete(report: Record<string, boolean>): boolean {
+  return INTEGRATION_FLAGS.every((flag) => report[flag])
+}
+
 describe('summarizers', () => {
   test('bound the review and fix evidence carried into assessments', () => {
     expect(summarizeReviewVerdict(null)).toBeNull()
@@ -169,6 +210,43 @@ describe('runTask', () => {
     expect(outcome.assessed).toBe(true) // halted outcomes route through attachAssessment
     expect(labels.filter((label) => label.startsWith('integrate:'))).toHaveLength(1)
   })
+
+  test('a non-rebased addendum integration halts at the integrate stage', async () => {
+    // The addendum lane shares the integrate gate with the normal lane, so the
+    // same rebased=false report must halt there too, not slip through as done.
+    const worktree = makeWorktree()
+    scriptAgent((label) => {
+      if (label.startsWith('addendum:')) return greenAddendum
+      if (label.startsWith('integrate:')) {
+        return { ok: true, rebased: false, pushed: true, squashMerged: true, roadmapMarkedDone: true, summary: 'merged without rebasing' }
+      }
+      throw new Error(`unscripted label: ${label}`)
+    })
+    const addendum = { ...task, isAddendum: true, subtasks: ['1.2.3.1'] }
+    const outcome = await subject(worktree).runTask(addendum, null)
+    expect(outcome.status).toBe('halted')
+    expect(outcome.stage).toBe('integrate')
+    expect(outcome.assessed).toBe(true)
+    expect(outcome.kind).toBe('addendum')
+    expect(labels.filter((label) => label.startsWith('integrate:'))).toHaveLength(1)
+  })
+
+  test('the integrate gate admits only the all-true integration combination (normal lane)', async () => {
+    const results = await integrationGateMatrix(false)
+    // The gate must halt exactly the incomplete combinations: gated iff not complete.
+    const mismatches = results.filter((result) => result.gated === integrationComplete(result.report))
+    expect(mismatches).toEqual([])
+    expect(results).toHaveLength(1 << INTEGRATION_FLAGS.length)
+    expect(results.find((result) => integrationComplete(result.report))?.status).toBe('done')
+  }, 20000)
+
+  test('the integrate gate admits only the all-true integration combination (addendum lane)', async () => {
+    const results = await integrationGateMatrix(true)
+    const mismatches = results.filter((result) => result.gated === integrationComplete(result.report))
+    expect(mismatches).toEqual([])
+    expect(results).toHaveLength(1 << INTEGRATION_FLAGS.length)
+    expect(results.find((result) => integrationComplete(result.report))?.status).toBe('done')
+  }, 20000)
 
   test('a blocking review round dispatches one fix agent then passes', async () => {
     const worktree = makeWorktree()

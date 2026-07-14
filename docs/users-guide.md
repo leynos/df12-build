@@ -733,6 +733,17 @@ squash carried forward. It retries until the push lands. The host simply does
 not extend that idempotence across a process crash, where a hidden success may
 already have merged.
 
+Separately from that in-agent retry loop, the host validates the integration
+agent's report before counting a task done. All five fields — `ok`, `rebased`,
+`squashMerged`, `pushed`, and `roadmapMarkedDone` — must be truthy. A branch
+that was squash-merged and pushed but never rebased onto `origin/<base>` (so
+`rebased` is false or absent) halts the task at `stage: integrate`; the
+`detail` field reads
+`'integration incomplete (need ok+rebased+squashMerged+pushed+roadmapMarkedDone)'`.
+Inspect the halted task result's `detail` field, rebase the branch manually if
+it is salvageable, and relaunch; otherwise discard the branch and relaunch from
+`origin/<base>`.
+
 Addendum implementations have one extra recovery state. If an addendum agent
 reports all work items complete, green gates, and no open issues, but fails to
 set the strict `ok=true` schema field, the workflow returns
