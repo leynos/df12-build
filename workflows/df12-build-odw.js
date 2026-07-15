@@ -1509,11 +1509,186 @@ function makeWritePreflight({ enabled, targets }) {
   }
   return { runTaskAgentWritePreflight: runTaskAgentWritePreflight2, ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2 };
 }
-var TASK_ARTEFACT_PATTERN = /^docs\/execplans\/.+\.md$/;
 
+// src/workflows/df12-build-odw/execplan-durability.ts
+var TASK_ARTEFACT_PATTERN = /^docs\/execplans\/.+\.md$/;
 function isTaskArtefactPath(candidate) {
   return TASK_ARTEFACT_PATTERN.test(String(candidate || ""));
 }
+function execplanRelPath(worktree, planPath) {
+  const path = process.getBuiltinModule("node:path");
+  const raw = String(planPath || "");
+  const rel = path.isAbsolute(raw) ? path.relative(worktree, raw) : path.normalize(raw);
+  if (!raw || !rel || rel === "." || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    return { ok: false, relPath: "", detail: `ExecPlan path escapes the assigned worktree: ${raw || "<empty>"}` };
+  }
+  return { ok: true, relPath: rel, detail: "" };
+}
+async function verifyExecplanCommitted(worktree, planPath) {
+  const contained = execplanRelPath(worktree, planPath);
+  if (!contained.ok) return { ok: false, detail: contained.detail };
+  const relPath = contained.relPath;
+  const inHead = await execFileStatus("git", ["-C", worktree, "cat-file", "-e", `HEAD:${relPath}`]);
+  if (!inHead.ok) return { ok: false, detail: `the plan file ${relPath} is not committed at HEAD` };
+  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1", "--", relPath]);
+  if (!status.ok) {
+    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || "").trim()}` };
+  }
+  if (String(status.stdout).trim()) return { ok: false, detail: `the plan file ${relPath} has uncommitted modifications` };
+  return { ok: true, detail: "" };
+}
+async function commitExecplanApproval(worktree, planPath, tag) {
+  const fs = process.getBuiltinModule("node:fs/promises");
+  const path = process.getBuiltinModule("node:path");
+  const contained = execplanRelPath(worktree, planPath);
+  if (!contained.ok) return { ok: false, detail: contained.detail };
+  const relPath = contained.relPath;
+  const absPath = path.join(worktree, relPath);
+  try {
+    const { constants } = process.getBuiltinModule("node:fs");
+    let text;
+    const readHandle = await fs.open(absPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      text = await readHandle.readFile({ encoding: "utf8" });
+    } finally {
+      await readHandle.close();
+    }
+    if (parseExecplanState(text).status !== "approved") {
+      const updated = /^Status:.*$/m.test(text) ? text.replace(/^Status:.*$/m, "Status: APPROVED") : `${text.trimEnd()}
+
+Status: APPROVED
+`;
+      const writeHandle = await fs.open(absPath, constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW);
+      try {
+        await writeHandle.writeFile(updated, { encoding: "utf8" });
+      } finally {
+        await writeHandle.close();
+      }
+    }
+  } catch (error) {
+    return { ok: false, detail: `could not update the plan status: ${error && error.message || String(error)}` };
+  }
+  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1", "--", relPath]);
+  if (!status.ok) {
+    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || "").trim()}` };
+  }
+  if (!String(status.stdout).trim()) return { ok: true, detail: "already committed as APPROVED" };
+  const add = await execFileStatus("git", ["-C", worktree, "add", "--", relPath]);
+  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
+  const commit = await execFileStatus("git", [
+    "-C",
+    worktree,
+    "-c",
+    "user.name=df12-build",
+    "-c",
+    "user.email=df12-build@workflow.invalid",
+    "commit",
+    "-m",
+    `Approve ExecPlan for task ${tag}`,
+    "--",
+    relPath
+  ]);
+  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
+  return { ok: true, detail: "" };
+}
+async function commitExecplanDraft(worktree, relPath, tag) {
+  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
+  if (!status.ok) return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
+  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return { ok: false, detail: "nothing to commit: the worktree is already clean" };
+  const foreign = lines.filter((line) => line.slice(3).replace(/^"(.*)"$/, "$1") !== relPath);
+  if (foreign.length) {
+    const sample = foreign.slice(0, 8).map((line) => line.trim()).join("; ");
+    return { ok: false, detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? "; \u2026" : ""})` };
+  }
+  const add = await execFileStatus("git", ["-C", worktree, "add", "--", relPath]);
+  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
+  const commit = await execFileStatus("git", [
+    "-C",
+    worktree,
+    "-c",
+    "user.name=df12-build",
+    "-c",
+    "user.email=df12-build@workflow.invalid",
+    "commit",
+    "-m",
+    `Draft ExecPlan for task ${tag}`,
+    "--",
+    relPath
+  ]);
+  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
+  return { ok: true, detail: "" };
+}
+async function salvageTaskArtefacts(worktree, candidatePaths, tag) {
+  const skipped = [];
+  const verified = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const candidate of candidatePaths) {
+    const raw = String(candidate || "");
+    if (!raw || seen.has(raw)) continue;
+    seen.add(raw);
+    if (!isTaskArtefactPath(raw)) {
+      skipped.push({ path: raw, reason: "not a task-scoped docs/execplans/*.md artefact" });
+      continue;
+    }
+    const contained = execplanRelPath(worktree, raw);
+    if (!contained.ok) {
+      skipped.push({ path: raw, reason: contained.detail });
+      continue;
+    }
+    if (!isTaskArtefactPath(contained.relPath)) {
+      skipped.push({ path: raw, reason: `normalizes outside the docs/execplans/*.md artefact scope (${contained.relPath})` });
+      continue;
+    }
+    const probe = await fileState(contained.relPath, worktree);
+    if (!probe.ok) {
+      skipped.push({ path: contained.relPath, reason: probe.detail });
+      continue;
+    }
+    if (!probe.exists) {
+      skipped.push({ path: contained.relPath, reason: "no regular file at the path (absent, or a symlink)" });
+      continue;
+    }
+    verified.push(contained.relPath);
+  }
+  if (!verified.length) {
+    return { committed: [], skipped, sha: "", detail: "nothing to salvage: no eligible task-scoped artefacts are dirty" };
+  }
+  const add = await execFileStatus("git", ["-C", worktree, "add", "--", ...verified]);
+  if (!add.ok) return { committed: [], skipped, sha: "", detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
+  const commit = await execFileStatus("git", [
+    "-C",
+    worktree,
+    "-c",
+    "user.name=df12-build",
+    "-c",
+    "user.email=df12-build@workflow.invalid",
+    "commit",
+    "-m",
+    `Salvage task artefacts for task ${tag}`,
+    "--",
+    ...verified
+  ]);
+  if (!commit.ok) return { committed: [], skipped, sha: "", detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
+  const head = await execFileStatus("git", ["-C", worktree, "rev-parse", "HEAD"]);
+  if (!head.ok) {
+    return { committed: verified, skipped, sha: "", detail: `salvage committed but reading HEAD failed: ${(head.message || head.stderr || "").trim()}` };
+  }
+  return { committed: verified, skipped, sha: String(head.stdout).trim(), detail: "" };
+}
+async function verifyWorktreeCommitted(worktree) {
+  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
+  if (!status.ok) {
+    return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
+  }
+  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return { ok: true, detail: "" };
+  const sample = lines.slice(0, 8).map((line) => line.trim()).join("; ");
+  return { ok: false, detail: `${lines.length} uncommitted path(s): ${sample}${lines.length > 8 ? "; \u2026" : ""}` };
+}
+
+// src/workflows/df12-build-odw/assessment.ts
+var SALVAGE_CLASSIFICATIONS = /* @__PURE__ */ new Set(["continue-manual", "adopt-partial", "infra-fault"]);
 function fastAssessmentClassification(evidence) {
   const collectionErrors = evidence?.collectionErrors || [];
   if (collectionErrors.length) {
@@ -1548,7 +1723,6 @@ function deterministicAssessment(classification, evidence, reason) {
     hostEvidence: evidence
   };
 }
-
 async function salvageAssessmentArtefacts(taskId, worktree, evidence, classification) {
   if (!SALVAGE_CLASSIFICATIONS.has(classification)) return null;
   if (!worktree) {
@@ -1574,7 +1748,6 @@ async function salvageAssessmentArtefacts(taskId, worktree, evidence, classifica
     return { classification, committed: [], skipped: [], sha: "", detail };
   }
 }
-
 function isInfraFaultResult(result) {
   if (!result) return false;
   if (result.status === "infra-fault" || result.stage === "infrastructure") return true;
@@ -2079,179 +2252,8 @@ ${outcome.tail}`, logFile };
   }
   return { coderabbitBackoffMinutes: coderabbitBackoffMinutes2, runCoderabbitHostReview: runCoderabbitHostReview2, recordCoderabbitReview: recordCoderabbitReview2, runHostCommitGates: runHostCommitGates2, runCodeSceneCheck: runCodeSceneCheck2 };
 }
-function execplanRelPath(worktree, planPath) {
-  const path = process.getBuiltinModule("node:path");
-  const raw = String(planPath || "");
-  const rel = path.isAbsolute(raw) ? path.relative(worktree, raw) : path.normalize(raw);
-  if (!raw || !rel || rel === "." || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
-    return { ok: false, relPath: "", detail: `ExecPlan path escapes the assigned worktree: ${raw || "<empty>"}` };
-  }
-  return { ok: true, relPath: rel, detail: "" };
-}
-async function verifyExecplanCommitted(worktree, planPath) {
-  const contained = execplanRelPath(worktree, planPath);
-  if (!contained.ok) return { ok: false, detail: contained.detail };
-  const relPath = contained.relPath;
-  const inHead = await execFileStatus("git", ["-C", worktree, "cat-file", "-e", `HEAD:${relPath}`]);
-  if (!inHead.ok) return { ok: false, detail: `the plan file ${relPath} is not committed at HEAD` };
-  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1", "--", relPath]);
-  if (!status.ok) {
-    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || "").trim()}` };
-  }
-  if (String(status.stdout).trim()) return { ok: false, detail: `the plan file ${relPath} has uncommitted modifications` };
-  return { ok: true, detail: "" };
-}
-async function commitExecplanApproval(worktree, planPath, tag) {
-  const fs = process.getBuiltinModule("node:fs/promises");
-  const path = process.getBuiltinModule("node:path");
-  const contained = execplanRelPath(worktree, planPath);
-  if (!contained.ok) return { ok: false, detail: contained.detail };
-  const relPath = contained.relPath;
-  const absPath = path.join(worktree, relPath);
-  try {
-    const { constants } = process.getBuiltinModule("node:fs");
-    let text;
-    const readHandle = await fs.open(absPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      text = await readHandle.readFile({ encoding: "utf8" });
-    } finally {
-      await readHandle.close();
-    }
-    if (parseExecplanState(text).status !== "approved") {
-      const updated = /^Status:.*$/m.test(text) ? text.replace(/^Status:.*$/m, "Status: APPROVED") : `${text.trimEnd()}
 
-Status: APPROVED
-`;
-      const writeHandle = await fs.open(absPath, constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW);
-      try {
-        await writeHandle.writeFile(updated, { encoding: "utf8" });
-      } finally {
-        await writeHandle.close();
-      }
-    }
-  } catch (error) {
-    return { ok: false, detail: `could not update the plan status: ${error && error.message || String(error)}` };
-  }
-  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1", "--", relPath]);
-  if (!status.ok) {
-    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || "").trim()}` };
-  }
-  if (!String(status.stdout).trim()) return { ok: true, detail: "already committed as APPROVED" };
-  const add = await execFileStatus("git", ["-C", worktree, "add", "--", relPath]);
-  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
-  const commit = await execFileStatus("git", [
-    "-C",
-    worktree,
-    "-c",
-    "user.name=df12-build",
-    "-c",
-    "user.email=df12-build@workflow.invalid",
-    "commit",
-    "-m",
-    `Approve ExecPlan for task ${tag}`,
-    "--",
-    relPath
-  ]);
-  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
-  return { ok: true, detail: "" };
-}
-async function commitExecplanDraft(worktree, relPath, tag) {
-  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
-  if (!status.ok) return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
-  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
-  if (!lines.length) return { ok: false, detail: "nothing to commit: the worktree is already clean" };
-  const foreign = lines.filter((line) => line.slice(3).replace(/^"(.*)"$/, "$1") !== relPath);
-  if (foreign.length) {
-    const sample = foreign.slice(0, 8).map((line) => line.trim()).join("; ");
-    return { ok: false, detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? "; \u2026" : ""})` };
-  }
-  const add = await execFileStatus("git", ["-C", worktree, "add", "--", relPath]);
-  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
-  const commit = await execFileStatus("git", [
-    "-C",
-    worktree,
-    "-c",
-    "user.name=df12-build",
-    "-c",
-    "user.email=df12-build@workflow.invalid",
-    "commit",
-    "-m",
-    `Draft ExecPlan for task ${tag}`,
-    "--",
-    relPath
-  ]);
-  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
-  return { ok: true, detail: "" };
-}
-
-async function salvageTaskArtefacts(worktree, candidatePaths, tag) {
-  const skipped = [];
-  const verified = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const candidate of candidatePaths) {
-    const raw = String(candidate || "");
-    if (!raw || seen.has(raw)) continue;
-    seen.add(raw);
-    if (!isTaskArtefactPath(raw)) {
-      skipped.push({ path: raw, reason: "not a task-scoped docs/execplans/*.md artefact" });
-      continue;
-    }
-    const contained = execplanRelPath(worktree, raw);
-    if (!contained.ok) {
-      skipped.push({ path: raw, reason: contained.detail });
-      continue;
-    }
-    if (!isTaskArtefactPath(contained.relPath)) {
-      skipped.push({ path: raw, reason: `normalizes outside the docs/execplans/*.md artefact scope (${contained.relPath})` });
-      continue;
-    }
-    const probe = await fileState(contained.relPath, worktree);
-    if (!probe.ok) {
-      skipped.push({ path: contained.relPath, reason: probe.detail });
-      continue;
-    }
-    if (!probe.exists) {
-      skipped.push({ path: contained.relPath, reason: "no regular file at the path (absent, or a symlink)" });
-      continue;
-    }
-    verified.push(contained.relPath);
-  }
-  if (!verified.length) {
-    return { committed: [], skipped, sha: "", detail: "nothing to salvage: no eligible task-scoped artefacts are dirty" };
-  }
-  const add = await execFileStatus("git", ["-C", worktree, "add", "--", ...verified]);
-  if (!add.ok) return { committed: [], skipped, sha: "", detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
-  const commit = await execFileStatus("git", [
-    "-C",
-    worktree,
-    "-c",
-    "user.name=df12-build",
-    "-c",
-    "user.email=df12-build@workflow.invalid",
-    "commit",
-    "-m",
-    `Salvage task artefacts for task ${tag}`,
-    "--",
-    ...verified
-  ]);
-  if (!commit.ok) return { committed: [], skipped, sha: "", detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
-  const head = await execFileStatus("git", ["-C", worktree, "rev-parse", "HEAD"]);
-  if (!head.ok) {
-    return { committed: verified, skipped, sha: "", detail: `salvage committed but reading HEAD failed: ${(head.message || head.stderr || "").trim()}` };
-  }
-  return { committed: verified, skipped, sha: String(head.stdout).trim(), detail: "" };
-}
-async function verifyWorktreeCommitted(worktree) {
-  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
-  if (!status.ok) {
-    return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
-  }
-  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
-  if (!lines.length) return { ok: true, detail: "" };
-  const sample = lines.slice(0, 8).map((line) => line.trim()).join("; ");
-  return { ok: false, detail: `${lines.length} uncommitted path(s): ${sample}${lines.length > 8 ? "; \u2026" : ""}` };
-}
-var SALVAGE_CLASSIFICATIONS = /* @__PURE__ */ new Set(["continue-manual", "adopt-partial", "infra-fault"]);
+// src/workflows/df12-build-odw/run-task.ts
 function summarizeReviewVerdict(review) {
   if (!review) return null;
   return {

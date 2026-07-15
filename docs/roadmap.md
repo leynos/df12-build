@@ -46,7 +46,7 @@ non-mutating.
     agents can read and write the assigned `roadmap-*` worktree rather than
     only the control checkout.
   - Success: a planner can create `docs/execplans/<branch-leaf>.md` in a
-    sibling task worktree, and design review reads that same on-disk artifact
+    sibling task worktree, and design review reads that same on-disk artefact
     before judging the plan.
 
 ### 1.2. Discover candidates without mutating the target project

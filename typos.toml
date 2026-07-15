@@ -6,6 +6,7 @@ extend-exclude = [
     ".git",
     ".hypothesis",
     ".pytest_cache",
+    ".terraform",
     ".tox",
     ".typos-oxendict-base.json",
     ".typos-oxendict-base.toml",
@@ -30,10 +31,12 @@ extend-exclude = [
 locale = "en-gb"
 extend-ignore-re = [
     "(?s)```.*?```",
+    "\\brust-analyzer\\b",
     "`[^`\\n]+`",
 ]
 
 [default.extend-words]
+"ASO" = "ASO"
 "absolutisable" = "absolutizable"
 "absolutisation" = "absolutization"
 "absolutisations" = "absolutizations"
@@ -142,8 +145,6 @@ extend-ignore-re = [
 "apologizers" = "apologizers"
 "apologizes" = "apologizes"
 "apologizing" = "apologizing"
-"artifact" = "artifact"
-"artifacts" = "artifacts"
 "atomisable" = "atomizable"
 "atomisation" = "atomization"
 "atomisations" = "atomizations"
@@ -830,6 +831,7 @@ extend-ignore-re = [
 "globalizers" = "globalizers"
 "globalizes" = "globalizes"
 "globalizing" = "globalizing"
+"handwritten" = "handwritten"
 "harmonisable" = "harmonizable"
 "harmonisation" = "harmonization"
 "harmonisations" = "harmonizations"
@@ -1010,6 +1012,24 @@ extend-ignore-re = [
 "internationalizers" = "internationalizers"
 "internationalizes" = "internationalizes"
 "internationalizing" = "internationalizing"
+"italicisable" = "italicizable"
+"italicisation" = "italicization"
+"italicisations" = "italicizations"
+"italicise" = "italicize"
+"italicised" = "italicized"
+"italiciser" = "italicizer"
+"italicisers" = "italicizers"
+"italicises" = "italicizes"
+"italicising" = "italicizing"
+"italicizable" = "italicizable"
+"italicization" = "italicization"
+"italicizations" = "italicizations"
+"italicize" = "italicize"
+"italicized" = "italicized"
+"italicizer" = "italicizer"
+"italicizers" = "italicizers"
+"italicizes" = "italicizes"
+"italicizing" = "italicizing"
 "itemisable" = "itemizable"
 "itemisation" = "itemization"
 "itemisations" = "itemizations"
@@ -2435,6 +2455,24 @@ extend-ignore-re = [
 "uncategorizers" = "uncategorizers"
 "uncategorizes" = "uncategorizes"
 "uncategorizing" = "uncategorizing"
+"underutilisable" = "underutilizable"
+"underutilisation" = "underutilization"
+"underutilisations" = "underutilizations"
+"underutilise" = "underutilize"
+"underutilised" = "underutilized"
+"underutiliser" = "underutilizer"
+"underutilisers" = "underutilizers"
+"underutilises" = "underutilizes"
+"underutilising" = "underutilizing"
+"underutilizable" = "underutilizable"
+"underutilization" = "underutilization"
+"underutilizations" = "underutilizations"
+"underutilize" = "underutilize"
+"underutilized" = "underutilized"
+"underutilizer" = "underutilizer"
+"underutilizers" = "underutilizers"
+"underutilizes" = "underutilizes"
+"underutilizing" = "underutilizing"
 "uninitialisable" = "uninitializable"
 "uninitialisation" = "uninitialization"
 "uninitialisations" = "uninitializations"

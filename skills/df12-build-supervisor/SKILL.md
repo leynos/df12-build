@@ -399,8 +399,8 @@ Known concrete failure:
   writable root.
 
 Treat design-review blockers as probably correct only after the reviewed
-artifact actually exists and is readable from the assigned worktree. If the
-reviewed artifact is absent, diagnose the missing side effect before editing
+artefact actually exists and is readable from the assigned worktree. If the
+reviewed artefact is absent, diagnose the missing side effect before editing
 the roadmap.
 
 ## Worked operator examples

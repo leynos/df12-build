@@ -536,7 +536,7 @@ If a partial implementation of this plan is interrupted, inspect `git status`,
 run the focused test, and resume from the first failing or unchecked Progress
 item. Do not attempt to recover by running a live ODW workshop.
 
-## Artifacts and notes
+## Artefacts and notes
 
 Concise validation transcripts are recorded here instead of full command logs.
 

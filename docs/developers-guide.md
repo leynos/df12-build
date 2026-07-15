@@ -214,8 +214,8 @@ bounces to the planner with the salvage-refusal evidence.
 Artefact salvage for failing branches is handled by two layers.
 `salvageTaskArtefacts` (`execplan-durability.ts`) is the primitive: it accepts
 a list of candidate paths, filters to those matching `TASK_ARTEFACT_PATTERN`
-(`docs/execplans/*.md`), re-checks that convention on the NORMALISED path (so
-`docs/execplans/../../README.md` is rejected after normalisation), containment-
+(`docs/execplans/*.md`), re-checks that convention on the NORMALIZED path (so
+`docs/execplans/../../README.md` is rejected after normalization), containment-
 checks via `execplanRelPath` (rejects `../` escapes and absolute paths outside
 the worktree), and lstat-probes via `fileState` so a symlink at the path is
 never followed. Only the verified paths are committed onto the branch under a
