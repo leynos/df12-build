@@ -518,6 +518,16 @@ backoff was added. Infrastructure faults keep their immediate warm retry — the
 committed-ExecPlan durability contract makes an in-place re-run cheap, and an
 adapter death is not a quota window that a pause would help clear.
 
+An adapter often wraps the provider limit (or a credential failure) inside its
+own process-exit string — for example `adapter 'claude' exited with code 1: API
+Error: 529 Overloaded` — so the message satisfies `infrastructureFailureDetail`
+*and* `providerFailureDetail` at once. The retry loop resolves the overlap with
+the same precedence as the terminal classifier (`resultFromUnhandledAgentError`):
+auth outranks provider, which outranks infrastructure. A wrapped rate-limit
+therefore takes the backoff path (counted as a `providerRetries`) instead of an
+immediate infra re-run against the still-closed window, and a wrapped auth
+failure stays terminal rather than burning the retry budget.
+
 The run result carries bounded-cardinality `faultMetrics` (`infraRetries`,
 `providerRetries`, `infraFaults`, `providerFaults`, `authFaults` — fixed keys,
 never keyed by task id or error text) so operators can read retry pressure and

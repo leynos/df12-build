@@ -641,8 +641,9 @@ function makeWithInfraRetry(attempts, backoffRange = [5, 30], sleep = hostSleepS
         return await run();
       } catch (error) {
         const message = error && error.message || String(error);
-        const isInfra = infrastructureFailureDetail(message) !== "";
-        const isProvider = !isInfra && providerFailureDetail(message) !== "";
+        const isAuth = authFailureDetail(message) !== "";
+        const isProvider = !isAuth && providerFailureDetail(message) !== "";
+        const isInfra = !isAuth && !isProvider && infrastructureFailureDetail(message) !== "";
         if (attempt >= attempts || !isInfra && !isProvider) {
           if (isInfra) {
             log(`[${label}] infrastructure fault persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`);
