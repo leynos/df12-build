@@ -191,6 +191,53 @@ describe('makeWithInfraRetry provider-fault backoff', () => {
     expect(sleeps).toEqual([infraRetryBackoffSeconds('stage#1', [5, 30])])
   })
 
+  test('a provider fault wrapped in an adapter exit backs off, not an immediate infra re-run', async () => {
+    // The adapter wraps a provider rate-limit as its own process exit, so the
+    // message satisfies both infrastructureFailureDetail and
+    // providerFailureDetail. The retry loop must mirror
+    // resultFromUnhandledAgentError's provider-over-infra precedence: back off
+    // and count a providerRetry rather than immediately re-running against the
+    // same closed rate-limit window and counting an infraRetry.
+    const sleeps: number[] = []
+    const withInfraRetry = makeWithInfraRetry(3, [5, 30], async (s) => {
+      sleeps.push(s)
+    })
+    let calls = 0
+    const failing = async () => {
+      calls += 1
+      throw new Error("adapter 'claude' exited with code 1: API Error: 529 Overloaded")
+    }
+    await expect(withInfraRetry(failing, 'stage')).rejects.toThrow(/529/)
+    expect(calls).toBe(3)
+    expect(faultMetrics.providerRetries).toBe(2)
+    expect(faultMetrics.infraRetries).toBe(0)
+    expect(sleeps.length).toBe(2)
+    for (const wait of sleeps) {
+      expect(wait).toBeGreaterThanOrEqual(5)
+      expect(wait).toBeLessThanOrEqual(30)
+    }
+  })
+
+  test('an auth failure wrapped in an adapter exit stays terminal, not retried as infra', async () => {
+    // Auth outranks infra as well: a wrapped credential failure is fatal, so it
+    // must not burn the retry budget even though the adapter-exit wrapper looks
+    // like an infrastructure fault.
+    const sleeps: number[] = []
+    const withInfraRetry = makeWithInfraRetry(3, [5, 30], async (s) => {
+      sleeps.push(s)
+    })
+    let calls = 0
+    const failing = async () => {
+      calls += 1
+      throw new Error("adapter 'codex' exited with code 1: API Error: 401 Unauthorized")
+    }
+    await expect(withInfraRetry(failing, 'stage')).rejects.toThrow(/401/)
+    expect(calls).toBe(1)
+    expect(faultMetrics.providerRetries).toBe(0)
+    expect(faultMetrics.infraRetries).toBe(0)
+    expect(sleeps).toEqual([])
+  })
+
   test('auth and product failures stay terminal with zero sleeps', async () => {
     const sleeps: number[] = []
     const withInfraRetry = makeWithInfraRetry(3, [5, 30], async (s) => {

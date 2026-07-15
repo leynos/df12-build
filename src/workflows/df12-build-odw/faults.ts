@@ -121,8 +121,17 @@ export function makeWithInfraRetry(
         return await run()
       } catch (error) {
         const message = ((error as Error | null) && (error as Error).message) || String(error)
-        const isInfra = infrastructureFailureDetail(message) !== ''
-        const isProvider = !isInfra && providerFailureDetail(message) !== ''
+        // Classify with the same precedence as resultFromUnhandledAgentError
+        // (auth > provider > infra). An adapter can wrap a provider rate-limit
+        // or an auth failure inside its own "adapter '…' exited with code N"
+        // string, which infrastructureFailureDetail also matches. Checking auth
+        // and provider first keeps a wrapped rate-limit on the backoff path
+        // (rather than an immediate infra re-run against the same closed window)
+        // and stops a wrapped auth failure from burning the retry budget —
+        // matching how the terminal classifier reports the identical message.
+        const isAuth = authFailureDetail(message) !== ''
+        const isProvider = !isAuth && providerFailureDetail(message) !== ''
+        const isInfra = !isAuth && !isProvider && infrastructureFailureDetail(message) !== ''
         if (attempt >= attempts || (!isInfra && !isProvider)) {
           // Log the terminal boundary distinctly from the retry path so
           // operators can see where the retry budget actually gave up.
