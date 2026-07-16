@@ -14,7 +14,12 @@ TYPOS := uv tool run typos@$(TYPOS_VERSION)
 DOCSTRING_MODULES := \
 	src/workflows/df12-build-odw/assessment.ts \
 	src/workflows/df12-build-odw/execplan-durability.ts \
-	src/workflows/df12-build-odw/main.ts
+	src/workflows/df12-build-odw/main.ts \
+	src/workflows/df12-build-odw/prompts.ts \
+	src/workflows/df12-build-odw/recovery-decision.ts \
+	src/workflows/df12-build-odw/recovery-discovery.ts \
+	src/workflows/df12-build-odw/run-task.ts \
+	src/workflows/df12-build-odw/schemas.ts
 DOCSTRING_MIN ?= 80
 
 .PHONY: all clean check-fmt lint typecheck markdownlint nixie spelling test test-modules test-workflow verify-modules verify-modules-strict workflow-parse workflow-build workflow-freshness docstring-coverage

@@ -9,7 +9,12 @@ import type { WorkflowConfig } from './config.ts'
 import { shellQuote } from './exec.ts'
 import { roadmapIdSlug } from './roadmap.ts'
 
-// The slices of task / plan / implementation records the prompts read.
+/**
+ * The slice of a roadmap task record the prompt builders read. Only the
+ * fields a prompt actually renders are modelled here, not the full roadmap
+ * task shape; `subtasks` is populated for addendum tasks (`isAddendum`
+ * true) and identifies the sub-task ids an addendum prompt is scoped to.
+ */
 export interface PromptTask {
   id: string
   title?: string
@@ -17,10 +22,22 @@ export interface PromptTask {
   subtasks?: readonly string[]
 }
 
+/**
+ * The slice of a plan record the prompt builders read: the path to the
+ * committed ExecPlan for a roadmap task, referenced by prompts that ask an
+ * agent to read, revise, or implement against that plan.
+ */
 export interface PromptPlan {
   execplanPath?: string
 }
 
+/**
+ * The slice of a builder's implementation report the prompt builders read.
+ * `summary` and `openIssues` feed the addendum review prompt; `residualRisk`
+ * (advisory, non-blocking) feeds {@link residualRiskLines} for the
+ * review/integration prompts. All fields are optional because a report may
+ * be absent (e.g. `impl` is `null`/`undefined`) or partially populated.
+ */
 export interface PromptImpl {
   summary?: string
   openIssues?: readonly string[]
@@ -50,17 +67,26 @@ function residualRiskLines(impl: PromptImpl | null | undefined): string[] {
   ]
 }
 
-// The verified git-donkey worktree-creation sequence, shared verbatim by every
-// prompt that tells an agent to build its own inspection worktree (audit here,
-// triage via injection). It mirrors the Worktree phase's fetch → base-arg →
-// verify/reset → re-verify discipline so an inspection worktree can never
-// silently root on a stale local BASE, and — critically — passes the configured
-// base to git donkey rather than relying on its no-argument default, which is
-// always `main` (git_donkey.donkey.choose_base_branch returns "main" for a null
-// origin arg). Omitting the base would root non-main bases on the wrong tree, or
-// fail outright when the target repo has no `main`. Parameterised only on the
-// base branch, so it can be injected into the import-free remediation module
-// without pulling config across the boundary.
+/**
+ * Render the verified git-donkey worktree-creation sequence, shared verbatim
+ * by every prompt that tells an agent to build its own inspection worktree
+ * (audit here, triage via injection). It mirrors the Worktree phase's fetch →
+ * base-arg → verify/reset → re-verify discipline so an inspection worktree
+ * can never silently root on a stale local BASE, and — critically — passes
+ * the configured base to git donkey rather than relying on its no-argument
+ * default, which is always `main` (git_donkey.donkey.choose_base_branch
+ * returns "main" for a null origin arg). Omitting the base would root
+ * non-main bases on the wrong tree, or fail outright when the target repo
+ * has no `main`. Parameterised only on the base branch, so it can be
+ * injected into the import-free remediation module without pulling config
+ * across the boundary.
+ *
+ * @param base - The integration branch to root the inspection worktree on
+ *   (e.g. the workflow's configured `BASE`).
+ * @returns The multi-line prompt fragment instructing the agent to fetch,
+ *   create, verify, and — if necessary — re-root the worktree on
+ *   `origin/${base}`.
+ */
 export function worktreeSafetyNet(base: string): string {
   return [
     `Create a fresh git-donkey worktree for your inspection, rooted on the CURRENT tip of origin/${base} — do no work in the root/control worktree. The control worktree's local ${base} is frequently stale (a remediation flush pushes origin/${base} without advancing local ${base}), so follow this verified sequence:`,
@@ -71,6 +97,25 @@ export function worktreeSafetyNet(base: string): string {
   ].join('\n')
 }
 
+/**
+ * Factory that binds the run configuration once and returns the full set of
+ * prompt builder functions used by the df12-build pipeline. Destructures
+ * `config` under the historical constant names so the prompt bodies remain
+ * verbatim, then closes over them so each returned builder never needs the
+ * config threaded back in explicitly. The entry point destructures the
+ * returned object, so call sites keep the same shape as if the builders
+ * were free-standing exports.
+ *
+ * @param config - The workflow's resolved run configuration (base branch,
+ *   roadmap location, search backend, delegation/review guidance text, and
+ *   related settings) consumed by the returned prompt builders.
+ * @returns An object exposing the prompt/guidance builder functions
+ *   (`preamble`, `planPrompt`, `designReviewPrompt`, `implementPrompt`,
+ *   `implementWorkItemPrompt`, `fixPrompt`, `codeReviewPrompt`,
+ *   `expertReviewPrompt`, `addendumReviewPrompt`, `implementAddendumPrompt`,
+ *   `integratePrompt`, `auditPrompt`, and the code-search helpers) for the
+ *   pipeline stages to invoke.
+ */
 export function makePrompts(config: WorkflowConfig) {
   const {
     BASE,
