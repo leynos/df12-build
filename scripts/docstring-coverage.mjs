@@ -21,6 +21,12 @@ import { readFileSync } from 'node:fs'
 
 const DEFAULT_MIN = 80
 
+/**
+ * Parse CLI arguments into file paths plus an optional `--min <pct>` threshold.
+ *
+ * @param argv Process arguments (excluding the node binary and script path).
+ * @returns `{ files, min }`; throws when `--min` is not a percentage in [0, 100].
+ */
 function parseArgs(argv) {
   const files = []
   let min = DEFAULT_MIN
@@ -39,9 +45,15 @@ function parseArgs(argv) {
   return { files, min }
 }
 
-// A leading `/** … */` block is a JSDoc doc-comment; a `//` block or a plain
-// `/* … */` block is not. Returns true when the comment range closest to the
-// declaration (the one that documents it) is a JSDoc block.
+/**
+ * Whether the comment closest to a declaration (the one that documents it) is a
+ * JSDoc block. Only a leading double-star block counts; a `//` block or a plain
+ * single-star block comment does not.
+ *
+ * @param fullText The module's full source text.
+ * @param node The declaration statement node.
+ * @returns True when the immediately-preceding comment is a JSDoc block.
+ */
 function hasJsDocImmediatelyBefore(fullText, node) {
   const ranges = ts.getLeadingCommentRanges(fullText, node.getFullStart()) || []
   if (!ranges.length) return false
@@ -50,9 +62,14 @@ function hasJsDocImmediatelyBefore(fullText, node) {
   return fullText.slice(last.pos, last.end).startsWith('/**')
 }
 
-// The exported names a top-level statement introduces (empty for non-exports and
-// for bare `export { … }` re-exports, which have no declaration site to document
-// here).
+/**
+ * The exported names a top-level statement introduces. Empty for non-exports and
+ * for bare `export { … }` re-exports, which have no declaration site to document
+ * here.
+ *
+ * @param statement A top-level source-file statement.
+ * @returns The exported identifier names (possibly several for a var statement).
+ */
 function exportedNames(statement) {
   const modifiers = ts.canHaveModifiers(statement) ? ts.getModifiers(statement) : undefined
   const isExported = (modifiers || []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
@@ -74,9 +91,16 @@ function exportedNames(statement) {
   return []
 }
 
-function hasFileDocblock(fullText, sourceFile) {
-  const anchor = sourceFile.statements.length ? sourceFile.statements[0].getFullStart() : fullText.length
-  const ranges = ts.getLeadingCommentRanges(fullText, 0) || ts.getLeadingCommentRanges(fullText, anchor) || []
+/**
+ * Whether the module opens with a `@file` JSDoc docblock. The module docblock
+ * is the first leading comment of the file, so a single leading-comment lookup
+ * from position 0 finds it.
+ *
+ * @param fullText The module's full source text.
+ * @returns True when a leading `/**` block contains an `@file` tag.
+ */
+function hasFileDocblock(fullText) {
+  const ranges = ts.getLeadingCommentRanges(fullText, 0) || []
   return ranges.some(
     (range) =>
       range.kind === ts.SyntaxKind.MultiLineCommentTrivia &&
@@ -85,6 +109,15 @@ function hasFileDocblock(fullText, sourceFile) {
   )
 }
 
+/**
+ * Analyse one module's docstring coverage: count its exported declarations, how
+ * many carry a JSDoc block, and whether it opens with an `@file` docblock. A
+ * module with no exports is vacuously covered (100%), but the `@file` block is
+ * still required so the module explains itself.
+ *
+ * @param file Path to the TypeScript module.
+ * @returns A per-file report `{ file, total, documented, coverage, fileDocblock, undocumented }`.
+ */
 function analyseFile(file) {
   const fullText = readFileSync(file, 'utf8')
   const sourceFile = ts.createSourceFile(file, fullText, ts.ScriptTarget.ESNext, true)
@@ -97,19 +130,21 @@ function analyseFile(file) {
   }
   const total = exportsFound.length
   const documented = exportsFound.filter((entry) => entry.documented).length
-  // A module with no exports is vacuously covered; the @file block is still
-  // required so the module explains itself.
   const coverage = total === 0 ? 100 : (documented / total) * 100
   return {
     file,
     total,
     documented,
     coverage,
-    fileDocblock: hasFileDocblock(fullText, sourceFile),
+    fileDocblock: hasFileDocblock(fullText),
     undocumented: exportsFound.filter((entry) => !entry.documented).map((entry) => entry.name),
   }
 }
 
+/**
+ * CLI entry point: analyse every given module and exit non-zero when any lacks
+ * the `@file` docblock or falls below the threshold, printing a per-file report.
+ */
 function main() {
   const { files, min } = parseArgs(process.argv.slice(2))
   if (!files.length) {

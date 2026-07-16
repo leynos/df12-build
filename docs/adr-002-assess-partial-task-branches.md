@@ -111,17 +111,22 @@ sequenceDiagram
     attachAssessment first classifies the failed task branch. When the
     classification is a deterministic continue-manual raised on untrustworthy
     host evidence, attachAssessment returns a salvage-skipped record without
-    touching Git. Otherwise, for a model-based continue-manual or adopt-partial
+    touching Git. For a model-based continue-manual or adopt-partial
     classification, attachAssessment calls salvageAssessmentArtefacts with the
-    classification, the host evidence, and the worktree path. That function
-    calls salvageTaskArtefacts with the candidate artefact paths and a commit
-    tag. salvageTaskArtefacts checks path containment and file state, then adds
-    and commits the eligible docs/execplans artefacts to Git, which returns the
-    commit SHA. salvageTaskArtefacts returns a SalvageOutcome, and
-    salvageAssessmentArtefacts wraps it as a SalvageRecord back to
-    attachAssessment.
+    classification, the host evidence, and the worktree path. For an infra-fault
+    result that never reaches the model, attachAssessment instead calls
+    salvageInfraFaultArtefacts, which collects host evidence and delegates to
+    salvageAssessmentArtefacts under the infra-fault classification. In both
+    committing branches salvageAssessmentArtefacts calls salvageTaskArtefacts
+    with the candidate artefact paths and a commit tag; salvageTaskArtefacts
+    checks path containment and file state, then adds and commits the eligible
+    docs/execplans artefacts to Git, which returns the commit SHA.
+    salvageTaskArtefacts returns a SalvageOutcome, and salvageAssessmentArtefacts
+    wraps it as a SalvageRecord back to its caller — attachAssessment directly,
+    or via salvageInfraFaultArtefacts, which passes the record on.
   }
   participant attachAssessment
+  participant salvageInfraFaultArtefacts
   participant salvageAssessmentArtefacts
   participant salvageTaskArtefacts
   participant Git
@@ -136,6 +141,15 @@ sequenceDiagram
     Git-->>salvageTaskArtefacts: commit SHA
     salvageTaskArtefacts-->>salvageAssessmentArtefacts: SalvageOutcome
     salvageAssessmentArtefacts-->>attachAssessment: SalvageRecord
+  else infra-fault result (no model assessment)
+    attachAssessment->>salvageInfraFaultArtefacts: infra-fault result, worktree
+    salvageInfraFaultArtefacts->>salvageAssessmentArtefacts: infra-fault classification, evidence, worktree
+    salvageAssessmentArtefacts->>salvageTaskArtefacts: candidate paths, tag
+    salvageTaskArtefacts->>Git: check containment, file state, add, commit
+    Git-->>salvageTaskArtefacts: commit SHA
+    salvageTaskArtefacts-->>salvageAssessmentArtefacts: SalvageOutcome
+    salvageAssessmentArtefacts-->>salvageInfraFaultArtefacts: SalvageRecord
+    salvageInfraFaultArtefacts-->>attachAssessment: SalvageRecord
   end
 ```
 
