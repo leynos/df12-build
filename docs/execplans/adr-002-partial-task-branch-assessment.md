@@ -604,6 +604,7 @@ const ASSESSMENT_SCHEMA = {
     roadmap: { type: 'string' },
     validation: { type: 'string' },
     missingEvidence: { type: 'array', items: { type: 'string' } },
+    residualRisk: { type: 'array', items: { type: 'string' } },
     risks: { type: 'array', items: { type: 'string' } },
     recommendation: { type: 'string' },
   },
@@ -616,6 +617,7 @@ const ASSESSMENT_SCHEMA = {
     'dirtyState',
     'changedFiles',
     'missingEvidence',
+    'residualRisk',
     'recommendation',
   ],
 }
