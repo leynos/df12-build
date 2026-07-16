@@ -1,9 +1,12 @@
-// Fresh-run recovery discovery (failure resume, phase 1) — reconstruct
-// recovery candidates from durable Git state alone: local roadmap-* branches,
-// live worktrees, and the canonical roadmap. Discovery never mutates the
-// target project; it only reads refs, worktree metadata, and commit ids.
-// Discovery limits (base branch, resumeTaskId, candidate cap) are bound once
-// via makeRecoveryDiscovery so the run configuration stays in the entry.
+/**
+ * @file Fresh-run recovery discovery (failure resume, phase 1) —
+ * reconstruct recovery candidates from durable Git state alone: local
+ * roadmap-* branches, live worktrees, and the canonical roadmap. Discovery
+ * never mutates the target project; it only reads refs, worktree metadata,
+ * and commit ids. Discovery limits (base branch, resumeTaskId, candidate
+ * cap) are bound once via makeRecoveryDiscovery so the run configuration
+ * stays in the entry.
+ */
 import { execFileStatus, fileState } from './exec.ts'
 import { directoryExists, readFileText } from './git-evidence.ts'
 import { branchToRoadmapId, parseExecplanState, parseWorktreeList } from './recovery-decision.ts'

@@ -1,8 +1,11 @@
-// Pure decision helpers for fresh-run recovery (failure-resume design):
-// task-branch naming, `git worktree list --porcelain` parsing, the review-mode
-// and continue-mode decision tables, and committed-ExecPlan state parsing.
-// Everything here is deterministic and free of I/O, injected ODW primitives,
-// and run configuration, so it is unit-testable by direct import.
+/**
+ * @file Pure decision helpers for fresh-run recovery (failure-resume
+ * design): task-branch naming, `git worktree list --porcelain` parsing,
+ * the review-mode and continue-mode decision tables, and committed-ExecPlan
+ * state parsing. Everything here is deterministic and free of I/O, injected
+ * ODW primitives, and run configuration, so it is unit-testable by direct
+ * import.
+ */
 
 export interface WorktreeEntry {
   worktreePath: string
@@ -31,12 +34,19 @@ export interface RecoveryEvidence {
 // review evidence that must prevent a resume. `residualRisk` is the ADVISORY
 // channel — non-blocking caveats carried forward as review/integration context;
 // the eligibility gate never consults it (issue #23).
+//
+// `residualRisk` is REQUIRED: it mirrors ASSESSMENT_SCHEMA (which lists it in
+// `required`) and forces every typed assessment producer to declare advisory
+// risk explicitly, even if empty. Untrusted agent JSON is still read defensively
+// at the boundary through `advisoryResidualRisk` below, which tolerates an
+// absent or malformed field — the required type governs typed producers, not the
+// runtime guard.
 export interface RecoveryAssessmentFields {
   classification?: string
   taskScoped?: boolean
   validation?: string
   missingEvidence?: readonly string[]
-  residualRisk?: readonly string[]
+  residualRisk: readonly string[]
 }
 
 // Read the ADVISORY residual risk off an assessment record, tolerating the

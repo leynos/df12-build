@@ -1,10 +1,12 @@
-// JSON Schema contracts for every structured agent hand-off in the
-// df12-build-odw workflow: plan, design verdict, implementation, dual
-// review, fix rounds, integration, post-merge audit, and the ADR 002
-// partial-branch assessment. Downstream JavaScript dereferences `required`
-// fields without optional chaining, and iterates keys under the assumption
-// that `additionalProperties` is false, so treat these as contracts, not
-// documentation; tests/modules/schemas.test.ts pins them.
+/**
+ * @file JSON Schema contracts for every structured agent hand-off in the
+ * df12-build-odw workflow: plan, design verdict, implementation, dual review,
+ * fix rounds, integration, post-merge audit, and the ADR 002 partial-branch
+ * assessment. Downstream JavaScript dereferences `required` fields without
+ * optional chaining, and iterates keys assuming `additionalProperties` is
+ * false, so treat these as contracts, not documentation;
+ * tests/modules/schemas.test.ts pins them.
+ */
 export const PLAN_SCHEMA = {
   type: 'object',
   additionalProperties: false,

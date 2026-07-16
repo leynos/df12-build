@@ -284,6 +284,7 @@ construct a synthetic implementation result from durable evidence:
   commits: ["<recent branch commit subjects>"],
   coderabbitRuns: 0,
   openIssues: ["recovered branch requires fresh review"],
+  residualRisk: ["<advisory caveat from assessment>"],
   summary: "Recovered adopt-complete branch from durable git state."
 }
 ```

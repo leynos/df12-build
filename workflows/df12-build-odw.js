@@ -32,6 +32,7 @@ export const meta = {
   ],
 }
 
+// src/workflows/df12-build-odw/recovery-decision.ts
 function advisoryResidualRisk(assessment) {
   return Array.isArray(assessment?.residualRisk) ? assessment.residualRisk : [];
 }
@@ -1069,6 +1070,7 @@ function makeConfig(rawArgs) {
   };
 }
 
+// src/workflows/df12-build-odw/prompts.ts
 function residualRiskLines(impl) {
   const items = impl?.residualRisk || [];
   if (!items.length) return [];
@@ -3403,7 +3405,8 @@ async function runRecovery(root, mergeLock2 = null) {
       evidence = assessment.hostEvidence;
       const resolved = await recoveryExecplanPath(candidate);
       enriched = { ...candidate, execplanPath: resolved.execplanPath };
-      decision = resolved.error ? { classification: "", action: "report", stage: null, reason: "execplan-stat-error", skip: true } : { stage: "review", ...recoveryDecision(enriched, evidence, assessment, RESUME_MODE, { dryRun: DRY_RUN }) };
+      const assessmentFields = assessment;
+      decision = resolved.error ? { classification: "", action: "report", stage: null, reason: "execplan-stat-error", skip: true } : { stage: "review", ...recoveryDecision(enriched, evidence, assessmentFields, RESUME_MODE, { dryRun: DRY_RUN }) };
     }
     const resultBase = {
       id: candidate.taskId,

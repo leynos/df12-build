@@ -23,6 +23,18 @@ const globals = globalThis as Record<string, unknown>
 globals.log = () => {}
 globals.phase = () => {}
 
+// Both assessment entry points (assessmentPrompt and recoveryAssessmentPrompt)
+// share the ADR 002 classification contract via assessmentPromptLines: blocking
+// gaps route to `missingEvidence`, advisory caveats to `residualRisk`, and an
+// eligible adopt-complete is never held back for advisory risk alone (#23).
+// Pin that instructional wording so a regression that weakens it fails loudly.
+function assertClassificationContract(prompt: string): void {
+  expect(prompt).toContain('Separate blocking evidence gaps from advisory residual risk:')
+  expect(prompt).toContain('Put a gap in `missingEvidence` ONLY when it genuinely blocks confidence')
+  expect(prompt).toContain('into `residualRisk`. These are non-blocking caveats carried forward')
+  expect(prompt).toContain('must NOT be held back for advisory residual risk alone')
+}
+
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, {
     cwd,
@@ -462,6 +474,7 @@ describe('recovery assessment entry points', () => {
     expect(prompt).not.toContain('after a workflow failure')
     expect(prompt).toContain('"branchName": "roadmap-1-2-3"')
     expect(prompt).toContain('"baseCommit": "abc123"')
+    assertClassificationContract(prompt)
   })
 
   test('assessRecoveryCandidate returns the structured assessment with host evidence', async () => {
@@ -537,5 +550,6 @@ describe('attachAssessment', () => {
     expect(prompt).toContain('PREAMBLE /tmp/wt')
     expect(prompt).toContain('roadmap task 1.2.3')
     expect(prompt).toContain('"branchName": "roadmap-1-2-3"')
+    assertClassificationContract(prompt)
   })
 })
