@@ -139,6 +139,8 @@ export function makeWithInfraRetry(
             log(`[${label}] infrastructure fault persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`)
           } else if (isProvider) {
             log(`[${label}] provider rate-limit persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`)
+          } else if (isAuth) {
+            log(`[${label}] authentication failure; not retried (fatal): ${message}`)
           } else {
             log(`[${label}] non-infrastructure failure; not retried: ${message}`)
           }

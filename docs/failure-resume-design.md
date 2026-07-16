@@ -145,16 +145,16 @@ fault, not as a reviewable task plan.
 
 Add these ODW `args` fields:
 
-| Argument                   | Default    | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| -------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `resumePartialBranches`    | `false`    | Enable fresh-run recovery discovery.                                                                                                                                                                                                                                                                                                                                                                                        |
-| `resumeMode`               | `"assess"` | One of `"assess"`, `"review"`, or `"continue"`. `"assess"` reports only. `"review"` may route clean `adopt-complete` branches into review and integration. `"continue"` dispatches deterministically on the committed ExecPlan `Status` and re-enters the ordinary pipeline at the plan, implement, or review stage.                                                                                                        |
-| `resumeTaskId`             | unset      | Limit recovery discovery to one roadmap id. This is separate from `taskId`, which selects normal roadmap work.                                                                                                                                                                                                                                                                                                              |
-| `resumeMaxCandidates`      | `4`        | Bound startup recovery fan-in so a messy repository does not consume the whole run.                                                                                                                                                                                                                                                                                                                                         |
-| `reuseAcceptedExecPlans`   | `false`    | Enable accepted-plan adoption after normal roadmap selection. When disabled, every normal task still enters the existing plan/design loop.                                                                                                                                                                                                                                                                                  |
-| `acceptedPlanMode`         | `"verify"` | One of `"verify"` or `"build"`. `"verify"` reports whether a matching plan is adoptable. `"build"` may enter implementation when the plan is fresh and accepted.                                                                                                                                                                                                                                                            |
-| `stageAttempts`            | `2`        | Total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, killed CLI, schema-retry exhaustion) or a provider rate-limit. Product failures are never retried.                                                                                                                                                                                                               |
-| `infraRetryBackoffSeconds` | `[5, 30]`  | `[low, high]` seconds for the bounded backoff between provider-fault retries. A retry waits an advertised `retry-after` (clamped into this range) when the error carries one, otherwise a deterministic seeded-jitter interval in the range. Second-scale, unlike the minute-scale `coderabbitBackoffMinutes`, because provider limits recover fast. Infrastructure-fault retries do not back off (a warm re-run is cheap). |
+| Argument                   | Default    | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| -------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `resumePartialBranches`    | `false`    | Enable fresh-run recovery discovery.                                                                                                                                                                                                                                                                                                                                                                                       |
+| `resumeMode`               | `"assess"` | One of `"assess"`, `"review"`, or `"continue"`. `"assess"` reports only. `"review"` may route clean `adopt-complete` branches into review and integration. `"continue"` dispatches deterministically on the committed ExecPlan `Status` and re-enters the ordinary pipeline at the plan, implement, or review stage.                                                                                                       |
+| `resumeTaskId`             | unset      | Limit recovery discovery to one roadmap id. This is separate from `taskId`, which selects normal roadmap work.                                                                                                                                                                                                                                                                                                             |
+| `resumeMaxCandidates`      | `4`        | Bound startup recovery fan-in so a messy repository does not consume the whole run.                                                                                                                                                                                                                                                                                                                                        |
+| `reuseAcceptedExecPlans`   | `false`    | Enable accepted-plan adoption after normal roadmap selection. When disabled, every normal task still enters the existing plan/design loop.                                                                                                                                                                                                                                                                                 |
+| `acceptedPlanMode`         | `"verify"` | One of `"verify"` or `"build"`. `"verify"` reports whether a matching plan is adoptable. `"build"` may enter implementation when the plan is fresh and accepted.                                                                                                                                                                                                                                                           |
+| `stageAttempts`            | `2`        | Total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, killed CLI, schema-retry exhaustion) or a provider rate-limit. Product failures are never retried.                                                                                                                                                                                                              |
+| `infraRetryBackoffSeconds` | `[5, 30]`  | `[low, high]` seconds for the bounded backoff between provider-fault retries. A retry waits an advertised `retry-after` (clamped into this range) when the error carries one, otherwise a deterministic seeded-jitter interval in the range. Second-scale, unlike the minute-scale `coderabbitBackoffMinutes` because provider limits recover fast. Infrastructure-fault retries do not back off (a warm re-run is cheap). |
 
 `resumeMode` is intentionally not called `autoResume`. The name should force an
 operator to choose the maximum action allowed by the run.
@@ -496,7 +496,7 @@ a product failure:
 A provider fault is a transient server-side limit — a `429`/`529`, an
 "overloaded" or "rate limited" model, a gateway timeout — detected by regex
 over the adapter's stderr or exception text (`providerFailureDetail`). Like an
-infrastructure fault it carries no verdict about the task branch, so it is
+infrastructure fault, it carries no verdict about the task branch, so it is
 retried in place within the same `stageAttempts` budget rather than halting on
 the first hit. The one difference is timing: retrying a still-closed rate-limit
 window instantly just burns the attempt budget, so each provider-fault re-run
@@ -510,20 +510,21 @@ When no wait is advertised the backoff is a deterministic seeded jitter (DJB2
 over `${label}#${attempt}`, `Math.random()` being banned for Claude Code
 dual-compatibility) spread across the same range, keeping sibling tasks that
 hit the same limit from retrying in lockstep. If the limit persists across the
-budget the task stops terminally as `provider-fault`, exactly as before this
+budget, the task stops terminally as `provider-fault`, exactly as before this
 backoff was added. Infrastructure faults keep their immediate warm retry — the
 committed-ExecPlan durability contract makes an in-place re-run cheap, and an
 adapter death is not a quota window that a pause would help clear.
 
 An adapter often wraps the provider limit (or a credential failure) inside its
-own process-exit string — for example `adapter 'claude' exited with code 1: API
-Error: 529 Overloaded` — so the message satisfies `infrastructureFailureDetail`
-*and* `providerFailureDetail` at once. The retry loop resolves the overlap with
-the same precedence as the terminal classifier (`resultFromUnhandledAgentError`):
-auth outranks provider, which outranks infrastructure. A wrapped rate-limit
-therefore takes the backoff path (counted as a `providerRetries`) instead of an
-immediate infra re-run against the still-closed window, and a wrapped auth
-failure stays terminal rather than burning the retry budget.
+own process-exit string — for example
+`adapter 'claude' exited with code 1: API Error: 529 Overloaded` — so the
+message satisfies `infrastructureFailureDetail` *and* `providerFailureDetail`
+at once. The retry loop resolves the overlap with the same precedence as the
+terminal classifier (`resultFromUnhandledAgentError`): auth outranks provider,
+which outranks infrastructure. A wrapped rate-limit therefore takes the backoff
+path (counted as a `providerRetries`) instead of an immediate infra re-run
+against the still-closed window, and a wrapped auth failure stays terminal
+rather than burning the retry budget.
 
 The run result carries bounded-cardinality `faultMetrics` (`infraRetries`,
 `providerRetries`, `infraFaults`, `providerFaults`, `authFaults` — fixed keys,
