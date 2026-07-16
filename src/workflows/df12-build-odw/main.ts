@@ -17,6 +17,7 @@ import {
   parseExecplanState,
   recoveryDecision,
   recoveryContinueDecision,
+  advisoryResidualRisk,
 } from './recovery-decision.ts'
 import {
   ASSESSMENT_CLASSIFICATIONS,
@@ -596,9 +597,14 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
       // rather than resuming or classifying on unverifiable evidence.
       const resolved = await recoveryExecplanPath(candidate)
       enriched = { ...candidate, execplanPath: resolved.execplanPath }
+      // The agent assessment is untrusted JSON, so assert it into the typed
+      // decision shape at this boundary (via unknown): the decision helpers
+      // read each field defensively, and advisory residualRisk is re-read
+      // through advisoryResidualRisk, not this cast.
+      const assessmentFields = assessment as unknown as RecoveryAssessmentFields
       decision = resolved.error
         ? { classification: '', action: 'report', stage: null, reason: 'execplan-stat-error', skip: true }
-        : { stage: 'review', ...recoveryDecision(enriched, evidence, assessment as RecoveryAssessmentFields, RESUME_MODE, { dryRun: DRY_RUN }) }
+        : { stage: 'review', ...recoveryDecision(enriched, evidence, assessmentFields, RESUME_MODE, { dryRun: DRY_RUN }) }
     }
 
     const resultBase = {

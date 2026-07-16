@@ -1,11 +1,14 @@
-// Shared pipeline stages and the per-task pipeline — used by the normal task
-// lane and by continue-mode recovery resume, so a resumed branch runs through
-// exactly the same planning loop, design review, implementation contract,
-// reviewers, and integration path as ordinary work. Each stage helper returns
-// { fail } (an unassessed result object) or its stage product; callers decide
-// whether to attach an assessment. The run wiring (config caps, prompt
-// builders, adapter options, stage locks, retry, assessment, write gate,
-// worktree creation) binds once via makeTaskPipeline.
+/**
+ * @file Shared pipeline stages and the per-task pipeline — used by the
+ * normal task lane and by continue-mode recovery resume, so a resumed
+ * branch runs through exactly the same planning loop, design review,
+ * implementation contract, reviewers, and integration path as ordinary
+ * work. Each stage helper returns { fail } (an unassessed result object)
+ * or its stage product; callers decide whether to attach an assessment.
+ * The run wiring (config caps, prompt builders, adapter options, stage
+ * locks, retry, assessment, write gate, worktree creation) binds once via
+ * makeTaskPipeline.
+ */
 import { fileState } from './exec.ts'
 import {
   commitExecplanApproval,
