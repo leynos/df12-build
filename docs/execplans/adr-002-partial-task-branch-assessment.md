@@ -387,6 +387,10 @@ The returned assessment object should require `classification`, `branchName`,
 `recommendation`. Use arrays of strings or small objects rather than free-form
 paragraphs where JavaScript needs to inspect the value.
 
+(Post-implementation note, issue #23: the schema also requires an advisory
+`residualRisk` array alongside the blocking `missingEvidence`, separating the
+two evidence channels.)
+
 Add `collectAssessmentEvidence(task, wt)`. It should run deterministic git
 commands inside the task worktree:
 
@@ -496,16 +500,6 @@ Expected pass after implementation:
 # fail 0
 ```
 
-Repository validation:
-
-```bash
-make all
-```
-
-Do not run `odw run` as part of this plan unless the operator explicitly asks
-for a live smoke run, because a live run can spawn agents and mutate a target
-project.
-
 ## Validation and acceptance
 
 Red-Green-Refactor evidence must be recorded in this document during
@@ -546,6 +540,23 @@ If a partial implementation of this plan is interrupted, inspect `git status`,
 run the focused test, and resume from the first failing or unchecked Progress
 item. Do not attempt to recover by running a live ODW workshop.
 
+
+## Artefacts and notes
+
+Concise validation transcripts are recorded here instead of full command logs.
+
+Red test evidence:
+
+```plaintext
+$ node --test tests/df12-build-odw-assessment.test.mjs
+not ok 1 - assessment schema exposes only ADR 002 classifications
+ReferenceError: ASSESSMENT_CLASSIFICATIONS is not defined
+```
+
+Green test evidence:
+
+```plaintext
+$ node --test tests/df12-build-odw-assessment.test.mjs
 ## Artefacts and notes
 
 Concise validation transcripts are recorded here instead of full command logs.
@@ -567,14 +578,6 @@ $ node --test tests/df12-build-odw-assessment.test.mjs
 # fail 0
 ```
 
-Final repository validation:
-
-```plaintext
-$ make all
-markdownlint-cli2: Summary: 0 error(s)
-workflows/df12-build-odw.js: wrapped JavaScript parses
-workflows/df12-build.js: wrapped JavaScript parses
-All diagrams validated successfully
 # tests 6
 # pass 6
 # fail 0
