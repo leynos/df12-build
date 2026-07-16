@@ -154,7 +154,7 @@ Add these ODW `args` fields:
 | `reuseAcceptedExecPlans` | `false` | Enable accepted-plan adoption after normal roadmap selection. When disabled, every normal task still enters the existing plan/design loop. |
 | `acceptedPlanMode` | `"verify"` | One of `"verify"` or `"build"`. `"verify"` reports whether a matching plan is adoptable. `"build"` may enter implementation when the plan is fresh and accepted. |
 | `stageAttempts` | `2` | Total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, killed CLI, schema-retry exhaustion) or a provider rate-limit. Product failures are never retried. |
-| `infraRetryBackoffSeconds` | `[5, 30]` | `[low, high]` seconds for the bounded backoff between provider-fault retries. A retry waits an advertised `retry-after` (clamped into this range) when the error carries one, otherwise a deterministic seeded-jitter interval in the range. Second-scale, unlike the minute-scale `coderabbitBackoffMinutes`, because provider limits recover fast. Infrastructure-fault retries do not back off (a warm re-run is cheap). |
+| `infraRetryBackoffSeconds` | `[5, 30]` | `[low, high]` seconds for the bounded backoff between provider-fault retries. A retry waits an advertised `retry-after` (clamped into this range) when the error carries one, otherwise a deterministic seeded-jitter interval in the range. Second-scale, unlike the minute-scale `coderabbitBackoffMinutes` because provider limits recover fast. Infrastructure-fault retries do not back off (a warm re-run is cheap). |
 
 `resumeMode` is intentionally not called `autoResume`. The name should force an
 operator to choose the maximum action allowed by the run.
@@ -499,7 +499,7 @@ unlike a product failure:
 A provider fault is a transient server-side limit — a `429`/`529`, an
 "overloaded" or "rate limited" model, a gateway timeout — detected by regex
 over the adapter's stderr or exception text (`providerFailureDetail`). Like an
-infrastructure fault it carries no verdict about the task branch, so it is
+infrastructure fault, it carries no verdict about the task branch, so it is
 retried in place within the same `stageAttempts` budget rather than halting on
 the first hit. The one difference is timing: retrying a still-closed rate-limit
 window instantly just burns the attempt budget, so each provider-fault re-run
@@ -513,7 +513,7 @@ When no wait is advertised the backoff is a deterministic seeded jitter
 (DJB2 over `${label}#${attempt}`, `Math.random()` being banned for Claude Code
 dual-compatibility) spread across the same range, keeping sibling tasks that
 hit the same limit from retrying in lockstep. If the limit persists across the
-budget the task stops terminally as `provider-fault`, exactly as before this
+budget, the task stops terminally as `provider-fault`, exactly as before this
 backoff was added. Infrastructure faults keep their immediate warm retry — the
 committed-ExecPlan durability contract makes an in-place re-run cheap, and an
 adapter death is not a quota window that a pause would help clear.

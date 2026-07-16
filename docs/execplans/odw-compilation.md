@@ -164,8 +164,10 @@ Planned work:
 - [x] (2026-07-05 22:00Z) Milestone 3: `exec.ts` (execFile wrappers,
   `shellQuote`, `fileState`) and `faults.ts` (classifiers, `faultMetrics`,
   `resultFromUnhandledAgentError`, retry). `withInfraRetry` became a
-  factory — `makeWithInfraRetry(attempts)` in the module, bound once in
-  `main.js` as `const withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS)`
+  factory — `makeWithInfraRetry(attempts, backoffRange, sleep)` in the
+  module (the later provider-backoff work added the `backoffRange`/`sleep`
+  args), bound once in `main.js` as `const withInfraRetry =
+  makeWithInfraRetry(STAGE_ATTEMPTS, INFRA_RETRY_BACKOFF_SECONDS)`
   — so all nine multiline call sites and the source-invariant regexes
   stayed untouched, and no top-level name collides with a module export
   (which the build's rename assertion would reject). Red-then-green
@@ -329,8 +331,9 @@ Planned work:
   second, independent line of defence.
   Date/Author: 2026-07-05, Claude with pmcintosh.
 - Decision: when a helper closes over a run-configuration constant, prefer
-  exporting a factory (`makeWithInfraRetry(attempts)`) bound once in the
-  entry over threading the constant through every call site.
+  exporting a factory (`makeWithInfraRetry(attempts, backoffRange, sleep)`)
+  bound once in the entry over threading the constant through every call
+  site.
   Rationale: call sites keep their shape (no source-invariant regex churn,
   no multiline edits), and a same-named local binding in the entry plus a
   same-named module export would collide in the flat bundle and trip the

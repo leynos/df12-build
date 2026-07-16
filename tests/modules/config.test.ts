@@ -145,4 +145,25 @@ describe('makeConfig overrides and clamps', () => {
     expect(config.AUTH_REQUIRED_ADAPTERS.has('kimi')).toBe(true)
     expect(config.AUTH_REQUIRED_ADAPTERS.has('gemini')).toBe(true)
   })
+
+  test('infraRetryBackoffSeconds defaults, truncates, and clamps low<=high', () => {
+    expect(makeConfig({}).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 30])
+    // An explicit range is coerced, truncated, and honoured.
+    expect(makeConfig({ infraRetryBackoffSeconds: [10, 40] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([10, 40])
+    expect(makeConfig({ infraRetryBackoffSeconds: [2.9, 8.9] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([2, 8])
+    // low floors at the default (0 is falsy), and a high below low is lifted to low.
+    expect(makeConfig({ infraRetryBackoffSeconds: [0, 0] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 30])
+    expect(makeConfig({ infraRetryBackoffSeconds: [20, 3] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([20, 20])
+    // Non-array or malformed input falls back to the defaults.
+    expect(makeConfig({ infraRetryBackoffSeconds: 'nope' }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 30])
+    expect(makeConfig({ infraRetryBackoffSeconds: [] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 30])
+  })
+
+  test('coderabbitBackoffMinutes shares the same range parsing with its own defaults', () => {
+    // Guards the shared parseBoundedRange helper at its second call site: same
+    // clamp/fallback behaviour, different default bounds.
+    expect(makeConfig({}).CODERABBIT_BACKOFF_MINUTES).toEqual([45, 90])
+    expect(makeConfig({ coderabbitBackoffMinutes: [60, 30] }).CODERABBIT_BACKOFF_MINUTES).toEqual([60, 60])
+    expect(makeConfig({ coderabbitBackoffMinutes: 'x' }).CODERABBIT_BACKOFF_MINUTES).toEqual([45, 90])
+  })
 })

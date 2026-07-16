@@ -272,9 +272,18 @@ error strings), and only then ordinary `failed`. Infra faults are agent-process
 deaths carrying no branch evidence: `withInfraRetry` re-runs the stage agent up
 to `stageAttempts` total attempts (default 2), and a persistent fault
 terminates as `infra-fault` with no assessment agent and no remediation triage
-writes. Never wrap the integration agent in `withInfraRetry` — its push to
-`origin/<base>` is not idempotent, and a source-invariant test pins both call
-sites as unwrapped.
+writes. Provider faults are retried within the same `stageAttempts` budget,
+but each re-run is preceded by a bounded backoff: an advertised `retry-after`
+is parsed and clamped into `infraRetryBackoffSeconds` (default `[5, 30]`s),
+falling back to a deterministic seeded jitter over that range when no
+`retry-after` is given; infra faults keep their immediate warm retry with no
+backoff. `withInfraRetry` is a three-arg factory —
+`makeWithInfraRetry(attempts, backoffRange, sleep)` — bound once as
+`const withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS,
+INFRA_RETRY_BACKOFF_SECONDS)`; `sleep` defaults to a real host sleep and is
+only overridden by tests, with an instant stub. Never wrap the integration
+agent in `withInfraRetry` — its push to `origin/<base>` is not idempotent, and
+a source-invariant test pins both call sites as unwrapped.
 
 Recovery assessment carries two distinct evidence channels, typed by
 `RecoveryAssessmentFields` in `recovery-decision.ts`: blocking
@@ -388,8 +397,9 @@ tick Progress items; loop coverage uses fixture plans with real ticks.
 The run result exposes the contract for operators and tests: `commitGates`
 (the effective deterministic gate list; agents must never assume `make all`
 aggregates a project's gates), `stageAttempts`, bounded-cardinality
-`faultMetrics` (`infraRetries`, `infraFaults`, `providerFaults`,
-`authFaults` — fixed keys only, never keyed by task id or error text),
+`faultMetrics` (`infraRetries`, `providerRetries`, `infraFaults`,
+`providerFaults`, `authFaults` — fixed keys only, never keyed by task id or
+error text),
 `recovery.unresolved`, and the `needs-operator-recovery` terminal `halted`
 state when survivor branches still block the roadmap frontier. See
 `docs/failure-resume-design.md` for the full design and

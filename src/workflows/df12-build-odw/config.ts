@@ -151,18 +151,24 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   const MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4 // plan <-> design-review exchanges before halting
   const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review cycles
   const STAGE_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2)) // total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, schema-retry exhaustion); product failures are never retried
+  // Parse a `[low, high]` range from config: coerce and truncate each bound,
+  // floor low at 1, and floor high at low so high >= low always holds. A
+  // missing or malformed value (non-array, non-numeric, or falsy) falls back to
+  // the supplied defaults. Shared by the provider-backoff and CodeRabbit-backoff
+  // knobs, which differ only in their default bounds.
+  const parseBoundedRange = (raw: unknown, defaultLow: number, defaultHigh: number): [number, number] => {
+    const range = Array.isArray(raw) ? raw : []
+    const low = Math.max(1, Math.trunc(Number(range[0]) || defaultLow))
+    const high = Math.max(low, Math.trunc(Number(range[1]) || defaultHigh))
+    return [low, high]
+  }
   // Bounded backoff (seconds) between stage-agent retries when the previous
   // attempt hit a provider rate-limit: retrying instantly just burns the
   // attempt budget against a still-closed window, so pause a seeded-jitter
   // interval in [low, high] (or the advertised retry-after, clamped into this
   // range) before the warm re-run. Second-scale, unlike the minute-scale
   // CodeRabbit host-review backoff, because provider limits recover fast.
-  const INFRA_RETRY_BACKOFF_SECONDS: [number, number] = (() => {
-    const range = Array.isArray(cfg.infraRetryBackoffSeconds) ? cfg.infraRetryBackoffSeconds : []
-    const low = Math.max(1, Math.trunc(Number(range[0]) || 5))
-    const high = Math.max(low, Math.trunc(Number(range[1]) || 30))
-    return [low, high]
-  })()
+  const INFRA_RETRY_BACKOFF_SECONDS: [number, number] = parseBoundedRange(cfg.infraRetryBackoffSeconds, 5, 30)
 
   // Per-work-item build loop: the host reads the committed ExecPlan's Progress
   // checklist and dispatches ONE builder turn per unticked work item, verifying
@@ -251,12 +257,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   // restores end-of-stage-only host review.
   const CODERABBIT_BETWEEN_WORK_ITEMS = cfg.coderabbitBetweenWorkItems !== false
   const CODERABBIT_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.coderabbitAttempts) || 3)) // total attempts per host review when rate limited
-  const CODERABBIT_BACKOFF_MINUTES: [number, number] = (() => {
-    const range = Array.isArray(cfg.coderabbitBackoffMinutes) ? cfg.coderabbitBackoffMinutes : []
-    const low = Math.max(1, Math.trunc(Number(range[0]) || 45))
-    const high = Math.max(low, Math.trunc(Number(range[1]) || 90))
-    return [low, high]
-  })()
+  const CODERABBIT_BACKOFF_MINUTES: [number, number] = parseBoundedRange(cfg.coderabbitBackoffMinutes, 45, 90)
   // Optional durable JSONL sink for every CodeRabbit finding, so recurring
   // finding classes can be tuned into deterministic lint rules over time.
   const CODERABBIT_FINDINGS_FILE = String(cfg.coderabbitFindingsFile || '')

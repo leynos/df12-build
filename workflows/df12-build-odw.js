@@ -649,6 +649,8 @@ function makeWithInfraRetry(attempts, backoffRange = [5, 30], sleep = hostSleepS
             log(`[${label}] infrastructure fault persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`);
           } else if (isProvider) {
             log(`[${label}] provider rate-limit persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`);
+          } else if (isAuth) {
+            log(`[${label}] authentication failure; not retried (fatal): ${message}`);
           } else {
             log(`[${label}] non-infrastructure failure; not retried: ${message}`);
           }
@@ -963,12 +965,13 @@ function makeConfig(rawArgs) {
   const MAX_DESIGN_ROUNDS2 = cfg.maxDesignRounds || 4;
   const MAX_REVIEW_ROUNDS2 = cfg.maxReviewRounds || 3;
   const STAGE_ATTEMPTS2 = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2));
-  const INFRA_RETRY_BACKOFF_SECONDS2 = (() => {
-    const range = Array.isArray(cfg.infraRetryBackoffSeconds) ? cfg.infraRetryBackoffSeconds : [];
-    const low = Math.max(1, Math.trunc(Number(range[0]) || 5));
-    const high = Math.max(low, Math.trunc(Number(range[1]) || 30));
+  const parseBoundedRange = (raw, defaultLow, defaultHigh) => {
+    const range = Array.isArray(raw) ? raw : [];
+    const low = Math.max(1, Math.trunc(Number(range[0]) || defaultLow));
+    const high = Math.max(low, Math.trunc(Number(range[1]) || defaultHigh));
     return [low, high];
-  })();
+  };
+  const INFRA_RETRY_BACKOFF_SECONDS2 = parseBoundedRange(cfg.infraRetryBackoffSeconds, 5, 30);
   const PER_WORK_ITEM_BUILD2 = cfg.perWorkItemBuild !== false;
   const MAX_WORK_ITEM_ROUNDS2 = Math.max(1, Math.trunc(Number(cfg.maxWorkItemRounds) || 16));
   const AUTO_MERGE2 = cfg.autoMerge !== false;
@@ -1018,12 +1021,7 @@ function makeConfig(rawArgs) {
   const CODERABBIT_HOST_REVIEW2 = cfg.coderabbitHostReview !== false;
   const CODERABBIT_BETWEEN_WORK_ITEMS2 = cfg.coderabbitBetweenWorkItems !== false;
   const CODERABBIT_ATTEMPTS2 = Math.max(1, Math.trunc(Number(cfg.coderabbitAttempts) || 3));
-  const CODERABBIT_BACKOFF_MINUTES2 = (() => {
-    const range = Array.isArray(cfg.coderabbitBackoffMinutes) ? cfg.coderabbitBackoffMinutes : [];
-    const low = Math.max(1, Math.trunc(Number(range[0]) || 45));
-    const high = Math.max(low, Math.trunc(Number(range[1]) || 90));
-    return [low, high];
-  })();
+  const CODERABBIT_BACKOFF_MINUTES2 = parseBoundedRange(cfg.coderabbitBackoffMinutes, 45, 90);
   const CODERABBIT_FINDINGS_FILE2 = String(cfg.coderabbitFindingsFile || "");
   const COMMIT_GATES2 = (Array.isArray(cfg.commitGates) && cfg.commitGates.length ? cfg.commitGates : ["make all"]).map((command) => String(command));
   const COMMIT_GATE_TEXT2 = COMMIT_GATES2.map((command) => `\`${command}\``).join(" then ");
