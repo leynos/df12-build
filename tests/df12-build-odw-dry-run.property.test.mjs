@@ -30,54 +30,61 @@ const dottedId = fc
 // snapshot compare. Reusing the pool keeps 100 iterations fast (no per-run
 // `git worktree add`/branch setup) while still exercising both a plain repo and
 // one carrying an extra addendum worktree.
-const repoPool = {
-  normal: makeRecoveryRepo(),
-  addendum: makeRecoveryRepo({ withAddendumWorktree: true }),
-}
-const baseline = {
-  normal: repoStateSnapshot(repoPool.normal),
-  addendum: repoStateSnapshot(repoPool.addendum),
-}
-
 test('property: any dry run over arbitrary task shapes and repo states mutates nothing', async () => {
-  let agentCalls = 0
-  const surface = await loadRunTask({ dryRun: true }, async () => {
-    agentCalls += 1
-    return { ok: true }
-  })
-  const taskArb = fc.record({
-    // Mix branch-colliding ids (roadmap-1-2-3 has a live worktree, roadmap-1-2-4
-    // is a bare branch, roadmap-2-1-1 exists), freely generated dotted ids, and
-    // fully arbitrary strings — the guard must not care what the id is.
-    id: fc.oneof(fc.constantFrom('1.2.3', '1.2.4', '2.1.1', '2.1.2.1'), dottedId, fc.string()),
-    title: fc.string(),
-    requires: fc.array(dottedId, { maxLength: 3 }),
-    isAddendum: fc.boolean(),
-    subtasks: fc.array(dottedId, { maxLength: 2 }),
-  })
-  await fc.assert(
-    fc.asyncProperty(taskArb, fc.constantFrom('normal', 'addendum'), async (task, repoKey) => {
-      agentCalls = 0
-      const repo = repoPool[repoKey]
-      const previousCwd = process.cwd()
-      process.chdir(repo.dir)
-      let result
-      try {
-        result = await surface.runTask(task, null)
-      } finally {
-        process.chdir(previousCwd)
-      }
-      // (a) terminal status is always dry-run; (b) stage is always pre-worktree
-      assert.equal(result.status, 'dry-run')
-      assert.equal(result.stage, 'pre-worktree')
-      assert.equal(result.worktree, undefined)
-      assert.equal(result.branch, undefined)
-      assert.equal(result.plan, undefined)
-      // (d) the agent stub is never invoked
-      assert.equal(agentCalls, 0, 'a dry run must never invoke the agent stub')
-      // (c) no new git refs or worktrees — the whole durable snapshot is intact
-      assert.deepEqual(repoStateSnapshot(repo), baseline[repoKey], 'a dry run must leave durable state untouched for every input')
-    }),
-    { numRuns: 100 },
-  )
+  // Pool construction sits OUTSIDE the try: if makeRecoveryRepo() throws there is
+  // nothing to clean up yet. The finally then releases BOTH pooled repos as soon
+  // as the property finishes, rather than deferring to the process-exit hook.
+  const repoPool = {
+    normal: makeRecoveryRepo(),
+    addendum: makeRecoveryRepo({ withAddendumWorktree: true }),
+  }
+  try {
+    const baseline = {
+      normal: repoStateSnapshot(repoPool.normal),
+      addendum: repoStateSnapshot(repoPool.addendum),
+    }
+    let agentCalls = 0
+    const surface = await loadRunTask({ dryRun: true }, async () => {
+      agentCalls += 1
+      return { ok: true }
+    })
+    const taskArb = fc.record({
+      // Mix branch-colliding ids (roadmap-1-2-3 has a live worktree, roadmap-1-2-4
+      // is a bare branch, roadmap-2-1-1 exists), freely generated dotted ids, and
+      // fully arbitrary strings — the guard must not care what the id is.
+      id: fc.oneof(fc.constantFrom('1.2.3', '1.2.4', '2.1.1', '2.1.2.1'), dottedId, fc.string()),
+      title: fc.string(),
+      requires: fc.array(dottedId, { maxLength: 3 }),
+      isAddendum: fc.boolean(),
+      subtasks: fc.array(dottedId, { maxLength: 2 }),
+    })
+    await fc.assert(
+      fc.asyncProperty(taskArb, fc.constantFrom('normal', 'addendum'), async (task, repoKey) => {
+        agentCalls = 0
+        const repo = repoPool[repoKey]
+        const previousCwd = process.cwd()
+        process.chdir(repo.dir)
+        let result
+        try {
+          result = await surface.runTask(task, null)
+        } finally {
+          process.chdir(previousCwd)
+        }
+        // (a) terminal status is always dry-run; (b) stage is always pre-worktree
+        assert.equal(result.status, 'dry-run')
+        assert.equal(result.stage, 'pre-worktree')
+        assert.equal(result.worktree, undefined)
+        assert.equal(result.branch, undefined)
+        assert.equal(result.plan, undefined)
+        // (d) the agent stub is never invoked
+        assert.equal(agentCalls, 0, 'a dry run must never invoke the agent stub')
+        // (c) no new git refs or worktrees — the whole durable snapshot is intact
+        assert.deepEqual(repoStateSnapshot(repo), baseline[repoKey], 'a dry run must leave durable state untouched for every input')
+      }),
+      { numRuns: 100 },
+    )
+  } finally {
+    repoPool.normal.cleanup()
+    repoPool.addendum.cleanup()
+  }
 })

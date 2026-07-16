@@ -759,8 +759,10 @@ Separately from that in-agent retry loop, the host validates the integration
 agent's report before counting a task done. All five fields — `ok`, `rebased`,
 `squashMerged`, `pushed`, and `roadmapMarkedDone` — must be truthy. A branch
 that was squash-merged and pushed but never rebased onto `origin/<base>` (so
-`rebased` is false or absent) halts the task at `stage: integrate`; the
-`detail` field reads
+`rebased` is false or absent) halts the task at `stage: integrate`. The
+`detail` field reports the integration agent's `conflicts` text or its
+`summary`, whichever is set first; only when both are absent does it fall
+back to the generic
 `'integration incomplete (need ok+rebased+squashMerged+pushed+roadmapMarkedDone)'`.
 Inspect the halted task result's `detail` field, rebase the branch manually if
 it is salvageable, and relaunch; otherwise discard the branch and relaunch from
