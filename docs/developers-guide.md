@@ -261,6 +261,14 @@ writes. Never wrap the integration agent in `withInfraRetry` — its push to
 `origin/<base>` is not idempotent, and a source-invariant test pins both call
 sites as unwrapped.
 
+Recovery assessment carries two distinct evidence channels, typed by
+`RecoveryAssessmentFields` in `recovery-decision.ts`: blocking
+`missingEvidence` and advisory `residualRisk` (read via the
+`advisoryResidualRisk` helper). `recoveryResumeEligibility` decides resume
+eligibility on `missingEvidence` alone and never consults `residualRisk`;
+the advisory risk is instead carried forward into the resumed code-review,
+expert-review, and integration prompts as a non-blocking section.
+
 Host-run CodeRabbit review (`coderabbitHostReview`, default on) moves the
 CLI invocation from agent prompts to the control loop: `coderabbit review
 --agent --type committed --base <base>` (a FIXED host invocation; the
