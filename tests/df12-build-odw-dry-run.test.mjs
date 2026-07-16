@@ -58,8 +58,13 @@ test('a dry run stops before worktree creation and mutates no git state', async 
 })
 
 test('a dry run in the addendum lane logs lane=addendum', async () => {
-  const surface = await loadRunTask({ dryRun: true }, async () => ({ ok: true }))
+  let agentCalls = 0
+  const surface = await loadRunTask({ dryRun: true }, async () => {
+    agentCalls += 1
+    return { ok: true }
+  })
   const repo = makeRecoveryRepo()
+  const before = repoStateSnapshot(repo)
   const previousCwd = process.cwd()
   process.chdir(repo.dir)
   let result
@@ -73,6 +78,11 @@ test('a dry run in the addendum lane logs lane=addendum', async () => {
   }
   assert.equal(result.status, 'dry-run')
   assert.equal(result.stage, 'pre-worktree')
+  assert.equal(agentCalls, 0, 'a dry run must not dispatch any agent (no probe, plan, or build)')
+
+  const after = repoStateSnapshot(repo)
+  assert.deepEqual(after, before, 'a dry run must leave every observable piece of durable state untouched')
+
   const boundaryLog = surface.logs.find((line) => line.includes('reason=dry-run'))
   assert.ok(boundaryLog, 'the dry-run early return must emit a structured log line')
   assert.match(boundaryLog, /lane=addendum/, 'the addendum lane must be reflected in the log')
