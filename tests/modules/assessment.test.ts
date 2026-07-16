@@ -2,7 +2,7 @@
 // 8): deferred-review classification, the manual-merge handoff guard, the
 // assessment gate, and the attach path with scripted agents over a real
 // fixture repo.
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -15,7 +15,9 @@ import {
   implementationAuthFailureDetail,
   isDeferredReviewIssue,
   makeAssessment,
+  summarizeSalvages,
 } from '../../src/workflows/df12-build-odw/assessment.ts'
+import * as durability from '../../src/workflows/df12-build-odw/execplan-durability.ts'
 
 const globals = globalThis as Record<string, unknown>
 globals.log = () => {}
@@ -194,6 +196,244 @@ describe('assessment model tier', () => {
     await withModels.attachAssessment({ id: '1.2.3', title: 'T' }, { branch: 'roadmap-1-2-3', worktreePath: dir, baseSha }, { status: 'failed', stage: 'review', detail: 'x' })
     expect(models[0]).toBe('medium-default')
     expect(models[1]).toBe('escalation-high')
+  })
+})
+
+// A branch whose docs/execplans directory is already tracked, so a fresh
+// artefact under it surfaces as an individual untracked (??) path rather than
+// a collapsed untracked directory — mirroring a real task branch.
+function makeRepoWithExecplans() {
+  const { dir, baseSha } = makeRepo()
+  mkdirSync(path.join(dir, 'docs', 'execplans'), { recursive: true })
+  writeFileSync(path.join(dir, 'docs', 'execplans', 'roadmap-1-2-3.md'), '# Plan\n')
+  git(dir, 'add', '.')
+  git(dir, 'commit', '-m', 'Add execplan')
+  return { dir, baseSha }
+}
+
+const REVIEW_REL = 'docs/execplans/roadmap-1-2-3-review.md'
+
+function addUntrackedReview(dir: string) {
+  writeFileSync(path.join(dir, REVIEW_REL), '# Review notes left before the schema-parse failure\n')
+}
+
+type SalvageShape = { classification: string; committed: string[]; skipped: unknown[]; sha: string; detail: string }
+
+describe('continue-manual/adopt-partial artefact salvage', () => {
+  for (const classification of ['continue-manual', 'adopt-partial']) {
+    test(`${classification} commits an eligible untracked artefact and records it on result.salvage`, async () => {
+      const { dir, baseSha } = makeRepoWithExecplans()
+      addUntrackedReview(dir)
+      globals.agent = async () => ({ classification, taskScoped: true })
+      const result = await subject().attachAssessment(
+        { id: '1.2.3', title: 'Parser' },
+        { branch: 'roadmap-1-2-3', worktreePath: dir, baseSha },
+        { status: 'failed', stage: 'review', detail: 'gates red' },
+      )
+      const salvage = result.salvage as SalvageShape | undefined
+      expect(salvage?.classification).toBe(classification)
+      expect(salvage?.committed).toEqual([REVIEW_REL])
+      expect(salvage?.sha).toMatch(/^[0-9a-f]{40}$/)
+      // The artefact is durably committed onto the branch; the tree is clean.
+      expect(git(dir, 'log', '-1', '--format=%s')).toBe('Salvage task artefacts for task 1.2.3')
+      expect(git(dir, 'status', '--porcelain=v1')).toBe('')
+    })
+  }
+
+  for (const classification of ['adopt-complete', 'discard']) {
+    test(`${classification} salvages nothing and leaves the branch untouched`, async () => {
+      const { dir, baseSha } = makeRepoWithExecplans()
+      addUntrackedReview(dir)
+      globals.agent = async () => ({ classification, taskScoped: true })
+      const result = await subject().attachAssessment(
+        { id: '1.2.3', title: 'Parser' },
+        { branch: 'roadmap-1-2-3', worktreePath: dir, baseSha },
+        { status: 'failed', stage: 'review', detail: 'gates red' },
+      )
+      expect(result.salvage).toBeUndefined()
+      // The artefact stays untracked and HEAD is unchanged.
+      expect(git(dir, 'status', '--porcelain=v1')).toBe(`?? ${REVIEW_REL}`)
+      expect(git(dir, 'log', '-1', '--format=%s')).toBe('Add execplan')
+    })
+  }
+
+  test('the deterministic (collection-error) continue-manual skips salvage on untrustworthy evidence', async () => {
+    const { dir } = makeRepoWithExecplans()
+    addUntrackedReview(dir)
+    let called = false
+    globals.agent = async () => {
+      called = true
+      return { classification: 'continue-manual' }
+    }
+    // Omitting baseSha makes the base-relative git probes fail, so evidence
+    // collection reports errors and the deterministic fast-path fires.
+    const result = await subject().attachAssessment(
+      { id: '1.2.3', title: 'T' },
+      { branch: 'roadmap-1-2-3', worktreePath: dir },
+      { status: 'failed', stage: 'review', detail: 'x' },
+    )
+    expect(called).toBe(false)
+    const assessment = result.assessment as { classification?: string; classifier?: string } | undefined
+    expect(assessment?.classification).toBe('continue-manual')
+    expect(assessment?.classifier).toBe('deterministic')
+    const salvage = result.salvage as SalvageShape | undefined
+    expect(salvage?.committed).toEqual([])
+    expect(salvage?.detail).toMatch(/skipped/)
+    // The artefact is NOT committed — nothing was salvaged against bad evidence.
+    expect(git(dir, 'status', '--porcelain=v1')).toBe(`?? ${REVIEW_REL}`)
+    expect(git(dir, 'log', '-1', '--format=%s')).toBe('Add execplan')
+  })
+
+  // A thrown salvageTaskArtefacts must be recorded, never escape: salvage can
+  // never turn a failed task into a run-halting error. Reachable only by forcing
+  // the primitive to throw, which the model-classified path is otherwise too
+  // defensive to trigger.
+  test('a thrown salvageTaskArtefacts is recorded as a salvage error, not escaped', async () => {
+    const { dir, baseSha } = makeRepoWithExecplans()
+    addUntrackedReview(dir)
+    globals.agent = async () => ({ classification: 'continue-manual', taskScoped: true })
+    const spy = spyOn(durability, 'salvageTaskArtefacts').mockImplementation(async () => {
+      throw new Error('boom in salvage')
+    })
+    try {
+      const result = await subject().attachAssessment(
+        { id: '1.2.3', title: 'Parser' },
+        { branch: 'roadmap-1-2-3', worktreePath: dir, baseSha },
+        { status: 'failed', stage: 'review', detail: 'gates red' },
+      )
+      const salvage = result.salvage as SalvageShape | undefined
+      expect(salvage?.classification).toBe('continue-manual')
+      expect(salvage?.committed).toEqual([])
+      expect(salvage?.detail.startsWith('salvage errored')).toBe(true)
+      expect(salvage?.detail).toContain('boom in salvage')
+      // The branch is untouched — the artefact stays untracked, HEAD unmoved.
+      expect(git(dir, 'status', '--porcelain=v1')).toBe(`?? ${REVIEW_REL}`)
+      expect(git(dir, 'log', '-1', '--format=%s')).toBe('Add execplan')
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
+
+// Schema-retry exhaustion is classified as an infra-fault, which
+// shouldAssessFailure excludes from MODEL assessment — but a planner or reviewer
+// may have written a docs/execplans/*.md artefact just before the parse failure,
+// and that artefact must still be salvaged (#18).
+describe('infra-fault artefact salvage (#18)', () => {
+  for (const [label, result] of [
+    ['status/stage', { id: '1.2.3', status: 'infra-fault', stage: 'infrastructure', detail: 'adapter reply did not satisfy the schema after 3 attempts' }],
+    ['detail-classified', { id: '1.2.3', status: 'failed', stage: 'plan', detail: 'SchemaValidationError: reply was not valid JSON' }],
+  ] as const) {
+    test(`salvages the untracked artefact without a model call (${label})`, async () => {
+      const { dir, baseSha } = makeRepoWithExecplans()
+      addUntrackedReview(dir)
+      let called = false
+      globals.agent = async () => {
+        called = true
+        return { classification: 'discard' }
+      }
+      const attached = await subject().attachAssessment(
+        { id: '1.2.3', title: 'Parser' },
+        { branch: 'roadmap-1-2-3', worktreePath: dir, baseSha },
+        result,
+      )
+      // No model assessment runs for an infra-fault...
+      expect(called).toBe(false)
+      expect(attached.assessment).toBeUndefined()
+      // ...yet the artefact is durably committed onto the branch.
+      const salvage = attached.salvage as SalvageShape | undefined
+      expect(salvage?.classification).toBe('infra-fault')
+      expect(salvage?.committed).toEqual([REVIEW_REL])
+      expect(salvage?.sha).toMatch(/^[0-9a-f]{40}$/)
+      expect(git(dir, 'log', '-1', '--format=%s')).toBe('Salvage task artefacts for task 1.2.3')
+      expect(git(dir, 'status', '--porcelain=v1')).toBe('')
+    })
+  }
+
+  test('an infra-fault with no worktree path records the no-worktree skip', async () => {
+    globals.agent = async () => {
+      throw new Error('the model must not be called for an infra-fault')
+    }
+    const result = await subject().attachAssessment(
+      { id: '1.2.3', title: 'Parser' },
+      { branch: 'roadmap-1-2-3' }, // worktreePath omitted
+      { id: '1.2.3', status: 'infra-fault', stage: 'infrastructure', detail: 'SchemaValidationError' },
+    )
+    const salvage = result.salvage as SalvageShape | undefined
+    expect(salvage?.classification).toBe('infra-fault')
+    expect(salvage?.committed).toEqual([])
+    expect(salvage?.detail.startsWith('salvage skipped: no worktree path')).toBe(true)
+  })
+
+  test('a provider fault with infra-shaped detail does not trigger infra-fault salvage', async () => {
+    const { dir, baseSha } = makeRepoWithExecplans()
+    addUntrackedReview(dir)
+    // The provider-fault STATUS must reject salvage before the detail heuristic,
+    // even though the detail embeds infra-shaped text ("SchemaValidationError"):
+    // isInfraFaultResult must not misclassify it. Salvage must not fire, and the
+    // model must not be consulted.
+    globals.agent = async () => {
+      throw new Error('the model must not be called for a provider fault')
+    }
+    const result = await subject().attachAssessment(
+      { id: '1.2.3', title: 'Parser' },
+      { branch: 'roadmap-1-2-3', worktreePath: dir, baseSha },
+      { id: '1.2.3', status: 'provider-fault', stage: 'provider', detail: 'API Error: 529 overloaded; SchemaValidationError while parsing the retried reply' },
+    )
+    expect(result.salvage).toBeUndefined()
+    expect(git(dir, 'status', '--porcelain=v1')).toBe(`?? ${REVIEW_REL}`)
+  })
+})
+
+// The terminal-summary aggregation (main.ts) is a pure helper so it can be
+// tested without running workflowMain: it must count only branches that
+// committed artefacts toward the summary suffix, while still surfacing skipped
+// attempts as rows.
+describe('summarizeSalvages', () => {
+  const committed = (id: string) => ({
+    id,
+    salvage: { classification: 'continue-manual', committed: [`docs/execplans/${id}.md`], skipped: [], sha: 'a'.repeat(40), detail: '' },
+  })
+  const skipped = (id: string) => ({
+    id,
+    salvage: { classification: 'infra-fault', committed: [], skipped: [], sha: '', detail: 'salvage skipped: no worktree path in the assessment evidence' },
+  })
+  const noSalvage = (id: string) => ({ id, status: 'done' })
+
+  test('no salvage attempted yields empty salvages and no summary suffix', () => {
+    const out = summarizeSalvages([noSalvage('1.1'), noSalvage('1.2')])
+    expect(out.salvages).toEqual([])
+    expect(out.salvagedBranches).toBe(0)
+    expect(out.summarySuffix).toBe('')
+  })
+
+  test('a skipped attempt is a row but not a salvaged branch and adds no suffix', () => {
+    const out = summarizeSalvages([skipped('1.2.3'), noSalvage('1.2.4')])
+    expect(out.salvages).toHaveLength(1)
+    expect(out.salvages[0]).toMatchObject({ id: '1.2.3', classification: 'infra-fault', committed: [], skipped: 0 })
+    expect(out.salvages[0].detail).toMatch(/salvage skipped: no worktree path/)
+    expect(out.salvagedBranches).toBe(0)
+    expect(out.summarySuffix).toBe('')
+  })
+
+  test('committed attempts count toward salvagedBranches and the summary suffix', () => {
+    const out = summarizeSalvages([committed('1.2.3'), skipped('1.2.4'), committed('1.2.5')])
+    // Every attempted salvage (committed AND skipped) is a row...
+    expect(out.salvages.map((entry) => entry.id)).toEqual(['1.2.3', '1.2.4', '1.2.5'])
+    // ...but only the two that committed artefacts count as salvaged branches.
+    expect(out.salvagedBranches).toBe(2)
+    expect(out.summarySuffix).toBe(' | salvaged artefacts on 2 branch(es)')
+    expect(out.salvages.find((entry) => entry.id === '1.2.4')?.committed).toEqual([])
+  })
+
+  test('the skipped count reflects the number of skipped candidate paths', () => {
+    const out = summarizeSalvages([{
+      id: '1.2.3',
+      salvage: { classification: 'adopt-partial', committed: ['docs/execplans/1-2-3.md'], skipped: [{ path: 'src/x.ts', reason: 'not a task-scoped docs/execplans/*.md artefact' }], sha: 'b'.repeat(40), detail: '' },
+    }])
+    expect(out.salvages[0].skipped).toBe(1)
+    expect(out.salvagedBranches).toBe(1)
+    expect(out.summarySuffix).toBe(' | salvaged artefacts on 1 branch(es)')
   })
 })
 

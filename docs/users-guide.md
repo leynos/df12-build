@@ -695,7 +695,26 @@ classification is one of:
 
 Assessment is report-only. It never marks roadmap checkboxes, pushes, merges,
 or cherry-picks. Use it to decide whether to preserve, manually finish, park, or
-discard the branch before relaunching from `origin/<base>`. Auth failures,
+discard the branch before relaunching from `origin/<base>`.
+
+After an `adopt-partial` or `continue-manual` verdict — and also after an
+infrastructure fault such as schema-retry exhaustion — the workflow commits any
+dirty `docs/execplans/*.md` artefacts onto the task branch so they survive
+worktree cleanup. This is artefact salvage. It never merges, pushes, or ticks a
+roadmap checkbox; it commits only under a deterministic machine identity
+(`df12-build`). Paths outside the `docs/execplans/` tree, symlinks, and paths
+that escape the worktree are all rejected before the commit. Salvage does not
+run for `adopt-complete` (which proceeds through the ordinary path) or `discard`
+(thrown away); it also skips when host evidence collection failed and is
+therefore untrustworthy (the deterministic `continue-manual` from a
+collection-error), or when no worktree path is present in the assessment
+evidence. The per-task result carries a `result.salvage` field
+(`{ classification, committed, skipped, sha, detail }`) for every branch where
+salvage ran or was skipped; the top-level run result includes a `salvages`
+summary array and the summary string appends `| salvaged artefacts on N
+branch(es)` when N > 0. Salvage runs only when partial-branch assessment is
+enabled (`assessPartialBranches=true`), the same switch that governs
+assessment; it does not run when that setting is disabled. Auth failures,
 provider outages such as `429`, `500`, or `529`, worktree-creation failures,
 dry runs, successful tasks, and manual-merge-ready branches are not assessed.
 Provider outages also suppress the final remediation flush, so transient

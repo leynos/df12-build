@@ -256,6 +256,22 @@ as `fatal-auth` before review or integration fallback. The focused assessment
 tests pass, the documentation updates are present, and `make all` passes. This
 milestone keeps all partial-branch adoption manual and report-only.
 
+Post-completion addendum (PR #57, issue #18): `continue-manual`,
+`adopt-partial`, and infra-fault handoffs now durably commit any dirty
+task-scoped `docs/execplans/*.md` artefacts onto the branch before worktree
+cleanup, so a planning or review artefact written just before a failure is
+preserved rather than lost. The one exception is a deterministic
+`continue-manual` raised from untrustworthy collection-error evidence: it
+records a salvage skip instead of committing because that evidence cannot be
+trusted. This extends preservation only through the
+branch's own Git history; it does not merge, push, or mark the roadmap, so
+the report-only, manual-adoption conclusion above still holds. Each per-task
+assessment result now also carries a `result.salvage` record
+(`{ classification, committed, skipped, sha, detail }`), and the run result
+carries a top-level `salvages` array; salvage runs only when partial-branch
+assessment is enabled (`assessPartialBranches=true`). See
+`docs/developers-guide.md` and `docs/users-guide.md`.
+
 ## Context and orientation
 
 `df12-build` is a workflow-asset repository. It does not own the target
@@ -519,9 +535,12 @@ Acceptance criteria:
 
 The implementation is idempotent. Re-running the tests recreates temporary git
 fixtures from scratch and does not touch real target-project branches. The
-workflow assessment stage is read-only: if it fails, the original task failure
-still returns and the surviving worktree remains available for manual
-inspection.
+workflow assessment stage is read-only with respect to the target project's
+reviewed work and roadmap state: if it fails, the original task failure still
+returns and the surviving worktree remains available for manual inspection.
+Salvage still durably commits task-scoped `docs/execplans/*.md` planning and
+review artefacts to the branch's own Git history, without merging, pushing, or
+ticking the roadmap.
 
 If a partial implementation of this plan is interrupted, inspect `git status`,
 run the focused test, and resume from the first failing or unchecked Progress
@@ -657,3 +676,14 @@ plan complete.
 Revision 7 on 2026-06-30: Recorded review follow-up fixes for fatal auth
 handling, required assessment evidence fields, and stale ADR wording. Updated
 validation evidence to 6 focused Node tests.
+
+Revision 8 on 2026-07-07: Post-completion scope note (documentation only; the
+plan remains COMPLETE). Artefact salvage was added in PR #57 (issue #18) after
+this ExecPlan closed: `salvageTaskArtefacts` (`execplan-durability.ts`) plus
+`salvageAssessmentArtefacts` and `salvageInfraFaultArtefacts` (`assessment.ts`)
+durably commit dirty task-scoped `docs/execplans/*.md` artefacts onto the
+failing branch's own history before cleanup, for `continue-manual`,
+`adopt-partial`, and infra-fault (schema-retry exhaustion) handoffs. Salvage
+never merges, pushes, or ticks the roadmap, so it stays within this plan's
+report-only, manual-adoption boundary. See `docs/developers-guide.md` and
+`docs/users-guide.md` for the salvage flow.

@@ -89,6 +89,73 @@ the task. The normal pattern is:
 Auth failures remain fatal. The assessment stage must not reinterpret an
 authentication failure as an adoptable implementation failure.
 
+The assessment stage also salvages task-scoped planning and review artefacts
+that a kept branch left uncommitted, so an ExecPlan or review file written just
+before a failure is preserved rather than lost to later worktree cleanup.
+Salvage runs for a model-based `continue-manual` or `adopt-partial`
+classification (and for infra-fault results that never reach the model);
+it commits only the eligible `docs/execplans/*.md` artefacts onto the branch's
+own history and never merges, pushes, or marks the roadmap. A deterministic
+`continue-manual` raised on untrustworthy host evidence records a
+salvage-skipped note instead of touching Git. Salvage is part of this
+assessment stage, so it only runs when partial-branch assessment is enabled
+(`assessPartialBranches=true`); when that stage is disabled, neither assessment
+nor salvage runs.
+
+Figure 1 shows the salvage control flow within `attachAssessment`.
+
+```mermaid
+sequenceDiagram
+  accTitle: Artefact salvage during partial-branch assessment
+  accDescr {
+    attachAssessment first classifies the failed task branch. When the
+    classification is a deterministic continue-manual raised on untrustworthy
+    host evidence, attachAssessment returns a salvage-skipped record without
+    touching Git. For a model-based continue-manual or adopt-partial
+    classification, attachAssessment calls salvageAssessmentArtefacts with the
+    classification, the host evidence, and the worktree path. For an infra-fault
+    result that never reaches the model, attachAssessment instead calls
+    salvageInfraFaultArtefacts, which collects host evidence and delegates to
+    salvageAssessmentArtefacts under the infra-fault classification. In both
+    committing branches salvageAssessmentArtefacts calls salvageTaskArtefacts
+    with the candidate artefact paths and a commit tag; salvageTaskArtefacts
+    checks path containment and file state, then adds and commits the eligible
+    docs/execplans artefacts to Git and reads the new commit SHA. It returns a
+    SalvageOutcome carrying the committed paths and that SHA — but if the
+    post-commit git rev-parse HEAD fails, the committed artefacts are still
+    returned with sha empty and the failure recorded in detail.
+    salvageAssessmentArtefacts wraps the SalvageOutcome as a SalvageRecord back
+    to its caller — attachAssessment directly, or via salvageInfraFaultArtefacts,
+    which passes the record on.
+  }
+  participant attachAssessment
+  participant salvageInfraFaultArtefacts
+  participant salvageAssessmentArtefacts
+  participant salvageTaskArtefacts
+  participant Git
+
+  attachAssessment->>attachAssessment: classify branch
+  alt continue-manual (untrustworthy evidence)
+    attachAssessment->>attachAssessment: return salvage-skipped record
+  else model-based classification (continue-manual/adopt-partial)
+    attachAssessment->>salvageAssessmentArtefacts: classification, evidence, worktree
+    salvageAssessmentArtefacts->>salvageTaskArtefacts: candidate paths, tag
+    salvageTaskArtefacts->>Git: check containment, file state, add, commit
+    Git-->>salvageTaskArtefacts: commit SHA (empty when rev-parse fails)
+    salvageTaskArtefacts-->>salvageAssessmentArtefacts: SalvageOutcome (sha or empty + detail)
+    salvageAssessmentArtefacts-->>attachAssessment: SalvageRecord
+  else infra-fault result (no model assessment)
+    attachAssessment->>salvageInfraFaultArtefacts: infra-fault result, worktree
+    salvageInfraFaultArtefacts->>salvageAssessmentArtefacts: infra-fault classification, evidence, worktree
+    salvageAssessmentArtefacts->>salvageTaskArtefacts: candidate paths, tag
+    salvageTaskArtefacts->>Git: check containment, file state, add, commit
+    Git-->>salvageTaskArtefacts: commit SHA (empty when rev-parse fails)
+    salvageTaskArtefacts-->>salvageAssessmentArtefacts: SalvageOutcome (sha or empty + detail)
+    salvageAssessmentArtefacts-->>salvageInfraFaultArtefacts: SalvageRecord
+    salvageInfraFaultArtefacts-->>attachAssessment: SalvageRecord
+  end
+```
+
 ## Consequences
 
 Positive consequences:

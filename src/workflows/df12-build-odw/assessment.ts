@@ -1,10 +1,12 @@
-// ADR 002 partial-branch assessment: deferred-review classification, the
-// manual-merge handoff guard, the assessment gate, and the report-only
-// assessment agents. Assessment output NEVER merges, pushes, or ticks the
-// roadmap; classification is advice for the operator, and host-collected
-// evidence is decisive over anything the agent reports. The run wiring
-// (preamble, adapter routing, retry, enable switch) binds once via
-// makeAssessment.
+/**
+ * @file ADR 002 partial-branch assessment: deferred-review classification, the
+ * manual-merge handoff guard, the assessment gate, and the report-only
+ * assessment agents. Assessment output NEVER merges, pushes, or ticks the
+ * roadmap; classification is advice for the operator, and host-collected
+ * evidence is decisive over anything the agent reports. The run wiring
+ * (preamble, adapter routing, retry, enable switch) binds once via
+ * makeAssessment.
+ */
 import { ASSESSMENT_SCHEMA } from './schemas.ts'
 import {
   authFailureDetail,
@@ -13,8 +15,83 @@ import {
 } from './faults.ts'
 import { collectAssessmentEvidence } from './git-evidence.ts'
 import type { AssessmentEvidence } from './git-evidence.ts'
+import { salvageTaskArtefacts } from './execplan-durability.ts'
+import type { SalvageOutcome } from './execplan-durability.ts'
 import type { RecoveryCandidate } from './types.ts'
 
+// States in which the assessed branch is KEPT (not fully adopted), so any
+// untracked task-scoped ExecPlan/review artefact is worth durably committing
+// onto the branch before later cleanup:
+//   - `adopt-partial`  — ADR 002 preserves work "only through Git state", which
+//     is exactly a branch-local commit;
+//   - `continue-manual` — hands the branch to an operator who needs the planning
+//     artefacts intact;
+//   - `infra-fault`    — schema-retry exhaustion / adapter death never reaches
+//     the model assessment (faults.ts), yet a planner or reviewer may have
+//     written the artefact just before the parse failure, which is exactly the
+//     case issue #18 targets. This is not a model classification (the schema
+//     enum cannot produce it), so it never collides with a model verdict; the
+//     infra-fault salvage path passes it explicitly.
+// `adopt-complete` proceeds through the ordinary path and `discard` is thrown
+// away, so neither salvages.
+const SALVAGE_CLASSIFICATIONS = new Set(['continue-manual', 'adopt-partial', 'infra-fault'])
+
+/**
+ * A salvage record carrying the classification that triggered (or skipped) it,
+ * spread onto the assessment result. The result types extend
+ * Record<string, unknown>, so this rides through run-task.ts without a breaking
+ * type change.
+ */
+export interface SalvageRecord extends SalvageOutcome {
+  classification: string
+}
+
+/**
+ * One run-summary row per task that ATTEMPTED salvage (committed or skipped),
+ * carrying the classification, committed paths, a skipped-count, the commit sha,
+ * and the (structured) detail.
+ */
+export interface SalvageSummaryEntry {
+  id: string
+  classification: string
+  committed: string[]
+  skipped: number
+  sha: string
+  detail: string
+}
+
+/**
+ * Aggregate per-task salvage records into the terminal run summary. Every task
+ * whose result carries a `salvage` record contributes a row — including a
+ * skipped attempt, which has `committed: []` — so `salvages` is empty only when
+ * no salvage was attempted anywhere. `salvagedBranches` counts the branches that
+ * actually committed artefacts, and drives `summarySuffix`, which is '' when
+ * every attempt was a skip (nothing committed). Pure and side-effect free so the
+ * aggregation can be unit-tested without running the workflow body.
+ *
+ * @param results Per-task results, each optionally carrying a `salvage` record.
+ * @returns The `salvages` rows, the `salvagedBranches` count, and the
+ *   `summarySuffix` text for the terminal run summary.
+ */
+export function summarizeSalvages(
+  results: ReadonlyArray<{ id?: string; salvage?: Partial<SalvageRecord> | null }>,
+): { salvages: SalvageSummaryEntry[]; salvagedBranches: number; summarySuffix: string } {
+  const salvages: SalvageSummaryEntry[] = results
+    .filter((result) => result.salvage)
+    .map((result) => ({
+      id: result.id || '',
+      classification: result.salvage?.classification || '',
+      committed: result.salvage?.committed || [],
+      skipped: (result.salvage?.skipped || []).length,
+      sha: result.salvage?.sha || '',
+      detail: result.salvage?.detail || '',
+    }))
+  const salvagedBranches = salvages.filter((entry) => entry.committed.length > 0).length
+  const summarySuffix = salvagedBranches ? ` | salvaged artefacts on ${salvagedBranches} branch(es)` : ''
+  return { salvages, salvagedBranches, summarySuffix }
+}
+
+/** The build/fix-report shape addendum manual-merge and auth-failure checks read from. */
 export interface ImplementationReport {
   ok?: boolean
   gatesGreen?: boolean
@@ -24,6 +101,7 @@ export interface ImplementationReport {
   openIssues?: readonly string[]
 }
 
+/** A task result eligible for ADR 002 assessment: its status, stage, detail, and open issues. */
 export interface AssessableResult extends Record<string, unknown> {
   status?: string
   stage?: string
@@ -31,12 +109,14 @@ export interface AssessableResult extends Record<string, unknown> {
   openIssues?: readonly string[]
 }
 
+/** The branch identity and location assessment needs: branch name, worktree path, and base commit. */
 export interface AssessmentWorktree {
   branch?: string
   worktreePath?: string
   baseSha?: string
 }
 
+/** The run wiring `makeAssessment` binds once: the prompt preamble, the enable switch, adapter routing, the escalation model, and the shared infra-retry wrapper. */
 export interface AssessmentDeps {
   preamble: (worktree: string | null | undefined) => string
   assessPartialBranches: boolean
@@ -45,13 +125,18 @@ export interface AssessmentDeps {
   withInfraRetry: <T>(run: () => Promise<T>, label: string) => Promise<T>
 }
 
-// Deterministic fast-classifier for the two clear, non-judgement cases, run
-// before any model call: an empty branch with a clean worktree is `discard`
-// (nothing durable to adopt) and a host evidence-collection failure is
-// `continue-manual` (cannot judge without evidence). Everything else — a
-// branch with committed work, or a dirty worktree (whose downgrade the
-// recovery eligibility gate owns) — returns null and reaches the model. Never
-// yields an adopt verdict, so recovery review-mode resume is unaffected.
+/**
+ * Deterministic fast-classifier for the two clear, non-judgement cases, run
+ * before any model call: an empty branch with a clean worktree is `discard`
+ * (nothing durable to adopt) and a host evidence-collection failure is
+ * `continue-manual` (cannot judge without evidence). Everything else — a
+ * branch with committed work, or a dirty worktree (whose downgrade the
+ * recovery eligibility gate owns) — returns null and reaches the model. Never
+ * yields an adopt verdict, so recovery review-mode resume is unaffected.
+ *
+ * @param evidence Host-collected git evidence, or undefined/null when unavailable.
+ * @returns The classification and reason, or null when the model must decide.
+ */
 export function fastAssessmentClassification(
   evidence: { collectionErrors?: readonly string[]; dirtyState?: string; recentCommits?: readonly unknown[] } | null | undefined,
 ): { classification: string; reason: string } | null {
@@ -99,6 +184,89 @@ function deterministicAssessment(
   }
 }
 
+// Salvage detail and caught git-error text can carry multi-line git stderr;
+// collapse whitespace and bound the length so a single operator log line never
+// dumps an unbounded stderr blob. The full text still rides on the structured
+// `result.salvage.detail`; only the log line is bounded.
+function boundedSalvageLogText(text: unknown, max = 200): string {
+  const flat = String(text ?? '').replace(/\s+/g, ' ').trim()
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+}
+
+// Commit any untracked/uncommitted task-scoped planning or review artefact the
+// assessed branch left behind, so a `continue-manual`/`adopt-partial` handoff
+// keeps the ExecPlan and review files the operator (or a later resume) needs.
+// Salvage runs only on a kept-but-not-adopted classification; every other
+// classification records a skip reason instead. It is deliberately total: a
+// git failure or an unexpected throw records a reason rather than escaping,
+// because salvage must never turn a failed task into a run-halting error.
+async function salvageAssessmentArtefacts(
+  taskId: string,
+  worktree: string,
+  evidence: AssessmentEvidence,
+  classification: string,
+): Promise<SalvageRecord | null> {
+  if (!SALVAGE_CLASSIFICATIONS.has(classification)) return null
+  if (!worktree) {
+    const record: SalvageRecord = { classification, committed: [], skipped: [], sha: '', detail: 'salvage skipped: no worktree path in the assessment evidence' }
+    log(`[salvage] task ${taskId} (${classification}): skipped — no worktree path in the assessment evidence`)
+    return record
+  }
+  try {
+    // Candidates are the uncommitted entries the host observed: untracked (??)
+    // and modified-but-unstaged (dirtyChanges) plus staged-but-uncommitted
+    // (stagedChanges). The primitive filters them to the artefact convention.
+    const candidates = [
+      ...(evidence.dirtyChanges || []),
+      ...(evidence.stagedChanges || []),
+    ].map((entry) => entry.path)
+    const outcome = await salvageTaskArtefacts(worktree, candidates, taskId)
+    // Salvage is otherwise silent structured data; emit one bounded operator
+    // line at the boundary so a commit, a "nothing to salvage", or a skipped
+    // path is diagnosable without scraping result.json.
+    // sha is fixed-length and the counts are bounded, so only the free-text
+    // detail needs collapsing/truncation before it reaches the log line.
+    if (outcome.committed.length) {
+      log(`[salvage] task ${taskId} (${classification}): committed ${outcome.committed.length} artefact(s) at ${outcome.sha || '<no sha>'}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ''}`)
+    } else {
+      log(`[salvage] task ${taskId} (${classification}): nothing committed — ${boundedSalvageLogText(outcome.detail || 'no eligible artefacts')}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ''}`)
+    }
+    return { classification, ...outcome }
+  } catch (error) {
+    const detail = `salvage errored: ${((error as Error | null) && (error as Error).message) || String(error)}`
+    log(`[salvage] task ${taskId} (${classification}): ${boundedSalvageLogText(detail)}`)
+    return { classification, committed: [], skipped: [], sha: '', detail }
+  }
+}
+
+// Mirror the infra-fault detection shouldAssessFailure uses to EXCLUDE a result
+// from model assessment: a status/stage the fault classifier stamped, or a
+// detail matching the ODW infrastructure patterns (schema-retry exhaustion,
+// adapter death). These branches never reach the model, but a planner or
+// reviewer may still have left a docs/execplans/*.md artefact dirty (#18).
+function isInfraFaultResult(result: AssessableResult | null | undefined): boolean {
+  if (!result) return false
+  // Positive signal: the fault classifier stamped an infra fault.
+  if (result.status === 'infra-fault' || result.stage === 'infrastructure') return true
+  // Reject success, provider, auth, and worktree-preflight outcomes BEFORE the
+  // detail heuristic (mirroring shouldAssessFailure's exclusions): those are
+  // handled on their own paths and must never trigger salvage, even when their
+  // detail happens to embed infra-shaped text (e.g. a provider error that quotes
+  // an underlying SchemaValidationError). Only a genuine product failure whose
+  // detail matches the ODW infrastructure patterns falls through.
+  if (result.status === 'done' || result.status === 'provider-fault' || result.status === 'fatal-auth') return false
+  if (result.stage === 'provider' || result.stage === 'auth' || result.stage === 'worktree' || result.stage === 'worktree-write') return false
+  const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
+  return Boolean(infrastructureFailureDetail(detail))
+}
+
+/**
+ * Whether an open issue text describes a deferred/rate-limited CodeRabbit
+ * review rather than a substantive product defect.
+ *
+ * @param issue A single open-issue string (or any value, coerced to text).
+ * @returns True when the text mentions CodeRabbit alongside a deferred/rate-limit marker.
+ */
 export function isDeferredReviewIssue(issue: unknown): boolean {
   const text = String(issue || '').toLowerCase()
   const deferredReviewMarkers = [
@@ -118,22 +286,41 @@ export function isDeferredReviewIssue(issue: unknown): boolean {
   return text.includes('coderabbit') && deferredReviewMarkers.some((marker) => text.includes(marker))
 }
 
+/**
+ * Whether every open issue in the list is a deferred/recoverable CodeRabbit
+ * review fault (e.g. a 429), so the list carries no substantive defect.
+ *
+ * @param openIssues The open-issue list, or null/undefined.
+ * @returns True only when the list is non-empty and every entry is deferred-review.
+ */
 export function hasOnlyDeferredReviewIssues(openIssues: readonly unknown[] | null | undefined): boolean {
   const issues = openIssues || []
   return issues.length > 0 && issues.every(isDeferredReviewIssue)
 }
 
+/**
+ * Extract an authentication-failure detail from an implementation report's
+ * summary and open issues, using the shared auth-fault pattern matcher.
+ *
+ * @param impl The implementation/fix report, or null/undefined.
+ * @returns The matched auth-failure detail, or '' when none is found.
+ */
 export function implementationAuthFailureDetail(impl: ImplementationReport | null | undefined): string {
   const detail = [impl?.summary, ...(impl?.openIssues || [])].filter(Boolean).join('\n')
   return authFailureDetail(detail)
 }
 
-// A complete, gate-green addendum whose builder did not set ok=true is an
-// operator handoff, not an assessment case. Open issues are tolerated only
-// when every one is a deferred/recoverable review fault (e.g. a CodeRabbit
-// 429): that exact missing evidence is bounded and mechanical — retry the
-// review, verify, integrate — so spending an unbounded judgement agent on it
-// burns tokens without adding operator information (issue #27).
+/**
+ * A complete, gate-green addendum whose builder did not set ok=true is an
+ * operator handoff, not an assessment case. Open issues are tolerated only
+ * when every one is a deferred/recoverable review fault (e.g. a CodeRabbit
+ * 429): that exact missing evidence is bounded and mechanical — retry the
+ * review, verify, integrate — so spending an unbounded judgement agent on it
+ * burns tokens without adding operator information (issue #27).
+ *
+ * @param impl The implementation/fix report, or null/undefined.
+ * @returns True when the addendum needs manual-merge handoff rather than assessment.
+ */
 export function addendumImplementationNeedsManualMerge(impl: ImplementationReport | null | undefined): boolean {
   if (!impl || impl.ok || !impl.gatesGreen) return false
   const openIssues = impl.openIssues || []
@@ -143,6 +330,16 @@ export function addendumImplementationNeedsManualMerge(impl: ImplementationRepor
   return Number.isFinite(completed) && Number.isFinite(total) && total > 0 && completed >= total
 }
 
+/**
+ * Bind the ADR 002 assessment run wiring once (preamble, adapter routing,
+ * escalation model, retry, enable switch) and return the assessment surface:
+ * prompt builders, the recovery-candidate assessor, the assessment-eligibility
+ * gate, and `attachAssessment`, which also drives artefact salvage. Assessment
+ * output NEVER merges, pushes, or ticks the roadmap.
+ *
+ * @param deps The run-scoped assessment dependencies (see {@link AssessmentDeps}).
+ * @returns `{ assessmentPrompt, recoveryAssessmentPrompt, assessRecoveryCandidate, shouldAssessFailure, attachAssessment }`.
+ */
 export function makeAssessment({ preamble, assessPartialBranches, assessmentAgentOptions, assessmentEscalationModel, withInfraRetry }: AssessmentDeps) {
   // Shared ADR 002 assessment prompt body — the classification contract is ONE
   // contract: in-run failure assessment and fresh-run recovery assessment feed
@@ -285,24 +482,56 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     return !authFailureDetail(detail) && !providerFailureDetail(detail) && !infrastructureFailureDetail(detail)
   }
 
+  // Schema-retry exhaustion — the exact failure issue #18 targets — is
+  // classified as an infra-fault (faults.ts), which shouldAssessFailure rightly
+  // excludes from MODEL assessment: the error says nothing about the branch, so
+  // spending a judgement agent on it is wasted. But salvage is deterministic and
+  // needs no model call, and the branch may hold a docs/execplans/*.md artefact
+  // the planner/reviewer wrote just before the parse failure. Commit it here so
+  // it survives later worktree cleanup; every non-infra early-return is passed
+  // through untouched.
+  async function salvageInfraFaultArtefacts<T extends AssessableResult>(
+    task: { id: string; title?: string },
+    wt: AssessmentWorktree,
+    result: T,
+  ): Promise<T & { salvage?: SalvageRecord }> {
+    if (!assessPartialBranches || !wt?.branch) return result
+    if (!isInfraFaultResult(result)) return result
+    const worktree = wt.worktreePath || ''
+    // Only collect git evidence when there is a worktree to read; without one,
+    // salvage short-circuits on its no-worktree guard before touching evidence.
+    const evidence = worktree
+      ? await collectAssessmentEvidence(task, wt)
+      : ({ dirtyChanges: [], stagedChanges: [] } as unknown as AssessmentEvidence)
+    const salvage = await salvageAssessmentArtefacts(task.id, worktree, evidence, 'infra-fault')
+    return salvage ? { ...result, salvage } : result
+  }
+
   async function attachAssessment<T extends AssessableResult>(
     task: { id: string; title?: string },
     wt: AssessmentWorktree,
     result: T,
-  ): Promise<T & { assessment?: Record<string, unknown>; assessmentError?: string; assessmentEvidence?: AssessmentEvidence }> {
-    if (!shouldAssessFailure(result, wt)) return result
+  ): Promise<T & { assessment?: Record<string, unknown>; assessmentError?: string; assessmentEvidence?: AssessmentEvidence; salvage?: SalvageRecord }> {
+    if (!shouldAssessFailure(result, wt)) return await salvageInfraFaultArtefacts(task, wt, result)
     phase('Assess')
     const evidence = await collectAssessmentEvidence(task, wt)
     const fast = fastAssessmentClassification(evidence)
     if (fast) {
-      return { ...result, assessment: deterministicAssessment(fast.classification, evidence, fast.reason) }
+      // The deterministic continue-manual fires only when host evidence
+      // collection failed, so the evidence is untrustworthy — do NOT salvage
+      // against it; record the skip so operators see why.
+      const salvage: SalvageRecord | null = fast.classification === 'continue-manual'
+        ? { classification: fast.classification, committed: [], skipped: [], sha: '', detail: 'salvage skipped: deterministic continue-manual fires on untrustworthy host evidence' }
+        : null
+      return { ...result, assessment: deterministicAssessment(fast.classification, evidence, fast.reason), ...(salvage ? { salvage } : {}) }
     }
     try {
       const assessment = await runModelAssessment(() => assessmentPrompt(task, wt, result, evidence), 'Assess', `assess:${task.id}`, evidence)
       if (!assessment) {
         return { ...result, assessmentError: 'assessment agent returned no structured output', assessmentEvidence: evidence }
       }
-      return { ...result, assessment: { ...assessment, hostEvidence: evidence } }
+      const salvage = await salvageAssessmentArtefacts(task.id, wt.worktreePath || '', evidence, String(assessment.classification || ''))
+      return { ...result, assessment: { ...assessment, hostEvidence: evidence }, ...(salvage ? { salvage } : {}) }
     } catch (error) {
       return {
         ...result,

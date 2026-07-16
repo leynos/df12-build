@@ -1,14 +1,16 @@
-// df12-build-odw entry: the ODW workflow's worker-pool control loop and
-// fresh-run recovery entrypoint. This module unpacks the run configuration
-// (config.ts) once, binds each subsystem factory with that configuration
-// (prompts, write preflight, assessment, remediation, host review, and the
-// per-task pipeline in run-task.ts), and owns the run-scoped state the
-// factories must share: the merge queue and stage semaphores, the worker
-// pool, recovery orchestration over the recovery-decision/-discovery
-// helpers, per-step remediation flushing, and the terminal run summary.
-// The build (scripts/build-workflow.mjs) bundles this file and its imports
-// flat and wraps the whole body for the ODW loader; workflowMain() below is
-// invoked by the generated footer.
+/**
+ * @file df12-build-odw entry: the ODW workflow's worker-pool control loop and
+ * fresh-run recovery entrypoint. This module unpacks the run configuration
+ * (config.ts) once, binds each subsystem factory with that configuration
+ * (prompts, write preflight, assessment, remediation, host review, and the
+ * per-task pipeline in run-task.ts), and owns the run-scoped state the
+ * factories must share: the merge queue and stage semaphores, the worker
+ * pool, recovery orchestration over the recovery-decision/-discovery
+ * helpers, per-step remediation flushing, and the terminal run summary.
+ * The build (scripts/build-workflow.mjs) bundles this file and its imports
+ * flat and wraps the whole body for the ODW loader; workflowMain() below is
+ * invoked by the generated footer.
+ */
 import {
   branchToRoadmapId,
   parseWorktreeList,
@@ -62,6 +64,8 @@ import {
   implementationAuthFailureDetail,
   isDeferredReviewIssue,
   makeAssessment,
+  summarizeSalvages,
+  type SalvageRecord,
 } from './assessment.ts'
 import { TRIAGE_SCHEMA, makeRemediation, stepOf } from './remediation.ts'
 import {
@@ -95,6 +99,7 @@ interface TaskOutcome extends AnyRecord {
   proposals?: AnyRecord[]
   assessment?: AnyRecord
   assessmentError?: string
+  salvage?: SalvageRecord
 }
 
 interface RecoveryRunSummary {
@@ -1114,6 +1119,11 @@ const assessments = results
     recommendation: result.assessment?.recommendation || '',
     assessmentError: result.assessmentError || '',
   }))
+// Salvage rides on individual task results (assessment.ts); surface it in the
+// terminal summary so an operator sees which branches had docs/execplans/*.md
+// artefacts committed (or why salvage was skipped) without opening result.json.
+// summarizeSalvages is a pure, unit-tested aggregator (see assessment.ts).
+const { salvages, summarySuffix: salvageSummarySuffix } = summarizeSalvages(results)
 
 return {
   base: BASE,
@@ -1163,6 +1173,11 @@ return {
   processed,
   results,
   assessments,
+  // Per-branch artefact-salvage records (committed docs/execplans/*.md paths,
+  // skip counts, and the salvage commit sha). A skipped salvage still produces a
+  // record with no committed paths, so this is empty only when no salvage was
+  // attempted on any branch.
+  salvages,
   audits,
   authPreflight,
   // Fresh-run recovery index (failure-resume design): per-task results[]
@@ -1179,6 +1194,7 @@ return {
     results.map((r) => `${r.id}=${r.status}`).join(', ') +
     (recovery.enabled ? ` | recovery(${recovery.mode}): ${recovery.assessed} assessed, ${recovery.resumed} resumed, ${recovery.skipped.length} skipped` : '') +
     (assessments.length ? ` | assessed ${assessments.length} failed/halted branch(es)` : '') +
+    salvageSummarySuffix +
     (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : '') +
     (halted ? ` | halted: ${halted}` : ' | clean stop (no more unblocked tasks).'),
 }

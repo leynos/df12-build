@@ -1510,7 +1510,198 @@ function makeWritePreflight({ enabled, targets }) {
   return { runTaskAgentWritePreflight: runTaskAgentWritePreflight2, ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2 };
 }
 
+// src/workflows/df12-build-odw/execplan-durability.ts
+var TASK_ARTEFACT_PATTERN = /^docs\/execplans\/.+\.md$/;
+function isTaskArtefactPath(candidate) {
+  return TASK_ARTEFACT_PATTERN.test(String(candidate || ""));
+}
+function execplanRelPath(worktree, planPath) {
+  const path = process.getBuiltinModule("node:path");
+  const raw = String(planPath || "");
+  const rel = path.isAbsolute(raw) ? path.relative(worktree, raw) : path.normalize(raw);
+  if (!raw || !rel || rel === "." || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    return { ok: false, relPath: "", detail: `ExecPlan path escapes the assigned worktree: ${raw || "<empty>"}` };
+  }
+  return { ok: true, relPath: rel, detail: "" };
+}
+async function verifyExecplanCommitted(worktree, planPath) {
+  const contained = execplanRelPath(worktree, planPath);
+  if (!contained.ok) return { ok: false, detail: contained.detail };
+  const relPath = contained.relPath;
+  const inHead = await execFileStatus("git", ["-C", worktree, "cat-file", "-e", `HEAD:${relPath}`]);
+  if (!inHead.ok) return { ok: false, detail: `the plan file ${relPath} is not committed at HEAD` };
+  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1", "--", relPath]);
+  if (!status.ok) {
+    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || "").trim()}` };
+  }
+  if (String(status.stdout).trim()) return { ok: false, detail: `the plan file ${relPath} has uncommitted modifications` };
+  return { ok: true, detail: "" };
+}
+async function commitExecplanApproval(worktree, planPath, tag) {
+  const fs = process.getBuiltinModule("node:fs/promises");
+  const path = process.getBuiltinModule("node:path");
+  const contained = execplanRelPath(worktree, planPath);
+  if (!contained.ok) return { ok: false, detail: contained.detail };
+  const relPath = contained.relPath;
+  const absPath = path.join(worktree, relPath);
+  try {
+    const { constants } = process.getBuiltinModule("node:fs");
+    let text;
+    const readHandle = await fs.open(absPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      text = await readHandle.readFile({ encoding: "utf8" });
+    } finally {
+      await readHandle.close();
+    }
+    if (parseExecplanState(text).status !== "approved") {
+      const updated = /^Status:.*$/m.test(text) ? text.replace(/^Status:.*$/m, "Status: APPROVED") : `${text.trimEnd()}
+
+Status: APPROVED
+`;
+      const writeHandle = await fs.open(absPath, constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW);
+      try {
+        await writeHandle.writeFile(updated, { encoding: "utf8" });
+      } finally {
+        await writeHandle.close();
+      }
+    }
+  } catch (error) {
+    return { ok: false, detail: `could not update the plan status: ${error && error.message || String(error)}` };
+  }
+  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1", "--", relPath]);
+  if (!status.ok) {
+    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || "").trim()}` };
+  }
+  if (!String(status.stdout).trim()) return { ok: true, detail: "already committed as APPROVED" };
+  const add = await execFileStatus("git", ["-C", worktree, "add", "--", relPath]);
+  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
+  const commit = await execFileStatus("git", [
+    "-C",
+    worktree,
+    "-c",
+    "user.name=df12-build",
+    "-c",
+    "user.email=df12-build@workflow.invalid",
+    "commit",
+    "-m",
+    `Approve ExecPlan for task ${tag}`,
+    "--",
+    relPath
+  ]);
+  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
+  return { ok: true, detail: "" };
+}
+async function commitExecplanDraft(worktree, relPath, tag) {
+  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
+  if (!status.ok) return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
+  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return { ok: false, detail: "nothing to commit: the worktree is already clean" };
+  const foreign = lines.filter((line) => line.slice(3).replace(/^"(.*)"$/, "$1") !== relPath);
+  if (foreign.length) {
+    const sample = foreign.slice(0, 8).map((line) => line.trim()).join("; ");
+    return { ok: false, detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? "; \u2026" : ""})` };
+  }
+  const add = await execFileStatus("git", ["-C", worktree, "add", "--", relPath]);
+  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
+  const commit = await execFileStatus("git", [
+    "-C",
+    worktree,
+    "-c",
+    "user.name=df12-build",
+    "-c",
+    "user.email=df12-build@workflow.invalid",
+    "commit",
+    "-m",
+    `Draft ExecPlan for task ${tag}`,
+    "--",
+    relPath
+  ]);
+  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
+  return { ok: true, detail: "" };
+}
+async function salvageTaskArtefacts(worktree, candidatePaths, tag) {
+  const skipped = [];
+  const verified = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const candidate of candidatePaths) {
+    const raw = String(candidate || "");
+    if (!raw || seen.has(raw)) continue;
+    seen.add(raw);
+    if (!isTaskArtefactPath(raw)) {
+      skipped.push({ path: raw, reason: "not a task-scoped docs/execplans/*.md artefact" });
+      continue;
+    }
+    const contained = execplanRelPath(worktree, raw);
+    if (!contained.ok) {
+      skipped.push({ path: raw, reason: contained.detail });
+      continue;
+    }
+    if (!isTaskArtefactPath(contained.relPath)) {
+      skipped.push({ path: raw, reason: `normalizes outside the docs/execplans/*.md artefact scope (${contained.relPath})` });
+      continue;
+    }
+    const probe = await fileState(contained.relPath, worktree);
+    if (!probe.ok) {
+      skipped.push({ path: contained.relPath, reason: probe.detail });
+      continue;
+    }
+    if (!probe.exists) {
+      skipped.push({ path: contained.relPath, reason: "no regular file at the path (absent, or a symlink)" });
+      continue;
+    }
+    verified.push(contained.relPath);
+  }
+  if (!verified.length) {
+    return { committed: [], skipped, sha: "", detail: "nothing to salvage: no eligible task-scoped artefacts are dirty" };
+  }
+  const add = await execFileStatus("git", ["-C", worktree, "add", "--", ...verified]);
+  if (!add.ok) return { committed: [], skipped, sha: "", detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
+  const commit = await execFileStatus("git", [
+    "-C",
+    worktree,
+    "-c",
+    "user.name=df12-build",
+    "-c",
+    "user.email=df12-build@workflow.invalid",
+    "commit",
+    "-m",
+    `Salvage task artefacts for task ${tag}`,
+    "--",
+    ...verified
+  ]);
+  if (!commit.ok) return { committed: [], skipped, sha: "", detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
+  const head = await execFileStatus("git", ["-C", worktree, "rev-parse", "HEAD"]);
+  if (!head.ok) {
+    return { committed: verified, skipped, sha: "", detail: `salvage committed but reading HEAD failed: ${(head.message || head.stderr || "").trim()}` };
+  }
+  return { committed: verified, skipped, sha: String(head.stdout).trim(), detail: "" };
+}
+async function verifyWorktreeCommitted(worktree) {
+  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
+  if (!status.ok) {
+    return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
+  }
+  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return { ok: true, detail: "" };
+  const sample = lines.slice(0, 8).map((line) => line.trim()).join("; ");
+  return { ok: false, detail: `${lines.length} uncommitted path(s): ${sample}${lines.length > 8 ? "; \u2026" : ""}` };
+}
+
 // src/workflows/df12-build-odw/assessment.ts
+var SALVAGE_CLASSIFICATIONS = /* @__PURE__ */ new Set(["continue-manual", "adopt-partial", "infra-fault"]);
+function summarizeSalvages(results2) {
+  const salvages = results2.filter((result) => result.salvage).map((result) => ({
+    id: result.id || "",
+    classification: result.salvage?.classification || "",
+    committed: result.salvage?.committed || [],
+    skipped: (result.salvage?.skipped || []).length,
+    sha: result.salvage?.sha || "",
+    detail: result.salvage?.detail || ""
+  }));
+  const salvagedBranches = salvages.filter((entry) => entry.committed.length > 0).length;
+  const summarySuffix = salvagedBranches ? ` | salvaged artefacts on ${salvagedBranches} branch(es)` : "";
+  return { salvages, salvagedBranches, summarySuffix };
+}
 function fastAssessmentClassification(evidence) {
   const collectionErrors = evidence?.collectionErrors || [];
   if (collectionErrors.length) {
@@ -1544,6 +1735,43 @@ function deterministicAssessment(classification, evidence, reason) {
     classifier: "deterministic",
     hostEvidence: evidence
   };
+}
+function boundedSalvageLogText(text, max = 200) {
+  const flat = String(text ?? "").replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}\u2026` : flat;
+}
+async function salvageAssessmentArtefacts(taskId, worktree, evidence, classification) {
+  if (!SALVAGE_CLASSIFICATIONS.has(classification)) return null;
+  if (!worktree) {
+    const record = { classification, committed: [], skipped: [], sha: "", detail: "salvage skipped: no worktree path in the assessment evidence" };
+    log(`[salvage] task ${taskId} (${classification}): skipped \u2014 no worktree path in the assessment evidence`);
+    return record;
+  }
+  try {
+    const candidates = [
+      ...evidence.dirtyChanges || [],
+      ...evidence.stagedChanges || []
+    ].map((entry) => entry.path);
+    const outcome = await salvageTaskArtefacts(worktree, candidates, taskId);
+    if (outcome.committed.length) {
+      log(`[salvage] task ${taskId} (${classification}): committed ${outcome.committed.length} artefact(s) at ${outcome.sha || "<no sha>"}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ""}`);
+    } else {
+      log(`[salvage] task ${taskId} (${classification}): nothing committed \u2014 ${boundedSalvageLogText(outcome.detail || "no eligible artefacts")}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ""}`);
+    }
+    return { classification, ...outcome };
+  } catch (error) {
+    const detail = `salvage errored: ${error && error.message || String(error)}`;
+    log(`[salvage] task ${taskId} (${classification}): ${boundedSalvageLogText(detail)}`);
+    return { classification, committed: [], skipped: [], sha: "", detail };
+  }
+}
+function isInfraFaultResult(result) {
+  if (!result) return false;
+  if (result.status === "infra-fault" || result.stage === "infrastructure") return true;
+  if (result.status === "done" || result.status === "provider-fault" || result.status === "fatal-auth") return false;
+  if (result.stage === "provider" || result.stage === "auth" || result.stage === "worktree" || result.stage === "worktree-write") return false;
+  const detail = [result.detail, ...result.openIssues || []].filter(Boolean).join("\n");
+  return Boolean(infrastructureFailureDetail(detail));
 }
 function isDeferredReviewIssue(issue) {
   const text = String(issue || "").toLowerCase();
@@ -1679,20 +1907,30 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
     const detail = [result.detail, ...result.openIssues || []].filter(Boolean).join("\n");
     return !authFailureDetail(detail) && !providerFailureDetail(detail) && !infrastructureFailureDetail(detail);
   }
+  async function salvageInfraFaultArtefacts(task, wt, result) {
+    if (!assessPartialBranches || !wt?.branch) return result;
+    if (!isInfraFaultResult(result)) return result;
+    const worktree = wt.worktreePath || "";
+    const evidence = worktree ? await collectAssessmentEvidence(task, wt) : { dirtyChanges: [], stagedChanges: [] };
+    const salvage = await salvageAssessmentArtefacts(task.id, worktree, evidence, "infra-fault");
+    return salvage ? { ...result, salvage } : result;
+  }
   async function attachAssessment2(task, wt, result) {
-    if (!shouldAssessFailure2(result, wt)) return result;
+    if (!shouldAssessFailure2(result, wt)) return await salvageInfraFaultArtefacts(task, wt, result);
     phase("Assess");
     const evidence = await collectAssessmentEvidence(task, wt);
     const fast = fastAssessmentClassification(evidence);
     if (fast) {
-      return { ...result, assessment: deterministicAssessment(fast.classification, evidence, fast.reason) };
+      const salvage = fast.classification === "continue-manual" ? { classification: fast.classification, committed: [], skipped: [], sha: "", detail: "salvage skipped: deterministic continue-manual fires on untrustworthy host evidence" } : null;
+      return { ...result, assessment: deterministicAssessment(fast.classification, evidence, fast.reason), ...salvage ? { salvage } : {} };
     }
     try {
       const assessment = await runModelAssessment(() => assessmentPrompt2(task, wt, result, evidence), "Assess", `assess:${task.id}`, evidence);
       if (!assessment) {
         return { ...result, assessmentError: "assessment agent returned no structured output", assessmentEvidence: evidence };
       }
-      return { ...result, assessment: { ...assessment, hostEvidence: evidence } };
+      const salvage = await salvageAssessmentArtefacts(task.id, wt.worktreePath || "", evidence, String(assessment.classification || ""));
+      return { ...result, assessment: { ...assessment, hostEvidence: evidence }, ...salvage ? { salvage } : {} };
     } catch (error) {
       return {
         ...result,
@@ -2032,122 +2270,6 @@ ${outcome.tail}`
 ${outcome.tail}`, logFile };
   }
   return { coderabbitBackoffMinutes: coderabbitBackoffMinutes2, runCoderabbitHostReview: runCoderabbitHostReview2, recordCoderabbitReview: recordCoderabbitReview2, runHostCommitGates: runHostCommitGates2, runCodeSceneCheck: runCodeSceneCheck2 };
-}
-
-// src/workflows/df12-build-odw/execplan-durability.ts
-function execplanRelPath(worktree, planPath) {
-  const path = process.getBuiltinModule("node:path");
-  const raw = String(planPath || "");
-  const rel = path.isAbsolute(raw) ? path.relative(worktree, raw) : path.normalize(raw);
-  if (!raw || !rel || rel === "." || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
-    return { ok: false, relPath: "", detail: `ExecPlan path escapes the assigned worktree: ${raw || "<empty>"}` };
-  }
-  return { ok: true, relPath: rel, detail: "" };
-}
-async function verifyExecplanCommitted(worktree, planPath) {
-  const contained = execplanRelPath(worktree, planPath);
-  if (!contained.ok) return { ok: false, detail: contained.detail };
-  const relPath = contained.relPath;
-  const inHead = await execFileStatus("git", ["-C", worktree, "cat-file", "-e", `HEAD:${relPath}`]);
-  if (!inHead.ok) return { ok: false, detail: `the plan file ${relPath} is not committed at HEAD` };
-  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1", "--", relPath]);
-  if (!status.ok) {
-    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || "").trim()}` };
-  }
-  if (String(status.stdout).trim()) return { ok: false, detail: `the plan file ${relPath} has uncommitted modifications` };
-  return { ok: true, detail: "" };
-}
-async function commitExecplanApproval(worktree, planPath, tag) {
-  const fs = process.getBuiltinModule("node:fs/promises");
-  const path = process.getBuiltinModule("node:path");
-  const contained = execplanRelPath(worktree, planPath);
-  if (!contained.ok) return { ok: false, detail: contained.detail };
-  const relPath = contained.relPath;
-  const absPath = path.join(worktree, relPath);
-  try {
-    const { constants } = process.getBuiltinModule("node:fs");
-    let text;
-    const readHandle = await fs.open(absPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      text = await readHandle.readFile({ encoding: "utf8" });
-    } finally {
-      await readHandle.close();
-    }
-    if (parseExecplanState(text).status !== "approved") {
-      const updated = /^Status:.*$/m.test(text) ? text.replace(/^Status:.*$/m, "Status: APPROVED") : `${text.trimEnd()}
-
-Status: APPROVED
-`;
-      const writeHandle = await fs.open(absPath, constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW);
-      try {
-        await writeHandle.writeFile(updated, { encoding: "utf8" });
-      } finally {
-        await writeHandle.close();
-      }
-    }
-  } catch (error) {
-    return { ok: false, detail: `could not update the plan status: ${error && error.message || String(error)}` };
-  }
-  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1", "--", relPath]);
-  if (!status.ok) {
-    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || "").trim()}` };
-  }
-  if (!String(status.stdout).trim()) return { ok: true, detail: "already committed as APPROVED" };
-  const add = await execFileStatus("git", ["-C", worktree, "add", "--", relPath]);
-  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
-  const commit = await execFileStatus("git", [
-    "-C",
-    worktree,
-    "-c",
-    "user.name=df12-build",
-    "-c",
-    "user.email=df12-build@workflow.invalid",
-    "commit",
-    "-m",
-    `Approve ExecPlan for task ${tag}`,
-    "--",
-    relPath
-  ]);
-  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
-  return { ok: true, detail: "" };
-}
-async function commitExecplanDraft(worktree, relPath, tag) {
-  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
-  if (!status.ok) return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
-  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
-  if (!lines.length) return { ok: false, detail: "nothing to commit: the worktree is already clean" };
-  const foreign = lines.filter((line) => line.slice(3).replace(/^"(.*)"$/, "$1") !== relPath);
-  if (foreign.length) {
-    const sample = foreign.slice(0, 8).map((line) => line.trim()).join("; ");
-    return { ok: false, detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? "; \u2026" : ""})` };
-  }
-  const add = await execFileStatus("git", ["-C", worktree, "add", "--", relPath]);
-  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
-  const commit = await execFileStatus("git", [
-    "-C",
-    worktree,
-    "-c",
-    "user.name=df12-build",
-    "-c",
-    "user.email=df12-build@workflow.invalid",
-    "commit",
-    "-m",
-    `Draft ExecPlan for task ${tag}`,
-    "--",
-    relPath
-  ]);
-  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
-  return { ok: true, detail: "" };
-}
-async function verifyWorktreeCommitted(worktree) {
-  const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
-  if (!status.ok) {
-    return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
-  }
-  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
-  if (!lines.length) return { ok: true, detail: "" };
-  const sample = lines.slice(0, 8).map((line) => line.trim()).join("; ");
-  return { ok: false, detail: `${lines.length} uncommitted path(s): ${sample}${lines.length > 8 ? "; \u2026" : ""}` };
 }
 
 // src/workflows/df12-build-odw/run-task.ts
@@ -3677,6 +3799,7 @@ async function workflowMain() {
     recommendation: result.assessment?.recommendation || "",
     assessmentError: result.assessmentError || ""
   }));
+  const { salvages, summarySuffix: salvageSummarySuffix } = summarizeSalvages(results);
   return {
     base: BASE,
     modelRouting: {
@@ -3725,6 +3848,11 @@ async function workflowMain() {
     processed,
     results,
     assessments,
+    // Per-branch artefact-salvage records (committed docs/execplans/*.md paths,
+    // skip counts, and the salvage commit sha). A skipped salvage still produces a
+    // record with no committed paths, so this is empty only when no salvage was
+    // attempted on any branch.
+    salvages,
     audits,
     authPreflight,
     // Fresh-run recovery index (failure-resume design): per-task results[]
@@ -3736,7 +3864,7 @@ async function workflowMain() {
     remediationTriage: triages,
     pendingProposals,
     halted,
-    summary: `Processed ${processed.length} roadmap task(s) (pool width ${MAX_PARALLEL}): ` + results.map((r) => `${r.id}=${r.status}`).join(", ") + (recovery.enabled ? ` | recovery(${recovery.mode}): ${recovery.assessed} assessed, ${recovery.resumed} resumed, ${recovery.skipped.length} skipped` : "") + (assessments.length ? ` | assessed ${assessments.length} failed/halted branch(es)` : "") + (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : "") + (halted ? ` | halted: ${halted}` : " | clean stop (no more unblocked tasks).")
+    summary: `Processed ${processed.length} roadmap task(s) (pool width ${MAX_PARALLEL}): ` + results.map((r) => `${r.id}=${r.status}`).join(", ") + (recovery.enabled ? ` | recovery(${recovery.mode}): ${recovery.assessed} assessed, ${recovery.resumed} resumed, ${recovery.skipped.length} skipped` : "") + (assessments.length ? ` | assessed ${assessments.length} failed/halted branch(es)` : "") + salvageSummarySuffix + (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : "") + (halted ? ` | halted: ${halted}` : " | clean stop (no more unblocked tasks).")
   };
 }
 

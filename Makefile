@@ -7,10 +7,19 @@ MARKDOWN_FILES := $(shell find . \
 WORKFLOW_FILES := workflows/df12-build-odw.js workflows/df12-build.js
 TYPOS_VERSION ?= 1.48.0
 TYPOS := uv tool run typos@$(TYPOS_VERSION)
+# Modules under the docstring-coverage gate (AGENTS.md's `/** @file … */` +
+# exported-declaration JSDoc rule). This is a deliberate allow-list, not the
+# whole tree: modules join it as they are brought up to the documented standard,
+# so the gate never regresses a documented module back below threshold.
+DOCSTRING_MODULES := \
+	src/workflows/df12-build-odw/assessment.ts \
+	src/workflows/df12-build-odw/execplan-durability.ts \
+	src/workflows/df12-build-odw/main.ts
+DOCSTRING_MIN ?= 80
 
-.PHONY: all clean check-fmt lint typecheck markdownlint nixie spelling test test-modules test-workflow verify-modules verify-modules-strict workflow-parse workflow-build workflow-freshness
+.PHONY: all clean check-fmt lint typecheck markdownlint nixie spelling test test-modules test-workflow verify-modules verify-modules-strict workflow-parse workflow-build workflow-freshness docstring-coverage
 
-all: check-fmt lint typecheck markdownlint nixie test workflow-freshness verify-modules
+all: check-fmt lint typecheck markdownlint nixie docstring-coverage test workflow-freshness verify-modules
 
 # Reset fetched dependencies. The generated workflow artefact is deliberately
 # NOT removed: it is a committed file (the sidecar copies it verbatim), so its
@@ -84,3 +93,9 @@ verify-modules-strict:
 
 workflow-parse:
 	node -e "const fs=require('fs'); for (const path of process.argv.slice(1)) { let source=fs.readFileSync(path,'utf8').replace(/^export const meta\s*=/m,'const meta ='); new Function('return (async function __workflow_wrapped__() {\n' + source + '\n})'); console.log(path + ': wrapped JavaScript parses'); }" $(WORKFLOW_FILES)
+
+# Enforce AGENTS.md's docstring rule on the allow-listed modules: a `/** @file
+# … */` module block plus a JSDoc block on every exported declaration, at or
+# above DOCSTRING_MIN percent. A plain `//` comment does not satisfy the gate.
+docstring-coverage:
+	node scripts/docstring-coverage.mjs --min $(DOCSTRING_MIN) $(DOCSTRING_MODULES)
