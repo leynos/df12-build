@@ -120,10 +120,13 @@ sequenceDiagram
     committing branches salvageAssessmentArtefacts calls salvageTaskArtefacts
     with the candidate artefact paths and a commit tag; salvageTaskArtefacts
     checks path containment and file state, then adds and commits the eligible
-    docs/execplans artefacts to Git, which returns the commit SHA.
-    salvageTaskArtefacts returns a SalvageOutcome, and salvageAssessmentArtefacts
-    wraps it as a SalvageRecord back to its caller — attachAssessment directly,
-    or via salvageInfraFaultArtefacts, which passes the record on.
+    docs/execplans artefacts to Git and reads the new commit SHA. It returns a
+    SalvageOutcome carrying the committed paths and that SHA — but if the
+    post-commit git rev-parse HEAD fails, the committed artefacts are still
+    returned with sha empty and the failure recorded in detail.
+    salvageAssessmentArtefacts wraps the SalvageOutcome as a SalvageRecord back
+    to its caller — attachAssessment directly, or via salvageInfraFaultArtefacts,
+    which passes the record on.
   }
   participant attachAssessment
   participant salvageInfraFaultArtefacts
@@ -138,16 +141,16 @@ sequenceDiagram
     attachAssessment->>salvageAssessmentArtefacts: classification, evidence, worktree
     salvageAssessmentArtefacts->>salvageTaskArtefacts: candidate paths, tag
     salvageTaskArtefacts->>Git: check containment, file state, add, commit
-    Git-->>salvageTaskArtefacts: commit SHA
-    salvageTaskArtefacts-->>salvageAssessmentArtefacts: SalvageOutcome
+    Git-->>salvageTaskArtefacts: commit SHA (empty when rev-parse fails)
+    salvageTaskArtefacts-->>salvageAssessmentArtefacts: SalvageOutcome (sha or empty + detail)
     salvageAssessmentArtefacts-->>attachAssessment: SalvageRecord
   else infra-fault result (no model assessment)
     attachAssessment->>salvageInfraFaultArtefacts: infra-fault result, worktree
     salvageInfraFaultArtefacts->>salvageAssessmentArtefacts: infra-fault classification, evidence, worktree
     salvageAssessmentArtefacts->>salvageTaskArtefacts: candidate paths, tag
     salvageTaskArtefacts->>Git: check containment, file state, add, commit
-    Git-->>salvageTaskArtefacts: commit SHA
-    salvageTaskArtefacts-->>salvageAssessmentArtefacts: SalvageOutcome
+    Git-->>salvageTaskArtefacts: commit SHA (empty when rev-parse fails)
+    salvageTaskArtefacts-->>salvageAssessmentArtefacts: SalvageOutcome (sha or empty + detail)
     salvageAssessmentArtefacts-->>salvageInfraFaultArtefacts: SalvageRecord
     salvageInfraFaultArtefacts-->>attachAssessment: SalvageRecord
   end
