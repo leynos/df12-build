@@ -67,7 +67,7 @@ describe('agent schema contracts', () => {
     expect(REVIEW_SCHEMA.required).toEqual(['verdict', 'blocking', 'summary'])
     expect(FIX_SCHEMA.required).toEqual(['gatesGreen', 'summary'])
     expect(IMPL_SCHEMA.required).toEqual(['ok', 'execplanPath', 'gatesGreen', 'summary'])
-    expect(INTEGRATE_SCHEMA.required).toEqual(['ok', 'summary'])
+    expect(INTEGRATE_SCHEMA.required).toEqual(['ok', 'roadmapMarkedDone', 'rebased', 'squashMerged', 'pushed', 'summary'])
     expect(PLAN_SCHEMA.required).toEqual(['execplanPath', 'workItems', 'summary'])
     expect(DESIGN_VERDICT_SCHEMA.required).toEqual(['satisfied', 'blocking'])
     expect(AUDIT_SCHEMA.required).toEqual(['findings', 'summary'])
