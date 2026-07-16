@@ -21,6 +21,14 @@ export const PLAN_SCHEMA = {
   required: ['execplanPath', 'workItems', 'summary'],
 }
 
+/**
+ * The design-review verdict on a submitted plan: whether the plan is
+ * implementable, design-conformant, and complete (`satisfied`), and the
+ * must-fix defects that block acceptance (`blocking`, empty iff satisfied).
+ * Downstream JavaScript dereferences `required` fields and assumes
+ * `additionalProperties: false`, so treat this as a contract, not
+ * documentation.
+ */
 export const DESIGN_VERDICT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -33,6 +41,13 @@ export const DESIGN_VERDICT_SCHEMA = {
   required: ['satisfied', 'blocking'],
 }
 
+/**
+ * The implementation agent's report on a completed round of work: `ok`,
+ * `gatesGreen`, a `summary`, and any `openIssues` left unresolved, keyed to
+ * the `execplanPath` driving the round. Downstream JavaScript dereferences
+ * `required` fields and assumes `additionalProperties: false`, so treat this
+ * as a contract, not documentation.
+ */
 export const IMPL_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -50,6 +65,13 @@ export const IMPL_SCHEMA = {
   required: ['ok', 'execplanPath', 'gatesGreen', 'summary'],
 }
 
+/**
+ * A reviewer's verdict on the implementation: `verdict` (pass or
+ * changes-requested), `blocking` items that must be fixed before the task is
+ * done, and a `summary`. Downstream JavaScript dereferences `required`
+ * fields and assumes `additionalProperties: false`, so treat this as a
+ * contract, not documentation.
+ */
 export const REVIEW_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -82,10 +104,16 @@ export const REVIEW_SCHEMA = {
   required: ['verdict', 'blocking', 'summary'],
 }
 
-// Structured return contract for review-fix rounds. Without it, the gate and
-// CodeRabbit evidence a fix agent produces evaporates with its transcript, and
-// a later assessment of the branch cannot see that the workflow already
-// re-validated the current tip (issue #24).
+/**
+ * A fix round's report, returned after a reviewer's blocking items are
+ * addressed: `gatesGreen`, a `summary`, and how each blocking item was
+ * `resolved`. Without this structured contract, the gate and CodeRabbit
+ * evidence a fix agent produces evaporates with its transcript, and a later
+ * assessment of the branch cannot see that the workflow already
+ * re-validated the current tip (issue #24). Downstream JavaScript
+ * dereferences `required` fields and assumes `additionalProperties: false`,
+ * so treat this as a contract, not documentation.
+ */
 export const FIX_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -100,6 +128,14 @@ export const FIX_SCHEMA = {
   required: ['gatesGreen', 'summary'],
 }
 
+/**
+ * The integration agent's claim about landing the branch: whether it
+ * succeeded (`ok`), was `rebased`, `squashMerged`, and `pushed`, and whether
+ * the roadmap entry was marked done (`roadmapMarkedDone`). Downstream
+ * JavaScript dereferences `required` fields and assumes
+ * `additionalProperties: false`, so treat this as a contract, not
+ * documentation.
+ */
 export const INTEGRATE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -116,6 +152,13 @@ export const INTEGRATE_SCHEMA = {
   required: ['ok', 'roadmapMarkedDone', 'rebased', 'squashMerged', 'pushed', 'summary'],
 }
 
+/**
+ * The post-merge audit's findings on the integrated change: categorized
+ * `findings` (each with `category`, `location`, `description`, and
+ * `proposedFix`) and a `summary`. Downstream JavaScript dereferences
+ * `required` fields and assumes `additionalProperties: false`, so treat
+ * this as a contract, not documentation.
+ */
 export const AUDIT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -151,6 +194,12 @@ export const AUDIT_SCHEMA = {
   required: ['findings', 'summary'],
 }
 
+/**
+ * The enum of allowed classification strings for an ADR 002 partial-branch
+ * assessment: `adopt-complete`, `adopt-partial`, `continue-manual`, and
+ * `discard`. Referenced by `ASSESSMENT_SCHEMA`'s `classification` property,
+ * so treat this as a contract, not documentation.
+ */
 export const ASSESSMENT_CLASSIFICATIONS = [
   'adopt-complete',
   'adopt-partial',
@@ -158,6 +207,17 @@ export const ASSESSMENT_CLASSIFICATIONS = [
   'discard',
 ]
 
+/**
+ * The ADR 002 partial-branch assessment: the resume `classification`,
+ * branch/worktree identity, and two carry-forward channels — the
+ * `missingEvidence` BLOCKING channel (genuinely missing validation/review
+ * evidence that must prevent an adopt-complete resume) and the
+ * `residualRisk` ADVISORY channel (non-blocking risk threaded to
+ * review/integration context that must not downgrade an otherwise-eligible
+ * adopt-complete resume). Downstream JavaScript dereferences `required`
+ * fields and assumes `additionalProperties: false`, so treat this as a
+ * contract, not documentation.
+ */
 export const ASSESSMENT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
