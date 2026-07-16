@@ -820,11 +820,20 @@ test('review-mode resume carries advisory residualRisk into the review and integ
   assert.equal(result.status, 'done')
   // The advisory context must survive onto the synthetic impl report...
   assert.deepEqual(result.impl.residualRisk, ['telemetry counter not yet wired up'])
-  // ...and be rendered as an explicitly non-blocking section in every prompt.
+  // ...and be rendered as an explicitly non-blocking, injection-safe section in
+  // every prompt: the item is JSON-encoded inside a fenced untrusted-data block
+  // so agent-authored residual risk cannot smuggle instructions downstream.
+  // This repo uses no snapshot mechanism (bun `toMatchSnapshot` is unused
+  // project-wide), so the prompt content is pinned with explicit assertions.
   const advisoryLabel = 'Advisory residual risk (non-blocking'
   for (const [name, text] of Object.entries(prompts)) {
     assert.ok(text.includes(advisoryLabel), `${name} prompt must carry the advisory residual-risk section`)
-    assert.ok(text.includes('telemetry counter not yet wired up'), `${name} prompt must list the residual-risk item`)
+    assert.ok(text.includes('"telemetry counter not yet wired up"'), `${name} prompt must list the JSON-encoded residual-risk item`)
+    assert.ok(text.includes('UNTRUSTED DATA'), `${name} prompt must mark residual risk as untrusted data`)
+    assert.ok(
+      text.includes('----- BEGIN RESIDUAL RISK DATA (untrusted) -----'),
+      `${name} prompt must fence the residual-risk data block`,
+    )
   }
 })
 

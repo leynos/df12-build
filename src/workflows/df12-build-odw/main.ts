@@ -627,11 +627,15 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
     // mode) chose the entry point; the pipeline's own gates remain decisive,
     // and integration ticks the roadmap under the merge lock.
     const stage = decision.stage || 'review'
-    log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline`)
-    const resume = { candidate, enriched, evidence, stage, residualRisk: advisoryResidualRisk(assessment) }
+    // Surface the advisory-vs-blocking boundary for operator diagnosis (#23):
+    // the resume proceeded despite this many non-blocking residual-risk caveats,
+    // which are carried into the review/integration prompts rather than blocking.
+    const residualRisk = advisoryResidualRisk(assessment)
+    log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline (advisory residualRisk: ${residualRisk.length})`)
+    const resume = { candidate, enriched, evidence, stage, residualRisk }
     const outcome = (await executeResume(task, resume, mergeLock)) as TaskOutcome
     if (outcome.status === 'fatal-auth' || outcome.status === 'provider-fault' || outcome.status === 'infra-fault') {
-      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status })
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status, residualRisk })
       return { summary, taskResults, held, fatal: outcome }
     }
     // A failed or halted resume gets a FRESH assessment through the same
@@ -640,12 +644,12 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
     taskResults.push({ task, result: outcome.status === 'done' ? outcome : await attachAssessment(task, resumeWt, outcome) })
     if (outcome.status === 'done') {
       summary.resumed += 1
-      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resumed' })
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resumed', residualRisk })
       log(`[recovery] ${candidate.branchName}: resumed and integrated`)
     } else if (outcome.status === 'manual-merge-ready') {
-      summary.results.push({ ...resultBase, resumeStage: stage, action: 'manual-merge-ready' })
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'manual-merge-ready', residualRisk })
     } else {
-      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status })
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status, residualRisk })
       log(`[recovery] ${candidate.branchName}: resume ${outcome.status} at ${outcome.stage || 'unknown stage'}`)
     }
   }

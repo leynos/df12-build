@@ -1010,7 +1010,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       }
       let integration: StageIntegration | null = null
       if (AUTO_MERGE) {
-        const attempt = await integrateTask(task, mergeLock, { worktree, proposals, kindExtra: { kind: 'addendum' } })
+        const attempt = await integrateTask(task, mergeLock, { worktree, proposals, kindExtra: { kind: 'addendum' }, impl })
         if (attempt.fault) return attempt.fault
         integration = attempt.integration ?? null
         if (integrationIncomplete(integration)) {
