@@ -1689,6 +1689,19 @@ async function verifyWorktreeCommitted(worktree) {
 
 // src/workflows/df12-build-odw/assessment.ts
 var SALVAGE_CLASSIFICATIONS = /* @__PURE__ */ new Set(["continue-manual", "adopt-partial", "infra-fault"]);
+function summarizeSalvages(results2) {
+  const salvages = results2.filter((result) => result.salvage).map((result) => ({
+    id: result.id || "",
+    classification: result.salvage?.classification || "",
+    committed: result.salvage?.committed || [],
+    skipped: (result.salvage?.skipped || []).length,
+    sha: result.salvage?.sha || "",
+    detail: result.salvage?.detail || ""
+  }));
+  const salvagedBranches = salvages.filter((entry) => entry.committed.length > 0).length;
+  const summarySuffix = salvagedBranches ? ` | salvaged artefacts on ${salvagedBranches} branch(es)` : "";
+  return { salvages, salvagedBranches, summarySuffix };
+}
 function fastAssessmentClassification(evidence) {
   const collectionErrors = evidence?.collectionErrors || [];
   if (collectionErrors.length) {
@@ -1723,6 +1736,10 @@ function deterministicAssessment(classification, evidence, reason) {
     hostEvidence: evidence
   };
 }
+function boundedSalvageLogText(text, max = 200) {
+  const flat = String(text ?? "").replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}\u2026` : flat;
+}
 async function salvageAssessmentArtefacts(taskId, worktree, evidence, classification) {
   if (!SALVAGE_CLASSIFICATIONS.has(classification)) return null;
   if (!worktree) {
@@ -1739,18 +1756,20 @@ async function salvageAssessmentArtefacts(taskId, worktree, evidence, classifica
     if (outcome.committed.length) {
       log(`[salvage] task ${taskId} (${classification}): committed ${outcome.committed.length} artefact(s) at ${outcome.sha || "<no sha>"}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ""}`);
     } else {
-      log(`[salvage] task ${taskId} (${classification}): nothing committed \u2014 ${outcome.detail || "no eligible artefacts"}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ""}`);
+      log(`[salvage] task ${taskId} (${classification}): nothing committed \u2014 ${boundedSalvageLogText(outcome.detail || "no eligible artefacts")}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ""}`);
     }
     return { classification, ...outcome };
   } catch (error) {
     const detail = `salvage errored: ${error && error.message || String(error)}`;
-    log(`[salvage] task ${taskId} (${classification}): ${detail}`);
+    log(`[salvage] task ${taskId} (${classification}): ${boundedSalvageLogText(detail)}`);
     return { classification, committed: [], skipped: [], sha: "", detail };
   }
 }
 function isInfraFaultResult(result) {
   if (!result) return false;
   if (result.status === "infra-fault" || result.stage === "infrastructure") return true;
+  if (result.status === "done" || result.status === "provider-fault" || result.status === "fatal-auth") return false;
+  if (result.stage === "provider" || result.stage === "auth" || result.stage === "worktree" || result.stage === "worktree-write") return false;
   const detail = [result.detail, ...result.openIssues || []].filter(Boolean).join("\n");
   return Boolean(infrastructureFailureDetail(detail));
 }
@@ -3773,15 +3792,7 @@ async function workflowMain() {
     recommendation: result.assessment?.recommendation || "",
     assessmentError: result.assessmentError || ""
   }));
-  const salvages = results.filter((result) => result.salvage).map((result) => ({
-    id: result.id,
-    classification: result.salvage?.classification || "",
-    committed: result.salvage?.committed || [],
-    skipped: (result.salvage?.skipped || []).length,
-    sha: result.salvage?.sha || "",
-    detail: result.salvage?.detail || ""
-  }));
-  const salvagedBranches = salvages.filter((entry) => entry.committed.length > 0).length;
+  const { salvages, summarySuffix: salvageSummarySuffix } = summarizeSalvages(results);
   return {
     base: BASE,
     modelRouting: {
@@ -3831,7 +3842,9 @@ async function workflowMain() {
     results,
     assessments,
     // Per-branch artefact-salvage records (committed docs/execplans/*.md paths,
-    // skip counts, and the salvage commit sha); empty when nothing was salvaged.
+    // skip counts, and the salvage commit sha). A skipped salvage still produces a
+    // record with no committed paths, so this is empty only when no salvage was
+    // attempted on any branch.
     salvages,
     audits,
     authPreflight,
@@ -3844,7 +3857,7 @@ async function workflowMain() {
     remediationTriage: triages,
     pendingProposals,
     halted,
-    summary: `Processed ${processed.length} roadmap task(s) (pool width ${MAX_PARALLEL}): ` + results.map((r) => `${r.id}=${r.status}`).join(", ") + (recovery.enabled ? ` | recovery(${recovery.mode}): ${recovery.assessed} assessed, ${recovery.resumed} resumed, ${recovery.skipped.length} skipped` : "") + (assessments.length ? ` | assessed ${assessments.length} failed/halted branch(es)` : "") + (salvagedBranches ? ` | salvaged artefacts on ${salvagedBranches} branch(es)` : "") + (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : "") + (halted ? ` | halted: ${halted}` : " | clean stop (no more unblocked tasks).")
+    summary: `Processed ${processed.length} roadmap task(s) (pool width ${MAX_PARALLEL}): ` + results.map((r) => `${r.id}=${r.status}`).join(", ") + (recovery.enabled ? ` | recovery(${recovery.mode}): ${recovery.assessed} assessed, ${recovery.resumed} resumed, ${recovery.skipped.length} skipped` : "") + (assessments.length ? ` | assessed ${assessments.length} failed/halted branch(es)` : "") + salvageSummarySuffix + (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : "") + (halted ? ` | halted: ${halted}` : " | clean stop (no more unblocked tasks).")
   };
 }
 

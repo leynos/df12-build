@@ -42,6 +42,43 @@ export interface SalvageRecord extends SalvageOutcome {
   classification: string
 }
 
+// One run-summary row per task that ATTEMPTED salvage (committed or skipped),
+// carrying the classification, committed paths, a skipped-count, the commit sha,
+// and the (structured) detail.
+export interface SalvageSummaryEntry {
+  id: string
+  classification: string
+  committed: string[]
+  skipped: number
+  sha: string
+  detail: string
+}
+
+// Aggregate per-task salvage records into the terminal run summary. Every task
+// whose result carries a `salvage` record contributes a row — including a
+// skipped attempt, which has `committed: []` — so `salvages` is empty only when
+// no salvage was attempted anywhere. `salvagedBranches` counts the branches that
+// actually committed artefacts, and drives `summarySuffix`, which is '' when
+// every attempt was a skip (nothing committed). Pure and side-effect free so the
+// aggregation can be unit-tested without running the workflow body.
+export function summarizeSalvages(
+  results: ReadonlyArray<{ id?: string; salvage?: Partial<SalvageRecord> | null }>,
+): { salvages: SalvageSummaryEntry[]; salvagedBranches: number; summarySuffix: string } {
+  const salvages: SalvageSummaryEntry[] = results
+    .filter((result) => result.salvage)
+    .map((result) => ({
+      id: result.id || '',
+      classification: result.salvage?.classification || '',
+      committed: result.salvage?.committed || [],
+      skipped: (result.salvage?.skipped || []).length,
+      sha: result.salvage?.sha || '',
+      detail: result.salvage?.detail || '',
+    }))
+  const salvagedBranches = salvages.filter((entry) => entry.committed.length > 0).length
+  const summarySuffix = salvagedBranches ? ` | salvaged artefacts on ${salvagedBranches} branch(es)` : ''
+  return { salvages, salvagedBranches, summarySuffix }
+}
+
 export interface ImplementationReport {
   ok?: boolean
   gatesGreen?: boolean
@@ -126,6 +163,15 @@ function deterministicAssessment(
   }
 }
 
+// Salvage detail and caught git-error text can carry multi-line git stderr;
+// collapse whitespace and bound the length so a single operator log line never
+// dumps an unbounded stderr blob. The full text still rides on the structured
+// `result.salvage.detail`; only the log line is bounded.
+function boundedSalvageLogText(text: unknown, max = 200): string {
+  const flat = String(text ?? '').replace(/\s+/g, ' ').trim()
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+}
+
 // Commit any untracked/uncommitted task-scoped planning or review artefact the
 // assessed branch left behind, so a `continue-manual`/`adopt-partial` handoff
 // keeps the ExecPlan and review files the operator (or a later resume) needs.
@@ -157,15 +203,17 @@ async function salvageAssessmentArtefacts(
     // Salvage is otherwise silent structured data; emit one bounded operator
     // line at the boundary so a commit, a "nothing to salvage", or a skipped
     // path is diagnosable without scraping result.json.
+    // sha is fixed-length and the counts are bounded, so only the free-text
+    // detail needs collapsing/truncation before it reaches the log line.
     if (outcome.committed.length) {
       log(`[salvage] task ${taskId} (${classification}): committed ${outcome.committed.length} artefact(s) at ${outcome.sha || '<no sha>'}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ''}`)
     } else {
-      log(`[salvage] task ${taskId} (${classification}): nothing committed — ${outcome.detail || 'no eligible artefacts'}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ''}`)
+      log(`[salvage] task ${taskId} (${classification}): nothing committed — ${boundedSalvageLogText(outcome.detail || 'no eligible artefacts')}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ''}`)
     }
     return { classification, ...outcome }
   } catch (error) {
     const detail = `salvage errored: ${((error as Error | null) && (error as Error).message) || String(error)}`
-    log(`[salvage] task ${taskId} (${classification}): ${detail}`)
+    log(`[salvage] task ${taskId} (${classification}): ${boundedSalvageLogText(detail)}`)
     return { classification, committed: [], skipped: [], sha: '', detail }
   }
 }
@@ -177,7 +225,16 @@ async function salvageAssessmentArtefacts(
 // reviewer may still have left a docs/execplans/*.md artefact dirty (#18).
 function isInfraFaultResult(result: AssessableResult | null | undefined): boolean {
   if (!result) return false
+  // Positive signal: the fault classifier stamped an infra fault.
   if (result.status === 'infra-fault' || result.stage === 'infrastructure') return true
+  // Reject success, provider, auth, and worktree-preflight outcomes BEFORE the
+  // detail heuristic (mirroring shouldAssessFailure's exclusions): those are
+  // handled on their own paths and must never trigger salvage, even when their
+  // detail happens to embed infra-shaped text (e.g. a provider error that quotes
+  // an underlying SchemaValidationError). Only a genuine product failure whose
+  // detail matches the ODW infrastructure patterns falls through.
+  if (result.status === 'done' || result.status === 'provider-fault' || result.status === 'fatal-auth') return false
+  if (result.stage === 'provider' || result.stage === 'auth' || result.stage === 'worktree' || result.stage === 'worktree-write') return false
   const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
   return Boolean(infrastructureFailureDetail(detail))
 }

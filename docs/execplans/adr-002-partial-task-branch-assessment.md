@@ -262,7 +262,11 @@ task-scoped `docs/execplans/*.md` artefacts onto the branch before worktree
 cleanup, so a planning or review artefact written just before a failure is
 preserved rather than lost. This extends preservation only through the
 branch's own Git history; it does not merge, push, or mark the roadmap, so
-the report-only, manual-adoption conclusion above still holds. See
+the report-only, manual-adoption conclusion above still holds. Each per-task
+assessment result now also carries a `result.salvage` record
+(`{ classification, committed, skipped, sha, detail }`), and the run result
+carries a top-level `salvages` array; salvage runs only when partial-branch
+assessment is enabled (`assessPartialBranches=true`). See
 `docs/developers-guide.md` and `docs/users-guide.md`.
 
 ## Context and orientation
@@ -528,9 +532,12 @@ Acceptance criteria:
 
 The implementation is idempotent. Re-running the tests recreates temporary git
 fixtures from scratch and does not touch real target-project branches. The
-workflow assessment stage is read-only: if it fails, the original task failure
-still returns and the surviving worktree remains available for manual
-inspection.
+workflow assessment stage is read-only with respect to the target project's
+reviewed work and roadmap state: if it fails, the original task failure still
+returns and the surviving worktree remains available for manual inspection.
+Salvage still durably commits task-scoped `docs/execplans/*.md` planning and
+review artefacts to the branch's own Git history, without merging, pushing, or
+ticking the roadmap.
 
 If a partial implementation of this plan is interrupted, inspect `git status`,
 run the focused test, and resume from the first failing or unchecked Progress

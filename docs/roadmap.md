@@ -79,7 +79,8 @@ assessment contract instead of creating a second recovery classifier.
     `docs/adr-002-assess-partial-task-branches.md`.
   - Note: the assessment feature now also salvages task-scoped
     `docs/execplans/*.md` artefacts for `continue-manual` and `adopt-partial`
-    classifications (PR #57); see the salvage section of
+    classifications, and for infra-fault handoffs (schema-retry exhaustion)
+    (PR #57); see the salvage section of
     `docs/developers-guide.md`.
   - Success: recovered candidates produce the same classification enum and
     evidence fields as in-run failed task assessments.

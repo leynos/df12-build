@@ -234,7 +234,12 @@ spawned. Both record the outcome on `result.salvage`
 top-level `salvages` array. Salvage never runs for `adopt-complete` or `discard`
 (those leave `result.salvage` unset), and it skips when collection-error
 evidence is untrustworthy or when no worktree path is present in the assessment
-evidence.
+evidence. Both wrappers are part of the assessment stage, so neither salvages
+when partial-branch assessment is disabled (`assessPartialBranches=false`):
+`salvageInfraFaultArtefacts` early-returns the result unchanged when
+`assessPartialBranches` is false (or the result has no task branch), and
+`salvageAssessmentArtefacts` is only reached after the model assessment, which
+does not run when the stage is disabled — so neither path attempts salvage.
 
 Failure classification is layered: `authFailureDetail` (fatal-auth), then
 `providerFailureDetail` (provider-fault), then `infrastructureFailureDetail`

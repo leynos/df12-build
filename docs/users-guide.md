@@ -712,7 +712,9 @@ evidence. The per-task result carries a `result.salvage` field
 (`{ classification, committed, skipped, sha, detail }`) for every branch where
 salvage ran or was skipped; the top-level run result includes a `salvages`
 summary array and the summary string appends `| salvaged artefacts on N
-branch(es)` when N > 0. Auth failures,
+branch(es)` when N > 0. Salvage runs only when partial-branch assessment is
+enabled (`assessPartialBranches=true`), the same switch that governs
+assessment; it does not run when that setting is disabled. Auth failures,
 provider outages such as `429`, `500`, or `529`, worktree-creation failures,
 dry runs, successful tasks, and manual-merge-ready branches are not assessed.
 Provider outages also suppress the final remediation flush, so transient

@@ -62,6 +62,7 @@ import {
   implementationAuthFailureDetail,
   isDeferredReviewIssue,
   makeAssessment,
+  summarizeSalvages,
 } from './assessment.ts'
 import { TRIAGE_SCHEMA, makeRemediation, stepOf } from './remediation.ts'
 import {
@@ -1124,17 +1125,8 @@ const assessments = results
 // Salvage rides on individual task results (assessment.ts); surface it in the
 // terminal summary so an operator sees which branches had docs/execplans/*.md
 // artefacts committed (or why salvage was skipped) without opening result.json.
-const salvages = results
-  .filter((result) => result.salvage)
-  .map((result) => ({
-    id: result.id,
-    classification: result.salvage?.classification || '',
-    committed: result.salvage?.committed || [],
-    skipped: (result.salvage?.skipped || []).length,
-    sha: result.salvage?.sha || '',
-    detail: result.salvage?.detail || '',
-  }))
-const salvagedBranches = salvages.filter((entry) => entry.committed.length > 0).length
+// summarizeSalvages is a pure, unit-tested aggregator (see assessment.ts).
+const { salvages, summarySuffix: salvageSummarySuffix } = summarizeSalvages(results)
 
 return {
   base: BASE,
@@ -1185,7 +1177,9 @@ return {
   results,
   assessments,
   // Per-branch artefact-salvage records (committed docs/execplans/*.md paths,
-  // skip counts, and the salvage commit sha); empty when nothing was salvaged.
+  // skip counts, and the salvage commit sha). A skipped salvage still produces a
+  // record with no committed paths, so this is empty only when no salvage was
+  // attempted on any branch.
   salvages,
   audits,
   authPreflight,
@@ -1203,7 +1197,7 @@ return {
     results.map((r) => `${r.id}=${r.status}`).join(', ') +
     (recovery.enabled ? ` | recovery(${recovery.mode}): ${recovery.assessed} assessed, ${recovery.resumed} resumed, ${recovery.skipped.length} skipped` : '') +
     (assessments.length ? ` | assessed ${assessments.length} failed/halted branch(es)` : '') +
-    (salvagedBranches ? ` | salvaged artefacts on ${salvagedBranches} branch(es)` : '') +
+    salvageSummarySuffix +
     (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : '') +
     (halted ? ` | halted: ${halted}` : ' | clean stop (no more unblocked tasks).'),
 }

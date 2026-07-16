@@ -15,6 +15,7 @@ import {
   implementationAuthFailureDetail,
   isDeferredReviewIssue,
   makeAssessment,
+  summarizeSalvages,
 } from '../../src/workflows/df12-build-odw/assessment.ts'
 import * as durability from '../../src/workflows/df12-build-odw/execplan-durability.ts'
 
@@ -364,21 +365,75 @@ describe('infra-fault artefact salvage (#18)', () => {
     expect(salvage?.detail.startsWith('salvage skipped: no worktree path')).toBe(true)
   })
 
-  test('a non-infra failure does not trigger infra-fault salvage', async () => {
+  test('a provider fault with infra-shaped detail does not trigger infra-fault salvage', async () => {
     const { dir, baseSha } = makeRepoWithExecplans()
     addUntrackedReview(dir)
-    // A provider fault leaves the branch but is not an infra-fault; salvage must
-    // not fire, and the model must not be consulted.
+    // The provider-fault STATUS must reject salvage before the detail heuristic,
+    // even though the detail embeds infra-shaped text ("SchemaValidationError"):
+    // isInfraFaultResult must not misclassify it. Salvage must not fire, and the
+    // model must not be consulted.
     globals.agent = async () => {
       throw new Error('the model must not be called for a provider fault')
     }
     const result = await subject().attachAssessment(
       { id: '1.2.3', title: 'Parser' },
       { branch: 'roadmap-1-2-3', worktreePath: dir, baseSha },
-      { id: '1.2.3', status: 'provider-fault', stage: 'provider', detail: 'API Error: 529 overloaded' },
+      { id: '1.2.3', status: 'provider-fault', stage: 'provider', detail: 'API Error: 529 overloaded; SchemaValidationError while parsing the retried reply' },
     )
     expect(result.salvage).toBeUndefined()
     expect(git(dir, 'status', '--porcelain=v1')).toBe(`?? ${REVIEW_REL}`)
+  })
+})
+
+// The terminal-summary aggregation (main.ts) is a pure helper so it can be
+// tested without running workflowMain: it must count only branches that
+// committed artefacts toward the summary suffix, while still surfacing skipped
+// attempts as rows.
+describe('summarizeSalvages', () => {
+  const committed = (id: string) => ({
+    id,
+    salvage: { classification: 'continue-manual', committed: [`docs/execplans/${id}.md`], skipped: [], sha: 'a'.repeat(40), detail: '' },
+  })
+  const skipped = (id: string) => ({
+    id,
+    salvage: { classification: 'infra-fault', committed: [], skipped: [], sha: '', detail: 'salvage skipped: no worktree path in the assessment evidence' },
+  })
+  const noSalvage = (id: string) => ({ id, status: 'done' })
+
+  test('no salvage attempted yields empty salvages and no summary suffix', () => {
+    const out = summarizeSalvages([noSalvage('1.1'), noSalvage('1.2')])
+    expect(out.salvages).toEqual([])
+    expect(out.salvagedBranches).toBe(0)
+    expect(out.summarySuffix).toBe('')
+  })
+
+  test('a skipped attempt is a row but not a salvaged branch and adds no suffix', () => {
+    const out = summarizeSalvages([skipped('1.2.3'), noSalvage('1.2.4')])
+    expect(out.salvages).toHaveLength(1)
+    expect(out.salvages[0]).toMatchObject({ id: '1.2.3', classification: 'infra-fault', committed: [], skipped: 0 })
+    expect(out.salvages[0].detail).toMatch(/salvage skipped: no worktree path/)
+    expect(out.salvagedBranches).toBe(0)
+    expect(out.summarySuffix).toBe('')
+  })
+
+  test('committed attempts count toward salvagedBranches and the summary suffix', () => {
+    const out = summarizeSalvages([committed('1.2.3'), skipped('1.2.4'), committed('1.2.5')])
+    // Every attempted salvage (committed AND skipped) is a row...
+    expect(out.salvages.map((entry) => entry.id)).toEqual(['1.2.3', '1.2.4', '1.2.5'])
+    // ...but only the two that committed artefacts count as salvaged branches.
+    expect(out.salvagedBranches).toBe(2)
+    expect(out.summarySuffix).toBe(' | salvaged artefacts on 2 branch(es)')
+    expect(out.salvages.find((entry) => entry.id === '1.2.4')?.committed).toEqual([])
+  })
+
+  test('the skipped count reflects the number of skipped candidate paths', () => {
+    const out = summarizeSalvages([{
+      id: '1.2.3',
+      salvage: { classification: 'adopt-partial', committed: ['docs/execplans/1-2-3.md'], skipped: [{ path: 'src/x.ts', reason: 'not a task-scoped docs/execplans/*.md artefact' }], sha: 'b'.repeat(40), detail: '' },
+    }])
+    expect(out.salvages[0].skipped).toBe(1)
+    expect(out.salvagedBranches).toBe(1)
+    expect(out.summarySuffix).toBe(' | salvaged artefacts on 1 branch(es)')
   })
 })
 

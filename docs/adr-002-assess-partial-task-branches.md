@@ -89,15 +89,18 @@ the task. The normal pattern is:
 Auth failures remain fatal. The assessment stage must not reinterpret an
 authentication failure as an adoptable implementation failure.
 
-The assessment stage also salvages task-scoped planning and review artefacts a
-kept branch left uncommitted, so an ExecPlan or review file written just before
-a failure is preserved rather than lost to later worktree cleanup. Salvage runs
-for a model-based `continue-manual` or `adopt-partial` classification (and for
-infra-fault results that never reach the model); it commits only the eligible
-`docs/execplans/*.md` artefacts onto the branch's own history and never merges,
-pushes, or marks the roadmap. A deterministic `continue-manual` raised on
-untrustworthy host evidence records a salvage-skipped note instead of touching
-Git.
+The assessment stage also salvages task-scoped planning and review artefacts
+that a kept branch left uncommitted, so an ExecPlan or review file written just
+before a failure is preserved rather than lost to later worktree cleanup.
+Salvage runs for a model-based `continue-manual` or `adopt-partial`
+classification (and for infra-fault results that never reach the model);
+it commits only the eligible `docs/execplans/*.md` artefacts onto the branch's
+own history and never merges, pushes, or marks the roadmap. A deterministic
+`continue-manual` raised on untrustworthy host evidence records a
+salvage-skipped note instead of touching Git. Salvage is part of this
+assessment stage, so it only runs when partial-branch assessment is enabled
+(`assessPartialBranches=true`); when that stage is disabled, neither assessment
+nor salvage runs.
 
 Figure 1 shows the salvage control flow within `attachAssessment`.
 
