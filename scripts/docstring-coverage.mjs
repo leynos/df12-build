@@ -1,19 +1,21 @@
-// Docstring-coverage gate for the ODW module tree. AGENTS.md requires each
-// module to open with a `/** @file … */` block and — so the public surface
-// stays self-documenting — a recognised JSDoc block on every EXPORTED
-// declaration. CodeRabbit's docstring-coverage check flagged the salvage
-// additions at 28.57%; this gate makes that signal a deterministic, local,
-// reproducible check rather than a review-time surprise.
-//
-// It parses each listed module with the TypeScript compiler API (a stable,
-// direct devDependency), counts exported top-level declarations, and treats a
-// declaration as documented only when a `/** … */` JSDoc block immediately
-// precedes it (a plain `//` comment does NOT count — that is exactly the
-// distinction CodeRabbit draws). A module with zero exports still must carry the
-// `@file` block. The gate fails when any module lacks the `@file` block or falls
-// below the coverage threshold (default 80%).
-//
-// Usage: node scripts/docstring-coverage.mjs [--min <pct>] <file.ts> [<file.ts> …]
+/**
+ * @file Docstring-coverage gate for the ODW module tree. AGENTS.md requires each
+ * module to open with a `@file` docblock and — so the public surface stays
+ * self-documenting — a recognised JSDoc block on every EXPORTED declaration.
+ * CodeRabbit's docstring-coverage check flagged the salvage additions at 28.57%;
+ * this gate makes that signal a deterministic, local, reproducible check rather
+ * than a review-time surprise.
+ *
+ * It parses each listed module with the TypeScript compiler API (a stable,
+ * direct devDependency), counts exported top-level declarations, and treats a
+ * declaration as documented only when a JSDoc block immediately precedes it (a
+ * plain `//` comment does NOT count — the distinction CodeRabbit draws). A
+ * module with zero exports still must carry the `@file` block. The gate fails
+ * when any module lacks the `@file` block or falls below the coverage threshold
+ * (default 80%).
+ *
+ * Usage: node scripts/docstring-coverage.mjs [--min <pct>] <file.ts> ...
+ */
 import ts from 'typescript'
 import { readFileSync } from 'node:fs'
 

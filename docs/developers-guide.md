@@ -219,9 +219,12 @@ a list of candidate paths, filters to those matching `TASK_ARTEFACT_PATTERN`
 checks via `execplanRelPath` (rejects `../` escapes and absolute paths outside
 the worktree), and lstat-probes via `fileState` so a symlink at the path is
 never followed. Only the verified paths are committed onto the branch under a
-deterministic machine identity (`df12-build`). The function never throws — a git
-failure or ineligible state is recorded as a reason on the returned
-`SalvageOutcome` (`{ committed, skipped, sha, detail }`). `sha` is the salvage
+deterministic machine identity (`df12-build`). Every git failure or ineligible
+state is recorded as a reason on the returned `SalvageOutcome`
+(`{ committed, skipped, sha, detail }`) rather than raised; the assessment
+wrappers below additionally run the call inside a catch that records any
+unexpected throw as `salvage errored`, so a failing task is never turned into a
+run-halting error. `sha` is the salvage
 commit SHA; it is `''` when nothing was committed OR when the post-commit HEAD
 read failed (in which case `detail` explains the `rev-parse` failure).
 `salvageAssessmentArtefacts` and `salvageInfraFaultArtefacts` (`assessment.ts`)

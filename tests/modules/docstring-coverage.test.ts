@@ -1,9 +1,12 @@
-// Regression guard for the docstring-coverage gate (scripts/docstring-coverage.mjs
-// and the `make docstring-coverage` target). It pins two things: the allow-listed
-// modules stay documented at/above threshold, and the checker actually enforces
-// the rule — a missing `/** @file … */` block fails, a `//` comment does NOT
-// count as a docstring, an undocumented export drops coverage below threshold,
-// and a module with no exports is vacuously covered (but still needs `@file`).
+/**
+ * @file Regression guard for the docstring-coverage gate
+ * (scripts/docstring-coverage.mjs and the `make docstring-coverage` target). It
+ * pins two things: the allow-listed modules stay documented at/above threshold,
+ * and the checker actually enforces the rule — a missing `@file` docblock fails,
+ * a `//` comment does NOT count as a docstring, an undocumented export drops
+ * coverage below threshold, and a module with no exports is vacuously covered
+ * (but still needs `@file`).
+ */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'

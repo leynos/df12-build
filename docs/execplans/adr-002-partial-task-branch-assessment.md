@@ -260,7 +260,10 @@ Post-completion addendum (PR #57, issue #18): `continue-manual`,
 `adopt-partial`, and infra-fault handoffs now durably commit any dirty
 task-scoped `docs/execplans/*.md` artefacts onto the branch before worktree
 cleanup, so a planning or review artefact written just before a failure is
-preserved rather than lost. This extends preservation only through the
+preserved rather than lost. The one exception is a deterministic
+`continue-manual` raised from untrustworthy collection-error evidence: it
+records a salvage skip instead of committing, because that evidence cannot be
+trusted. This extends preservation only through the
 branch's own Git history; it does not merge, push, or mark the roadmap, so
 the report-only, manual-adoption conclusion above still holds. Each per-task
 assessment result now also carries a `result.salvage` record

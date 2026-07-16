@@ -1,11 +1,14 @@
-// Workflow-entrypoint smoke of artefact salvage through the REAL odw runtime
-// (issue #18). It proves that workflowMain() wires summarizeSalvages() into both
-// the public result object (`result.salvages`) and the terminal summary string
-// (the `| salvaged artefacts on N branch(es)` suffix) — not just that the helper
-// is correct in isolation (that is tests/modules/assessment.test.ts). A single
-// normal task runs; its planner writes a task-scoped docs/execplans artefact and
-// then fails as an ODW infrastructure fault, so the host salvages the artefact.
-// Skips when the `odw` CLI is not installed.
+/**
+ * @file Workflow-entrypoint smoke of artefact salvage through the REAL odw
+ * runtime (issue #18). It proves that workflowMain() wires summarizeSalvages()
+ * into both the public result object (`result.salvages`) and the terminal
+ * summary string (the `| salvaged artefacts on N branch(es)` suffix) — not just
+ * that the helper is correct in isolation (that is
+ * tests/modules/assessment.test.ts). A single normal task runs; its planner
+ * writes a task-scoped docs/execplans artefact and then fails as an ODW
+ * infrastructure fault, so the host salvages the artefact. Skips when the `odw`
+ * CLI is not installed.
+ */
 
 import assert from 'node:assert/strict'
 import { execFile, execFileSync } from 'node:child_process'

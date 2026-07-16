@@ -65,6 +65,7 @@ import {
   isDeferredReviewIssue,
   makeAssessment,
   summarizeSalvages,
+  type SalvageRecord,
 } from './assessment.ts'
 import { TRIAGE_SCHEMA, makeRemediation, stepOf } from './remediation.ts'
 import {
@@ -98,13 +99,7 @@ interface TaskOutcome extends AnyRecord {
   proposals?: AnyRecord[]
   assessment?: AnyRecord
   assessmentError?: string
-  salvage?: {
-    classification?: string
-    committed?: string[]
-    skipped?: Array<{ path: string; reason: string }>
-    sha?: string
-    detail?: string
-  }
+  salvage?: SalvageRecord
 }
 
 interface RecoveryRunSummary {
