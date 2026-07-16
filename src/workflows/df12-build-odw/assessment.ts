@@ -1,10 +1,12 @@
-// ADR 002 partial-branch assessment: deferred-review classification, the
-// manual-merge handoff guard, the assessment gate, and the report-only
-// assessment agents. Assessment output NEVER merges, pushes, or ticks the
-// roadmap; classification is advice for the operator, and host-collected
-// evidence is decisive over anything the agent reports. The run wiring
-// (preamble, adapter routing, retry, enable switch) binds once via
-// makeAssessment.
+/**
+ * @file ADR 002 partial-branch assessment: deferred-review classification, the
+ * manual-merge handoff guard, the assessment gate, and the report-only
+ * assessment agents. Assessment output NEVER merges, pushes, or ticks the
+ * roadmap; classification is advice for the operator, and host-collected
+ * evidence is decisive over anything the agent reports. The run wiring
+ * (preamble, adapter routing, retry, enable switch) binds once via
+ * makeAssessment.
+ */
 import { ASSESSMENT_SCHEMA } from './schemas.ts'
 import {
   authFailureDetail,
@@ -34,17 +36,21 @@ import type { RecoveryCandidate } from './types.ts'
 // away, so neither salvages.
 const SALVAGE_CLASSIFICATIONS = new Set(['continue-manual', 'adopt-partial', 'infra-fault'])
 
-// A salvage record carrying the classification that triggered (or skipped) it,
-// spread onto the assessment result. The result types extend
-// Record<string, unknown>, so this rides through run-task.ts without a breaking
-// type change.
+/**
+ * A salvage record carrying the classification that triggered (or skipped) it,
+ * spread onto the assessment result. The result types extend
+ * Record<string, unknown>, so this rides through run-task.ts without a breaking
+ * type change.
+ */
 export interface SalvageRecord extends SalvageOutcome {
   classification: string
 }
 
-// One run-summary row per task that ATTEMPTED salvage (committed or skipped),
-// carrying the classification, committed paths, a skipped-count, the commit sha,
-// and the (structured) detail.
+/**
+ * One run-summary row per task that ATTEMPTED salvage (committed or skipped),
+ * carrying the classification, committed paths, a skipped-count, the commit sha,
+ * and the (structured) detail.
+ */
 export interface SalvageSummaryEntry {
   id: string
   classification: string
@@ -54,13 +60,19 @@ export interface SalvageSummaryEntry {
   detail: string
 }
 
-// Aggregate per-task salvage records into the terminal run summary. Every task
-// whose result carries a `salvage` record contributes a row — including a
-// skipped attempt, which has `committed: []` — so `salvages` is empty only when
-// no salvage was attempted anywhere. `salvagedBranches` counts the branches that
-// actually committed artefacts, and drives `summarySuffix`, which is '' when
-// every attempt was a skip (nothing committed). Pure and side-effect free so the
-// aggregation can be unit-tested without running the workflow body.
+/**
+ * Aggregate per-task salvage records into the terminal run summary. Every task
+ * whose result carries a `salvage` record contributes a row — including a
+ * skipped attempt, which has `committed: []` — so `salvages` is empty only when
+ * no salvage was attempted anywhere. `salvagedBranches` counts the branches that
+ * actually committed artefacts, and drives `summarySuffix`, which is '' when
+ * every attempt was a skip (nothing committed). Pure and side-effect free so the
+ * aggregation can be unit-tested without running the workflow body.
+ *
+ * @param results Per-task results, each optionally carrying a `salvage` record.
+ * @returns The `salvages` rows, the `salvagedBranches` count, and the
+ *   `summarySuffix` text for the terminal run summary.
+ */
 export function summarizeSalvages(
   results: ReadonlyArray<{ id?: string; salvage?: Partial<SalvageRecord> | null }>,
 ): { salvages: SalvageSummaryEntry[]; salvagedBranches: number; summarySuffix: string } {
@@ -79,6 +91,7 @@ export function summarizeSalvages(
   return { salvages, salvagedBranches, summarySuffix }
 }
 
+/** The build/fix-report shape addendum manual-merge and auth-failure checks read from. */
 export interface ImplementationReport {
   ok?: boolean
   gatesGreen?: boolean
@@ -88,6 +101,7 @@ export interface ImplementationReport {
   openIssues?: readonly string[]
 }
 
+/** A task result eligible for ADR 002 assessment: its status, stage, detail, and open issues. */
 export interface AssessableResult extends Record<string, unknown> {
   status?: string
   stage?: string
@@ -95,12 +109,14 @@ export interface AssessableResult extends Record<string, unknown> {
   openIssues?: readonly string[]
 }
 
+/** The branch identity and location assessment needs: branch name, worktree path, and base commit. */
 export interface AssessmentWorktree {
   branch?: string
   worktreePath?: string
   baseSha?: string
 }
 
+/** The run wiring `makeAssessment` binds once: the prompt preamble, the enable switch, adapter routing, the escalation model, and the shared infra-retry wrapper. */
 export interface AssessmentDeps {
   preamble: (worktree: string | null | undefined) => string
   assessPartialBranches: boolean
@@ -109,13 +125,18 @@ export interface AssessmentDeps {
   withInfraRetry: <T>(run: () => Promise<T>, label: string) => Promise<T>
 }
 
-// Deterministic fast-classifier for the two clear, non-judgement cases, run
-// before any model call: an empty branch with a clean worktree is `discard`
-// (nothing durable to adopt) and a host evidence-collection failure is
-// `continue-manual` (cannot judge without evidence). Everything else — a
-// branch with committed work, or a dirty worktree (whose downgrade the
-// recovery eligibility gate owns) — returns null and reaches the model. Never
-// yields an adopt verdict, so recovery review-mode resume is unaffected.
+/**
+ * Deterministic fast-classifier for the two clear, non-judgement cases, run
+ * before any model call: an empty branch with a clean worktree is `discard`
+ * (nothing durable to adopt) and a host evidence-collection failure is
+ * `continue-manual` (cannot judge without evidence). Everything else — a
+ * branch with committed work, or a dirty worktree (whose downgrade the
+ * recovery eligibility gate owns) — returns null and reaches the model. Never
+ * yields an adopt verdict, so recovery review-mode resume is unaffected.
+ *
+ * @param evidence Host-collected git evidence, or undefined/null when unavailable.
+ * @returns The classification and reason, or null when the model must decide.
+ */
 export function fastAssessmentClassification(
   evidence: { collectionErrors?: readonly string[]; dirtyState?: string; recentCommits?: readonly unknown[] } | null | undefined,
 ): { classification: string; reason: string } | null {
@@ -239,6 +260,13 @@ function isInfraFaultResult(result: AssessableResult | null | undefined): boolea
   return Boolean(infrastructureFailureDetail(detail))
 }
 
+/**
+ * Whether an open issue text describes a deferred/rate-limited CodeRabbit
+ * review rather than a substantive product defect.
+ *
+ * @param issue A single open-issue string (or any value, coerced to text).
+ * @returns True when the text mentions CodeRabbit alongside a deferred/rate-limit marker.
+ */
 export function isDeferredReviewIssue(issue: unknown): boolean {
   const text = String(issue || '').toLowerCase()
   const deferredReviewMarkers = [
@@ -258,22 +286,41 @@ export function isDeferredReviewIssue(issue: unknown): boolean {
   return text.includes('coderabbit') && deferredReviewMarkers.some((marker) => text.includes(marker))
 }
 
+/**
+ * Whether every open issue in the list is a deferred/recoverable CodeRabbit
+ * review fault (e.g. a 429), so the list carries no substantive defect.
+ *
+ * @param openIssues The open-issue list, or null/undefined.
+ * @returns True only when the list is non-empty and every entry is deferred-review.
+ */
 export function hasOnlyDeferredReviewIssues(openIssues: readonly unknown[] | null | undefined): boolean {
   const issues = openIssues || []
   return issues.length > 0 && issues.every(isDeferredReviewIssue)
 }
 
+/**
+ * Extract an authentication-failure detail from an implementation report's
+ * summary and open issues, using the shared auth-fault pattern matcher.
+ *
+ * @param impl The implementation/fix report, or null/undefined.
+ * @returns The matched auth-failure detail, or '' when none is found.
+ */
 export function implementationAuthFailureDetail(impl: ImplementationReport | null | undefined): string {
   const detail = [impl?.summary, ...(impl?.openIssues || [])].filter(Boolean).join('\n')
   return authFailureDetail(detail)
 }
 
-// A complete, gate-green addendum whose builder did not set ok=true is an
-// operator handoff, not an assessment case. Open issues are tolerated only
-// when every one is a deferred/recoverable review fault (e.g. a CodeRabbit
-// 429): that exact missing evidence is bounded and mechanical — retry the
-// review, verify, integrate — so spending an unbounded judgement agent on it
-// burns tokens without adding operator information (issue #27).
+/**
+ * A complete, gate-green addendum whose builder did not set ok=true is an
+ * operator handoff, not an assessment case. Open issues are tolerated only
+ * when every one is a deferred/recoverable review fault (e.g. a CodeRabbit
+ * 429): that exact missing evidence is bounded and mechanical — retry the
+ * review, verify, integrate — so spending an unbounded judgement agent on it
+ * burns tokens without adding operator information (issue #27).
+ *
+ * @param impl The implementation/fix report, or null/undefined.
+ * @returns True when the addendum needs manual-merge handoff rather than assessment.
+ */
 export function addendumImplementationNeedsManualMerge(impl: ImplementationReport | null | undefined): boolean {
   if (!impl || impl.ok || !impl.gatesGreen) return false
   const openIssues = impl.openIssues || []
@@ -283,6 +330,16 @@ export function addendumImplementationNeedsManualMerge(impl: ImplementationRepor
   return Number.isFinite(completed) && Number.isFinite(total) && total > 0 && completed >= total
 }
 
+/**
+ * Bind the ADR 002 assessment run wiring once (preamble, adapter routing,
+ * escalation model, retry, enable switch) and return the assessment surface:
+ * prompt builders, the recovery-candidate assessor, the assessment-eligibility
+ * gate, and `attachAssessment`, which also drives artefact salvage. Assessment
+ * output NEVER merges, pushes, or ticks the roadmap.
+ *
+ * @param deps The run-scoped assessment dependencies (see {@link AssessmentDeps}).
+ * @returns `{ assessmentPrompt, recoveryAssessmentPrompt, assessRecoveryCandidate, shouldAssessFailure, attachAssessment }`.
+ */
 export function makeAssessment({ preamble, assessPartialBranches, assessmentAgentOptions, assessmentEscalationModel, withInfraRetry }: AssessmentDeps) {
   // Shared ADR 002 assessment prompt body — the classification contract is ONE
   // contract: in-run failure assessment and fresh-run recovery assessment feed

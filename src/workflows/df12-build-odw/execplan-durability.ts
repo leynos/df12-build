@@ -1,21 +1,26 @@
-// Host-enforced ExecPlan durability — prose alone does not hold: live runs
-// showed planners returning uncommitted drafts and reviewers approving
-// without committing the status flip. The control loop therefore verifies
-// durable state at every stage boundary, the same philosophy as the
-// write-probe: prompts request, the host verifies.
+/**
+ * @file Host-enforced ExecPlan durability — prose alone does not hold: live runs
+ * showed planners returning uncommitted drafts and reviewers approving
+ * without committing the status flip. The control loop therefore verifies
+ * durable state at every stage boundary, the same philosophy as the
+ * write-probe: prompts request, the host verifies.
+ */
 import { execFileStatus, fileState } from './exec.ts'
 import { parseExecplanState } from './recovery-decision.ts'
 
+/** The pass/fail outcome of a durability check: whether the target is durable, and why not when it is not. */
 export interface DurabilityVerdict {
   ok: boolean
   detail: string
 }
 
+/**
+ * The result of a salvage-commit attempt: `committed` paths, `skipped`
+ * `{path,reason}` entries, the commit `sha` (empty when nothing was committed
+ * OR when the post-commit HEAD read failed — then `detail` explains), and
+ * `detail`. The full text lives here; log lines are separately bounded.
+ */
 export interface SalvageOutcome {
-  // Task-scoped artefact paths committed onto the branch (relative to the
-  // worktree), the paths skipped with a reason, and the resulting commit sha
-  // ('' when nothing was committed). `detail` is empty on a clean success and
-  // otherwise carries the "nothing to salvage" or git-failure reason.
   committed: string[]
   skipped: Array<{ path: string; reason: string }>
   sha: string
@@ -29,15 +34,28 @@ export interface SalvageOutcome {
 // guess at arbitrary uncommitted work.
 const TASK_ARTEFACT_PATTERN = /^docs\/execplans\/.+\.md$/
 
+/**
+ * Whether a candidate path matches the canonical task-scoped ExecPlan/review
+ * artefact convention (Markdown under docs/execplans/).
+ *
+ * @param candidate The candidate path (or any value, coerced to text).
+ * @returns True when the path matches the artefact pattern.
+ */
 export function isTaskArtefactPath(candidate: unknown): boolean {
   return TASK_ARTEFACT_PATTERN.test(String(candidate || ''))
 }
 
-// Contain an agent-supplied ExecPlan path within the task worktree. Plan
-// paths come back from planner agents — untrusted, prompt-injectable data
-// under the documented threat model — so an absolute path outside the
-// worktree or a ../ escape must fail closed BEFORE any filesystem or git
-// access. Returns { ok, relPath, detail }.
+/**
+ * Contain an agent-supplied ExecPlan path within the task worktree. Plan
+ * paths come back from planner agents — untrusted, prompt-injectable data
+ * under the documented threat model — so an absolute path outside the
+ * worktree or a ../ escape must fail closed BEFORE any filesystem or git
+ * access.
+ *
+ * @param worktree The task worktree's absolute path.
+ * @param planPath The agent-supplied plan path (untrusted).
+ * @returns `{ ok, relPath, detail }`; `ok` is false when the path escapes the worktree.
+ */
 export function execplanRelPath(worktree: string, planPath: unknown): { ok: boolean; relPath: string; detail: string } {
   const path = process.getBuiltinModule('node:path')
   const raw = String(planPath || '')
@@ -48,8 +66,14 @@ export function execplanRelPath(worktree: string, planPath: unknown): { ok: bool
   return { ok: true, relPath: rel, detail: '' }
 }
 
-// A plan is durable only when it exists at HEAD with no uncommitted
-// modifications. Returns { ok, detail }.
+/**
+ * A plan is durable only when it exists at HEAD with no uncommitted
+ * modifications.
+ *
+ * @param worktree The task worktree's absolute path.
+ * @param planPath The agent-supplied plan path (untrusted; contained via {@link execplanRelPath}).
+ * @returns `{ ok, detail }`.
+ */
 export async function verifyExecplanCommitted(worktree: string, planPath: unknown): Promise<DurabilityVerdict> {
   const contained = execplanRelPath(worktree, planPath)
   if (!contained.ok) return { ok: false, detail: contained.detail }
@@ -64,10 +88,19 @@ export async function verifyExecplanCommitted(worktree: string, planPath: unknow
   return { ok: true, detail: '' }
 }
 
-// The APPROVED flip is deterministic bookkeeping, so the control loop owns
-// it: the design reviewer stays read-only, and the committed Status
-// transition can never be skipped by an agent ignoring prose. Commits ONLY
-// the plan path; idempotent when the committed status is already APPROVED.
+/**
+ * The APPROVED flip is deterministic bookkeeping, so the control loop owns
+ * it: the design reviewer stays read-only, and the committed Status
+ * transition can never be skipped by an agent ignoring prose. Commits ONLY
+ * the plan path; idempotent when the committed status is already APPROVED.
+ * Side effect: rewrites the plan's Status line in place and, when that leaves
+ * it dirty, `git add` + `git commit`s it under the `df12-build` machine identity.
+ *
+ * @param worktree The task worktree's absolute path.
+ * @param planPath The agent-supplied plan path (untrusted; contained via {@link execplanRelPath}).
+ * @param tag A label for the commit message (typically the task id).
+ * @returns `{ ok, detail }`.
+ */
 export async function commitExecplanApproval(worktree: string, planPath: unknown, tag: string): Promise<DurabilityVerdict> {
   const fs = process.getBuiltinModule('node:fs/promises')
   const path = process.getBuiltinModule('node:path')
@@ -121,15 +154,23 @@ export async function commitExecplanApproval(worktree: string, planPath: unknown
   return { ok: true, detail: '' }
 }
 
-// Live runs showed planners repeatedly returning with the drafted plan dirty
-// — each bounce burnt a 30–90 minute planner round on pure git bookkeeping.
-// Making the drafted plan durable is deterministic bookkeeping (the same
-// philosophy as the APPROVED flip), so when the plan file is the ONLY
-// uncommitted path the host commits it, path-scoped, and proceeds. Any other
-// dirty path still bounces to the planner: the plan may depend on work the
-// host must not guess at. A failed host commit surfaces the underlying git
-// error — the strongest evidence when the environment, not the agent, is
-// what blocks committing. Returns { ok, detail }.
+/**
+ * Live runs showed planners repeatedly returning with the drafted plan dirty
+ * — each bounce burnt a 30–90 minute planner round on pure git bookkeeping.
+ * Making the drafted plan durable is deterministic bookkeeping (the same
+ * philosophy as the APPROVED flip), so when the plan file is the ONLY
+ * uncommitted path the host commits it, path-scoped, and proceeds. Any other
+ * dirty path still bounces to the planner: the plan may depend on work the
+ * host must not guess at. A failed host commit surfaces the underlying git
+ * error — the strongest evidence when the environment, not the agent, is
+ * what blocks committing. Side effect: `git add` + `git commit`s the plan
+ * path under the `df12-build` machine identity.
+ *
+ * @param worktree The task worktree's absolute path.
+ * @param relPath The plan's path relative to the worktree.
+ * @param tag A label for the commit message (typically the task id).
+ * @returns `{ ok, detail }`.
+ */
 export async function commitExecplanDraft(worktree: string, relPath: string, tag: string): Promise<DurabilityVerdict> {
   const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1'])
   if (!status.ok) return { ok: false, detail: `git status failed: ${(status.message || status.stderr || '').trim()}` }
@@ -152,19 +193,28 @@ export async function commitExecplanDraft(worktree: string, relPath: string, tag
   return { ok: true, detail: '' }
 }
 
-// Salvage useful, task-scoped planning/review artefacts a failing branch left
-// uncommitted, by committing them onto the branch's OWN history — never
-// merging, pushing, or ticking the roadmap — so they survive any later
-// agent-driven worktree cleanup (the issue: a planner writes an ExecPlan or a
-// review file, then fails schema parsing, and the untracked artefact is lost).
-// Each candidate is filtered to the artefact convention, contained
-// (execplanRelPath), and probed (fileState — a regular file, symlinks rejected)
-// BEFORE any git call, matching the anti-spoof discipline the rest of this
-// module uses on untrusted worktree content. A git failure or an ineligible
-// state is a recorded reason, never a throw, so salvage can never convert a
-// failed task into a run-halting error. Returns committed paths, skipped paths
-// with reasons, and the salvage commit sha (or a "nothing to salvage" detail
-// when no eligible artefact is dirty).
+/**
+ * The path-scoped, containment-checked, symlink-rejecting salvage-commit
+ * primitive. Salvages useful, task-scoped planning/review artefacts a failing
+ * branch left uncommitted, by committing them onto the branch's OWN
+ * history — never merging, pushing, or ticking the roadmap — so they survive
+ * any later agent-driven worktree cleanup (the issue: a planner writes an
+ * ExecPlan or a review file, then fails schema parsing, and the untracked
+ * artefact is lost). Each candidate is filtered to the artefact convention,
+ * contained ({@link execplanRelPath}), and probed (fileState — a regular
+ * file, symlinks rejected) BEFORE any git call, matching the anti-spoof
+ * discipline the rest of this module uses on untrusted worktree content.
+ * Never throws: a git failure or an ineligible state is a recorded reason
+ * instead, so salvage can never convert a failed task into a run-halting
+ * error. Side effect: on success, `git add` + `git commit`s the verified
+ * `docs/execplans/*.md` paths under the `df12-build` machine identity.
+ *
+ * @param worktree The task worktree's absolute path.
+ * @param candidatePaths Uncommitted paths the host observed (untracked, dirty, or staged).
+ * @param tag A label for the commit message (typically the task id).
+ * @returns Committed paths, skipped paths with reasons, and the salvage
+ *   commit sha (or a "nothing to salvage" detail when no eligible artefact is dirty).
+ */
 export async function salvageTaskArtefacts(worktree: string, candidatePaths: readonly string[], tag: string): Promise<SalvageOutcome> {
   const skipped: Array<{ path: string; reason: string }> = []
   const verified: string[] = []
@@ -233,9 +283,14 @@ export async function salvageTaskArtefacts(worktree: string, candidatePaths: rea
   return { committed: verified, skipped, sha: String(head.stdout).trim(), detail: '' }
 }
 
-// Every path a successful implementation leaves uncommitted is unreviewable
-// (the dual review judges committed work) and is silently lost at the squash
-// merge. Returns { ok, detail } with a bounded path sample.
+/**
+ * Every path a successful implementation leaves uncommitted is unreviewable
+ * (the dual review judges committed work) and is silently lost at the squash
+ * merge.
+ *
+ * @param worktree The task worktree's absolute path.
+ * @returns `{ ok, detail }`, with `detail` carrying a bounded path sample on failure.
+ */
 export async function verifyWorktreeCommitted(worktree: string): Promise<DurabilityVerdict> {
   const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1'])
   if (!status.ok) {
