@@ -25,6 +25,43 @@ import {
 const WORKFLOW_PATH = new URL('../workflows/df12-build-odw.js', import.meta.url)
 const CONTROL_LOOP_MARKER = '// --- Worker-pool control loop'
 
+// Golden-file fixtures for the recovery-resume prompt contract. A tiny
+// Node-only mechanism (no bun snapshot APIs, no extra test-framework dep):
+// each prompt is sanitized to stable placeholders, then compared byte-for-byte
+// against a committed artefact. Regenerate deliberately with
+// `UPDATE_PROMPT_GOLDEN=1 node --test tests/df12-build-odw-recovery.test.mjs`.
+const PROMPT_GOLDEN_DIR = new URL('./fixtures/prompts/', import.meta.url)
+
+// Replace the per-run temporary fixture paths with stable placeholders so the
+// captured prompts are deterministic across runs and machines. The worktree
+// and project paths nest under root, so substitute the longer, more specific
+// paths first. Kept local, explicit, and free of any other rewriting.
+function sanitizePrompt(text, repo) {
+  return text
+    .replaceAll(repo.parserWorktree, '<WORKTREE>')
+    .replaceAll(repo.dir, '<PROJECT>')
+    .replaceAll(repo.root, '<FIXTURE_ROOT>')
+}
+
+// Assert a sanitized prompt equals its committed golden artefact, or rewrite the
+// artefact when UPDATE_PROMPT_GOLDEN is set. Exact equality means drift ANYWHERE
+// in the prompt — not only the residual-risk section — forces a deliberate
+// review of the regenerated golden.
+function assertPromptGolden(name, sanitized) {
+  const file = new URL(`${name}.txt`, PROMPT_GOLDEN_DIR)
+  if (process.env.UPDATE_PROMPT_GOLDEN) {
+    mkdirSync(PROMPT_GOLDEN_DIR, { recursive: true })
+    writeFileSync(file, sanitized)
+    return
+  }
+  const expected = readFileSync(file, 'utf8')
+  assert.equal(
+    sanitized,
+    expected,
+    `${name} prompt drifted from its golden artefact; if intentional, regenerate with UPDATE_PROMPT_GOLDEN=1`,
+  )
+}
+
 
 async function loadRecoverySurface(args = {}, agentImpl = async () => null) {
   let source = await readFile(WORKFLOW_PATH, 'utf8')
@@ -823,8 +860,9 @@ test('review-mode resume carries advisory residualRisk into the review and integ
   // ...and be rendered as an explicitly non-blocking, injection-safe section in
   // every prompt: the item is JSON-encoded inside a fenced untrusted-data block
   // so agent-authored residual risk cannot smuggle instructions downstream.
-  // This repo uses no snapshot mechanism (bun `toMatchSnapshot` is unused
-  // project-wide), so the prompt content is pinned with explicit assertions.
+  // These semantic assertions guard the residual-risk contract directly; the
+  // golden comparison below additionally locks the WHOLE prompt so drift outside
+  // this section still needs a deliberate golden update.
   const advisoryLabel = 'Advisory residual risk (non-blocking'
   for (const [name, text] of Object.entries(prompts)) {
     assert.ok(text.includes(advisoryLabel), `${name} prompt must carry the advisory residual-risk section`)
@@ -835,6 +873,13 @@ test('review-mode resume carries advisory residualRisk into the review and integ
       `${name} prompt must fence the residual-risk data block`,
     )
   }
+
+  // Full-prompt regression coverage: sanitize the per-run temp paths, then
+  // assert exact equality against committed golden artefacts scoped to this
+  // recovery-resume prompt contract.
+  assertPromptGolden('recovery-resume-code-review', sanitizePrompt(prompts.codeReview, repo))
+  assertPromptGolden('recovery-resume-expert-review', sanitizePrompt(prompts.expertReview, repo))
+  assertPromptGolden('recovery-resume-integrate', sanitizePrompt(prompts.integrate, repo))
 })
 
 test('review-mode resume enforces the write preflight before any review agent', async () => {
