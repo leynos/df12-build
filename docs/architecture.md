@@ -259,6 +259,7 @@ Workflow and documentation changes must at least pass:
 - `make markdownlint`
 - `make nixie`
 - `make typecheck`
+- `make docs-check`
 
 Do not start a live `odw run` as a routine documentation gate. A live run can
 spawn agents and mutate target-project state, so it is reserved for explicit

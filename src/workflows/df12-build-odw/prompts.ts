@@ -1,9 +1,11 @@
 /**
- * @file Prompt builders for every ordinary pipeline stage, plus the shared
+ * Prompt builders for every ordinary pipeline stage, plus the shared
  * agent preamble and code-search guidance. The run configuration binds once
  * via makePrompts (the factory destructures the config record under the
  * historical constant names so the prompt bodies stay verbatim); the entry
  * destructures the returned builders, so call sites keep their shape.
+ *
+ * @module
  */
 import type { WorkflowConfig } from './config.ts'
 import { shellQuote } from './exec.ts'

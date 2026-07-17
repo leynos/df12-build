@@ -1,11 +1,13 @@
 /**
- * @file ADR 002 partial-branch assessment: deferred-review classification, the
+ * ADR 002 partial-branch assessment: deferred-review classification, the
  * manual-merge handoff guard, the assessment gate, and the report-only
  * assessment agents. Assessment output NEVER merges, pushes, or ticks the
  * roadmap; classification is advice for the operator, and host-collected
  * evidence is decisive over anything the agent reports. The run wiring
  * (preamble, adapter routing, retry, enable switch) binds once via
  * makeAssessment.
+ *
+ * @module
  */
 import { ASSESSMENT_SCHEMA } from './schemas.ts'
 import {

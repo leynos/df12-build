@@ -1,5 +1,5 @@
 /**
- * @file Task-agent writable-root preflight — ODW launches every adapter
+ * Task-agent writable-root preflight — ODW launches every adapter
  * with the control checkout as its working directory, so a sandbox scoped
  * to that checkout silently rejects writes to sibling
  * ...worktrees/roadmap-* paths. Prompt text cannot fix that, so the
@@ -12,6 +12,8 @@
  * enable flag come from run configuration, bound once via
  * makeWritePreflight so the exported runners keep their two-argument
  * shape.
+ *
+ * @module
  */
 
 /** One adapter that must prove write access into task worktrees before the run proceeds. */

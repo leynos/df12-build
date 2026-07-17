@@ -1,9 +1,11 @@
 /**
- * @file Shared runtime shapes for the df12-build-odw module tree. These name
+ * Shared runtime shapes for the df12-build-odw module tree. These name
  * the structures that cross module boundaries so later peels can `import
  * type` them instead of re-deriving the shape from call sites. Only shapes
  * that are already observable in the code belong here; speculative fields do
  * not.
+ *
+ * @module
  */
 
 /**
