@@ -493,7 +493,6 @@ unlike a product failure:
    to relaunch with `resumeMode: "continue"`; the committed ExecPlan `Status`
    dispatches the branch back into the pipeline at the stage where it died.
 
-
 ### Provider rate-limits
 
 A provider fault is a transient server-side limit — a `429`/`529`, an

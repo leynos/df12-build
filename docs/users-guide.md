@@ -450,10 +450,13 @@ Common arguments:
 - `commitGateTimeoutSeconds`: per-command timeout for host-run gates.
   Defaults to `3600`; a gate that exceeds it is killed and reported as a
   failure with the timeout named in the evidence.
-- `stageAttempts`: total attempts per stage agent when the previous attempt
-  died on an infrastructure fault (an ODW adapter timeout or crash, or
-  schema-retry exhaustion). Defaults to `2`. Product failures are never
-  retried, and the host never re-dispatches a faulted integration stage: a
+- `stageAttempts`: the shared total-attempt budget per stage agent, spent when
+  the previous attempt died on either an infrastructure fault (an ODW adapter
+  timeout or crash, or schema-retry exhaustion) or a transient provider fault (a
+  `429`/`529`, an overloaded model, or a gateway timeout). Defaults to `2`.
+  Infrastructure faults are retried immediately; provider faults wait a bounded
+  backoff (`infraRetryBackoffSeconds`) before each re-run. Product failures are
+  never retried, and the host never re-dispatches a faulted integration stage: a
   crash between the squash push and the agent's return can leave a hidden
   success already landed on `origin/<base>`, which the host cannot detect, so
   repeating the stage risks a double merge. (The integration agent still
