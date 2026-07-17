@@ -1,15 +1,38 @@
-// Failure classification and the bounded infrastructure retry. A failure's
-// class decides the pool's response: fatal-auth halts new work, a provider
-// fault defers the task, an infrastructure fault may be retried warm (the
-// committed-ExecPlan durability contract makes re-runs cheap), and anything
-// else flows through the ordinary product-failure paths.
+/**
+ * @file Failure classification and the bounded in-run stage-agent retry for the
+ * ODW workflow. A failure's class decides the pool's response: fatal-auth halts
+ * new work, a provider fault is retried with a bounded backoff, an
+ * infrastructure fault is retried warm (the committed-ExecPlan durability
+ * contract makes re-runs cheap), and anything else flows through the ordinary
+ * product-failure paths. Classification precedence is auth > provider > infra,
+ * so an adapter that wraps a provider or auth failure inside its own
+ * process-exit string is still routed by the underlying cause.
+ */
 import type { FaultMetrics } from './types.ts'
 
-// Bounded-cardinality fault counters, surfaced verbatim in the run result so
-// operators can see retry pressure and terminal fault classes without
-// scraping logs. Fixed keys only — never keyed by task id or error text.
+/**
+ * Bounded-cardinality fault counters, surfaced verbatim in the run result so
+ * operators can read retry pressure and terminal fault classes without scraping
+ * logs. The keys are fixed — never keyed by task id or error text — so the
+ * metric cardinality stays constant: `infraRetries`/`providerRetries` count
+ * re-run attempts made by {@link makeWithInfraRetry}, while
+ * `infraFaults`/`providerFaults`/`authFaults` count terminal classifications
+ * recorded by {@link resultFromUnhandledAgentError}. Mutated in place by both.
+ */
 export const faultMetrics: FaultMetrics = { infraRetries: 0, providerRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 }
 
+/**
+ * Detect a fatal authentication/credential failure in an error message. Matches
+ * the stable auth-failure strings the adapters and CodeRabbit emit (a 401,
+ * "not logged in", signed-out, expired/missing tokens, `loggedIn: false`, and
+ * login-required hints). Auth is the highest-precedence class: it halts new work
+ * and is never retried.
+ *
+ * @param value The error or message to classify (coerced to a string).
+ * @returns The trimmed matched detail when the text looks like an auth failure,
+ *   otherwise an empty string — the falsy "not an auth failure" signal callers
+ *   test with `!== ''`.
+ */
 export function authFailureDetail(value: unknown): string {
   const text = String(value || '')
   const patterns = [
@@ -32,6 +55,17 @@ export function authFailureDetail(value: unknown): string {
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
 }
 
+/**
+ * Detect a transient provider-side limit in an error message: an `API Error`
+ * carrying a 429/500/502/503/504/529 status, or free-text overload / rate-limit
+ * / gateway-timeout / service-unavailable phrasing. A provider fault carries no
+ * verdict about the task branch, so the retry loop backs off and retries it in
+ * place rather than halting the task. Ranks below auth but above infrastructure.
+ *
+ * @param value The error or message to classify (coerced to a string).
+ * @returns The trimmed matched detail when the text looks like a provider fault,
+ *   otherwise an empty string.
+ */
 export function providerFailureDetail(value: unknown): string {
   const text = String(value || '')
   const patterns = [
@@ -42,10 +76,19 @@ export function providerFailureDetail(value: unknown): string {
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
 }
 
-// ODW-level infrastructure faults: the agent process died or its reply
-// channel failed, so the error carries no evidence about the task branch.
-// The patterns pin ODW's own stable error strings (bridge.ts
-// cliFailureMessage and the schema-retry exhaustion message).
+/**
+ * Detect an ODW-level infrastructure fault: the agent process died or its reply
+ * channel failed (an adapter timeout, a non-zero adapter exit, an
+ * `AdapterExecutionError`, a `SchemaValidationError`, schema-retry exhaustion,
+ * or an empty reply), so the error carries no evidence about the task branch.
+ * The patterns pin ODW's own stable error strings (bridge.ts `cliFailureMessage`
+ * and the schema-retry exhaustion message). This is the lowest-precedence class,
+ * so a message that also matches auth or provider is routed by those first.
+ *
+ * @param value The error or message to classify (coerced to a string).
+ * @returns The trimmed matched detail when the text looks like an infrastructure
+ *   fault, otherwise an empty string.
+ */
 export function infrastructureFailureDetail(value: unknown): string {
   const text = String(value || '')
   const patterns = [
@@ -59,18 +102,34 @@ export function infrastructureFailureDetail(value: unknown): string {
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
 }
 
-// Thin setTimeout-backed sleep in seconds, injectable so the retry loop can
-// pause between provider-fault attempts while tests substitute an instant
-// stub. Seconds (not minutes) because provider rate-limits recover fast; the
-// CodeRabbit host review uses the minute-scale sibling in host-review.ts.
+/**
+ * The production backoff sleep: a thin `setTimeout`-backed pause measured in
+ * seconds. It is the default `sleep` injected into {@link makeWithInfraRetry},
+ * so the retry loop actually waits between provider-fault attempts, while tests
+ * substitute an instant stub that records the requested durations instead of
+ * pausing. Seconds (not minutes) because provider rate-limits recover fast; the
+ * CodeRabbit host review uses the minute-scale sibling in host-review.ts.
+ *
+ * @param seconds How long to pause, in seconds.
+ * @returns A promise that resolves once the pause has elapsed.
+ */
 export async function hostSleepSeconds(seconds: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, seconds * 1000))
 }
 
-// Deterministic jitter in [low, high] seconds: Math.random() is banned for
-// Claude Code workflow dual-compatibility (ODW scanDualCompat), and a seeded
-// spread keeps sibling tasks that hit the same provider limit from retrying in
-// lockstep. Mirrors coderabbitBackoffMinutes in host-review.ts.
+/**
+ * Deterministic backoff jitter, in whole seconds, spread across `[low, high]`. A
+ * DJB2 hash of the seed picks a point in the range, so `Math.random()` (banned
+ * for Claude Code workflow dual-compatibility — ODW scanDualCompat) is never
+ * called, yet distinct seeds still de-synchronise sibling tasks that hit the
+ * same provider limit at once. The result is stable for a given seed and range.
+ * Mirrors `coderabbitBackoffMinutes` in host-review.ts.
+ *
+ * @param seed A stable per-attempt key; the retry loop passes `${label}#${attempt}`.
+ * @param range The inclusive `[low, high]` bounds; callers pass an already-clamped
+ *   range (low >= 1, high >= low).
+ * @returns An integer wait within `[low, high]` seconds.
+ */
 export function infraRetryBackoffSeconds(seed: unknown, range: [number, number]): number {
   let hash = 5381
   for (const ch of String(seed)) hash = ((hash * 33) ^ (ch.codePointAt(0) as number)) >>> 0
@@ -78,12 +137,18 @@ export function infraRetryBackoffSeconds(seed: unknown, range: [number, number])
   return low + (hash % (high - low + 1))
 }
 
-// Best-effort parse of an advertised retry-after wait, in seconds, from an
-// error message. Provider faults are free text (adapter stderr/exception
-// strings), never HTTP header objects, so this scans for the common shapes
-// (`retry-after: N`, `try again in N second(s)/minute(s)`). Returns 0 when no
-// wait is advertised; the caller clamps any hit into the configured range so a
-// hostile or huge value cannot stall the run.
+/**
+ * Best-effort parse of an advertised retry-after wait, in seconds, from an error
+ * message. Provider faults arrive as free text (adapter stderr/exception
+ * strings), never HTTP header objects, so this scans for the two common shapes —
+ * `retry-after: N` and `try again in N second(s)/minute(s)`, converting minutes
+ * to seconds. The advertised value is returned at face value; the caller clamps
+ * any hit into the configured range so a hostile or huge wait cannot stall the
+ * run.
+ *
+ * @param value The error or message to scan (coerced to a string).
+ * @returns The advertised wait in seconds, or 0 when none is advertised.
+ */
 export function parseRetryAfterSeconds(value: unknown): number {
   const text = String(value || '')
   const header = text.match(/retry[-\s]?after[:\s]+(\d+(?:\.\d+)?)/i)
@@ -96,18 +161,38 @@ export function parseRetryAfterSeconds(value: unknown): number {
   return 0
 }
 
-// Bounded in-run retry for stage agents. An infrastructure fault (a hung or
-// killed adapter stream, schema-retry exhaustion) says nothing about the task
-// branch, and the committed-ExecPlan durability contract makes a warm re-run
-// cheap — the retried agent finds the committed plan and any committed work
-// already on disk, so infra faults retry immediately. A provider rate-limit is
-// transient too, but retrying it instantly just burns the attempt budget
-// against the same closed window, so provider faults now retry with a bounded
-// backoff (honouring an advertised retry-after when present, else deterministic
-// seeded jitter) before each re-run. Product failures (review verdicts, gate
-// failures) are never retried here; they flow through the ordinary failure
-// paths. The attempt budget, backoff range, and sleep primitive are bound once
-// by the caller (run configuration), so call sites keep the two-argument shape.
+/**
+ * Build the bounded in-run retry wrapper for stage agents. The attempt budget,
+ * backoff range, and sleep primitive are bound once by the caller (run
+ * configuration), so call sites keep the two-argument
+ * `withInfraRetry(run, label)` shape.
+ *
+ * The returned wrapper re-runs `run` until it resolves or the budget is spent,
+ * classifying each failure with the same precedence as
+ * {@link resultFromUnhandledAgentError} (auth > provider > infra):
+ * - Infrastructure faults retry immediately, with no backoff: the
+ *   committed-ExecPlan durability contract makes a warm re-run cheap — the
+ *   retried agent finds the committed plan and any committed work already on
+ *   disk — and an adapter death is not a quota window a pause would clear. Each
+ *   retry increments `faultMetrics.infraRetries`.
+ * - Provider rate-limits retry after a bounded backoff, because retrying a
+ *   still-closed window instantly just burns the budget. The wait honours an
+ *   advertised `retry-after` clamped into `backoffRange` when present, else a
+ *   deterministic seeded jitter over `${label}#${attempt}`. Each retry
+ *   increments `faultMetrics.providerRetries` and awaits the injected `sleep`.
+ * - Auth failures and product failures (review verdicts, gate failures) are
+ *   never retried; they rethrow at once for the ordinary failure paths.
+ * When the budget is exhausted the last error is rethrown.
+ *
+ * @param attempts Total attempts per stage agent, counting the first try.
+ * @param backoffRange Inclusive `[low, high]` seconds for the provider-fault
+ *   backoff; also the clamp bounds for an advertised `retry-after`. Defaults to
+ *   `[5, 30]`.
+ * @param sleep Injected async pause awaited before each provider retry; defaults
+ *   to {@link hostSleepSeconds} and is replaced by an instant stub in tests.
+ * @returns `withInfraRetry(run, label)`, which resolves with `run`'s value or
+ *   rethrows the terminal error once the budget or classification says stop.
+ */
 export function makeWithInfraRetry(
   attempts: number,
   backoffRange: [number, number] = [5, 30],
@@ -162,6 +247,13 @@ export function makeWithInfraRetry(
   }
 }
 
+/**
+ * The synthetic task result {@link resultFromUnhandledAgentError} returns for an
+ * error that escaped a stage's own handling. `status` carries the classified
+ * fault class and `stage` the phase it maps to; `proposals` defaults empty and
+ * caller-supplied `extra` fields are spread on top, so the object stays
+ * assignable to the general task-result record the pool consumes.
+ */
 export interface UnhandledAgentErrorResult extends Record<string, unknown> {
   id: string
   status: 'fatal-auth' | 'provider-fault' | 'infra-fault' | 'failed'
@@ -170,6 +262,20 @@ export interface UnhandledAgentErrorResult extends Record<string, unknown> {
   proposals: unknown[]
 }
 
+/**
+ * Turn an unhandled agent error into a typed, terminal task result, classifying
+ * it with auth > provider > infra precedence (matching {@link makeWithInfraRetry})
+ * and falling back to a plain `failed`. Increments the matching terminal
+ * `faultMetrics` counter (`authFaults`/`providerFaults`/`infraFaults`) for the
+ * chosen class. This is the terminal reporter, distinct from the retry loop: it
+ * records the class the run result should carry once retries are exhausted or a
+ * fault is non-retryable.
+ *
+ * @param id The task id the failing stage belongs to.
+ * @param detail The raw error text to classify and surface to the operator.
+ * @param extra Additional fields spread onto the result (e.g. the worktree path).
+ * @returns The typed result with `status` and `stage` set from the classification.
+ */
 export function resultFromUnhandledAgentError(
   id: string,
   detail: string,
