@@ -1,5 +1,5 @@
 /**
- * @file Remediation triage — when a step quiesces (no task from it still
+ * Remediation triage — when a step quiesces (no task from it still
  * building), GIST-triage the review/audit proposals it accrued into three
  * lanes instead of dumping them as full tasks into the current step:
  *   - addendum  -> small fix folded onto a completed task's execplan + a
@@ -11,6 +11,8 @@
  * and the cheap addendum lane (no audit) is what stops the amplification
  * spiral. The run wiring (preamble, base branch, roadmap path, adapter
  * routing) binds once via makeRemediation.
+ *
+ * @module
  */
 
 /** A single review/audit follow-up proposal awaiting triage. */

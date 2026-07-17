@@ -1,10 +1,13 @@
 /**
- * @file Pure decision helpers for fresh-run recovery (failure-resume
- * design): task-branch naming, `git worktree list --porcelain` parsing,
- * the review-mode and continue-mode decision tables, and committed-ExecPlan
- * state parsing. Everything here is deterministic and free of I/O, injected
- * ODW primitives, and run configuration, so it is unit-testable by direct
- * import.
+ * Pure decision helpers for fresh-run recovery (failure-resume design):
+ * task-branch naming, `git worktree list --porcelain` parsing, the review-mode
+ * and continue-mode decision tables, and committed-ExecPlan state parsing.
+ * Everything here is deterministic and free of I/O, injected ODW primitives,
+ * and run configuration, so it is unit-testable by direct import. The decision
+ * tables have a Dafny-verified twin under `verify/`; keep the branch order and
+ * skip-reason precedence here in step with that specification.
+ *
+ * @module
  */
 
 /** One `git worktree list --porcelain` record, reduced to the fields recovery consults. */
@@ -27,7 +30,6 @@ export interface RecoveryCandidateHygiene {
   /** Path to the branch's durable ExecPlan; its absence disqualifies a review-mode resume. */
   execplanPath?: string
 }
-
 /**
  * Host-collected git evidence for a recovery candidate's worktree: any
  * collection errors, the working-tree dirty/clean state, and recent commit

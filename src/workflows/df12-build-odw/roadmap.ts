@@ -1,9 +1,11 @@
 /**
- * @file Deterministic roadmap parsing and selection. The roadmap markdown is
+ * Deterministic roadmap parsing and selection. The roadmap markdown is
  * the single source of scheduling truth: checkbox task lines, `Requires`
  * lines (with step ranges), and addendum sub-tasks nested under completed
  * parents. Everything here is pure text-in, data-out; reading the canonical
  * roadmap ref stays with the caller.
+ *
+ * @module
  */
 import type { RoadmapTask, SelectedTask } from './types.ts'
 

@@ -39,7 +39,6 @@ export const DESIGN_VERDICT_SCHEMA = {
   },
   required: ['satisfied', 'blocking'],
 }
-
 /**
  * The implementation agent's report on a completed round of work: `ok`,
  * `gatesGreen`, a `summary`, and any `openIssues` left unresolved, keyed to

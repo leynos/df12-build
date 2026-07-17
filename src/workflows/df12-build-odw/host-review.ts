@@ -1,11 +1,13 @@
 /**
- * @file Host-run CodeRabbit review and host-run commit gates. The control loop
+ * Host-run CodeRabbit review and host-run commit gates. The control loop
  * invokes the CodeRabbit CLI against committed work (absorbing rate-limit
  * backoff in host wall-clock instead of agent tokens) and re-runs the
  * configured gate commands against committed HEAD, so a gatesGreen claim is
  * verified, never trusted. The run wiring (base branch, attempts, backoff
  * range, findings sink, gate set, gate timeout) binds once via
  * makeHostReview; the parsers and aggregates are direct exports.
+ *
+ * @module
  */
 import { execFileStatus } from './exec.ts'
 import type { ExecOptions, ExecStatus } from './exec.ts'

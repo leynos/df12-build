@@ -1,8 +1,10 @@
 /**
- * @file Process and filesystem helpers: execFile wrappers with attached
+ * Process and filesystem helpers: execFile wrappers with attached
  * stream output, shell quoting, and the absent-vs-fault file probe. All host
  * I/O goes through `process.getBuiltinModule` so the module loads without
  * imports under the ODW wrapper.
+ *
+ * @module
  */
 
 /**

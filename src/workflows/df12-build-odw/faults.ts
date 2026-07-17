@@ -1,9 +1,11 @@
 /**
- * @file Failure classification and the bounded infrastructure retry. A
+ * Failure classification and the bounded infrastructure retry. A
  * failure's class decides the pool's response: fatal-auth halts new work, a
  * provider fault defers the task, an infrastructure fault may be retried warm
  * (the committed-ExecPlan durability contract makes re-runs cheap), and
  * anything else flows through the ordinary product-failure paths.
+ *
+ * @module
  */
 import type { FaultMetrics } from './types.ts'
 
