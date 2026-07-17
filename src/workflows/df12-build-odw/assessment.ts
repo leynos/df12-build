@@ -43,6 +43,7 @@ const SALVAGE_CLASSIFICATIONS = new Set(['continue-manual', 'adopt-partial', 'in
  * type change.
  */
 export interface SalvageRecord extends SalvageOutcome {
+  /** The assessment classification that triggered (or skipped) the salvage. */
   classification: string
 }
 
@@ -52,11 +53,17 @@ export interface SalvageRecord extends SalvageOutcome {
  * and the (structured) detail.
  */
 export interface SalvageSummaryEntry {
+  /** The task id whose branch attempted salvage. */
   id: string
+  /** The classification that drove the attempt. */
   classification: string
+  /** Repository-relative paths actually committed; empty for a skipped attempt. */
   committed: string[]
+  /** Count of candidate paths skipped (not the salvage-convention artefacts). */
   skipped: number
+  /** The salvage commit sha, or '' when nothing was committed. */
   sha: string
+  /** Structured detail (e.g. the skip reason), unbounded for the summary row. */
   detail: string
 }
 
@@ -75,7 +82,14 @@ export interface SalvageSummaryEntry {
  */
 export function summarizeSalvages(
   results: ReadonlyArray<{ id?: string; salvage?: Partial<SalvageRecord> | null }>,
-): { salvages: SalvageSummaryEntry[]; salvagedBranches: number; summarySuffix: string } {
+): {
+  /** One row per task that attempted salvage (committed or skipped). */
+  salvages: SalvageSummaryEntry[]
+  /** Count of branches that actually committed artefacts. */
+  salvagedBranches: number
+  /** Terminal-summary suffix text; '' when every attempt was a skip. */
+  summarySuffix: string
+} {
   const salvages: SalvageSummaryEntry[] = results
     .filter((result) => result.salvage)
     .map((result) => ({
@@ -93,35 +107,53 @@ export function summarizeSalvages(
 
 /** The build/fix-report shape addendum manual-merge and auth-failure checks read from. */
 export interface ImplementationReport {
+  /** Builder's own success claim; a complete-but-not-ok report is a manual-merge handoff. */
   ok?: boolean
+  /** Builder's claim that the required gates are green (host-verified elsewhere). */
   gatesGreen?: boolean
+  /** Work items the builder reports complete; coerced to a number for the completion check. */
   workItemsCompleted?: unknown
+  /** Total work items; coerced to a number for the completion check. */
   workItemsTotal?: unknown
+  /** Free-text summary, scanned for auth-failure detail. */
   summary?: string
+  /** Open issues; tolerated for handoff only when every one is a deferred review. */
   openIssues?: readonly string[]
 }
 
 /** A task result eligible for ADR 002 assessment: its status, stage, detail, and open issues. */
 export interface AssessableResult extends Record<string, unknown> {
+  /** Terminal task status; only 'failed'/'halted' branches are assessment candidates. */
   status?: string
+  /** Failure stage; infra/auth/provider/worktree stages are excluded from assessment. */
   stage?: string
+  /** Failure detail, scanned for auth/provider/infrastructure fault patterns. */
   detail?: string
+  /** Open issues, folded into the fault-pattern scan alongside `detail`. */
   openIssues?: readonly string[]
 }
 
 /** The branch identity and location assessment needs: branch name, worktree path, and base commit. */
 export interface AssessmentWorktree {
+  /** The surviving task branch name; assessment is skipped when absent. */
   branch?: string
+  /** The branch's worktree path, read for host evidence and salvage. */
   worktreePath?: string
+  /** The base commit the branch diverged from. */
   baseSha?: string
 }
 
 /** The run wiring `makeAssessment` binds once: the prompt preamble, the enable switch, adapter routing, the escalation model, and the shared infra-retry wrapper. */
 export interface AssessmentDeps {
+  /** Builds the shared prompt preamble for a given worktree path. */
   preamble: (worktree: string | null | undefined) => string
+  /** Master enable switch; when false, no assessment or salvage runs. */
   assessPartialBranches: boolean
+  /** Maps base agent options to the routed adapter options for the assessment call. */
   assessmentAgentOptions: (options: Record<string, unknown>) => Record<string, unknown>
+  /** The escalation model used for high-stakes adopt-complete candidates. */
   assessmentEscalationModel: string
+  /** Wraps a model call with the shared infrastructure-fault retry policy. */
   withInfraRetry: <T>(run: () => Promise<T>, label: string) => Promise<T>
 }
 
@@ -139,7 +171,12 @@ export interface AssessmentDeps {
  */
 export function fastAssessmentClassification(
   evidence: { collectionErrors?: readonly string[]; dirtyState?: string; recentCommits?: readonly unknown[] } | null | undefined,
-): { classification: string; reason: string } | null {
+): {
+  /** The deterministic classification ('discard' or 'continue-manual'). */
+  classification: string
+  /** Operator-facing rationale, reused as the assessment rationale/recommendation. */
+  reason: string
+} | null {
   const collectionErrors = evidence?.collectionErrors || []
   if (collectionErrors.length) {
     return { classification: 'continue-manual', reason: `host evidence collection reported error(s) (${collectionErrors.slice(0, 3).join('; ')}); operator judgement required` }
@@ -465,17 +502,45 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     const evidence = await collectAssessmentEvidence(task, wt)
     const fast = fastAssessmentClassification(evidence)
     if (fast) {
-      return { evidence, assessment: deterministicAssessment(fast.classification, evidence, fast.reason), assessmentError: '' }
+      return {
+        /** Host-collected git evidence for the candidate branch. */
+        evidence,
+        /** The assessment object (deterministic or model), or null on failure. */
+        assessment: deterministicAssessment(fast.classification, evidence, fast.reason),
+        /** Error text when no structured assessment was produced; '' otherwise. */
+        assessmentError: '',
+      }
     }
     try {
       const label = `recover-assess:${candidate.taskId}${candidate.isAddendum ? '-addendum' : ''}`
       const assessment = await runModelAssessment(() => recoveryAssessmentPrompt(task, candidate, evidence), 'Recovery', label, evidence)
       if (!assessment) {
-        return { evidence, assessment: null, assessmentError: 'assessment agent returned no structured output' }
+        return {
+          /** Host-collected git evidence for the candidate branch. */
+          evidence,
+          /** The assessment object (deterministic or model), or null on failure. */
+          assessment: null,
+          /** Error text when no structured assessment was produced; '' otherwise. */
+          assessmentError: 'assessment agent returned no structured output',
+        }
       }
-      return { evidence, assessment: { ...assessment, hostEvidence: evidence }, assessmentError: '' }
+      return {
+        /** Host-collected git evidence for the candidate branch. */
+        evidence,
+        /** The assessment object (deterministic or model), or null on failure. */
+        assessment: { ...assessment, hostEvidence: evidence },
+        /** Error text when no structured assessment was produced; '' otherwise. */
+        assessmentError: '',
+      }
     } catch (error) {
-      return { evidence, assessment: null, assessmentError: ((error as Error | null) && (error as Error).message) || String(error) }
+      return {
+        /** Host-collected git evidence for the candidate branch. */
+        evidence,
+        /** The assessment object (deterministic or model), or null on failure. */
+        assessment: null,
+        /** Error text when no structured assessment was produced; '' otherwise. */
+        assessmentError: ((error as Error | null) && (error as Error).message) || String(error),
+      }
     }
   }
 
@@ -517,7 +582,16 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     task: { id: string; title?: string },
     wt: AssessmentWorktree,
     result: T,
-  ): Promise<T & { assessment?: Record<string, unknown>; assessmentError?: string; assessmentEvidence?: AssessmentEvidence; salvage?: SalvageRecord }> {
+  ): Promise<T & {
+    /** The model or deterministic assessment object, when one was produced. */
+    assessment?: Record<string, unknown>
+    /** The error text when the assessment agent failed or returned nothing. */
+    assessmentError?: string
+    /** Host evidence attached on the error paths so operators can still judge. */
+    assessmentEvidence?: AssessmentEvidence
+    /** The artefact-salvage record, when a kept-but-not-adopted branch salvaged. */
+    salvage?: SalvageRecord
+  }> {
     if (!shouldAssessFailure(result, wt)) return await salvageInfraFaultArtefacts(task, wt, result)
     phase('Assess')
     const evidence = await collectAssessmentEvidence(task, wt)
@@ -547,5 +621,16 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     }
   }
 
-  return { assessmentPrompt, recoveryAssessmentPrompt, assessRecoveryCandidate, shouldAssessFailure, attachAssessment }
+  return {
+    /** Build the in-run failure-assessment prompt for a surviving branch. */
+    assessmentPrompt,
+    /** Build the fresh-run recovery-assessment prompt (transcript unavailable by design). */
+    recoveryAssessmentPrompt,
+    /** Assess a discovered recovery candidate through the ADR 002 contract. */
+    assessRecoveryCandidate,
+    /** The eligibility gate: whether a failed result's branch reaches model assessment. */
+    shouldAssessFailure,
+    /** Attach an assessment (or infra-fault salvage) to a task result; never merges or ticks the roadmap. */
+    attachAssessment,
+  }
 }

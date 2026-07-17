@@ -20,7 +20,6 @@ export const PLAN_SCHEMA = {
   },
   required: ['execplanPath', 'workItems', 'summary'],
 }
-
 /**
  * The design-review verdict on a submitted plan: whether the plan is
  * implementable, design-conformant, and complete (`satisfied`), and the

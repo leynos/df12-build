@@ -10,7 +10,9 @@ import { parseExecplanState } from './recovery-decision.ts'
 
 /** The pass/fail outcome of a durability check: whether the target is durable, and why not when it is not. */
 export interface DurabilityVerdict {
+  /** True when the target is durable (committed, no uncommitted modifications). */
   ok: boolean
+  /** Empty on success; otherwise the reason the target failed the durability check. */
   detail: string
 }
 
@@ -21,9 +23,18 @@ export interface DurabilityVerdict {
  * `detail`. The full text lives here; log lines are separately bounded.
  */
 export interface SalvageOutcome {
+  /** Relative paths successfully committed onto the branch's own history. */
   committed: string[]
-  skipped: Array<{ path: string; reason: string }>
+  /** Candidate paths excluded from salvage, each paired with why it was excluded. */
+  skipped: Array<{
+    /** The candidate path (as observed by the host, before or after containment). */
+    path: string
+    /** Why the candidate was excluded from salvage (out of scope, escaped the worktree, or not a regular file). */
+    reason: string
+  }>
+  /** The salvage commit's HEAD sha; empty when nothing was committed OR the post-commit HEAD read failed (see `detail`). */
   sha: string
+  /** A human-readable summary of the outcome (e.g. "nothing to salvage" or a git failure). */
   detail: string
 }
 
@@ -56,7 +67,14 @@ export function isTaskArtefactPath(candidate: unknown): boolean {
  * @param planPath The agent-supplied plan path (untrusted).
  * @returns `{ ok, relPath, detail }`; `ok` is false when the path escapes the worktree.
  */
-export function execplanRelPath(worktree: string, planPath: unknown): { ok: boolean; relPath: string; detail: string } {
+export function execplanRelPath(worktree: string, planPath: unknown): {
+  /** True when the path resolves inside the worktree. */
+  ok: boolean
+  /** The path relative to the worktree; empty when `ok` is false. */
+  relPath: string
+  /** Empty when `ok`; otherwise why the path was rejected. */
+  detail: string
+} {
   const path = process.getBuiltinModule('node:path')
   const raw = String(planPath || '')
   const rel = path.isAbsolute(raw) ? path.relative(worktree, raw) : path.normalize(raw)

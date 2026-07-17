@@ -1,38 +1,60 @@
-// Remediation triage — when a step quiesces (no task from it still building),
-// GIST-triage the review/audit proposals it accrued into three lanes instead of
-// dumping them as full tasks into the current step:
-//   • addendum  -> small fix folded onto a completed task's execplan + a nested
-//                  [ ] sub-task (consumed by the lightweight addendum lane);
-//   • step-task -> substantial work that serves THIS step's hypothesis;
-//   • reroute   -> substantial work filed under the step/phase whose hypothesis
-//                  it actually serves (a new step is created when none fits).
-// Routing by hypothesis keeps a step carrying only debt that advances it, and
-// the cheap addendum lane (no audit) is what stops the amplification spiral.
-// The run wiring (preamble, base branch, roadmap path, adapter routing) binds
-// once via makeRemediation.
+/**
+ * @file Remediation triage — when a step quiesces (no task from it still
+ * building), GIST-triage the review/audit proposals it accrued into three
+ * lanes instead of dumping them as full tasks into the current step:
+ *   - addendum  -> small fix folded onto a completed task's execplan + a
+ *     nested [ ] sub-task (consumed by the lightweight addendum lane);
+ *   - step-task -> substantial work that serves THIS step's hypothesis;
+ *   - reroute   -> substantial work filed under the step/phase whose
+ *     hypothesis it actually serves (a new step is created when none fits).
+ * Routing by hypothesis keeps a step carrying only debt that advances it,
+ * and the cheap addendum lane (no audit) is what stops the amplification
+ * spiral. The run wiring (preamble, base branch, roadmap path, adapter
+ * routing) binds once via makeRemediation.
+ */
 
+/** A single review/audit follow-up proposal awaiting triage. */
 export interface RemediationProposal extends Record<string, unknown> {
+  /** Short title used as the dedup key (normalized: trimmed, lower-cased). */
   title?: string
+  /** Rationale text; also used as a legacy fallback source tag. */
   rationale?: string
+  /** Severity as reported by the originating review or audit. */
   severity?: string
   // The audit/review origin tag (e.g. `review:1.2.3`, `audit:1.2.4`) that
   // run-task.ts stamps onto every proposal; the canonical identity for
   // multi-source escalation. `rationale` is only a legacy fallback.
+  /** Canonical origin tag stamped by run-task.ts, e.g. `review:1.2.3`. */
   source?: string
 }
 
+/** Run-scoped dependencies {@link makeRemediation} closes over. */
 export interface RemediationDeps {
+  /** Shared standing-rules preamble, sourced from prompts.ts. */
   preamble: (worktree: string | null | undefined) => string
   // The verified git-donkey worktree-creation sequence, sourced from
   // prompts.ts so audit and triage share one authority and cannot drift.
   // Injected (rather than imported) to keep this module import-free.
+  /** Verified git-donkey worktree-creation sequence, sourced from prompts.ts. */
   worktreeSafetyNet: (base: string) => string
+  /** Integration branch name the triage worktree roots on. */
   base: string
+  /** Path to the roadmap file the triage agent reads and edits. */
   roadmap: string
+  /** Adapter-routing hook applied to the triage agent's call options. */
   triageAgentOptions: (options: Record<string, unknown>) => Record<string, unknown>
+  /** Stronger model used when {@link triageNeedsEscalation} returns true. */
   triageEscalationModel: string
 }
 
+/**
+ * JSON Schema contract for the triage agent's routing decisions: one
+ * decision per proposal (addendum / step-task / reroute / editorial /
+ * dropped), any new steps it created, and whether it pushed its roadmap
+ * edits.
+ *
+ * @internal
+ */
 export const TRIAGE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -61,13 +83,20 @@ export const TRIAGE_SCHEMA = {
   required: ['ok', 'decisions', 'summary'],
 }
 
+/**
+ * Derives the step prefix (`"<phase>.<step>"`) a roadmap id belongs to, so
+ * proposals and new tasks can be grouped and filed under the right step
+ * regardless of how many task/sub-task segments the full id carries.
+ */
 export const stepOf = (id: unknown): string => String(id).split('.').slice(0, 2).join('.')
 
-// Deterministic pre-pass: collapse exact-duplicate proposals by normalized
-// title before the routing agent sees them, so the model spends nothing on
-// obvious repeats (multiple reviews/audits raising the same item). Order and
-// first-seen metadata are preserved; the deduped source tags are unioned so a
-// later multi-source escalation check still sees every origin.
+/**
+ * Deterministic pre-pass: collapses exact-duplicate proposals by normalized
+ * title before the routing agent sees them, so the model spends nothing on
+ * obvious repeats (multiple reviews/audits raising the same item). Order
+ * and first-seen metadata are preserved; the deduped source tags are
+ * unioned so a later multi-source escalation check still sees every origin.
+ */
 export function dedupeProposals(proposals: readonly RemediationProposal[]): RemediationProposal[] {
   const byKey = new Map<string, RemediationProposal & { sources?: string[] }>()
   for (const proposal of proposals || []) {
@@ -86,10 +115,12 @@ export function dedupeProposals(proposals: readonly RemediationProposal[]): Reme
   return [...byKey.values()]
 }
 
-// The escalation signal for the routing agent: proposals drawn from more than
-// one distinct audit/review source are the ones that can conflict or route
-// across phases, so they warrant the stronger model. A single-source, small
-// set is medium-model work.
+/**
+ * The escalation signal for the routing agent: proposals drawn from more
+ * than one distinct audit/review source are the ones that can conflict or
+ * route across phases, so they warrant the stronger model. A
+ * single-source, small set is medium-model work.
+ */
 export function triageNeedsEscalation(deduped: readonly (RemediationProposal & { sources?: string[] })[]): boolean {
   const sources = new Set<string>()
   for (const proposal of deduped) {
@@ -104,6 +135,12 @@ export function triageNeedsEscalation(deduped: readonly (RemediationProposal & {
   return sources.size > 1
 }
 
+/**
+ * Builds the triage prompt and its runner for one workflow run, closing
+ * over the run's preamble, base branch, roadmap path, and adapter routing
+ * so the returned functions take only the per-call step/proposal
+ * arguments.
+ */
 export function makeRemediation({ preamble, worktreeSafetyNet, base, roadmap, triageAgentOptions, triageEscalationModel }: RemediationDeps) {
   function triagePrompt(stepPrefix: string, proposals: readonly RemediationProposal[]): string {
     return [
@@ -153,5 +190,14 @@ export function makeRemediation({ preamble, worktreeSafetyNet, base, roadmap, tr
     return await agent(triagePrompt(stepPrefix, deduped), triageAgentOptions(options))
   }
 
-  return { triagePrompt, runTriage, dedupeProposals, triageNeedsEscalation }
+  return {
+    /** Builds the triage agent's prompt for one settled step's proposals. */
+    triagePrompt,
+    /** Dedupes and dispatches the triage agent, escalating model choice when warranted. */
+    runTriage,
+    /** Re-exported for callers that need the dedup pass without a full triage run. */
+    dedupeProposals,
+    /** Re-exported for callers that need the escalation check without a full triage run. */
+    triageNeedsEscalation,
+  }
 }
