@@ -111,8 +111,8 @@ why.
   - validate new behaviour with relevant unit and behavioural tests; a bug fix
     ships with a test that fails before the fix and passes after;
   - pass every gate in `make all` — `check-fmt`, `lint`, `typecheck`,
-    `markdownlint`, `nixie`, the module and artefact test suites,
-    `workflow-freshness`, and `verify-modules`;
+    `markdownlint`, `nixie`, `docs-check`, the module and artefact test
+    suites, `workflow-freshness`, and `verify-modules`;
   - keep the generated artefact fresh (`make workflow-build`) and committed
     alongside the source.
 
@@ -198,8 +198,13 @@ Apply the general clarity and strictness goals, subject to these ODW rules:
   into typed objects rather than long positional lists; extract predicate
   helpers or lookup tables when branching grows complex, and give exhaustive
   `switch` logic a `never` guard.
-- **Module docstrings.** Begin each module with a `/** @file … */`-style block
-  (a top comment) describing its purpose and responsibilities.
+- **Module docstrings.** Begin each module with a `/** … @module */` block (a
+  top JSDoc comment ending with TypeDoc's bare `@module` tag) describing its
+  purpose and responsibilities. `make docs-check` (TypeDoc's `notDocumented`
+  validation, zero tolerance) enforces this and a JSDoc block on every
+  exported declaration across the tree; JSON Schema constants are tagged
+  `@internal` so their `description` fields remain the per-field
+  documentation.
 
 ## Testing
 

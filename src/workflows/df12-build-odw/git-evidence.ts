@@ -1,9 +1,11 @@
 /**
- * @file Host-collected git evidence. The assessor and the recovery decision
+ * Host-collected git evidence. The assessor and the recovery decision
  * tables treat this module's output as decisive over anything an agent
  * reports, so collection must be honest about faults: every failed git
  * command lands in collectionErrors instead of silently reading as "clean"
  * or "no changes".
+ *
+ * @module
  */
 import { execFileStatus } from './exec.ts'
 

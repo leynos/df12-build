@@ -1,9 +1,11 @@
 /**
- * @file Host-enforced ExecPlan durability — prose alone does not hold: live runs
+ * Host-enforced ExecPlan durability — prose alone does not hold: live runs
  * showed planners returning uncommitted drafts and reviewers approving
  * without committing the status flip. The control loop therefore verifies
  * durable state at every stage boundary, the same philosophy as the
  * write-probe: prompts request, the host verifies.
+ *
+ * @module
  */
 import { execFileStatus, fileState } from './exec.ts'
 import { parseExecplanState } from './recovery-decision.ts'

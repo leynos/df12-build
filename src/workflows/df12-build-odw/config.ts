@@ -1,10 +1,12 @@
 /**
- * @file Run configuration: every `args` default, clamp, validation, and derived
+ * Run configuration: every `args` default, clamp, validation, and derived
  * guidance string, built once by makeConfig and destructured by the entry.
  * Field names deliberately match the entry's historical constant names so
  * `const { BASE, ROADMAP, ... } = makeConfig(args)` keeps every reference
  * intact. makeConfig is pure: the projectRoot chdir side effect stays with
  * the caller.
+ *
+ * @module
  */
 
 /**
