@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      MARKDOWNLINT_CLI2_VERSION: '0.22.1'
+      NIXIE_CLI_VERSION: '1.1.0'
+      NIXIE_PYTHON_VERSION: '3.14'
+      DAFNY_VERSION: '4.10.0'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+          # check-fmt diffs the range back to the merge-base with
+          # origin/main, so the full history is required.
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+      - uses: astral-sh/setup-uv@c5680ec91f7b9b91406fab4ded5d45245abf7b67
+      - name: Install JavaScript dependencies
+        run: bun install --frozen-lockfile
+      - name: Install Markdown and Mermaid validators
+        run: |
+          set -euo pipefail
+          npm install --global "markdownlint-cli2@${MARKDOWNLINT_CLI2_VERSION}"
+          uv tool install --python "${NIXIE_PYTHON_VERSION}" --managed-python \
+            "nixie-cli==${NIXIE_CLI_VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install Dafny
+        run: dotnet tool install --global dafny --version "${DAFNY_VERSION}"
+      - name: Run commit gates
+        run: make all
+      # make all uses the lenient verify-modules (it skips without Dafny so
+      # local runs stay friendly); CI must prove Dafny actually ran.
+      - name: Verify decision-table model (strict)
+        run: make verify-modules-strict
