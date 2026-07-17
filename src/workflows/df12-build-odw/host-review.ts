@@ -1,73 +1,135 @@
-// Host-run CodeRabbit review and host-run commit gates. The control loop
-// invokes the CodeRabbit CLI against committed work (absorbing rate-limit
-// backoff in host wall-clock instead of agent tokens) and re-runs the
-// configured gate commands against committed HEAD, so a gatesGreen claim is
-// verified, never trusted. The run wiring (base branch, attempts, backoff
-// range, findings sink, gate set, gate timeout) binds once via
-// makeHostReview; the parsers and aggregates are direct exports.
+/**
+ * @file Host-run CodeRabbit review and host-run commit gates. The control loop
+ * invokes the CodeRabbit CLI against committed work (absorbing rate-limit
+ * backoff in host wall-clock instead of agent tokens) and re-runs the
+ * configured gate commands against committed HEAD, so a gatesGreen claim is
+ * verified, never trusted. The run wiring (base branch, attempts, backoff
+ * range, findings sink, gate set, gate timeout) binds once via
+ * makeHostReview; the parsers and aggregates are direct exports.
+ */
 import { execFileStatus } from './exec.ts'
 import type { ExecOptions, ExecStatus } from './exec.ts'
 import { authFailureDetail } from './faults.ts'
 
+/**
+ * One CodeRabbit `finding` event, kept as its raw wire object (it extends
+ * Record so unrecognized fields survive) plus the fields the host reads to gate
+ * and to record. Every field is optional because the CLI wire shape is not
+ * under our control.
+ */
 export interface CoderabbitFinding extends Record<string, unknown> {
+  /** Wire discriminator; always `'finding'` for this shape. */
   type?: string
+  /** CLI severity (critical|major|minor|trivial|info); only critical/major block. */
   severity?: string
+  /** Repository-relative file the finding concerns, when the CLI reports one. */
   fileName?: string
+  /** Human-readable finding text; the primary blocking-item message source. */
   comment?: string
+  /** Machine-oriented fix guidance, used as the message when `comment` is absent. */
   codegenInstructions?: string
+  /** Suggested edits; only their count is written to the findings sink. */
   suggestions?: unknown[]
 }
 
+/**
+ * The parsed result of one CodeRabbit `--agent` NDJSON stream. Callers classify
+ * from these fields rather than the process exit code, which is unreliable (the
+ * CLI exits 0 even on fatal errors).
+ */
 export interface CoderabbitParsedOutput {
+  /** Every parsed NDJSON event object, in emission order. */
   events: Array<Record<string, unknown>>
+  /** Non-JSON stdout lines, retained as fallback evidence for error detail. */
   rawLines: string[]
+  /** The `finding` events, narrowed for severity gating and sink recording. */
   findings: CoderabbitFinding[]
+  /** The terminal `complete` event, or null when the stream never completed. */
   complete: Record<string, unknown> | null
-  error: (Record<string, unknown> & { errorType?: string; message?: string }) | null
+  /** The first `error` event, or null; drives the rate-limit/auth/error outcomes. */
+  error: (Record<string, unknown> & {
+    /** Error discriminator; `'rate_limit'` marks a recoverable quota fault. */
+    errorType?: string
+    /** Error message text, folded into the classifier's error-text scan. */
+    message?: string
+  }) | null
 }
 
+/** Terminal classification of a host CodeRabbit review; see classifyCoderabbitOutcome. */
 export type CoderabbitOutcome = 'clean' | 'findings' | 'rate-limited' | 'auth' | 'error'
 
+/** The outcome of one host CodeRabbit review pass, returned to the control loop. */
 export interface CoderabbitReview {
+  /** Terminal classification driving whether findings gate or the run defers. */
   outcome: CoderabbitOutcome
+  /** How many attempts ran, including rate-limit backoff retries. */
   attempts: number
+  /** The findings collected on the final attempt. */
   findings: CoderabbitFinding[]
+  /** Operator-facing failure text; empty for the clean and findings outcomes. */
   detail: string
 }
 
+/** The result of running the configured commit gates against committed HEAD. */
 export interface HostGateRun {
+  /** True only when every configured gate passed. */
   green: boolean
-  results: Array<{ command: string; ok: boolean; logFile: string }>
+  /** Per-gate outcomes in run order; the run stops at the first failure. */
+  results: Array<{
+    /** The gate command line as configured. */
+    command: string
+    /** Whether this gate passed. */
+    ok: boolean
+    /** Path to the secure per-gate log holding the full output. */
+    logFile: string
+  }>
+  /** Operator-facing failure text with a bounded output tail; empty when green. */
   detail: string
 }
 
+/** Injectable seams so host review can be unit-tested without real subprocesses or waits. */
 export interface HostReviewDeps {
+  /** Process runner; defaults to execFileStatus. */
   exec?: (command: string, commandArgs: readonly string[], options?: ExecOptions) => Promise<ExecStatus>
+  /** Backoff sleep in minutes; defaults to the real wall-clock hostSleepMinutes. */
   sleep?: (minutes: number) => Promise<void>
 }
 
+/** The run wiring makeHostReview binds once: review target, retry/backoff, findings sink, and the gate set. */
 export interface HostReviewConfig {
+  /** Base branch the `--type committed` review diffs against. */
   base: string
+  /** Maximum CodeRabbit attempts before a rate-limited review is deferred. */
   coderabbitAttempts: number
+  /** Inclusive [low, high] minute range for the seeded backoff jitter. */
   coderabbitBackoffMinutes: [number, number]
+  /** Path to the durable JSONL findings sink; empty disables it. */
   coderabbitFindingsFile: string
+  /** The gate command lines re-run against committed HEAD. */
   commitGates: readonly string[]
+  /** Per-gate SIGTERM timeout, in seconds. */
   commitGateTimeoutSeconds: number
+  /** Whether the CodeScene code-health check runs. */
   csCheck: boolean
+  /** The CodeScene check command line; its first token is the PATH probe. */
   csCheckCommand: string
 }
 
-// The CLI's --agent mode emits NDJSON events on stdout and exits 0 even on
-// fatal errors, so classification parses events, never exit codes. Wire
-// contract pinned against coderabbit CLI internals; captured live sessions
-// documenting every observed event shape live in
-// docs/coderabbit-wire-contract.md. Summary:
-//   {"type":"review_context"|"status"|"heartbeat"} — progress events
-//   {"type":"finding", severity: critical|major|minor|trivial|info,
-//    fileName, comment?, suggestions?, codegenInstructions?}
-//   {"type":"complete", status, findings: N, message?}
-//   {"type":"error", errorType ("rate_limit" for quota), message,
-//    recoverable, details?/metadata?{waitTime}}
+/**
+ * Parse a CodeRabbit `--agent` NDJSON stdout stream into structured events,
+ * findings, terminal completion, and error. The `--agent` mode emits NDJSON on
+ * stdout and exits 0 even on fatal errors, so callers classify from these
+ * events, never the exit code; non-JSON lines are retained in `rawLines` as
+ * fallback evidence. Wire contract pinned against coderabbit CLI internals;
+ * captured live sessions documenting every observed event shape live in
+ * docs/coderabbit-wire-contract.md. Summary:
+ *   {"type":"review_context"|"status"|"heartbeat"} — progress events
+ *   {"type":"finding", severity: critical|major|minor|trivial|info,
+ *    fileName, comment?, suggestions?, codegenInstructions?}
+ *   {"type":"complete", status, findings: N, message?}
+ *   {"type":"error", errorType ("rate_limit" for quota), message,
+ *    recoverable, details?/metadata?{waitTime}}
+ */
 export function parseCoderabbitAgentOutput(stdout: unknown): CoderabbitParsedOutput {
   const events: Array<Record<string, unknown>> = []
   const rawLines: string[] = []
@@ -94,16 +156,25 @@ export function parseCoderabbitAgentOutput(stdout: unknown): CoderabbitParsedOut
   }
 }
 
+/** The severities that turn a CodeRabbit finding into a blocking fix-round item. */
 export const CODERABBIT_BLOCKING_SEVERITIES = new Set(['critical', 'major'])
 
-// The success sentinels a `complete` event's status may carry. Both spellings
-// are observed from the real CLI: 'review_completed' in the captured live
-// sessions (docs/coderabbit-wire-contract.md) and 'reviewed' in the CLI output
-// the host-review tests were written against. Any other terminal status (a
-// cancelled or aborted review) must NOT read as clean.
+/**
+ * The success sentinels a `complete` event's status may carry. Both spellings
+ * are observed from the real CLI: 'review_completed' in the captured live
+ * sessions (docs/coderabbit-wire-contract.md) and 'reviewed' in the CLI output
+ * the host-review tests were written against. Any other terminal status (a
+ * cancelled or aborted review) must NOT read as clean.
+ */
 export const CODERABBIT_SUCCESS_STATUSES = new Set(['review_completed', 'reviewed'])
 
-// One of: 'clean' | 'findings' | 'rate-limited' | 'auth' | 'error'.
+/**
+ * Classify a CodeRabbit review from its parsed events and the exec result,
+ * never the exit code. Rate-limit and auth faults are detected from the
+ * combined error text; a `complete` event reads clean only when its status is a
+ * known success sentinel, so a cancelled or aborted completion is an error, not
+ * clean. Returns one of 'clean' | 'findings' | 'rate-limited' | 'auth' | 'error'.
+ */
 export function classifyCoderabbitOutcome(
   execResult: { ok?: boolean; stderr?: string; message?: string },
   parsed: CoderabbitParsedOutput,
@@ -120,32 +191,60 @@ export function classifyCoderabbitOutcome(
   return 'error'
 }
 
+/** Real wall-clock backoff sleep (minutes); the injectable default for rate-limit waits. */
 export async function hostSleepMinutes(minutes: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, minutes * 60000))
 }
 
-// Blocking severities become fix-round items; the rest are captured for the
-// findings sink and linter tuning but never gate integration.
+/**
+ * Reduce findings to their blocking (critical/major) items as operator-facing
+ * fix-round strings; non-blocking findings are captured for the sink and linter
+ * tuning but never gate integration. Each message is bounded to 500 characters.
+ */
 export function coderabbitBlockingItems(findings: readonly CoderabbitFinding[] | null | undefined): string[] {
   return (findings || [])
     .filter((finding) => CODERABBIT_BLOCKING_SEVERITIES.has(String(finding.severity || '').toLowerCase()))
     .map((finding) => `CodeRabbit (${finding.severity}) ${finding.fileName || 'unknown file'}: ${String(finding.comment || finding.codegenInstructions || 'see the recorded suggestions').slice(0, 500)}`)
 }
 
-// Bounded-cardinality run-result aggregate plus the optional durable JSONL
-// sink for linter tuning.
+/**
+ * Bounded-cardinality run aggregate for the terminal run summary, plus the last
+ * durable-sink write error. Process-wide state, updated by recordCoderabbitReview
+ * and the control loop; kept low-cardinality (fixed keys) so operators can read
+ * review pressure straight from the result.
+ */
 export const coderabbitCapture: {
+  /** Total host reviews recorded. */
   reviews: number
+  /** Total findings recorded across all reviews. */
   findings: number
+  /** Reviews that ended rate-limited (deferred rather than gated). */
   rateLimitedRuns: number
+  /** Reviews that could not complete and were deferred to a relaunch. */
   deferred: number
+  /** Finding counts keyed by lower-cased severity. */
   bySeverity: Record<string, number>
+  /** Last findings-sink write error, if any; empty when the sink is healthy. */
   sinkError: string
 } = { reviews: 0, findings: 0, rateLimitedRuns: 0, deferred: 0, bySeverity: {}, sinkError: '' }
 
-export const hostGateMetrics = { runs: 0, failures: 0 }
+/** Process-wide host commit-gate counters for the run summary. */
+export const hostGateMetrics = {
+  /** Total gate executions attempted. */
+  runs: 0,
+  /** Gate executions that failed. */
+  failures: 0,
+}
 
-export const csCheckMetrics = { runs: 0, failures: 0, skipped: 0 }
+/** Process-wide CodeScene check counters for the run summary. */
+export const csCheckMetrics = {
+  /** Check executions attempted (excludes skips). */
+  runs: 0,
+  /** Check executions that reported code-health issues. */
+  failures: 0,
+  /** Checks skipped because the configured binary was not on PATH. */
+  skipped: 0,
+}
 
 // Per-process gate-log directory, created lazily with mkdtempSync so its name
 // is unpredictable and its mode is 0700: a local attacker cannot pre-plant a
@@ -164,12 +263,25 @@ function gateLogRoot(): string {
   return gateLogDirCache
 }
 
+/**
+ * Build the secure per-run log path for one gate execution inside the private
+ * mkdtemp gate-log directory (see gateLogRoot). The tag and round label are
+ * slugged and length-bounded; the raw gate command is deliberately kept out of
+ * the filename because it is attacker/operator-controlled text.
+ */
 export function hostGateLogPath(tag: string, roundLabel: string, index: number): string {
   const slug = (value: unknown) => String(value).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
   const path = process.getBuiltinModule('node:path')
   return path.join(gateLogRoot(), `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`)
 }
 
+/**
+ * Bind the host-review run wiring once (base branch, attempts, backoff range,
+ * findings sink, gate set, gate timeout, CodeScene) and return the host-side
+ * gate surface. Host-collected evidence here is decisive: the gates and
+ * CodeRabbit re-run against committed HEAD, so a gatesGreen claim is verified,
+ * never trusted.
+ */
 export function makeHostReview(config: HostReviewConfig) {
   const {
     base,
@@ -373,7 +485,16 @@ export function makeHostReview(config: HostReviewConfig) {
   // Skips gracefully — like `make verify-modules` without Dafny — when the
   // configured binary is not on PATH, so environments without CodeScene are
   // not blocked. Returns { clean, skipped, detail, logFile }.
-  async function runCodeSceneCheck(worktree: string, tag: string, label: string): Promise<{ clean: boolean; skipped: boolean; detail: string; logFile: string }> {
+  async function runCodeSceneCheck(worktree: string, tag: string, label: string): Promise<{
+    /** True when the check passed or was skipped; false only on reported issues. */
+    clean: boolean
+    /** True when skipped because the CodeScene binary was not on PATH. */
+    skipped: boolean
+    /** Operator-facing detail with a bounded log tail; empty when clean and not skipped. */
+    detail: string
+    /** Path to the secure per-run log, or '' when skipped. */
+    logFile: string
+  }> {
     if (!csCheck) return { clean: true, skipped: true, detail: '', logFile: '' }
     const bin = csCheckCommand.trim().split(/\s+/)[0] || 'cs-check-changed'
     // Pass the probed name as a positional argument ($1), never interpolated
@@ -395,5 +516,16 @@ export function makeHostReview(config: HostReviewConfig) {
     return { clean: false, skipped: false, detail: `CodeScene check \`${csCheckCommand}\` reported code-health issues${timedOut}; full log: ${logFile}; output tail:\n${outcome.tail}`, logFile }
   }
 
-  return { coderabbitBackoffMinutes, runCoderabbitHostReview, recordCoderabbitReview, runHostCommitGates, runCodeSceneCheck }
+  return {
+    /** Deterministic seeded backoff jitter (minutes) for rate-limit retries. */
+    coderabbitBackoffMinutes,
+    /** Run one host CodeRabbit review against committed changes; backoff is absorbed in wall-clock. */
+    runCoderabbitHostReview,
+    /** Fold a review's findings into the capture aggregate and the durable sink. */
+    recordCoderabbitReview,
+    /** Re-run the configured commit gates against committed HEAD; host-verifies a gatesGreen claim. */
+    runHostCommitGates,
+    /** Run the CodeScene code-health check, skipping gracefully when its binary is absent. */
+    runCodeSceneCheck,
+  }
 }
