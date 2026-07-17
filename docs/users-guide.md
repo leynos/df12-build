@@ -530,8 +530,11 @@ Common arguments:
   span more than one audit/review source (potential cross-phase or conflicting
   routing). Defaults to `gpt-5.5@high`.
 - `taskId`: run exactly one roadmap task.
-- `dryRun`: when `true`, plan, review, and audit without implementation,
-  integration, or document writes.
+- `dryRun`: when `true`, a fresh task stops before worktree creation — and so
+  before planning, review, implementation, integration, or document writes —
+  making it a read-only validation path that mutates no git state. (Recovery
+  and continue-mode resume keep their own dry-run handling over pre-existing
+  worktrees.)
 - `autoMerge`: when `false`, leave reviewed task branches for manual
   integration.
 - `documentAudit`: when `false`, return audit findings without writing audit
@@ -756,8 +759,10 @@ Separately from that in-agent retry loop, the host validates the integration
 agent's report before counting a task done. All five fields — `ok`, `rebased`,
 `squashMerged`, `pushed`, and `roadmapMarkedDone` — must be truthy. A branch
 that was squash-merged and pushed but never rebased onto `origin/<base>` (so
-`rebased` is false or absent) halts the task at `stage: integrate`; the
-`detail` field reads
+`rebased` is false or absent) halts the task at `stage: integrate`. The
+`detail` field reports the integration agent's `conflicts` text or its
+`summary`, whichever is set first; only when both are absent does it fall
+back to the generic
 `'integration incomplete (need ok+rebased+squashMerged+pushed+roadmapMarkedDone)'`.
 Inspect the halted task result's `detail` field, rebase the branch manually if
 it is salvageable, and relaunch; otherwise discard the branch and relaunch from

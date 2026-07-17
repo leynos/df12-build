@@ -2840,6 +2840,16 @@ function makeTaskPipeline(deps) {
   async function runTask2(task, mergeLock2) {
     const tag = `${task.id}`;
     log(`[task ${tag}] ${task.title}`);
+    if (DRY_RUN2) {
+      log(`[task ${tag}] dry run: stopping before worktree creation (lane=${task.isAddendum ? "addendum" : "normal"}, stage=pre-worktree, reason=dry-run)`);
+      return {
+        id: tag,
+        status: "dry-run",
+        stage: "pre-worktree",
+        detail: "dry run stopped before worktree creation",
+        proposals: []
+      };
+    }
     phase("Worktree");
     const wt = await createWorktree2(task);
     if (!wt || !wt.ok || !wt.worktreePath) {
@@ -2860,17 +2870,6 @@ function makeTaskPipeline(deps) {
         };
       }
       if (task.isAddendum) {
-        if (DRY_RUN2) {
-          return {
-            id: tag,
-            status: "dry-run",
-            stage: "addendum",
-            detail: "dry run stopped before addendum implementation",
-            worktree,
-            proposals: [],
-            kind: "addendum"
-          };
-        }
         phase("Implement");
         const impl2 = await buildLock2(() => withInfraRetry2(() => agent(implementAddendumPrompt2(task, worktree), buildAgentOptions2({ phase: "Implement", label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`));
         const authDetail = implementationAuthFailureDetail(impl2);
@@ -2969,17 +2968,6 @@ function makeTaskPipeline(deps) {
       const planned = await runPlanDesignLoop2(task, worktree);
       if (planned.fail) return await attachAssessment2(task, wt, planned.fail);
       const plan = planned.plan;
-      if (DRY_RUN2) {
-        return {
-          id: tag,
-          status: "dry-run",
-          stage: "post-design",
-          detail: "dry run stopped after planning and design review",
-          plan,
-          worktree,
-          proposals: []
-        };
-      }
       const built = await runImplementationStage2(task, worktree, plan);
       if (built.fail) {
         return built.fail.status === "fatal-auth" ? built.fail : await attachAssessment2(task, wt, built.fail);

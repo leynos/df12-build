@@ -849,6 +849,28 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     const tag = `${task.id}`
     log(`[task ${tag}] ${task.title}`)
 
+    // --- Dry run: stop before any git state is mutated ----------------------
+    // A dry run must be a safe validation path, so it terminates ahead of
+    // worktree creation and the write-access preflight — both of which mutate
+    // state (git worktree add -b, probe writes). Guarding here (rather than
+    // after createWorktree) means a dry run against a repo with surviving
+    // roadmap-* branches never trips the branch collision. This single check
+    // precedes the task.isAddendum branch, so it covers the addendum and
+    // normal lanes alike; markDryRun keys off task.isAddendum, not the result.
+    if (DRY_RUN) {
+      // Structured, parseable trace at the decision boundary so operators see
+      // WHY a task stopped, not just the terminal status. Lane is derived from
+      // task.isAddendum (the guard precedes the addendum/normal branch).
+      log(`[task ${tag}] dry run: stopping before worktree creation (lane=${task.isAddendum ? 'addendum' : 'normal'}, stage=pre-worktree, reason=dry-run)`)
+      return {
+        id: tag,
+        status: 'dry-run',
+        stage: 'pre-worktree',
+        detail: 'dry run stopped before worktree creation',
+        proposals: [],
+      }
+    }
+
     // --- Worktree -----------------------------------------------------------
     phase('Worktree')
     const wt = await createWorktree(task)
@@ -876,18 +898,6 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     // merge. No audit afterwards (the control loop skips it), which is what stops
     // remediation from spawning more remediation.
     if (task.isAddendum) {
-      if (DRY_RUN) {
-        return {
-          id: tag,
-          status: 'dry-run',
-          stage: 'addendum',
-          detail: 'dry run stopped before addendum implementation',
-          worktree,
-          proposals: [],
-          kind: 'addendum',
-        }
-      }
-
       phase('Implement')
       const impl = (await buildLock(() => withInfraRetry(() => agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: 'Implement', label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`))) as StageImpl | null
       const authDetail = implementationAuthFailureDetail(impl)
@@ -1004,18 +1014,6 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     const planned = await runPlanDesignLoop(task, worktree)
     if (planned.fail) return await attachAssessment(task, wt, planned.fail)
     const plan = planned.plan as StagePlan
-
-    if (DRY_RUN) {
-      return {
-        id: tag,
-        status: 'dry-run',
-        stage: 'post-design',
-        detail: 'dry run stopped after planning and design review',
-        plan,
-        worktree,
-        proposals: [],
-      }
-    }
 
     // --- Implement ----------------------------------------------------------
     const built = await runImplementationStage(task, worktree, plan)

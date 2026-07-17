@@ -115,6 +115,21 @@ intact:
   `processed`.
 - Skip assessment for auth failures, dry runs, successful tasks,
   manual-merge-ready branches, and failures before worktree creation.
+- Keep the dry-run short-circuit as the first control-flow statement after
+  the task-log line in `runTask`. The guard is the first control-flow
+  statement after the task-log line — before `createWorktree` and the
+  writable-root/write-access preflight — and returns a terminal
+  `{ status: 'dry-run', stage: 'pre-worktree' }` result, so no branch,
+  worktree, or probe write is created. It covers both the normal and addendum
+  lanes, preceding the `task.isAddendum` split; the earlier addendum-specific
+  and post-design dry-run exits were removed because this single
+  head-of-function guard makes them unreachable. Recovery/continue-mode resume
+  keeps its own separate dry-run handling over pre-existing worktrees. The
+  guard must remain the first control-flow statement after the task-log line
+  to preserve the no-mutation guarantee. This boundary is documented
+  consistently in `docs/architecture.md`'s `## Enforcement boundary` table
+  (the "Dry run" row) and `docs/users-guide.md`'s `## Workflow arguments`
+  section (`dryRun`).
 - Keep fresh-run recovery fail-closed. Assess mode must stay non-mutating (the
   no-mutation regression suite pins this), review-mode resume may only land
   through `runDualReviewAndIntegration` and the merge lock, and eligibility
