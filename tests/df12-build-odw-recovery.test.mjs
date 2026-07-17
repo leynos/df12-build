@@ -514,7 +514,10 @@ test('resume eligibility admits only clean, committed, task-scoped, validated br
     [{ evidence: eligibleEvidence({ dirtyState: 'unknown' }) }, 'dirty-worktree'],
     [{ evidence: eligibleEvidence({ recentCommits: [] }) }, 'no-committed-work'],
     [{ assessment: sampleAssessment({ taskScoped: false }) }, 'not-task-scoped'],
-    [{ assessment: sampleAssessment({ validation: '   ' }) }, 'missing-validation-evidence'],
+    // Empty/whitespace `validation` no longer disqualifies on its own — blocking
+    // missingEvidence is the sole evidence-based gate now, so this stays eligible
+    // (issue #23).
+    [{ assessment: sampleAssessment({ validation: '   ' }) }, ''],
     [{ assessment: sampleAssessment({ missingEvidence: ['no gate log'] }) }, 'missing-validation-evidence'],
     [{ candidate: { ...eligibleCandidate(), execplanPath: '' } }, 'missing-execplan'],
   ]
@@ -591,15 +594,15 @@ test('decision-table sweep: resume happens only when every eligibility fact hold
       missingEvidence: combo.missingEvidence,
       residualRisk: combo.residualRisk,
     })
-    // Eligibility depends only on blocking missingEvidence — advisory
-    // residualRisk must never affect the resume decision (issue #23).
+    // Eligibility depends only on blocking missingEvidence — neither advisory
+    // residualRisk nor the descriptive `validation` string affects the resume
+    // decision (issue #23).
     const eligible =
       !combo.isAddendum &&
       combo.collectionErrors.length === 0 &&
       combo.dirtyState === 'clean' &&
       combo.recentCommits.length > 0 &&
       combo.taskScoped === true &&
-      combo.validation.trim() !== '' &&
       combo.missingEvidence.length === 0 &&
       combo.execplanPath !== ''
 

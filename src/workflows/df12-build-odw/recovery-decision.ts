@@ -231,10 +231,13 @@ export const RECOVERY_SKIP_REASONS = [
 
 /**
  * Review-mode resume eligibility gate: only a clean, committed, task-scoped
- * adopt-complete branch with validation evidence may spend review and
- * integration effort. Host-collected evidence is decisive over
- * agent-reported fields; advisory `residualRisk` is deliberately not
- * consulted here (issue #23). Pure and side-effect free.
+ * adopt-complete branch whose assessment reports no blocking `missingEvidence`
+ * may spend review and integration effort. `missingEvidence` is the sole
+ * evidence-based downgrade gate (issue #23): callers surface genuinely missing
+ * validation or review evidence through it, so an empty or absent `validation`
+ * field no longer disqualifies on its own. Host-collected evidence is decisive
+ * over agent-reported fields; advisory `residualRisk` is deliberately not
+ * consulted here. Pure and side-effect free.
  *
  * @param candidate - The candidate's hygiene fields, or a nullish value.
  * @param evidence - The host-collected git evidence, or a nullish value.
@@ -253,10 +256,12 @@ export function recoveryResumeEligibility(
   if (evidence?.dirtyState !== 'clean') return 'dirty-worktree'
   if (!(evidence?.recentCommits || []).length) return 'no-committed-work'
   if (assessment?.taskScoped !== true) return 'not-task-scoped'
-  if (!String(assessment?.validation || '').trim()) return 'missing-validation-evidence'
-  // Only BLOCKING missing evidence disqualifies. Advisory `residualRisk` is
-  // deliberately NOT consulted here — it is carried forward to the resumed
-  // reviewer/integrator instead of downgrading adopt-complete (issue #23).
+  // `missingEvidence` is the SOLE evidence-based downgrade gate (issue #23):
+  // callers represent genuinely missing validation or review evidence through
+  // it, so an empty or absent `validation` field no longer disqualifies on its
+  // own. Advisory `residualRisk` is deliberately NOT consulted here — it is
+  // carried forward to the resumed reviewer/integrator instead of downgrading
+  // adopt-complete.
   if ((assessment?.missingEvidence || []).length) return 'missing-validation-evidence'
   if (!candidate?.execplanPath) return 'missing-execplan'
   return ''

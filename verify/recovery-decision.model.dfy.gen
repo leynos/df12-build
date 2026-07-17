@@ -16,7 +16,7 @@ datatype Candidate = Candidate(isAddendum: bool, hasExecplan: bool)
 
 datatype Evidence = Evidence(hasCollectionErrors: bool, isClean: bool, hasCommits: bool)
 
-datatype Assessment = Assessment(classification: Classification, taskScoped: bool, hasValidation: bool, hasMissingEvidence: bool)
+datatype Assessment = Assessment(classification: Classification, taskScoped: bool, hasMissingEvidence: bool)
 
 datatype ReviewDecision = ReviewDecision(action: Action, classification: Classification, reason: SkipReason, skip: bool)
 
@@ -39,20 +39,17 @@ function resumeEligibility(candidate: Candidate, evidence: Evidence, assessment:
           if !(assessment.taskScoped) then
             SkipReason.NotTaskScoped
           else
-            if !(assessment.hasValidation) then
+            if assessment.hasMissingEvidence then
               SkipReason.MissingValidationEvidence
             else
-              if assessment.hasMissingEvidence then
-                SkipReason.MissingValidationEvidence
+              if !(candidate.hasExecplan) then
+                SkipReason.MissingExecplan
               else
-                if !(candidate.hasExecplan) then
-                  SkipReason.MissingExecplan
-                else
-                  SkipReason.NoReason
+                SkipReason.NoReason
 }
 
 lemma resumeEligibility_ensures(candidate: Candidate, evidence: Evidence, assessment: Assessment)
-  ensures (resumeEligibility(candidate, evidence, assessment).NoReason? ==> (((((((!(candidate.isAddendum) && !(evidence.hasCollectionErrors)) && evidence.isClean) && evidence.hasCommits) && assessment.taskScoped) && assessment.hasValidation) && !(assessment.hasMissingEvidence)) && candidate.hasExecplan))
+  ensures (resumeEligibility(candidate, evidence, assessment).NoReason? ==> ((((((!(candidate.isAddendum) && !(evidence.hasCollectionErrors)) && evidence.isClean) && evidence.hasCommits) && assessment.taskScoped) && !(assessment.hasMissingEvidence)) && candidate.hasExecplan))
 {
 }
 

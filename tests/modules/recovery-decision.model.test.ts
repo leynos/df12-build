@@ -65,11 +65,12 @@ const evidenceArb = fc.record({
 const assessmentArb = fc.record({
   classification: fc.constantFrom(...(Object.keys(CLASSIFICATION) as Array<keyof typeof CLASSIFICATION>)),
   taskScoped: fc.oneof(fc.boolean(), fc.constant(undefined)),
+  // `validation` (including empty/whitespace) and advisory `residualRisk` are
+  // generated to exercise the production decision, but both map to nothing in
+  // the boolean abstraction: only blocking `missingEvidence` feeds
+  // `hasMissingEvidence`, the sole evidence-based downgrade gate (issue #23).
   validation: fc.constantFrom('gates green: make all', '   ', ''),
   missingEvidence: fc.array(fc.string({ minLength: 1 }), { maxLength: 2 }),
-  // Advisory residual risk is generated to exercise the production decision,
-  // but it maps to nothing in the boolean abstraction: only blocking
-  // missingEvidence feeds `hasMissingEvidence` (issue #23).
   residualRisk: fc.array(fc.string({ minLength: 1 }), { maxLength: 2 }),
 })
 
@@ -91,7 +92,6 @@ const abstractEvidence = (evidence: ProdEvidence) => ({
 const abstractAssessment = (assessment: ProdAssessment) => ({
   classification: CLASSIFICATION[assessment.classification],
   taskScoped: assessment.taskScoped === true,
-  hasValidation: assessment.validation.trim() !== '',
   hasMissingEvidence: assessment.missingEvidence.length > 0,
 })
 

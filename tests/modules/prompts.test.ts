@@ -174,6 +174,29 @@ describe('advisory residual-risk rendering (issue #23)', () => {
       const genuineEndFences = text.split('\n').filter((line) => line === '----- END RESIDUAL RISK DATA -----')
       expect(genuineEndFences.length).toBe(1)
     })
+
+    test(`${name} escapes U+2028/U+2029 so a separator cannot split the block`, () => {
+      // U+2028 (line separator) and U+2029 (paragraph separator) are ECMAScript
+      // line terminators that JSON.stringify leaves unescaped; a surviving one
+      // would split the numbered item across lines and could forge the fence.
+      const LS = String.fromCharCode(0x2028)
+      const PS = String.fromCharCode(0x2029)
+      const BS = String.fromCharCode(0x5c) // backslash, kept out of the source
+      const payload = `before${LS}mid${PS}after`
+      const text = render({ residualRisk: [payload] })
+      // The raw separators must not survive into the rendered prompt...
+      expect(text).not.toContain(LS)
+      expect(text).not.toContain(PS)
+      // ...they appear as their escaped \u sequences instead.
+      expect(text).toContain(`${BS}u2028`)
+      expect(text).toContain(`${BS}u2029`)
+      // The whole item stays on ONE line (located by its escaped marker, since
+      // integratePrompt also has its own numbered steps) and the fence is intact.
+      const itemLine = text.split('\n').find((line) => line.includes(`${BS}u2028`))
+      expect(itemLine).toContain(`before${BS}u2028mid${BS}u2029after`)
+      const genuineEndFences = text.split('\n').filter((line) => line === '----- END RESIDUAL RISK DATA -----')
+      expect(genuineEndFences.length).toBe(1)
+    })
   }
 })
 
