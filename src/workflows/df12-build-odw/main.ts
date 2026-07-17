@@ -17,6 +17,7 @@ import {
   parseExecplanState,
   recoveryDecision,
   recoveryContinueDecision,
+  advisoryResidualRisk,
 } from './recovery-decision.ts'
 import {
   ASSESSMENT_CLASSIFICATIONS,
@@ -429,18 +430,19 @@ async function readRoadmapForSelection(root: string = process.cwd()) {
   }
 }
 
-// Execute a resume at the dispatched stage through the ordinary pipeline.
-// Every stage funnels into the SAME dual-review + merge-lock integration path
-// as fresh work; the host-verified write gate runs first because plan, build,
-// fix, and integration agents all write into the recovered worktree.
+interface ResumeContext {
+  candidate: RecoveryCandidate
+  enriched: RecoveryCandidate
+  evidence: AssessmentEvidence | AnyRecord | undefined
+  stage: string
+  residualRisk: string[]
+}
 async function executeResume(
   task: SelectedTask,
-  candidate: RecoveryCandidate,
-  enriched: RecoveryCandidate,
-  evidence: AssessmentEvidence | AnyRecord | undefined,
-  stage: string,
+  resume: ResumeContext,
   mergeLock: MergeLockFn,
 ): Promise<StageResult> {
+  const { candidate, enriched, evidence, stage, residualRisk } = resume
   const worktree = candidate.worktreePath
   const extra = { kind: 'recovery-resume' }
   const writeAccess = await ensureTaskAgentWriteAccess(worktree, candidate.taskId)
@@ -467,7 +469,10 @@ async function executeResume(
       if (built.fail) return built.fail
       impl = built.impl
     } else {
-      const synthetic = await syntheticRecoveryImpl(enriched, evidence)
+      // Carry the ADR 002 assessment's advisory residual risk forward into the
+      // synthetic implementation report so the resumed reviewer/integrator sees
+      // the caveats — without the resume having been blocked for them (#23).
+      const synthetic = await syntheticRecoveryImpl(enriched, evidence, residualRisk)
       impl = synthetic
       plan = { execplanPath: synthetic.execplanPath, workItems: [], summary: synthetic.summary }
     }
@@ -592,9 +597,14 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
       // rather than resuming or classifying on unverifiable evidence.
       const resolved = await recoveryExecplanPath(candidate)
       enriched = { ...candidate, execplanPath: resolved.execplanPath }
+      // The agent assessment is untrusted JSON, so assert it into the typed
+      // decision shape at this boundary (via unknown): the decision helpers
+      // read each field defensively, and advisory residualRisk is re-read
+      // through advisoryResidualRisk, not this cast.
+      const assessmentFields = assessment as unknown as RecoveryAssessmentFields
       decision = resolved.error
         ? { classification: '', action: 'report', stage: null, reason: 'execplan-stat-error', skip: true }
-        : { stage: 'review', ...recoveryDecision(enriched, evidence, assessment as RecoveryAssessmentFields, RESUME_MODE, { dryRun: DRY_RUN }) }
+        : { stage: 'review', ...recoveryDecision(enriched, evidence, assessmentFields, RESUME_MODE, { dryRun: DRY_RUN }) }
     }
 
     const resultBase = {
@@ -623,10 +633,15 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
     // mode) chose the entry point; the pipeline's own gates remain decisive,
     // and integration ticks the roadmap under the merge lock.
     const stage = decision.stage || 'review'
-    log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline`)
-    const outcome = (await executeResume(task, candidate, enriched, evidence, stage, mergeLock)) as TaskOutcome
+    // Surface the advisory-vs-blocking boundary for operator diagnosis (#23):
+    // the resume proceeded despite this many non-blocking residual-risk caveats,
+    // which are carried into the review/integration prompts rather than blocking.
+    const residualRisk = advisoryResidualRisk(assessment)
+    log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline (advisory residualRisk: ${residualRisk.length})`)
+    const resume = { candidate, enriched, evidence, stage, residualRisk }
+    const outcome = (await executeResume(task, resume, mergeLock)) as TaskOutcome
     if (outcome.status === 'fatal-auth' || outcome.status === 'provider-fault' || outcome.status === 'infra-fault') {
-      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status })
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status, residualRisk })
       return { summary, taskResults, held, fatal: outcome }
     }
     // A failed or halted resume gets a FRESH assessment through the same
@@ -635,12 +650,12 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
     taskResults.push({ task, result: outcome.status === 'done' ? outcome : await attachAssessment(task, resumeWt, outcome) })
     if (outcome.status === 'done') {
       summary.resumed += 1
-      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resumed' })
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resumed', residualRisk })
       log(`[recovery] ${candidate.branchName}: resumed and integrated`)
     } else if (outcome.status === 'manual-merge-ready') {
-      summary.results.push({ ...resultBase, resumeStage: stage, action: 'manual-merge-ready' })
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'manual-merge-ready', residualRisk })
     } else {
-      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status })
+      summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status, residualRisk })
       log(`[recovery] ${candidate.branchName}: resume ${outcome.status} at ${outcome.stage || 'unknown stage'}`)
     }
   }

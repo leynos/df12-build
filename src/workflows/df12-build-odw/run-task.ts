@@ -1,11 +1,14 @@
-// Shared pipeline stages and the per-task pipeline — used by the normal task
-// lane and by continue-mode recovery resume, so a resumed branch runs through
-// exactly the same planning loop, design review, implementation contract,
-// reviewers, and integration path as ordinary work. Each stage helper returns
-// { fail } (an unassessed result object) or its stage product; callers decide
-// whether to attach an assessment. The run wiring (config caps, prompt
-// builders, adapter options, stage locks, retry, assessment, write gate,
-// worktree creation) binds once via makeTaskPipeline.
+/**
+ * @file Shared pipeline stages and the per-task pipeline — used by the
+ * normal task lane and by continue-mode recovery resume, so a resumed
+ * branch runs through exactly the same planning loop, design review,
+ * implementation contract, reviewers, and integration path as ordinary
+ * work. Each stage helper returns { fail } (an unassessed result object)
+ * or its stage product; callers decide whether to attach an assessment.
+ * The run wiring (config caps, prompt builders, adapter options, stage
+ * locks, retry, assessment, write gate, worktree creation) binds once via
+ * makeTaskPipeline.
+ */
 import { fileState } from './exec.ts'
 import {
   commitExecplanApproval,
@@ -37,15 +40,33 @@ import {
 } from './schemas.ts'
 import type { SelectedTask } from './types.ts'
 
+/**
+ * The planning stage's product: the committed ExecPlan the design review,
+ * implementation, and later stages read from. Extends
+ * `Record<string, unknown>` because the planner agent's structured response
+ * may carry additional fields the pipeline does not consume directly.
+ */
 export interface StagePlan extends Record<string, unknown> {
   execplanPath?: string
 }
 
+/**
+ * The implementation stage's product: the build agent's (or work-item build
+ * loop's) report on the committed work. Carries the advisory, non-blocking
+ * `residualRisk` list forward from an ADR 002 recovery assessment so the
+ * dual review and integration prompts can render it as context (#23).
+ * Extends `Record<string, unknown>` because the implementation agent's
+ * structured response may carry additional fields the pipeline does not
+ * consume directly.
+ */
 export interface StageImpl extends Record<string, unknown> {
   ok?: boolean
   gatesGreen?: boolean
   summary?: string
   openIssues?: string[]
+  // Advisory, non-blocking residual risk carried forward from an ADR 002
+  // recovery assessment; rendered as review/integration context only (#23).
+  residualRisk?: string[]
   workItemsCompleted?: unknown
   workItemsTotal?: unknown
 }
@@ -73,12 +94,28 @@ interface DesignVerdict extends Record<string, unknown> {
   blocking?: string[]
 }
 
+/**
+ * The result envelope every stage helper and pipeline entry point returns:
+ * a task `id`, a `status` (for example `'failed'`, `'halted'`,
+ * `'manual-merge-ready'`, or `'done'`), and optional `stage`/`detail`
+ * fields describing where and why. Extends `Record<string, unknown>` so
+ * callers can attach further context (proposals, review rounds, an
+ * assessment, and so on) without a separate type per stage.
+ */
 export type StageResult = Record<string, unknown> & { id: string; status: string; stage?: string; detail?: string }
 
 type Lock = <T>(fn: () => Promise<T>) => Promise<T>
 type MergeLock = (<T>(fn: () => Promise<T>) => Promise<T>) | null
 type AgentOptions = (options: Record<string, unknown>) => Record<string, unknown>
 
+/**
+ * The dependency contract injected into {@link makeTaskPipeline}: the
+ * config caps and feature flags, the prompt builders for every stage, the
+ * agent-options factories, the stage locks and retry helper, the
+ * assessment and write-gate callbacks, and the host-gate/CodeRabbit/
+ * CodeScene runners. Binding these once at pipeline creation keeps the
+ * per-task functions free of ambient configuration lookups.
+ */
 export interface TaskPipelineDeps {
   MAX_DESIGN_ROUNDS: number
   MAX_REVIEW_ROUNDS: number
@@ -97,11 +134,11 @@ export interface TaskPipelineDeps {
   implementPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, opts?: Record<string, unknown>) => string
   implementWorkItemPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, item: { text: string }, opts?: Record<string, unknown>) => string
   fixPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, blocking: string[], round: number) => string
-  codeReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan) => string
-  expertReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan) => string
+  codeReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, impl?: StageImpl | null) => string
+  expertReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, impl?: StageImpl | null) => string
   addendumReviewPrompt: (task: SelectedTask, worktree: string, impl: StageImpl | null) => string
   implementAddendumPrompt: (task: SelectedTask, worktree: string) => string
-  integratePrompt: (task: SelectedTask, worktree: string) => string
+  integratePrompt: (task: SelectedTask, worktree: string, impl?: StageImpl | null) => string
   planAgentOptions: AgentOptions
   reviewAgentOptions: AgentOptions
   buildAgentOptions: AgentOptions
@@ -118,10 +155,17 @@ export interface TaskPipelineDeps {
   createWorktree: (task: SelectedTask) => Promise<{ ok?: boolean; worktreePath?: string; branch?: string; baseSha?: string; notes?: string } | null>
 }
 
-// Bounded per-round records of what the reviewers and fix agents actually
-// reported, so a failed/halted outcome carries fresh validation evidence into
-// its assessment instead of leaving the assessor with only stale ExecPlan
-// text and non-durable /tmp gate logs (issue #24).
+/**
+ * Bounded per-round record of what the dual-review reviewers actually
+ * reported, so a failed/halted outcome carries fresh validation evidence
+ * into its assessment instead of leaving the assessor with only stale
+ * ExecPlan text and non-durable /tmp gate logs (issue #24).
+ *
+ * @param review the raw review-stage output, or null/undefined when the
+ *   reviewer did not run or returned nothing.
+ * @returns a trimmed `{ verdict, blocking, summary }` record, or `null`
+ *   when `review` is absent.
+ */
 export function summarizeReviewVerdict(review: StageReview | null | undefined) {
   if (!review) return null
   return {
@@ -131,6 +175,16 @@ export function summarizeReviewVerdict(review: StageReview | null | undefined) {
   }
 }
 
+/**
+ * Bounded per-round record of what a fix agent actually reported, mirroring
+ * {@link summarizeReviewVerdict} so a failed/halted outcome carries fresh
+ * fix-round evidence into its assessment (issue #24).
+ *
+ * @param fix the raw fix-stage output — a structured report, a bare string
+ *   summary, or null/undefined when no fix ran.
+ * @returns `{ summary }` when `fix` is a string, a trimmed structured
+ *   record when `fix` is an object, or `null` when `fix` is absent.
+ */
 export function summarizeFixReport(fix: Record<string, unknown> | string | null | undefined) {
   if (!fix) return null
   if (typeof fix === 'string') return { summary: fix }
@@ -144,14 +198,29 @@ export function summarizeFixReport(fix: Record<string, unknown> | string | null 
   }
 }
 
-// The host treats the integration agent's report as a claim: a task counts as
-// integrated only when every field below lands true. `rebased` guards against a
-// squash-merged, pushed branch that was never realigned onto BASE. Both the
-// normal and addendum lanes share this gate, so keep the check and its detail
-// in one place to stop the lanes drifting when the required fields change.
+/**
+ * The shared detail string for an incomplete integration: the host treats
+ * the integration agent's report as a claim, and a task counts as
+ * integrated only when `ok`, `rebased`, `squashMerged`, `pushed`, and
+ * `roadmapMarkedDone` all land true. Both the normal and addendum lanes
+ * share this string (via {@link integrationIncomplete} and
+ * {@link integrationHaltDetail}) so the required fields cannot drift
+ * between the two lanes.
+ */
 export const INTEGRATION_INCOMPLETE_DETAIL =
   'integration incomplete (need ok+rebased+squashMerged+pushed+roadmapMarkedDone)'
 
+/**
+ * Checks the integration agent's report against the shared gate: a task
+ * counts as integrated only when every required field lands true.
+ * `rebased` guards against a squash-merged, pushed branch that was never
+ * realigned onto BASE.
+ *
+ * @param integration the raw integration-stage report, or null when
+ *   integration did not run.
+ * @returns true when `integration` is null or any of `ok`, `rebased`,
+ *   `pushed`, `squashMerged`, or `roadmapMarkedDone` is falsy.
+ */
 export function integrationIncomplete(integration: StageIntegration | null): boolean {
   return (
     !integration?.ok ||
@@ -162,10 +231,37 @@ export function integrationIncomplete(integration: StageIntegration | null): boo
   )
 }
 
+/**
+ * Picks the best available detail string for a halted integration, so the
+ * host's returned {@link StageResult} explains why integration stopped
+ * rather than repeating the generic gate message when the integration
+ * agent reported something more specific.
+ *
+ * @param integration the raw integration-stage report, or null when
+ *   integration did not run.
+ * @returns the integration's `conflicts` string if present, otherwise its
+ *   `summary`, otherwise {@link INTEGRATION_INCOMPLETE_DETAIL}.
+ */
 export function integrationHaltDetail(integration: StageIntegration | null): string {
   return integration?.conflicts || integration?.summary || INTEGRATION_INCOMPLETE_DETAIL
 }
 
+/**
+ * Factory that binds the run wiring — config caps, prompt builders,
+ * adapter options, stage locks, retry, assessment, the write gate, and
+ * worktree creation — once, and returns the per-task pipeline built from
+ * it. Used by both the normal task lane and continue-mode recovery
+ * resume, so a resumed branch runs through exactly the same planning
+ * loop, design review, implementation contract, reviewers, and
+ * integration path as ordinary work.
+ *
+ * @param deps the injected dependency contract (see
+ *   {@link TaskPipelineDeps}).
+ * @returns an object exposing `runPlanDesignLoop`, `runWorkItemBuildLoop`,
+ *   `runImplementationStage`, `runDualReviewAndIntegration`, and
+ *   `runTask` — the individual stage helpers and the full per-task
+ *   entry point, all closed over the same bound `deps`.
+ */
 export function makeTaskPipeline(deps: TaskPipelineDeps) {
   const {
     MAX_DESIGN_ROUNDS,
@@ -623,15 +719,24 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
   // result the caller must return as-is.
   async function integrateTask(
     task: SelectedTask,
-    worktree: string,
     mergeLock: MergeLock,
-    proposals: Array<Record<string, unknown>>,
-    kindExtra: Record<string, unknown>,
+    // The integration call's context: the recovered worktree, the accumulated
+    // review proposals and result-kind decoration carried onto any fault
+    // result, and the implementation report the prompt renders (its advisory
+    // residualRisk reaches the integrator this way, #23). Grouped so the entry
+    // point stays a readable command rather than a long positional list.
+    context: {
+      worktree: string
+      proposals: Array<Record<string, unknown>>
+      kindExtra: Record<string, unknown>
+      impl?: StageImpl | null
+    },
   ): Promise<{ integration?: StageIntegration | null; fault?: StageResult }> {
+    const { worktree, proposals, kindExtra, impl } = context
     const tag = task.id
     const doIntegrate = () => {
       phase('Integrate')
-      return buildLock(() => agent(integratePrompt(task, worktree), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
+      return buildLock(() => agent(integratePrompt(task, worktree, impl), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
     }
     try {
       return { integration: (mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()) as StageIntegration | null }
@@ -752,8 +857,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
             return null
           })
       const [codeReview, expertReview] = (await parallel([
-        runReviewAgent(codeReviewPrompt(task, worktree, plan), 'Code Review', `code-review:${tag} r${round}`),
-        runReviewAgent(expertReviewPrompt(task, worktree, plan), 'Expert Review', `expert-review:${tag} r${round}`),
+        runReviewAgent(codeReviewPrompt(task, worktree, plan, impl), 'Code Review', `code-review:${tag} r${round}`),
+        runReviewAgent(expertReviewPrompt(task, worktree, plan, impl), 'Expert Review', `expert-review:${tag} r${round}`),
       ])) as Array<StageReview | null>
       for (const r of [codeReview, expertReview]) {
         if (r?.proposedRoadmapItems?.length) proposals.push(...r.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
@@ -832,7 +937,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     // so at most one task touches origin/BASE at a time.
     let integration: StageIntegration | null = null
     if (AUTO_MERGE) {
-      const attempt = await integrateTask(task, worktree, mergeLock, proposals, kindExtra)
+      const attempt = await integrateTask(task, mergeLock, { worktree, proposals, kindExtra, impl })
       if (attempt.fault) return attempt.fault
       integration = attempt.integration ?? null
       if (integrationIncomplete(integration)) {
@@ -998,7 +1103,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       }
       let integration: StageIntegration | null = null
       if (AUTO_MERGE) {
-        const attempt = await integrateTask(task, worktree, mergeLock, proposals, { kind: 'addendum' })
+        const attempt = await integrateTask(task, mergeLock, { worktree, proposals, kindExtra: { kind: 'addendum' }, impl })
         if (attempt.fault) return attempt.fault
         integration = attempt.integration ?? null
         if (integrationIncomplete(integration)) {

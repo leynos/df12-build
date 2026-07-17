@@ -25,6 +25,43 @@ import {
 const WORKFLOW_PATH = new URL('../workflows/df12-build-odw.js', import.meta.url)
 const CONTROL_LOOP_MARKER = '// --- Worker-pool control loop'
 
+// Golden-file fixtures for the recovery-resume prompt contract. A tiny
+// Node-only mechanism (no bun snapshot APIs, no extra test-framework dep):
+// each prompt is sanitized to stable placeholders, then compared byte-for-byte
+// against a committed artefact. Regenerate deliberately with
+// `UPDATE_PROMPT_GOLDEN=1 node --test tests/df12-build-odw-recovery.test.mjs`.
+const PROMPT_GOLDEN_DIR = new URL('./fixtures/prompts/', import.meta.url)
+
+// Replace the per-run temporary fixture paths with stable placeholders so the
+// captured prompts are deterministic across runs and machines. The worktree
+// and project paths nest under root, so substitute the longer, more specific
+// paths first. Kept local, explicit, and free of any other rewriting.
+function sanitizePrompt(text, repo) {
+  return text
+    .replaceAll(repo.parserWorktree, '<WORKTREE>')
+    .replaceAll(repo.dir, '<PROJECT>')
+    .replaceAll(repo.root, '<FIXTURE_ROOT>')
+}
+
+// Assert a sanitized prompt equals its committed golden artefact, or rewrite the
+// artefact when UPDATE_PROMPT_GOLDEN is set. Exact equality means drift ANYWHERE
+// in the prompt — not only the residual-risk section — forces a deliberate
+// review of the regenerated golden.
+function assertPromptGolden(name, sanitized) {
+  const file = new URL(`${name}.txt`, PROMPT_GOLDEN_DIR)
+  if (process.env.UPDATE_PROMPT_GOLDEN) {
+    mkdirSync(PROMPT_GOLDEN_DIR, { recursive: true })
+    writeFileSync(file, sanitized)
+    return
+  }
+  const expected = readFileSync(file, 'utf8')
+  assert.equal(
+    sanitized,
+    expected,
+    `${name} prompt drifted from its golden artefact; if intentional, regenerate with UPDATE_PROMPT_GOLDEN=1`,
+  )
+}
+
 
 async function loadRecoverySurface(args = {}, agentImpl = async () => null) {
   let source = await readFile(WORKFLOW_PATH, 'utf8')
@@ -449,6 +486,27 @@ test('resume eligibility admits only clean, committed, task-scoped, validated br
 
   assert.equal(surface.recoveryResumeEligibility(eligibleCandidate(), eligibleEvidence(), assessment), '')
 
+  // Advisory residual risk is NOT a disqualifier: an otherwise-eligible
+  // adopt-complete branch remains eligible even with non-empty residualRisk,
+  // provided blocking missingEvidence stays empty (issue #23).
+  assert.equal(
+    surface.recoveryResumeEligibility(
+      eligibleCandidate(),
+      eligibleEvidence(),
+      sampleAssessment({ residualRisk: ['flaky integration test observed once'] }),
+    ),
+    '',
+  )
+  // Blocking missingEvidence still disqualifies even when residualRisk is set.
+  assert.equal(
+    surface.recoveryResumeEligibility(
+      eligibleCandidate(),
+      eligibleEvidence(),
+      sampleAssessment({ missingEvidence: ['no gate log'], residualRisk: ['advisory note'] }),
+    ),
+    'missing-validation-evidence',
+  )
+
   const rows = [
     [{ candidate: { ...eligibleCandidate(), isAddendum: true } }, 'addendum-branch'],
     [{ evidence: eligibleEvidence({ collectionErrors: ['diff failed'] }) }, 'evidence-collection-error'],
@@ -456,7 +514,10 @@ test('resume eligibility admits only clean, committed, task-scoped, validated br
     [{ evidence: eligibleEvidence({ dirtyState: 'unknown' }) }, 'dirty-worktree'],
     [{ evidence: eligibleEvidence({ recentCommits: [] }) }, 'no-committed-work'],
     [{ assessment: sampleAssessment({ taskScoped: false }) }, 'not-task-scoped'],
-    [{ assessment: sampleAssessment({ validation: '   ' }) }, 'missing-validation-evidence'],
+    // Empty/whitespace `validation` no longer disqualifies on its own — blocking
+    // missingEvidence is the sole evidence-based gate now, so this stays eligible
+    // (issue #23).
+    [{ assessment: sampleAssessment({ validation: '   ' }) }, ''],
     [{ assessment: sampleAssessment({ missingEvidence: ['no gate log'] }) }, 'missing-validation-evidence'],
     [{ candidate: { ...eligibleCandidate(), execplanPath: '' } }, 'missing-execplan'],
   ]
@@ -507,6 +568,7 @@ test('decision-table sweep: resume happens only when every eligibility fact hold
     taskScoped: [true, false],
     validation: ['make all green', '   '],
     missingEvidence: [[], ['no gate log']],
+    residualRisk: [[], ['residual note']],
     execplanPath: ['docs/execplans/roadmap-1-2-3.md', ''],
     classification: ['adopt-complete', 'adopt-partial', 'continue-manual', 'discard'],
     mode: ['assess', 'review'],
@@ -530,14 +592,17 @@ test('decision-table sweep: resume happens only when every eligibility fact hold
       taskScoped: combo.taskScoped,
       validation: combo.validation,
       missingEvidence: combo.missingEvidence,
+      residualRisk: combo.residualRisk,
     })
+    // Eligibility depends only on blocking missingEvidence — neither advisory
+    // residualRisk nor the descriptive `validation` string affects the resume
+    // decision (issue #23).
     const eligible =
       !combo.isAddendum &&
       combo.collectionErrors.length === 0 &&
       combo.dirtyState === 'clean' &&
       combo.recentCommits.length > 0 &&
       combo.taskScoped === true &&
-      combo.validation.trim() !== '' &&
       combo.missingEvidence.length === 0 &&
       combo.execplanPath !== ''
 
@@ -556,7 +621,7 @@ test('decision-table sweep: resume happens only when every eligibility fact hold
     if (shouldResume) resumes += 1
   }
   assert.ok(resumes > 0, 'the sweep must include the fully eligible corner')
-  assert.equal(combos.length, 2 * 2 * 3 * 2 * 2 * 2 * 2 * 2 * 4 * 2 * 2, 'the sweep must cover the whole domain')
+  assert.equal(combos.length, 2 * 2 * 3 * 2 * 2 * 2 * 2 * 2 * 2 * 4 * 2 * 2, 'the sweep must cover the whole domain')
 })
 
 test('review-mode resume fails closed: ineligible adopt-complete downgrades to continue-manual', async () => {
@@ -601,7 +666,14 @@ test('synthetic recovery implementation bridges into review without faking evide
   assert.deepEqual(missingPlan.commits, ['abc1234 Work on roadmap-1-2-3'])
   assert.equal(missingPlan.coderabbitRuns, 0)
   assert.deepEqual(missingPlan.openIssues, ['recovered branch requires fresh review'])
+  assert.deepEqual(missingPlan.residualRisk, [], 'residualRisk defaults to an empty carry-forward channel')
   assert.match(missingPlan.summary, /Recovered adopt-complete branch from durable git state/)
+
+  // Advisory residual risk from the assessment is carried forward verbatim
+  // (issue #23) without touching any blocking field.
+  const withRisk = await surface.syntheticRecoveryImpl(candidate, evidence, ['flaky teardown seen once'])
+  assert.deepEqual(withRisk.residualRisk, ['flaky teardown seen once'])
+  assert.deepEqual(withRisk.openIssues, ['recovered branch requires fresh review'])
 
   mkdirSync(path.join(repo.parserWorktree, 'docs', 'execplans'), { recursive: true })
   writeFileSync(
@@ -611,9 +683,12 @@ test('synthetic recovery implementation bridges into review without faking evide
   const withPlan = await surface.syntheticRecoveryImpl(candidate, evidence)
   assert.equal(withPlan.execplanPath, 'docs/execplans/roadmap-1-2-3.md')
 
-  const allowed = new Set(Object.keys(surface.IMPL_SCHEMA.properties))
+  // The synthetic report mirrors IMPL_SCHEMA, plus the host-only `residualRisk`
+  // carry-forward channel that is rendered as review/integration context but is
+  // never sent back to an agent under IMPL_SCHEMA.
+  const allowed = new Set([...Object.keys(surface.IMPL_SCHEMA.properties), 'residualRisk'])
   for (const key of Object.keys(withPlan)) {
-    assert.ok(allowed.has(key), `synthetic field ${key} must exist in IMPL_SCHEMA`)
+    assert.ok(allowed.has(key), `synthetic field ${key} must exist in IMPL_SCHEMA or be the residualRisk carry-forward`)
   }
 })
 
@@ -755,6 +830,59 @@ test('review-mode resume routes an eligible branch through review and integratio
     ],
     'resume must pass the write preflight, then use the ordinary review labels and the integration agent',
   )
+})
+
+test('review-mode resume carries advisory residualRisk into the review and integration prompts', async () => {
+  const calls = []
+  const prompts = { codeReview: '', expertReview: '', integrate: '' }
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review' },
+    reviewModeAgent(calls, {
+      assess: async () => sampleAssessment({ residualRisk: ['telemetry counter not yet wired up'] }),
+      review: async (prompt, opts) => {
+        if ((opts.label || '').startsWith('code-review:')) prompts.codeReview = prompt
+        else prompts.expertReview = prompt
+        return { verdict: 'pass', blocking: [], summary: 'ship it' }
+      },
+      integrate: async (prompt) => {
+        prompts.integrate = prompt
+        return { ok: true, roadmapMarkedDone: true, rebased: true, squashMerged: true, mergeSha: 'feedfeed', pushed: true, conflicts: '', summary: 'squash merged and pushed' }
+      },
+    }),
+  )
+  const repo = makeRecoveryRepo()
+
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.fatal, null)
+  assert.equal(outcome.summary.resumed, 1, 'advisory residualRisk must not block the resume')
+  const { result } = outcome.taskResults[0]
+  assert.equal(result.status, 'done')
+  // The advisory context must survive onto the synthetic impl report...
+  assert.deepEqual(result.impl.residualRisk, ['telemetry counter not yet wired up'])
+  // ...and be rendered as an explicitly non-blocking, injection-safe section in
+  // every prompt: the item is JSON-encoded inside a fenced untrusted-data block
+  // so agent-authored residual risk cannot smuggle instructions downstream.
+  // These semantic assertions guard the residual-risk contract directly; the
+  // golden comparison below additionally locks the WHOLE prompt so drift outside
+  // this section still needs a deliberate golden update.
+  const advisoryLabel = 'Advisory residual risk (non-blocking'
+  for (const [name, text] of Object.entries(prompts)) {
+    assert.ok(text.includes(advisoryLabel), `${name} prompt must carry the advisory residual-risk section`)
+    assert.ok(text.includes('"telemetry counter not yet wired up"'), `${name} prompt must list the JSON-encoded residual-risk item`)
+    assert.ok(text.includes('UNTRUSTED DATA'), `${name} prompt must mark residual risk as untrusted data`)
+    assert.ok(
+      text.includes('----- BEGIN RESIDUAL RISK DATA (untrusted) -----'),
+      `${name} prompt must fence the residual-risk data block`,
+    )
+  }
+
+  // Full-prompt regression coverage: sanitize the per-run temp paths, then
+  // assert exact equality against committed golden artefacts scoped to this
+  // recovery-resume prompt contract.
+  assertPromptGolden('recovery-resume-code-review', sanitizePrompt(prompts.codeReview, repo))
+  assertPromptGolden('recovery-resume-expert-review', sanitizePrompt(prompts.expertReview, repo))
+  assertPromptGolden('recovery-resume-integrate', sanitizePrompt(prompts.integrate, repo))
 })
 
 test('review-mode resume enforces the write preflight before any review agent', async () => {

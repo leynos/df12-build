@@ -387,6 +387,10 @@ The returned assessment object should require `classification`, `branchName`,
 `recommendation`. Use arrays of strings or small objects rather than free-form
 paragraphs where JavaScript needs to inspect the value.
 
+(Post-implementation note, issue #23: the schema also requires an advisory
+`residualRisk` array alongside the blocking `missingEvidence`, separating the
+two evidence channels.)
+
 Add `collectAssessmentEvidence(task, wt)`. It should run deterministic git
 commands inside the task worktree:
 
@@ -496,16 +500,6 @@ Expected pass after implementation:
 # fail 0
 ```
 
-Repository validation:
-
-```bash
-make all
-```
-
-Do not run `odw run` as part of this plan unless the operator explicitly asks
-for a live smoke run, because a live run can spawn agents and mutate a target
-project.
-
 ## Validation and acceptance
 
 Red-Green-Refactor evidence must be recorded in this document during
@@ -610,6 +604,7 @@ const ASSESSMENT_SCHEMA = {
     roadmap: { type: 'string' },
     validation: { type: 'string' },
     missingEvidence: { type: 'array', items: { type: 'string' } },
+    residualRisk: { type: 'array', items: { type: 'string' } },
     risks: { type: 'array', items: { type: 'string' } },
     recommendation: { type: 'string' },
   },
@@ -622,6 +617,7 @@ const ASSESSMENT_SCHEMA = {
     'dirtyState',
     'changedFiles',
     'missingEvidence',
+    'residualRisk',
     'recommendation',
   ],
 }

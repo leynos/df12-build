@@ -798,8 +798,13 @@ Set `resumePartialBranches=true` and choose the maximum action with
   incomplete evidence is downgraded to `continue-manual` with an explicit skip
   reason (`dirty-worktree`, `no-committed-work`, `not-task-scoped`,
   `missing-validation-evidence`, `evidence-collection-error`, or
-  `addendum-branch`). Review-mode resume mutates the target project exactly as
-  ordinary integration does, so grant it the same permissions and trust.
+  `addendum-branch`). Blocking evidence gaps (`missingEvidence`) still trigger
+  that downgrade, but advisory residual risk (`residualRisk`) never does: it is
+  non-blocking and is instead carried forward into the resumed dual review and
+  integration prompts as an explicit, clearly delimited advisory section for
+  the reviewer or integrator to weigh. Review-mode resume mutates the target
+  project exactly as ordinary integration does, so grant it the same
+  permissions and trust.
 - **Continue-mode resume** (`resumeMode="continue"`): no judgement agent at
   all. The workflow collects host git evidence and reads the committed
   ExecPlan `Status:` line, then dispatches deterministically: `DRAFT` (or a

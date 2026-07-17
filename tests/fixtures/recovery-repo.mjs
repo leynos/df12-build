@@ -170,6 +170,7 @@ export function sampleAssessment(overrides = {}) {
     roadmap: 'task unchecked',
     validation: 'make all green at HEAD',
     missingEvidence: [],
+    residualRisk: [],
     risks: [],
     rationale: 'complete slice',
     recommendation: 'review and integrate',

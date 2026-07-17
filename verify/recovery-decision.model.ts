@@ -59,7 +59,6 @@ export interface Evidence {
 export interface Assessment {
   classification: Classification;
   taskScoped: boolean;
-  hasValidation: boolean;
   hasMissingEvidence: boolean;
 }
 
@@ -86,13 +85,12 @@ export function resumeEligibility(
   evidence: Evidence,
   assessment: Assessment,
 ): SkipReason {
-  //@ ensures \result === 'NoReason' ==> !candidate.isAddendum && !evidence.hasCollectionErrors && evidence.isClean && evidence.hasCommits && assessment.taskScoped && assessment.hasValidation && !assessment.hasMissingEvidence && candidate.hasExecplan
+  //@ ensures \result === 'NoReason' ==> !candidate.isAddendum && !evidence.hasCollectionErrors && evidence.isClean && evidence.hasCommits && assessment.taskScoped && !assessment.hasMissingEvidence && candidate.hasExecplan
   if (candidate.isAddendum) return 'AddendumBranch';
   if (evidence.hasCollectionErrors) return 'EvidenceCollectionError';
   if (!evidence.isClean) return 'DirtyWorktree';
   if (!evidence.hasCommits) return 'NoCommittedWork';
   if (!assessment.taskScoped) return 'NotTaskScoped';
-  if (!assessment.hasValidation) return 'MissingValidationEvidence';
   if (assessment.hasMissingEvidence) return 'MissingValidationEvidence';
   if (!candidate.hasExecplan) return 'MissingExecplan';
   return 'NoReason';

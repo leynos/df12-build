@@ -139,11 +139,18 @@ test('assessment schema exposes only ADR 002 classifications', async () => {
     'roadmap',
     'validation',
     'missingEvidence',
+    'residualRisk',
     'risks',
     'rationale',
     'recommendation',
     'nextActions',
   ])
+  assert.deepEqual(surface.ASSESSMENT_SCHEMA.properties.residualRisk, {
+    type: 'array',
+    items: { type: 'string' },
+    description:
+      'ADVISORY, non-blocking residual risk carried forward as review/integration context; must NOT downgrade an otherwise-eligible adopt-complete resume',
+  })
 })
 
 test('auth-shaped implementation issues are fatal, not deferred review', async () => {
@@ -328,15 +335,19 @@ test('filesystem faults surface distinctly from absent files', async () => {
 })
 
 test('integration is never retried on infrastructure faults', async () => {
-  const source = await readWorkflowSource()
+  // Assert against the GENERATED artefact. esbuild renames the colliding
+  // top-level `buildLock`/`integratePrompt`/`mergeLock` bindings to
+  // `buildLock2`/`integratePrompt2`/`mergeLock2` when bundling, so the emitted
+  // call sites carry those suffixed identifiers.
+  const source = await readFile(WORKFLOW_PATH, 'utf8')
   // The push to origin/BASE is not idempotent: a hidden-success first
   // attempt re-run after an adapter death could integrate the task twice.
   assert.doesNotMatch(source, /withInfraRetry\([^\n]*integratePrompt/)
   // Both lanes now route through the single integrateTask helper, so exactly
   // one unwrapped call site must exist and both callers must use the helper.
-  const bareCalls = source.match(/buildLock\(\(\) => agent\(integratePrompt\(task, worktree\)/g) || []
+  const bareCalls = source.match(/buildLock2\(\(\) => agent\(integratePrompt2\(task, worktree, impl\)/g) || []
   assert.equal(bareCalls.length, 1, 'the shared integrateTask call site stays unwrapped')
-  const helperCalls = source.match(/await integrateTask\(task, worktree, mergeLock, proposals,/g) || []
+  const helperCalls = source.match(/await integrateTask\(task, mergeLock2, \{ worktree, proposals,/g) || []
   assert.equal(helperCalls.length, 2, 'normal and addendum lanes both integrate through integrateTask')
 })
 

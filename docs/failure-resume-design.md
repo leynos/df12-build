@@ -263,7 +263,10 @@ The workflow applies this decision table after assessment:
 
 `resumeMode="review"` must still fail closed. If any required evidence is
 missing, the candidate remains `continue-manual` in the returned recovery
-summary even when the assessment said `adopt-complete`.
+summary even when the assessment said `adopt-complete`. Advisory
+`residualRisk` is exempt from this downgrade: it never disqualifies an
+otherwise eligible resume, and is instead threaded into the synthetic
+implementation report and the resumed review and integration prompts.
 
 ## Review-mode resume path
 
@@ -281,6 +284,7 @@ construct a synthetic implementation result from durable evidence:
   commits: ["<recent branch commit subjects>"],
   coderabbitRuns: 0,
   openIssues: ["recovered branch requires fresh review"],
+  residualRisk: ["<advisory caveat from assessment>"],
   summary: "Recovered adopt-complete branch from durable git state."
 }
 ```

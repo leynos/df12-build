@@ -71,6 +71,12 @@ The assessment prompt must ask for bounded, evidence-first output:
 The workflow host consumes assessment output through a schema. Free-text
 recommendations must not drive integration directly.
 
+The assessment separates two evidence channels: `missingEvidence` is
+BLOCKING and disqualifies a resume (an eligible `adopt-complete` is
+downgraded to `continue-manual`), while `residualRisk` is ADVISORY and
+non-blocking — it never downgrades an eligible `adopt-complete` branch, and
+is instead carried forward into the resumed review and integration prompts.
+
 `adopt-complete` can enter the ordinary review and integration path only after
 the branch is clean, contains committed work, passes relevant gates, and has not
 marked the roadmap task complete unless the task's success criterion is actually
