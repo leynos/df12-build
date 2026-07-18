@@ -187,8 +187,8 @@
           "agent_process_id": "0198e5a1-0000-7000-8000-0000000000b1",
           "source": "otlp-header",
           "confidence": "exact",
-          "first_seen_ns": 1721000000000000000,
-          "last_seen_ns": 1721000000500000000
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000500000000"
         }
       },
       {
@@ -201,8 +201,8 @@
           "span_id": "b7ad6b7169203331",
           "source": "trace-context",
           "confidence": "exact",
-          "first_seen_ns": 1721000000000000000,
-          "last_seen_ns": 1721000000000000000
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
         }
       },
       {
@@ -213,8 +213,8 @@
           "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a3",
           "source": "events-jsonl",
           "confidence": "heuristic",
-          "first_seen_ns": 1721000000000000000,
-          "last_seen_ns": 1721000000000000000
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
         }
       }
     ],
@@ -227,8 +227,8 @@
           "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a4",
           "source": "otlp-header",
           "confidence": "probable",
-          "first_seen_ns": 1721000000000000000,
-          "last_seen_ns": 1721000000000000000
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
         }
       },
       {
@@ -239,8 +239,8 @@
           "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a5",
           "source": "events-jsonl",
           "confidence": "exact",
-          "first_seen_ns": 1721000000000000000,
-          "last_seen_ns": 1721000000000000000
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
         }
       },
       {
@@ -251,8 +251,8 @@
           "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a6",
           "source": "otlp-header",
           "confidence": "heuristic",
-          "first_seen_ns": 1721000000000000000,
-          "last_seen_ns": 1721000000000000000
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
         }
       },
       {
@@ -263,8 +263,8 @@
           "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a7",
           "source": "otlp-header",
           "confidence": "exact",
-          "first_seen_ns": 1721000000000000000,
-          "last_seen_ns": 1721000000000000000
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
         }
       },
       {
@@ -276,8 +276,8 @@
           "trace_id": "deadbeef",
           "source": "trace-context",
           "confidence": "exact",
-          "first_seen_ns": 1721000000000000000,
-          "last_seen_ns": 1721000000000000000
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
         }
       },
       {
@@ -287,8 +287,8 @@
           "binding_value": "sess_abcdef",
           "source": "otlp-header",
           "confidence": "exact",
-          "first_seen_ns": 1721000000000000000,
-          "last_seen_ns": 1721000000000000000
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
         }
       }
     ]

@@ -43,7 +43,9 @@ interface Fixtures {
   nodeKeys: { valid: string[]; invalid: string[] }
 }
 
-const ajv = new Ajv2020({ allErrors: true, strict: true })
+// strict mode catches schema mistakes (unknown keywords, ignored keywords);
+// allowUnionTypes permits the scalar union on envelope attribute values.
+const ajv = new Ajv2020({ allErrors: true, strict: true, allowUnionTypes: true })
 const fixtures = loadJson(FIXTURE_PATH) as unknown as Fixtures
 
 const contextSchema = loadJson(schemaPath('workflow-observability-context.v1.json'))
