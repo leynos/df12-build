@@ -87,9 +87,16 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
 - [x] (2026-07-18) ExecPlan rewritten after the source design conversation
   replaced the events-bridge approach with the correlation-first gateway;
   task 5.1.1 re-scoped from "build a bridge" to "define the contract".
-- [ ] Milestone 1: draft `docs/workflow-observability-contract.md`.
-- [ ] Milestone 2: red fixture tests for envelope and identity validation.
-- [ ] Milestone 3: green — schemas and fixtures under `schemas/observability/`.
+- [x] (2026-07-19) Milestone 1: drafted
+  `docs/workflow-observability-contract.md` (14 numbered sections);
+  markdownlint, spelling, and nixie clean.
+- [x] (2026-07-19) Milestone 2: added
+  `tests/modules/observability-contract.test.ts` and the consolidated
+  `tests/fixtures/observability-contract/fixtures.json`; added `ajv` (draft
+  2020-12) as a dev dependency. Red observed: the suite fails with `ENOENT`
+  on `schemas/observability/workflow-observability-context.v1.json`, exactly
+  the missing-schema failure the plan predicts.
+- [ ] Milestone 3: green — schemas under `schemas/observability/`.
 - [ ] Milestone 4: cross-references, contents, and gate pass.
 
 ## Surprises & discoveries
