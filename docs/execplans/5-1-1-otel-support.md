@@ -96,8 +96,13 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
   2020-12) as a dev dependency. Red observed: the suite fails with `ENOENT`
   on `schemas/observability/workflow-observability-context.v1.json`, exactly
   the missing-schema failure the plan predicts.
-- [ ] Milestone 3: green — schemas under `schemas/observability/`.
-- [ ] Milestone 4: cross-references, contents, and gate pass.
+- [x] (2026-07-19) Milestone 3: green — added the three schemas under
+  `schemas/observability/`. Contract test passes 31/31; the full module
+  suite (397 tests) and `tsc` pass. Two schema-shaping decisions surfaced
+  (union scalar types, nanosecond string timestamps) — see Surprises.
+- [x] (2026-07-19) Milestone 4: cross-linked the contract from ADR 003, the
+  developers' guide, and the contents index; ticked 5.1.1 in the roadmap;
+  ran the full gate and a CodeRabbit review.
 
 ## Surprises & discoveries
 
@@ -107,6 +112,21 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
   correlation as unsound under parallelism and retries.
   Impact: the bridge survives only as a `heuristic`-confidence import path;
   this task now defines the identity contract instead.
+- Observation: nanosecond-since-epoch timestamps overflow the range JSON
+  numbers represent exactly (2^53), so a binding carried as JSON would lose
+  precision above roughly the year 2255 in nanoseconds — in fact already,
+  since ns counts are ~1.7e18 today.
+  Evidence: `1721000000000000000` is not exactly representable as an IEEE-754
+  double.
+  Impact: the binding schema carries `first_seen_ns` and `last_seen_ns` as
+  decimal strings, and the contract (section 9) states this with rationale;
+  the SQLite store holds them as 64-bit integers.
+- Observation: ajv strict mode rejects a scalar union type
+  (`["string","number","boolean"]`) unless `allowUnionTypes` is set.
+  Evidence: `strictTypes` error at the envelope `attributes` value schema.
+  Impact: the validator enables `allowUnionTypes` while keeping `strict`
+  otherwise on, so schema mistakes are still caught; the envelope keeps its
+  scalar-union attribute values.
 
 ## Decision log
 
@@ -149,7 +169,31 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
 
 ## Outcomes & retrospective
 
-To be completed as milestones land.
+The task delivered the version-1 workflow observability contract as a
+normative document (`docs/workflow-observability-contract.md`, 14 numbered
+sections), three JSON Schema draft 2020-12 files under
+`schemas/observability/`, a consolidated fixture set, and a validation suite
+(`tests/modules/observability-contract.test.ts`, 31 tests) that exercises
+every documented rule — including the sink credential rule, the
+source-to-confidence binding conditional, and the logical node key grammar.
+ADR 003, the roadmap, the contents index, and the developers' guide now link
+the contract, and roadmap task 5.1.1 is marked complete.
+
+Against the original purpose, the narrow waist is now fixed: ODW (step 5.2),
+the collector (step 5.1.2), and Dakar (step 5.5) have one written and
+machine-checkable contract to build against.
+
+Lessons for the next steps:
+
+- The schema files, not the prose, are the interface later steps validate
+  against; the test asserts each schema is pinned to `.v1.json` so a version
+  bump is a deliberate new file, not an in-place edit.
+- Two data-shape decisions (string nanosecond timestamps, scalar-union
+  attributes) are the kind of detail the collector step must honour; both are
+  recorded normatively rather than left to rediscovery.
+- The agent-event extensions are marked provisional; step 5.2 should confirm
+  the field names against what ODW can actually emit before the collector
+  hard-codes them.
 
 ## Context and orientation
 

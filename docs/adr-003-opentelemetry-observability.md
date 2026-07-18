@@ -221,7 +221,10 @@ change never rewrites history.
 
 1. Observability contract and collector: define the identity contract and
    `leynos.*` attribute registry, then implement `workflow-telemetryd` with
-   raw storage and the canonical projection (roadmap step 5.1).
+   raw storage and the canonical projection (roadmap step 5.1). The version-1
+   contract is now written up in
+   `docs/workflow-observability-contract.md`, with machine-readable schemas
+   under `schemas/observability/`.
 2. ODW correlation substrate: invocation and process ids, enriched JSONL
    agent events, a per-invocation environment layer in the bridge, W3C
    context injection, and a host-side span primitive using asynchronous

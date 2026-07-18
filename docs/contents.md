@@ -23,6 +23,9 @@ workflow assets, or understanding why the system is shaped the way it is.
   structure, and configuration contract of the ODW workflow.
 - [Failure resume design](failure-resume-design.md): explains how the workflow
   assesses surviving task branches and resumes work after interruption.
+- [Workflow observability contract](workflow-observability-contract.md): the
+  normative version-1 identity model, attribute registry, envelope, headers,
+  and binding schemas that the observability fabric builds against.
 - [Security and permissions](security-and-permissions.md): sets out the
   capabilities a workshop can exercise and how they are constrained.
 - [ODW compilation and compile-time testing](odw-compilation-and-compile-time-testing.md):

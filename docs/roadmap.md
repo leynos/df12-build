@@ -282,7 +282,7 @@ share before any instrumentation lands. Its output is the narrow waist that
 ODW, df12-build, the providers, and sibling workflows all depend on, so it
 must settle before the substrate work starts.
 
-- [ ] 5.1.1. Define the workflow observability contract.
+- [x] 5.1.1. Define the workflow observability contract.
   - See `docs/adr-003-opentelemetry-observability.md` sections "Identity
     model", "Attribute namespaces and span model", and "Cross-workflow
     contract".
@@ -292,6 +292,9 @@ must settle before the substrate work starts.
     `df12.*`/`dakar.*`), logical node keys, the span topology, the
     `WorkflowObservabilityContextV1` envelope, correlation headers, binding
     confidence levels, and the metrics cardinality policy.
+  - Delivered in `docs/workflow-observability-contract.md`, with schemas
+    under `schemas/observability/` and validation in
+    `tests/modules/observability-contract.test.ts` (PR #63).
   - Success: a versioned contract document plus JSON Schemas exist, and
     fixture tests validate conforming and non-conforming envelopes and
     identity keys deterministically.
