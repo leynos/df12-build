@@ -83,6 +83,10 @@ describe('deferred-review classification', () => {
     ['CodeRabbit temporarily unavailable', true],
     ['coderabbit found 3 blocking issues', false],
     ['rate limit exceeded on the build API', false],
+    // Dakar deferrals carry 'dakar' plus a 'deferred' marker and must classify
+    // as recoverable review faults, just like CodeRabbit rate limits.
+    ['Dakar review deferred (stage: deferred) — budget exhausted', true],
+    ['dakar review changes-requested: 2 blocking findings', false],
     ['', false],
   ]
   for (const [issue, expected] of table) {
