@@ -262,3 +262,45 @@ first recovery slice.
     "Deferred decisions".
   - Success: deletion, stash handling, and branch-retention policy are recorded
     before any automated cleanup lands.
+
+## 5. Workshop observability
+
+Idea: if a workshop run can be replayed as OpenTelemetry (OTel) traces and
+metrics from its durable run artefacts, operators can diagnose slow phases,
+failure clusters, and token spend across runs without touching the workflow
+artefact or risking a live run.
+
+This phase adds host-side telemetry only. The workflow script, the compiled
+artefact, and run behaviour must remain byte-for-byte unaffected.
+
+### 5.1. OpenTelemetry export for workshop runs
+
+This step answers whether the run directory's `events.jsonl` carries enough
+structure to reconstruct a faithful run → phase → agent trace. Its output
+decides whether later dashboarding work can rely on the bridge or needs
+runtime changes upstream in ODW.
+
+- [ ] 5.1.1. Implement the host-side OTel bridge that translates a run
+  directory's `events.jsonl` into OTLP traces.
+  - See `docs/adr-003-opentelemetry-observability.md`.
+  - Map the run to a root span, phases to child spans, and agent invocations
+    to grandchild spans with task id, branch, adapter, model, and outcome
+    attributes; close dangling spans from crashed runs as `interrupted`.
+  - Support both tailing a live run and replaying a completed run directory;
+    exit without side effects when no OTLP endpoint is configured.
+  - Success: fixture tests replay a recorded `events.jsonl` and assert the
+    exported span hierarchy, attributes, and statuses deterministically.
+- [ ] 5.1.2. Emit workshop metrics from the bridge. Requires 5.1.1.
+  - See `docs/adr-003-opentelemetry-observability.md`.
+  - Cover agent invocation counts, failure and retry counts, token spend, and
+    merge-lock wait time, following OTel semantic conventions where one
+    applies.
+  - Success: fixture tests assert metric names, attribute keys, and values for
+    a recorded run.
+- [ ] 5.1.3. Document bridge operation and prove it against a real collector.
+  Requires 5.1.2.
+  - Cover configuration via `OTEL_EXPORTER_OTLP_*` variables in the user
+    guide, developer guide, and supervisor skill.
+  - Run a bounded smoke test exporting one completed run to a local collector.
+  - Success: operators can export an existing run directory end to end from
+    documentation alone.
