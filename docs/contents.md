@@ -41,6 +41,10 @@ workflow assets, or understanding why the system is shaped the way it is.
 - [ADR 002: Assess partial task branches](adr-002-assess-partial-task-branches.md):
   records the decision to assess surviving task branches before a fresh
   restart.
+- [ADR 003: Correlation-first OpenTelemetry observability](adr-003-opentelemetry-observability.md):
+  records the proposed decision to correlate workflow nodes and agent
+  telemetry through dispatch-time identity, a local OTLP collector, and a
+  SQLite store.
 
 ## Plans
 
@@ -50,3 +54,5 @@ workflow assets, or understanding why the system is shaped the way it is.
     the plan behind the partial-branch assessment behaviour.
   - [ODW compilation](execplans/odw-compilation.md): the plan behind the
     compile-time testing and artefact build.
+  - [Workflow observability contract (5.1.1)](execplans/5-1-1-otel-support.md):
+    the plan for defining the identity and schema contract behind ADR 003.
