@@ -17,6 +17,11 @@ Read these before changing launch or workflow behaviour:
   decision.
 - `docs/adr-002-assess-partial-task-branches.md` for the accepted partial
   branch assessment and adoption model.
+- `docs/adr-003-opentelemetry-observability.md` for the proposed
+  correlation-first observability fabric, and
+  `docs/workflow-observability-contract.md` for the version-1 identity model,
+  attribute registry, envelope, and binding schemas that later steps build
+  against.
 - `docs/users-guide.md` for the public launch flow and configuration surface.
 - `docs/odw-compilation-and-compile-time-testing.md` for how the ODW artefact
   is compiled from the module tree and how compile-time behaviour is tested.
