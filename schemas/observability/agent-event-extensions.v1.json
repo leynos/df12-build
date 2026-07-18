@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://df12.dev/schemas/observability/agent-event-extensions.v1.json",
+  "title": "AgentEventExtensionsV1",
+  "description": "Identity fields ODW adds to its agent_started, agent_finished, and agent_failed JSONL events. Additive and snake_case; existing event fields are unchanged. Provisional until ODW implements them (roadmap step 5.2). See docs/workflow-observability-contract.md section 12.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "run_id",
+    "node_attempt_id",
+    "agent_invocation_id",
+    "agent_process_id",
+    "cli_attempt"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "node_attempt_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agent_invocation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agent_process_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cli_attempt": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

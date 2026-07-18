@@ -275,7 +275,10 @@ Its authoritative shape is
 snake_case (section 3). The fields are `binding_type`, `binding_value`,
 `agent_invocation_id`, optional `agent_process_id`, optional `trace_id` and
 `span_id` (lower-hex of 32 and 16 characters respectively), `source`,
-`confidence`, `first_seen_ns`, and `last_seen_ns`.
+`confidence`, `first_seen_ns`, and `last_seen_ns`. The two nanosecond
+timestamps are carried as decimal strings, not JSON numbers, because a
+nanosecond count since the epoch exceeds the range JSON numbers represent
+exactly (2^53); the SQLite store holds them as 64-bit integers.
 
 The `binding_type` is a dotted, namespaced key. The registry for version 1
 includes:

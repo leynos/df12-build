@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://df12.dev/schemas/observability/telemetry-binding.v1.json",
+  "title": "TelemetryBindingV1",
+  "description": "A record associating a provider identifier with an ODW agent invocation at a stated confidence. Snake_case mirrors the SQLite columns. See docs/workflow-observability-contract.md section 9.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "binding_type",
+    "binding_value",
+    "agent_invocation_id",
+    "source",
+    "confidence",
+    "first_seen_ns",
+    "last_seen_ns"
+  ],
+  "properties": {
+    "binding_type": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)+$"
+    },
+    "binding_value": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agent_invocation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agent_process_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trace_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "span_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "source": {
+      "type": "string",
+      "enum": ["trace-context", "otlp-header", "provider-event", "events-jsonl"]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["exact", "derived", "heuristic"]
+    },
+    "first_seen_ns": {
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    },
+    "last_seen_ns": {
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "enum": ["trace-context", "otlp-header"]
+          }
+        },
+        "required": ["source"]
+      },
+      "then": {
+        "properties": {
+          "confidence": {
+            "const": "exact"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "const": "events-jsonl"
+          }
+        },
+        "required": ["source"]
+      },
+      "then": {
+        "properties": {
+          "confidence": {
+            "const": "heuristic"
+          }
+        }
+      }
+    }
+  ]
+}
