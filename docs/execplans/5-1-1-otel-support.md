@@ -5,7 +5,7 @@ This ExecPlan (execution plan) is a living document. The sections
 `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work
 proceeds.
 
-Status: DRAFT
+Status: IN PROGRESS
 
 ## Purpose / big picture
 
@@ -114,6 +114,31 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
   Rationale: the envelope crosses workflow boundaries, so consumers must be
   able to pin an exact version.
   Date/Author: 2026-07-18, this plan.
+- Decision: the test file is `tests/modules/observability-contract.test.ts`,
+  not the top-level `tests/observability-contract.test.ts` named in the plan
+  of work.
+  Rationale: `make test-modules` runs `bun test tests/modules`, so only files
+  under `tests/modules/` are covered by `make all`; a top-level file would be
+  ungated. The `tsconfig.json` `include` also lists `tests/modules`, so the
+  file is typechecked there.
+  Date/Author: 2026-07-19, implementation.
+- Decision: the contract uses three naming domains rather than one, and
+  documents the split normatively — camelCase for the cross-process envelope
+  (a TypeScript/JSON interface), snake_case for ODW JSON Lines event
+  extensions (matching the existing event stream), dotted `leynos.*` for
+  OpenTelemetry attributes, and snake_case for binding rows (matching the
+  SQL storage in ADR 003).
+  Rationale: each schema then mirrors the exact wire or storage surface its
+  consumer already uses; forcing uniform casing would misrepresent at least
+  one surface.
+  Date/Author: 2026-07-19, implementation.
+- Decision: fixture data is consolidated into a small number of JSON files
+  under `tests/fixtures/observability-contract/` rather than one file per
+  case.
+  Rationale: keeps the total changed-file count within the "roughly 12"
+  tolerance while still exercising every documented case; the substantive new
+  artefacts are the contract document, three schemas, and one test.
+  Date/Author: 2026-07-19, implementation.
 
 ## Outcomes & retrospective
 
