@@ -1464,7 +1464,9 @@ test('host-run CodeRabbit findings drive a fix round through the real CLI seam',
     }
     throw new Error(`unexpected label: ${opts.label}`)
   }
-  const surface = await loadRecoverySurface({ coderabbitHostReview: true }, agentImpl)
+  // The default host review tool is now Dakar; pin CodeRabbit to exercise its
+  // real NDJSON CLI seam here.
+  const surface = await loadRecoverySurface({ coderabbitHostReview: true, reviewTool: 'coderabbit' }, agentImpl)
 
   const previousPath = process.env.PATH
   process.env.PATH = `${bin}:${previousPath}`

@@ -160,12 +160,17 @@ The key argument groups are:
   `hostCommitGates`/`hostGatesBetweenWorkItems`/`commitGateTimeoutSeconds`
   (host-run gate verification, including between work-item build turns),
   `csCheck`/`csCheckCommand` (the CodeScene code-health gate that runs after
-  the commit gates and before CodeRabbit), `coderabbitHostReview`/
-  `coderabbitBetweenWorkItems`/`coderabbitAttempts`/ `coderabbitBackoffMinutes`/
-  `coderabbitFindingsFile` (host-run CodeRabbit review, between-work-item
-  gating, and findings capture), `perWorkItemBuild`/`maxWorkItemRounds` (the
-  host-driven work-item build loop), and `stageAttempts` (bounded in-run retry
-  of stage agents on infrastructure faults).
+  the commit gates and before host review), `reviewTool` (default `dakar`;
+  `coderabbit` selects the retained NDJSON reviewer; other values throw) with
+  `dakarCommand` (default `dakar-review`), `dakarTimeoutSeconds` (default 3600,
+  clamped 60..7200), and `dakarBudgetGbp` (default 0, clamped 0..10),
+  `coderabbitHostReview`/
+  `coderabbitBetweenWorkItems`/`coderabbitAttempts`/`coderabbitBackoffMinutes`/
+  `coderabbitFindingsFile` (host-review enablement, between-work-item gating,
+  attempts, backoff, and findings capture; the names predate Dakar),
+  `perWorkItemBuild`/`maxWorkItemRounds` (the host-driven work-item build loop),
+  and `stageAttempts` (bounded in-run retry of stage agents on infrastructure
+  faults).
 - Recovery controls: `resumePartialBranches` (opt-in fresh-run discovery),
   `resumeMode` (`assess` reports only; `review` may resume eligible
   `adopt-complete` branches through ordinary integration; `continue` dispatches
@@ -208,14 +213,26 @@ Opus/high defaults:
 A sidecar that wants a different assessment or triage route must say so in
 `args.json`.
 
+The host review tool defaults to Dakar. It runs `dakarCommand` (default
+`dakar-review`) against the committed diff with `--repo-root`, `--base`,
+`--timeout`, an optional `--budget-gbp`, and a fresh ephemeral `--state-root`
+per attempt. The fresh state root keeps the gate stateless despite Dakar's
+reviewed-head cache. Dakar's JSON verdict maps onto the existing host-review
+contract: pass or skip is clean, `changes-requested` supplies findings,
+`deferred` reuses the established backoff path, and other failures fail the
+review. Severity mapping preserves the blocking rule: Dakar `critical` and
+`high` become `critical` and `major`. Set `reviewTool: 'coderabbit'` to restore
+the NDJSON CodeRabbit invocation.
+
 Auth preflight is adapter-aware. The workflow always checks Codex auth because
-build-side stages depend on it, checks CodeRabbit auth when implementation can
-run, and checks Claude auth whenever any configured stage uses the `claude`
-adapter. Auth failures are terminal workflow failures rather than ordinary task
-failures or partial-branch recovery candidates.
+build-side stages depend on it, checks `OPENAI_API_KEY` for Dakar or CodeRabbit
+CLI auth for CodeRabbit when implementation can run, and checks Claude auth
+whenever any configured stage uses the `claude` adapter. Auth failures are
+terminal workflow failures rather than ordinary task failures or partial-branch
+recovery candidates.
 
 ODW adapter timeout is also part of the runtime contract. With the default
-host-run CodeRabbit review, agents never wait on CodeRabbit — the host absorbs
+host-run review, agents never wait on the review tool — the host absorbs
 rate-limit backoff in its own wall-clock — and with the default per-work-item
 build each builder turn covers one work item, so adapter timeouts only need to
 cover honest stage work: roughly 3600 seconds for the build adapter and
