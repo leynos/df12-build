@@ -265,42 +265,131 @@ first recovery slice.
 
 ## 5. Workshop observability
 
-Idea: if a workshop run can be replayed as OpenTelemetry (OTel) traces and
-metrics from its durable run artefacts, operators can diagnose slow phases,
-failure clusters, and token spend across runs without touching the workflow
-artefact or risking a live run.
+Idea: if the workflow host mints a durable identity for every agent dispatch,
+and both provider CLIs export their native OpenTelemetry signals to a local
+collector that stores them beside a versioned relational projection,
+operators can cross-reference workflow nodes and agent telemetry exactly,
+even under parallelism, retries, and recovery.
 
-This phase adds host-side telemetry only. The workflow script, the compiled
-artefact, and run behaviour must remain byte-for-byte unaffected.
+This phase implements ADR 003. Correlation is identity-first: labels,
+phases, and timestamps are evidence, never primary join keys. Telemetry is
+advisory and must never alter workflow control flow.
 
-### 5.1. OpenTelemetry export for workshop runs
+### 5.1. Observability contract and telemetry collector
 
-This step answers whether the run directory's `events.jsonl` carries enough
-structure to reconstruct a faithful run → phase → agent trace. Its output
-decides whether later dashboarding work can rely on the bridge or needs
-runtime changes upstream in ODW.
+This step answers what identity and schema contract every producer must
+share before any instrumentation lands. Its output is the narrow waist that
+ODW, df12-build, the providers, and sibling workflows all depend on, so it
+must settle before the substrate work starts.
 
-- [ ] 5.1.1. Implement the host-side OTel bridge that translates a run
-  directory's `events.jsonl` into OTLP traces.
-  - See `docs/adr-003-opentelemetry-observability.md`.
-  - Map the run to a root span, phases to child spans, and agent invocations
-    to grandchild spans with task id, branch, adapter, model, and outcome
-    attributes; close dangling spans from crashed runs as `interrupted`.
-  - Support both tailing a live run and replaying a completed run directory;
-    exit without side effects when no OTLP endpoint is configured.
-  - Success: fixture tests replay a recorded `events.jsonl` and assert the
-    exported span hierarchy, attributes, and statuses deterministically.
-- [ ] 5.1.2. Emit workshop metrics from the bridge. Requires 5.1.1.
-  - See `docs/adr-003-opentelemetry-observability.md`.
-  - Cover agent invocation counts, failure and retry counts, token spend, and
-    merge-lock wait time, following OTel semantic conventions where one
-    applies.
-  - Success: fixture tests assert metric names, attribute keys, and values for
-    a recorded run.
-- [ ] 5.1.3. Document bridge operation and prove it against a real collector.
-  Requires 5.1.2.
-  - Cover configuration via `OTEL_EXPORTER_OTLP_*` variables in the user
-    guide, developer guide, and supervisor skill.
-  - Run a bounded smoke test exporting one completed run to a local collector.
-  - Success: operators can export an existing run directory end to end from
-    documentation alone.
+- [ ] 5.1.1. Define the workflow observability contract.
+  - See `docs/adr-003-opentelemetry-observability.md` sections "Identity
+    model", "Attribute namespaces and span model", and "Cross-workflow
+    contract".
+  - Cover the identity model (correlation id, workflow invocation id, node
+    attempt id, agent invocation and process ids, CLI attempt), the
+    three-layer attribute namespace (`gen_ai.*`, `leynos.*`, and
+    `df12.*`/`dakar.*`), logical node keys, the span topology, the
+    `WorkflowObservabilityContextV1` envelope, correlation headers, binding
+    confidence levels, and the metrics cardinality policy.
+  - Success: a versioned contract document plus JSON Schemas exist, and
+    fixture tests validate conforming and non-conforming envelopes and
+    identity keys deterministically.
+- [ ] 5.1.2. Implement the `workflow-telemetryd` OTLP receiver over SQLite.
+  Requires 5.1.1.
+  - See ADR 003 section "Collector and store".
+  - Accept OTLP/HTTP JSON on `/v1/traces`, `/v1/logs`, and `/v1/metrics`;
+    validate correlation headers against registered invocations; store raw
+    `otel_*` records in one transaction per batch; spool to JSONL on write
+    rejection; expose health and dropped-record counters.
+  - Success: fixture OTLP posts shaped like Claude and Codex exports land in
+    the raw tables with their bindings, and a rejected write spools and
+    replays without loss.
+- [ ] 5.1.3. Add the canonical relational projection. Requires 5.1.2.
+  - See ADR 003 section "Collector and store".
+  - Create `correlation`, `workflow_invocation`, `workflow_invocation_edge`,
+    `workflow_node_attempt`, `agent_invocation`, `agent_process`,
+    `telemetry_binding`, and `artifact`, with confidence-tagged bindings and
+    canonical `gen_ai.*` field mapping.
+  - Success: fixture ingestion yields exact-confidence joins from a node
+    attempt through agent invocations to provider spans, sessions, requests,
+    and tool calls.
+
+### 5.2. ODW correlation substrate
+
+This step answers whether ODW can generate identity at dispatch and carry it
+into agent processes. The work lands upstream in the ODW runtime, so this
+step also learns whether the ODW maintenance loop can absorb the contract
+without breaking existing workflows.
+
+- [ ] 5.2.1. Extend ODW with dispatch identity and telemetry context.
+  Requires 5.1.1.
+  - See ADR 003 sections "Identity model" and "Migration plan".
+  - Generate agent invocation and process ids and CLI attempt numbers; add
+    them to `agent_started`, `agent_finished`, and `agent_failed` events;
+    add a per-invocation environment layer to the adapter bridge; inject
+    `TRACEPARENT`/`TRACESTATE`; add a host-side `span()` primitive using
+    asynchronous context propagation, leaving `phase()` as a presentation
+    cursor.
+  - Success: an ODW run emits agent events carrying the new identifiers, and
+    a probe child process observes the injected per-invocation environment.
+
+### 5.3. Workflow and provider instrumentation
+
+This step answers whether df12-build's stages can be expressed as nodes with
+exact agent bindings, using the substrate rather than bespoke wiring.
+
+- [ ] 5.3.1. Instrument df12-build nodes with a `withNode` helper.
+  Requires 5.2.1.
+  - See ADR 003 section "Migration plan".
+  - Wrap selection and recovery decisions, worktree creation and
+    writable-root checks, plan and design-review rounds, ExecPlan work
+    items, host gates, CodeScene and CodeRabbit, review and fix rounds,
+    integration lock wait separately from integration execution, and audit,
+    triage, and assessment; write the immutable run manifest at launch;
+    express recovery lineage as span links to prior attempts.
+  - Success: a dry run produces the expected node-attempt records for each
+    stage, with parallel reviewers under one review node.
+- [ ] 5.3.2. Wire provider exporters for exact correlation. Requires 5.2.1
+  and 5.1.2.
+  - See ADR 003 section "Propagation".
+  - Claude: enable telemetry and beta traces, direct OTLP to the local
+    receiver, inherit trace context, and disable session and account metric
+    attributes. Codex: configure OTLP/HTTP JSON exporters with
+    per-invocation headers; preserve native trace ids as binding edges.
+  - Success: a bounded live smoke run shows Claude spans parented under ODW
+    `invoke_agent` spans and Codex records bound by headers at `exact`
+    confidence.
+
+### 5.4. Operator query surfaces
+
+This step answers whether the store supports the acceptance test: from one
+task id, reach every downstream execution fact without archaeology.
+
+- [ ] 5.4.1. Add query views and the `df12-obs` CLI. Requires 5.1.3 and
+  5.3.2.
+  - See ADR 003 section "Migration plan".
+  - Create `v_task_timeline`, `v_agent_usage`, `v_failure_chain`, and
+    `v_recovery_lineage`, plus CLI verbs for runs, tasks, invocations, tool
+    calls, commits, failures, and lineage.
+  - Success: from a roadmap task id an operator reaches node attempts, agent
+    invocations, provider sessions, model requests, token and cost records,
+    tool calls, errors, commits, and recovery lineage through the CLI alone.
+
+### 5.5. Cross-workflow correlation
+
+This step answers whether the contract genuinely generalizes beyond
+df12-build by carrying identity and sink through a Dakar call.
+
+- [ ] 5.5.1. Pass the observability context through Dakar calls.
+  Requires 5.1.3.
+  - See ADR 003 section "Cross-workflow contract".
+  - Add `--correlation-id`, `--telemetry-sink`, and
+    `--observability-context` to the Dakar CLI with the documented
+    precedence; propagate identity through workflow arguments and inherited
+    environment; record `workflow_invocation_edge` rows; echo resolved
+    identity and telemetry status in results and review history; preserve
+    candidate provenance by adding `sourceCandidateIds` to synthesized
+    findings.
+  - Success: a fixture query resolves a df12-build node attempt to the Dakar
+    finder and verifier invocations behind an accepted finding.
