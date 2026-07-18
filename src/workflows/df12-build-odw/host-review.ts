@@ -163,8 +163,18 @@ export function classifyDakarReview(execResult: ExecStatus): { outcome: Coderabb
   if (doc.ok === true) {
     if (doc.skipped === true || doc.verdict === 'pass') return { outcome: 'clean', findings: [], detail: '' }
     if (doc.verdict === 'changes-requested') {
-      const findings = (Array.isArray(doc.findings) ? doc.findings : []).map(mapDakarFinding)
-      return { outcome: 'findings', findings, detail: '' }
+      // A reviewer rejection must carry findings: an absent or empty array
+      // would produce zero blocking items and let the fix-round gate treat
+      // the rejection as clean, so it fails closed as an error instead.
+      const raw = Array.isArray(doc.findings) ? doc.findings : null
+      if (!raw || raw.length === 0) {
+        return {
+          outcome: 'error',
+          findings: [],
+          detail: 'Dakar returned changes-requested without any findings; refusing to treat a reviewer rejection as non-blocking',
+        }
+      }
+      return { outcome: 'findings', findings: raw.map(mapDakarFinding), detail: '' }
     }
   }
   return { outcome: 'error', findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail(doc.verdict ?? 'none', 200)})` }

@@ -130,11 +130,25 @@ describe('runDakarHostReview', () => {
   }
 
   test('unparsable stdout is an error carrying a bounded detail', async () => {
-    const { exec } = recordingExec({ ok: false, stdout: 'total garbage, no brace', stderr: 'dakar-review: fatal', message: 'spawn failed' })
+    // An oversized stderr payload must be tail-bounded, not passed through
+    // whole: the detail travels into halt records and operator logs.
+    const oversized = 'x'.repeat(50_000)
+    const { exec } = recordingExec({ ok: false, stdout: 'total garbage, no brace', stderr: oversized, message: 'spawn failed' })
     const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
     const review = await runCoderabbitHostReview('/w', 'l', { exec })
     expect(review.outcome).toBe('error')
     expect(review.detail.length).toBeGreaterThan(0)
+    expect(review.detail.length).toBeLessThanOrEqual(2_000)
+  })
+
+  test('changes-requested without findings is an error, never a silent pass', async () => {
+    // A reviewer rejection with no findings would otherwise yield zero
+    // blocking items and sail through the fix-round gate as if clean.
+    const { exec } = recordingExec({ ok: true, stdout: '{"ok":true,"verdict":"changes-requested","findings":[]}', stderr: '' })
+    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+    const review = await runCoderabbitHostReview('/w', 'l', { exec })
+    expect(review.outcome).toBe('error')
+    expect(review.detail).toContain('changes-requested')
   })
 
   test('a deferred stage backs off and retries like a CodeRabbit rate limit', async () => {
