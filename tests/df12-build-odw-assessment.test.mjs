@@ -412,7 +412,9 @@ test('CodeRabbit backoff jitter is deterministic, seeded, and range-bound', asyn
 })
 
 test('the host review loop backs off on rate limits and stops at the attempt cap', async () => {
-  const surface = await loadAssessmentSurface()
+  // This seam exercises the retained CodeRabbit NDJSON path; the default tool is
+  // now Dakar, so pin the tool to keep asserting the CodeRabbit invocation.
+  const surface = await loadAssessmentSurface({ reviewTool: 'coderabbit' })
   assert.equal(surface.CODERABBIT_HOST_REVIEW, true)
   assert.equal(surface.CODERABBIT_ATTEMPTS, 3)
 
@@ -750,8 +752,10 @@ async function runPreflightWithFakes(args, fakes) {
 }
 
 test('auth preflight consults Claude only when a stage routes to the claude adapter', async () => {
+  // reviewTool: 'coderabbit' keeps the CodeRabbit auth-status probe in the
+  // preflight; the Dakar default probes OPENAI_API_KEY instead (covered below).
   const withClaude = makeAuthBin()
-  const failures = await runPreflightWithFakes({}, withClaude)
+  const failures = await runPreflightWithFakes({ reviewTool: 'coderabbit' }, withClaude)
   assert.deepEqual(failures, [])
   assert.deepEqual(withClaude.calls(), [
     'codex login status',
@@ -761,6 +765,7 @@ test('auth preflight consults Claude only when a stage routes to the claude adap
 
   const codexOnly = makeAuthBin()
   const codexOnlyArgs = {
+    reviewTool: 'coderabbit',
     planAdapter: 'codex',
     reviewAdapter: 'codex',
     triageAdapter: 'codex',
@@ -776,11 +781,38 @@ test('auth preflight consults Claude only when a stage routes to the claude adap
 
 test('auth preflight reports a signed-out Claude as a failure', async () => {
   const fakes = makeAuthBin({ claudeOk: false })
-  const failures = await runPreflightWithFakes({}, fakes)
+  const failures = await runPreflightWithFakes({ reviewTool: 'coderabbit' }, fakes)
   assert.equal(failures.length, 1)
   assert.equal(failures[0].tool, 'claude')
   assert.equal(failures[0].command, 'claude auth status')
   assert.match(failures[0].detail, /Not logged in/)
+})
+
+test('the Dakar preflight requires a non-empty OPENAI_API_KEY and skips CodeRabbit auth', async () => {
+  const previousKey = process.env.OPENAI_API_KEY
+  try {
+    // Default tool is Dakar: an unset key fails the preflight closed, and the
+    // CodeRabbit CLI auth-status probe is never consulted.
+    delete process.env.OPENAI_API_KEY
+    const missing = makeAuthBin()
+    const missingFailures = await runPreflightWithFakes({}, missing)
+    assert.equal(missingFailures.length, 1)
+    assert.equal(missingFailures[0].tool, 'dakar')
+    assert.match(missingFailures[0].detail, /OPENAI_API_KEY/)
+    assert.ok(
+      !missing.calls().some((line) => line.startsWith('coderabbit ')),
+      'coderabbit auth must not be consulted in Dakar mode',
+    )
+
+    // A non-empty key clears the Dakar preflight.
+    process.env.OPENAI_API_KEY = 'sk-test-key'
+    const present = makeAuthBin()
+    const presentFailures = await runPreflightWithFakes({}, present)
+    assert.deepEqual(presentFailures, [])
+  } finally {
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = previousKey
+  }
 })
 
 test('normal and addendum implementations gate auth before integration', async () => {

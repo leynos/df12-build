@@ -48,6 +48,15 @@ export interface HostReviewDeps {
 
 export interface HostReviewConfig {
   base: string
+  // The host review tool. 'dakar' (the default) runs the Dakar CLI and maps its
+  // JSON verdict onto the CoderabbitReview contract; 'coderabbit' keeps the
+  // retained NDJSON path. The CoderabbitReview shape and run-task call sites are
+  // deliberately unchanged — the tool-neutral rename is a separate refactor.
+  reviewTool: 'dakar' | 'coderabbit'
+  dakarCommand: string
+  dakarTimeoutSeconds: number
+  // 0 means "omit --budget-gbp and let Dakar apply its own default budget".
+  dakarBudgetGbp: number
   coderabbitAttempts: number
   coderabbitBackoffMinutes: [number, number]
   coderabbitFindingsFile: string
@@ -55,6 +64,110 @@ export interface HostReviewConfig {
   commitGateTimeoutSeconds: number
   csCheck: boolean
   csCheckCommand: string
+}
+
+// Dakar emits ONE JSON document on stdout (not NDJSON). The document carries a
+// tri-state result: `ok` (did the run itself complete), `skipped` (nothing was
+// unreviewed), `verdict` (pass | changes-requested), and — when ok is false —
+// a `stage` plus `error`. `stage: 'deferred'` is Dakar's budget/quota backoff
+// signal, mapped onto the CodeRabbit rate-limit path so the existing host
+// backoff loop and run-task deferral handling apply verbatim.
+export interface DakarFinding extends Record<string, unknown> {
+  severity?: string
+  path?: string
+  line?: number | string
+  title?: string
+  detail?: string
+  evidence?: string
+}
+
+export interface DakarDocument extends Record<string, unknown> {
+  ok?: boolean
+  skipped?: boolean
+  verdict?: string
+  stage?: string
+  error?: string
+  findings?: DakarFinding[]
+}
+
+// Dakar severities onto the CodeRabbit severity vocabulary. critical+high map to
+// CodeRabbit's blocking critical+major (see CODERABBIT_BLOCKING_SEVERITIES), so
+// coderabbitBlockingItems blocks on exactly Dakar's critical+high. Unknown
+// severities fall through to the non-blocking 'info' bucket.
+export const DAKAR_SEVERITY_MAP: Record<string, string> = {
+  critical: 'critical',
+  high: 'major',
+  medium: 'minor',
+  low: 'trivial',
+}
+
+// Keep a bounded tail of operator/CLI-controlled text so a runaway error stream
+// cannot bloat the review detail or the durable findings sink.
+function boundedTail(text: unknown, limit = 2000): string {
+  const value = String(text || '')
+  return value.length > limit ? value.slice(-limit) : value
+}
+
+// Slice from the first '{' and parse the remainder as one JSON document; any
+// leading progress noise before the document is ignored. Returns null on a
+// missing brace or a parse failure, which the classifier reads as 'error'.
+export function parseDakarDocument(stdout: unknown): DakarDocument | null {
+  const text = String(stdout || '')
+  const start = text.indexOf('{')
+  if (start === -1) return null
+  try {
+    const doc = JSON.parse(text.slice(start))
+    return doc && typeof doc === 'object' ? (doc as DakarDocument) : null
+  } catch {
+    return null
+  }
+}
+
+export function mapDakarFinding(finding: DakarFinding): CoderabbitFinding {
+  const severity = DAKAR_SEVERITY_MAP[String(finding.severity || '').toLowerCase()] || 'info'
+  const filePath = String(finding.path || '')
+  const title = String(finding.title || '')
+  const detail = String(finding.detail || '')
+  const evidence = String(finding.evidence || '')
+  const hasLine = finding.line !== undefined && finding.line !== null && String(finding.line) !== ''
+  const locator = hasLine ? ` (${filePath}:${finding.line})` : ''
+  return {
+    type: 'finding',
+    severity,
+    fileName: filePath,
+    comment: `${title} — ${detail}${locator}`.slice(0, 2000),
+    codegenInstructions: `${detail}\nEvidence: ${evidence}`.slice(0, 2000),
+    suggestions: [],
+  }
+}
+
+// Map one Dakar run onto the single-attempt shape the shared retry loop consumes
+// ({ outcome, findings, detail }). Order matters: an unparsable/absent document
+// is an error first; then ok===false splits into deferred (rate-limited) vs a
+// stage error; then ok===true resolves skipped/pass (clean) and
+// changes-requested (findings). Any other shape fails closed as an error.
+export function classifyDakarReview(execResult: ExecStatus): { outcome: CoderabbitOutcome; findings: CoderabbitFinding[]; detail: string } {
+  const doc = parseDakarDocument(execResult.stdout)
+  if (!doc) {
+    const detail = boundedTail([execResult.stderr, execResult.message].filter(Boolean).join('\n')) || 'dakar-review produced no parsable JSON output'
+    return { outcome: 'error', findings: [], detail }
+  }
+  if (doc.ok === false) {
+    if (String(doc.stage) === 'deferred') {
+      // 'dakar' + 'deferred' markers let assessment.ts recognize this as a
+      // recoverable review deferral, mirroring the CodeRabbit rate-limit path.
+      return { outcome: 'rate-limited', findings: [], detail: `Dakar review deferred (stage: deferred) — ${boundedTail(doc.error || 'no detail')}` }
+    }
+    return { outcome: 'error', findings: [], detail: `stage: ${doc.stage ?? 'unknown'} — ${boundedTail(doc.error || 'no detail')}` }
+  }
+  if (doc.ok === true) {
+    if (doc.skipped === true || doc.verdict === 'pass') return { outcome: 'clean', findings: [], detail: '' }
+    if (doc.verdict === 'changes-requested') {
+      const findings = (Array.isArray(doc.findings) ? doc.findings : []).map(mapDakarFinding)
+      return { outcome: 'findings', findings, detail: '' }
+    }
+  }
+  return { outcome: 'error', findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail(doc.verdict ?? 'none', 200)})` }
 }
 
 // The CLI's --agent mode emits NDJSON events on stdout and exits 0 even on
@@ -173,6 +286,10 @@ export function hostGateLogPath(tag: string, roundLabel: string, index: number):
 export function makeHostReview(config: HostReviewConfig) {
   const {
     base,
+    reviewTool,
+    dakarCommand,
+    dakarTimeoutSeconds,
+    dakarBudgetGbp,
     coderabbitAttempts,
     coderabbitBackoffMinutes: backoffRange,
     coderabbitFindingsFile,
@@ -192,28 +309,64 @@ export function makeHostReview(config: HostReviewConfig) {
     return low + (hash % (high - low + 1))
   }
 
+  // One CodeRabbit attempt: exec the NDJSON --agent review and classify from the
+  // event stream (never the exit code). Detail is empty on a clean/findings
+  // outcome; otherwise it carries the first parsable error text.
+  async function runCoderabbitAttempt(worktree: string, exec: NonNullable<HostReviewDeps['exec']>): Promise<{ outcome: CoderabbitOutcome; findings: CoderabbitFinding[]; detail: string }> {
+    const result = await exec('coderabbit', ['review', '--agent', '--type', 'committed', '--base', base], { cwd: worktree })
+    const parsed = parseCoderabbitAgentOutput(result.stdout)
+    const outcome = classifyCoderabbitOutcome(result, parsed)
+    const detail = outcome === 'clean' || outcome === 'findings'
+      ? ''
+      : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join('; ') || 'coderabbit produced no parsable outcome').trim()
+    return { outcome, findings: parsed.findings, detail }
+  }
+
+  // One Dakar attempt: exec the Dakar CLI against the committed diff and map its
+  // single JSON document onto the CoderabbitReview single-attempt shape. A fresh
+  // ephemeral state root per attempt keeps the gate stateless — Dakar otherwise
+  // records reviewed heads and would skip already-seen commits across runs, so a
+  // shared state root would silently turn re-reviews into no-ops.
+  async function runDakarAttempt(worktree: string, exec: NonNullable<HostReviewDeps['exec']>): Promise<{ outcome: CoderabbitOutcome; findings: CoderabbitFinding[]; detail: string }> {
+    const fs = process.getBuiltinModule('node:fs')
+    const os = process.getBuiltinModule('node:os')
+    const path = process.getBuiltinModule('node:path')
+    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'df12-dakar-state-'))
+    const commandArgs = [
+      '--repo-root', worktree,
+      '--base', base,
+      '--state-root', stateRoot,
+      '--timeout', String(dakarTimeoutSeconds),
+      ...(dakarBudgetGbp > 0 ? ['--budget-gbp', String(dakarBudgetGbp)] : []),
+    ]
+    const result = await exec(dakarCommand, commandArgs, { cwd: worktree })
+    return classifyDakarReview(result)
+  }
+
   // Run one host review against the worktree's COMMITTED changes, absorbing
-  // rate-limit backoff in host wall-clock (zero agent tokens). Returns
-  // { outcome, attempts, findings, detail }. deps are injectable for tests.
+  // rate-limit/deferral backoff in host wall-clock (zero agent tokens). Returns
+  // { outcome, attempts, findings, detail }. The retry/backoff loop wraps BOTH
+  // tools' 'rate-limited' outcomes identically; the per-tool attempt differs
+  // only in the CLI and the parse. The tool-neutral rename of this function (and
+  // the CoderabbitReview type) is deliberately DEFERRED so run-task.ts and its
+  // tests keep calling this exact name and contract. deps are injectable for
+  // tests.
   async function runCoderabbitHostReview(worktree: string, label: string, deps: HostReviewDeps = {}): Promise<CoderabbitReview> {
     const exec = deps.exec || execFileStatus
     const sleep = deps.sleep || hostSleepMinutes
-    const commandArgs = ['review', '--agent', '--type', 'committed', '--base', base]
+    const toolName = reviewTool === 'dakar' ? 'Dakar' : 'CodeRabbit'
     for (let attempt = 1; ; attempt++) {
-      log(`[${label}] CodeRabbit host review attempt ${attempt} of ${coderabbitAttempts}`)
-      const result = await exec('coderabbit', commandArgs, { cwd: worktree })
-      const parsed = parseCoderabbitAgentOutput(result.stdout)
-      const outcome = classifyCoderabbitOutcome(result, parsed)
-      if (outcome === 'rate-limited' && attempt < coderabbitAttempts) {
+      log(`[${label}] ${toolName} host review attempt ${attempt} of ${coderabbitAttempts}`)
+      const single = reviewTool === 'dakar'
+        ? await runDakarAttempt(worktree, exec)
+        : await runCoderabbitAttempt(worktree, exec)
+      if (single.outcome === 'rate-limited' && attempt < coderabbitAttempts) {
         const minutes = coderabbitBackoffMinutes(`${label}#${attempt}`)
-        log(`[${label}] CodeRabbit rate limited; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${coderabbitAttempts} (wall-clock only, no agent tokens)`)
+        log(`[${label}] ${toolName} rate limited/deferred; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${coderabbitAttempts} (wall-clock only, no agent tokens)`)
         await sleep(minutes)
         continue
       }
-      const detail = outcome === 'clean' || outcome === 'findings'
-        ? ''
-        : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join('; ') || 'coderabbit produced no parsable outcome').trim()
-      return { outcome, attempts: attempt, findings: parsed.findings, detail }
+      return { outcome: single.outcome, attempts: attempt, findings: single.findings, detail: single.detail }
     }
   }
 

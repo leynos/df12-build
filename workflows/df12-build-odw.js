@@ -972,6 +972,14 @@ function makeConfig(rawArgs) {
     TRIAGE_ADAPTER2,
     ASSESSMENT_ADAPTER2
   ].map((adapter) => String(adapter || "").toLowerCase()));
+  const REVIEW_TOOL2 = String(cfg.reviewTool || "dakar").toLowerCase();
+  if (!["dakar", "coderabbit"].includes(REVIEW_TOOL2)) {
+    throw new Error(`Unsupported reviewTool: ${REVIEW_TOOL2} (use "dakar" or "coderabbit")`);
+  }
+  const DAKAR_COMMAND2 = String(cfg.dakarCommand || "dakar-review");
+  const DAKAR_TIMEOUT_SECONDS2 = Math.min(7200, Math.max(60, Math.trunc(Number(cfg.dakarTimeoutSeconds) || 3600)));
+  const DAKAR_BUDGET_GBP_RAW = Number(cfg.dakarBudgetGbp);
+  const DAKAR_BUDGET_GBP2 = Number.isFinite(DAKAR_BUDGET_GBP_RAW) ? Math.min(10, Math.max(0, DAKAR_BUDGET_GBP_RAW)) : 0;
   const CODERABBIT_REVIEW_COMMAND2 = cfg.coderabbitReviewCommand || "coderabbit review --agent";
   const CODERABBIT_HOST_REVIEW2 = cfg.coderabbitHostReview !== false;
   const CODERABBIT_BETWEEN_WORK_ITEMS2 = cfg.coderabbitBetweenWorkItems !== false;
@@ -1048,6 +1056,10 @@ function makeConfig(rawArgs) {
     ASSESSMENT_MODEL: ASSESSMENT_MODEL2,
     ASSESSMENT_ESCALATION_MODEL: ASSESSMENT_ESCALATION_MODEL2,
     AUTH_REQUIRED_ADAPTERS: AUTH_REQUIRED_ADAPTERS2,
+    REVIEW_TOOL: REVIEW_TOOL2,
+    DAKAR_COMMAND: DAKAR_COMMAND2,
+    DAKAR_TIMEOUT_SECONDS: DAKAR_TIMEOUT_SECONDS2,
+    DAKAR_BUDGET_GBP: DAKAR_BUDGET_GBP2,
     CODERABBIT_REVIEW_COMMAND: CODERABBIT_REVIEW_COMMAND2,
     CODERABBIT_HOST_REVIEW: CODERABBIT_HOST_REVIEW2,
     CODERABBIT_BETWEEN_WORK_ITEMS: CODERABBIT_BETWEEN_WORK_ITEMS2,
@@ -1810,12 +1822,14 @@ function isDeferredReviewIssue(issue) {
     "retry after",
     "waittime",
     "wait time",
+    "deferred",
     "deferred review",
     "deferred coderabbit review",
     "coderabbit review deferred",
     "unavailable"
   ];
-  return text.includes("coderabbit") && deferredReviewMarkers.some((marker) => text.includes(marker));
+  const namesHostReviewer = text.includes("coderabbit") || text.includes("dakar");
+  return namesHostReviewer && deferredReviewMarkers.some((marker) => text.includes(marker));
 }
 function hasOnlyDeferredReviewIssues(openIssues) {
   const issues = openIssues || [];
@@ -2075,6 +2089,66 @@ function makeRemediation({ preamble: preamble2, worktreeSafetyNet: worktreeSafet
 }
 
 // src/workflows/df12-build-odw/host-review.ts
+var DAKAR_SEVERITY_MAP = {
+  critical: "critical",
+  high: "major",
+  medium: "minor",
+  low: "trivial"
+};
+function boundedTail(text, limit = 2e3) {
+  const value = String(text || "");
+  return value.length > limit ? value.slice(-limit) : value;
+}
+function parseDakarDocument(stdout) {
+  const text = String(stdout || "");
+  const start = text.indexOf("{");
+  if (start === -1) return null;
+  try {
+    const doc = JSON.parse(text.slice(start));
+    return doc && typeof doc === "object" ? doc : null;
+  } catch {
+    return null;
+  }
+}
+function mapDakarFinding(finding) {
+  const severity = DAKAR_SEVERITY_MAP[String(finding.severity || "").toLowerCase()] || "info";
+  const filePath = String(finding.path || "");
+  const title = String(finding.title || "");
+  const detail = String(finding.detail || "");
+  const evidence = String(finding.evidence || "");
+  const hasLine = finding.line !== void 0 && finding.line !== null && String(finding.line) !== "";
+  const locator = hasLine ? ` (${filePath}:${finding.line})` : "";
+  return {
+    type: "finding",
+    severity,
+    fileName: filePath,
+    comment: `${title} \u2014 ${detail}${locator}`.slice(0, 2e3),
+    codegenInstructions: `${detail}
+Evidence: ${evidence}`.slice(0, 2e3),
+    suggestions: []
+  };
+}
+function classifyDakarReview(execResult) {
+  const doc = parseDakarDocument(execResult.stdout);
+  if (!doc) {
+    const detail = boundedTail([execResult.stderr, execResult.message].filter(Boolean).join("\n")) || "dakar-review produced no parsable JSON output";
+    return { outcome: "error", findings: [], detail };
+  }
+  if (doc.ok === false) {
+    if (String(doc.stage) === "deferred") {
+      return { outcome: "rate-limited", findings: [], detail: `Dakar review deferred (stage: deferred) \u2014 ${boundedTail(doc.error || "no detail")}` };
+    }
+    return { outcome: "error", findings: [], detail: `stage: ${doc.stage ?? "unknown"} \u2014 ${boundedTail(doc.error || "no detail")}` };
+  }
+  if (doc.ok === true) {
+    if (doc.skipped === true || doc.verdict === "pass") return { outcome: "clean", findings: [], detail: "" };
+    if (doc.verdict === "changes-requested") {
+      const findings = (Array.isArray(doc.findings) ? doc.findings : []).map(mapDakarFinding);
+      return { outcome: "findings", findings, detail: "" };
+    }
+  }
+  return { outcome: "error", findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail(doc.verdict ?? "none", 200)})` };
+}
 function parseCoderabbitAgentOutput(stdout) {
   const events = [];
   const rawLines = [];
@@ -2137,6 +2211,10 @@ function hostGateLogPath(tag, roundLabel, index) {
 function makeHostReview(config) {
   const {
     base,
+    reviewTool,
+    dakarCommand,
+    dakarTimeoutSeconds,
+    dakarBudgetGbp,
     coderabbitAttempts,
     coderabbitBackoffMinutes: backoffRange,
     coderabbitFindingsFile,
@@ -2151,23 +2229,46 @@ function makeHostReview(config) {
     const [low, high] = backoffRange;
     return low + hash % (high - low + 1);
   }
+  async function runCoderabbitAttempt(worktree, exec) {
+    const result = await exec("coderabbit", ["review", "--agent", "--type", "committed", "--base", base], { cwd: worktree });
+    const parsed = parseCoderabbitAgentOutput(result.stdout);
+    const outcome = classifyCoderabbitOutcome(result, parsed);
+    const detail = outcome === "clean" || outcome === "findings" ? "" : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join("; ") || "coderabbit produced no parsable outcome").trim();
+    return { outcome, findings: parsed.findings, detail };
+  }
+  async function runDakarAttempt(worktree, exec) {
+    const fs = process.getBuiltinModule("node:fs");
+    const os = process.getBuiltinModule("node:os");
+    const path = process.getBuiltinModule("node:path");
+    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "df12-dakar-state-"));
+    const commandArgs = [
+      "--repo-root",
+      worktree,
+      "--base",
+      base,
+      "--state-root",
+      stateRoot,
+      "--timeout",
+      String(dakarTimeoutSeconds),
+      ...dakarBudgetGbp > 0 ? ["--budget-gbp", String(dakarBudgetGbp)] : []
+    ];
+    const result = await exec(dakarCommand, commandArgs, { cwd: worktree });
+    return classifyDakarReview(result);
+  }
   async function runCoderabbitHostReview2(worktree, label, deps = {}) {
     const exec = deps.exec || execFileStatus;
     const sleep = deps.sleep || hostSleepMinutes;
-    const commandArgs = ["review", "--agent", "--type", "committed", "--base", base];
+    const toolName = reviewTool === "dakar" ? "Dakar" : "CodeRabbit";
     for (let attempt = 1; ; attempt++) {
-      log(`[${label}] CodeRabbit host review attempt ${attempt} of ${coderabbitAttempts}`);
-      const result = await exec("coderabbit", commandArgs, { cwd: worktree });
-      const parsed = parseCoderabbitAgentOutput(result.stdout);
-      const outcome = classifyCoderabbitOutcome(result, parsed);
-      if (outcome === "rate-limited" && attempt < coderabbitAttempts) {
+      log(`[${label}] ${toolName} host review attempt ${attempt} of ${coderabbitAttempts}`);
+      const single = reviewTool === "dakar" ? await runDakarAttempt(worktree, exec) : await runCoderabbitAttempt(worktree, exec);
+      if (single.outcome === "rate-limited" && attempt < coderabbitAttempts) {
         const minutes = coderabbitBackoffMinutes2(`${label}#${attempt}`);
-        log(`[${label}] CodeRabbit rate limited; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${coderabbitAttempts} (wall-clock only, no agent tokens)`);
+        log(`[${label}] ${toolName} rate limited/deferred; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${coderabbitAttempts} (wall-clock only, no agent tokens)`);
         await sleep(minutes);
         continue;
       }
-      const detail = outcome === "clean" || outcome === "findings" ? "" : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join("; ") || "coderabbit produced no parsable outcome").trim();
-      return { outcome, attempts: attempt, findings: parsed.findings, detail };
+      return { outcome: single.outcome, attempts: attempt, findings: single.findings, detail: single.detail };
     }
   }
   async function recordCoderabbitReview2(label, review) {
@@ -3062,6 +3163,10 @@ var {
   ASSESSMENT_MODEL,
   ASSESSMENT_ESCALATION_MODEL,
   AUTH_REQUIRED_ADAPTERS,
+  REVIEW_TOOL,
+  DAKAR_COMMAND,
+  DAKAR_TIMEOUT_SECONDS,
+  DAKAR_BUDGET_GBP,
   CODERABBIT_REVIEW_COMMAND,
   CODERABBIT_HOST_REVIEW,
   CODERABBIT_BETWEEN_WORK_ITEMS,
@@ -3160,6 +3265,10 @@ var {
   runCodeSceneCheck
 } = makeHostReview({
   base: BASE,
+  reviewTool: REVIEW_TOOL,
+  dakarCommand: DAKAR_COMMAND,
+  dakarTimeoutSeconds: DAKAR_TIMEOUT_SECONDS,
+  dakarBudgetGbp: DAKAR_BUDGET_GBP,
   coderabbitAttempts: CODERABBIT_ATTEMPTS,
   coderabbitBackoffMinutes: CODERABBIT_BACKOFF_MINUTES,
   coderabbitFindingsFile: CODERABBIT_FINDINGS_FILE,
@@ -3193,14 +3302,25 @@ async function runAuthPreflight() {
     }
   }
   if (REQUIRE_CODERABBIT_AUTH) {
-    const coderabbit = await execFileStatus("coderabbit", ["auth", "status"]);
-    const coderabbitOutput = [coderabbit.stdout, coderabbit.stderr, coderabbit.message].filter(Boolean).join("\n");
-    if (!coderabbit.ok || authFailureDetail(coderabbitOutput)) {
-      failures.push({
-        tool: "coderabbit",
-        command: "coderabbit auth status",
-        detail: authFailureDetail(coderabbitOutput) || coderabbitOutput.trim() || "CodeRabbit auth status check failed"
-      });
+    if (REVIEW_TOOL === "dakar") {
+      const openaiKey = process.env.OPENAI_API_KEY;
+      if (typeof openaiKey !== "string" || openaiKey.trim() === "") {
+        failures.push({
+          tool: "dakar",
+          command: "OPENAI_API_KEY (env)",
+          detail: "OPENAI_API_KEY is unset or empty; the Dakar host review needs it to reach the OpenAI-backed reviewer"
+        });
+      }
+    } else {
+      const coderabbit = await execFileStatus("coderabbit", ["auth", "status"]);
+      const coderabbitOutput = [coderabbit.stdout, coderabbit.stderr, coderabbit.message].filter(Boolean).join("\n");
+      if (!coderabbit.ok || authFailureDetail(coderabbitOutput)) {
+        failures.push({
+          tool: "coderabbit",
+          command: "coderabbit auth status",
+          detail: authFailureDetail(coderabbitOutput) || coderabbitOutput.trim() || "CodeRabbit auth status check failed"
+        });
+      }
     }
   }
   if (failures.length) {
@@ -3208,7 +3328,7 @@ async function runAuthPreflight() {
   } else {
     const passed = ["Codex"];
     if (AUTH_REQUIRED_ADAPTERS.has("claude")) passed.push("Claude");
-    if (REQUIRE_CODERABBIT_AUTH) passed.push("CodeRabbit");
+    if (REQUIRE_CODERABBIT_AUTH) passed.push(REVIEW_TOOL === "dakar" ? "Dakar (OPENAI_API_KEY)" : "CodeRabbit");
     log(`[auth] preflight passed for ${passed.join(", ")}`);
   }
   return failures;

@@ -53,6 +53,10 @@ export interface RawWorkflowArgs {
   triageEscalationModel?: string
   assessmentModel?: string
   assessmentEscalationModel?: string
+  reviewTool?: string
+  dakarCommand?: string
+  dakarTimeoutSeconds?: number | string
+  dakarBudgetGbp?: number | string
   coderabbitReviewCommand?: string
   coderabbitHostReview?: boolean
   coderabbitBetweenWorkItems?: boolean
@@ -114,6 +118,10 @@ export interface WorkflowConfig {
   ASSESSMENT_MODEL: string
   ASSESSMENT_ESCALATION_MODEL: string
   AUTH_REQUIRED_ADAPTERS: Set<string>
+  REVIEW_TOOL: 'dakar' | 'coderabbit'
+  DAKAR_COMMAND: string
+  DAKAR_TIMEOUT_SECONDS: number
+  DAKAR_BUDGET_GBP: number
   CODERABBIT_REVIEW_COMMAND: string
   CODERABBIT_HOST_REVIEW: boolean
   CODERABBIT_BETWEEN_WORK_ITEMS: boolean
@@ -219,6 +227,22 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     TRIAGE_ADAPTER,
     ASSESSMENT_ADAPTER,
   ].map((adapter) => String(adapter || '').toLowerCase()))
+  // The host review tool. Dakar is the default gate; CodeRabbit stays
+  // selectable for the retained NDJSON wire contract. An unrecognized value
+  // throws rather than silently defaulting — the tool choice governs which CLI
+  // and which auth the run depends on, so a typo must fail loudly (mirroring
+  // the RESUME_MODE guard above).
+  const REVIEW_TOOL = String(cfg.reviewTool || 'dakar').toLowerCase()
+  if (!['dakar', 'coderabbit'].includes(REVIEW_TOOL)) {
+    throw new Error(`Unsupported reviewTool: ${REVIEW_TOOL} (use "dakar" or "coderabbit")`)
+  }
+  // Dakar host-review knobs. The command is the CLI entry point on PATH; the
+  // timeout bounds one review run; the budget is passed through only when set
+  // (0 leaves Dakar to apply its own default budget).
+  const DAKAR_COMMAND = String(cfg.dakarCommand || 'dakar-review')
+  const DAKAR_TIMEOUT_SECONDS = Math.min(7200, Math.max(60, Math.trunc(Number(cfg.dakarTimeoutSeconds) || 3600)))
+  const DAKAR_BUDGET_GBP_RAW = Number(cfg.dakarBudgetGbp)
+  const DAKAR_BUDGET_GBP = Number.isFinite(DAKAR_BUDGET_GBP_RAW) ? Math.min(10, Math.max(0, DAKAR_BUDGET_GBP_RAW)) : 0
   // LEGACY (agent-run) mode ONLY: the command the build/fix prompts tell the
   // agent to invoke when coderabbitHostReview=false. In host-review mode the
   // control loop runs a FIXED committed-diff invocation
@@ -342,6 +366,10 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     ASSESSMENT_MODEL,
     ASSESSMENT_ESCALATION_MODEL,
     AUTH_REQUIRED_ADAPTERS,
+    REVIEW_TOOL: REVIEW_TOOL as 'dakar' | 'coderabbit',
+    DAKAR_COMMAND,
+    DAKAR_TIMEOUT_SECONDS,
+    DAKAR_BUDGET_GBP,
     CODERABBIT_REVIEW_COMMAND,
     CODERABBIT_HOST_REVIEW,
     CODERABBIT_BETWEEN_WORK_ITEMS,

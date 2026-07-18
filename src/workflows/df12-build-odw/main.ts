@@ -168,6 +168,10 @@ const {
   ASSESSMENT_MODEL,
   ASSESSMENT_ESCALATION_MODEL,
   AUTH_REQUIRED_ADAPTERS,
+  REVIEW_TOOL,
+  DAKAR_COMMAND,
+  DAKAR_TIMEOUT_SECONDS,
+  DAKAR_BUDGET_GBP,
   CODERABBIT_REVIEW_COMMAND,
   CODERABBIT_HOST_REVIEW,
   CODERABBIT_BETWEEN_WORK_ITEMS,
@@ -289,6 +293,10 @@ const {
   runCodeSceneCheck,
 } = makeHostReview({
   base: BASE,
+  reviewTool: REVIEW_TOOL,
+  dakarCommand: DAKAR_COMMAND,
+  dakarTimeoutSeconds: DAKAR_TIMEOUT_SECONDS,
+  dakarBudgetGbp: DAKAR_BUDGET_GBP,
   coderabbitAttempts: CODERABBIT_ATTEMPTS,
   coderabbitBackoffMinutes: CODERABBIT_BACKOFF_MINUTES,
   coderabbitFindingsFile: CODERABBIT_FINDINGS_FILE,
@@ -328,15 +336,31 @@ async function runAuthPreflight() {
     }
   }
 
+  // The host review preflight is gated by the same REQUIRE_CODERABBIT_AUTH flag
+  // regardless of tool (the flag name is CodeRabbit-specific for historical
+  // reasons; it means "the run needs a working host reviewer"). Dakar reviews
+  // via `pi`/OpenAI, so its preflight is a host check that OPENAI_API_KEY is a
+  // non-empty string rather than a CLI auth-status probe.
   if (REQUIRE_CODERABBIT_AUTH) {
-    const coderabbit = await execFileStatus('coderabbit', ['auth', 'status'])
-    const coderabbitOutput = [coderabbit.stdout, coderabbit.stderr, coderabbit.message].filter(Boolean).join('\n')
-    if (!coderabbit.ok || authFailureDetail(coderabbitOutput)) {
-      failures.push({
-        tool: 'coderabbit',
-        command: 'coderabbit auth status',
-        detail: authFailureDetail(coderabbitOutput) || coderabbitOutput.trim() || 'CodeRabbit auth status check failed',
-      })
+    if (REVIEW_TOOL === 'dakar') {
+      const openaiKey = process.env.OPENAI_API_KEY
+      if (typeof openaiKey !== 'string' || openaiKey.trim() === '') {
+        failures.push({
+          tool: 'dakar',
+          command: 'OPENAI_API_KEY (env)',
+          detail: 'OPENAI_API_KEY is unset or empty; the Dakar host review needs it to reach the OpenAI-backed reviewer',
+        })
+      }
+    } else {
+      const coderabbit = await execFileStatus('coderabbit', ['auth', 'status'])
+      const coderabbitOutput = [coderabbit.stdout, coderabbit.stderr, coderabbit.message].filter(Boolean).join('\n')
+      if (!coderabbit.ok || authFailureDetail(coderabbitOutput)) {
+        failures.push({
+          tool: 'coderabbit',
+          command: 'coderabbit auth status',
+          detail: authFailureDetail(coderabbitOutput) || coderabbitOutput.trim() || 'CodeRabbit auth status check failed',
+        })
+      }
     }
   }
 
@@ -345,7 +369,7 @@ async function runAuthPreflight() {
   } else {
     const passed = ['Codex']
     if (AUTH_REQUIRED_ADAPTERS.has('claude')) passed.push('Claude')
-    if (REQUIRE_CODERABBIT_AUTH) passed.push('CodeRabbit')
+    if (REQUIRE_CODERABBIT_AUTH) passed.push(REVIEW_TOOL === 'dakar' ? 'Dakar (OPENAI_API_KEY)' : 'CodeRabbit')
     log(`[auth] preflight passed for ${passed.join(', ')}`)
   }
 
