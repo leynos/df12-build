@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://df12.dev/schemas/observability/workflow-observability-context.v1.json",
+  "title": "WorkflowObservabilityContextV1",
+  "description": "The envelope one workflow passes to another so the child's telemetry joins the parent's correlation. See docs/workflow-observability-contract.md section 6.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "correlationId"],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "correlationId": {
+      "$ref": "#/$defs/identifier"
+    },
+    "workflowInvocationId": {
+      "$ref": "#/$defs/identifier"
+    },
+    "parent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflowInvocationId", "nodeAttemptId"],
+      "properties": {
+        "workflowInvocationId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "nodeAttemptId": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["traceparent"],
+      "properties": {
+        "traceparent": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+        },
+        "tracestate": {
+          "type": "string"
+        }
+      }
+    },
+    "sink": {
+      "$ref": "#/$defs/sink"
+    },
+    "attributes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["string", "number", "boolean"]
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "endpoint", "protocol"],
+      "properties": {
+        "kind": {
+          "const": "otlp-http"
+        },
+        "endpoint": {
+          "type": "string",
+          "pattern": "^otlp\\+https?://"
+        },
+        "protocol": {
+          "const": "http/json"
+        },
+        "authRef": {
+          "$ref": "#/$defs/authRef"
+        }
+      }
+    },
+    "authRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "variable"],
+      "properties": {
+        "kind": {
+          "const": "environment"
+        },
+        "variable": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        }
+      }
+    }
+  }
+}

@@ -23,6 +23,9 @@ workflow assets, or understanding why the system is shaped the way it is.
   structure, and configuration contract of the ODW workflow.
 - [Failure resume design](failure-resume-design.md): explains how the workflow
   assesses surviving task branches and resumes work after interruption.
+- [Workflow observability contract](workflow-observability-contract.md): the
+  normative version-1 identity model, attribute registry, envelope, headers,
+  and binding schemas that the observability fabric builds against.
 - [Security and permissions](security-and-permissions.md): sets out the
   capabilities a workshop can exercise and how they are constrained.
 - [ODW compilation and compile-time testing](odw-compilation-and-compile-time-testing.md):
@@ -41,6 +44,10 @@ workflow assets, or understanding why the system is shaped the way it is.
 - [ADR 002: Assess partial task branches](adr-002-assess-partial-task-branches.md):
   records the decision to assess surviving task branches before a fresh
   restart.
+- [ADR 003: Correlation-first OpenTelemetry observability](adr-003-opentelemetry-observability.md):
+  records the proposed decision to correlate workflow nodes and agent
+  telemetry through dispatch-time identity, a local OTLP collector, and a
+  SQLite store.
 
 ## Plans
 
@@ -50,3 +57,5 @@ workflow assets, or understanding why the system is shaped the way it is.
     the plan behind the partial-branch assessment behaviour.
   - [ODW compilation](execplans/odw-compilation.md): the plan behind the
     compile-time testing and artefact build.
+  - [Workflow observability contract (5.1.1)](execplans/5-1-1-otel-support.md):
+    the plan for defining the identity and schema contract behind ADR 003.

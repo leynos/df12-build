@@ -1,0 +1,355 @@
+{
+  "_comment": "Fixtures for tests/modules/observability-contract.test.ts. Each case exercises one rule of docs/workflow-observability-contract.md. camelCase envelope fields, snake_case binding and event fields (see contract section 3).",
+  "contexts": {
+    "valid": [
+      {
+        "name": "full parent context with trace and sink",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000001",
+          "workflowInvocationId": "0198e5a1-0000-7000-8000-0000000000c1",
+          "parent": {
+            "workflowInvocationId": "0198e5a1-0000-7000-8000-0000000000d1",
+            "nodeAttemptId": "0198e5a1-0000-7000-8000-0000000000e1"
+          },
+          "trace": {
+            "traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            "tracestate": "df12=1"
+          },
+          "sink": {
+            "kind": "otlp-http",
+            "endpoint": "otlp+http://127.0.0.1:4318",
+            "protocol": "http/json",
+            "authRef": {
+              "kind": "environment",
+              "variable": "LEYNOS_TELEMETRY_TOKEN"
+            }
+          },
+          "attributes": {
+            "df12.task.kind": "normal",
+            "resumed": false
+          }
+        }
+      },
+      {
+        "name": "minimal correlation only",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000002"
+        }
+      },
+      {
+        "name": "sink absent, telemetry disabled",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000003",
+          "workflowInvocationId": "0198e5a1-0000-7000-8000-0000000000c3",
+          "attributes": {
+            "leynos.workflow.name": "dakar-review"
+          }
+        }
+      },
+      {
+        "name": "https sink over otlp scheme",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000004",
+          "sink": {
+            "kind": "otlp-http",
+            "endpoint": "otlp+https://collector.internal:4318",
+            "protocol": "http/json"
+          }
+        }
+      }
+    ],
+    "invalid": [
+      {
+        "name": "missing schemaVersion",
+        "value": {
+          "correlationId": "0198e5a1-0000-7000-8000-000000000010"
+        }
+      },
+      {
+        "name": "wrong schemaVersion",
+        "value": {
+          "schemaVersion": 2,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000011"
+        }
+      },
+      {
+        "name": "missing correlationId",
+        "value": {
+          "schemaVersion": 1,
+          "workflowInvocationId": "0198e5a1-0000-7000-8000-0000000000c1"
+        }
+      },
+      {
+        "name": "inline credential smuggled into sink",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000012",
+          "sink": {
+            "kind": "otlp-http",
+            "endpoint": "otlp+http://127.0.0.1:4318",
+            "protocol": "http/json",
+            "token": "s3cr3t-bearer-token"
+          }
+        }
+      },
+      {
+        "name": "inline credential via non-environment authRef",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000013",
+          "sink": {
+            "kind": "otlp-http",
+            "endpoint": "otlp+http://127.0.0.1:4318",
+            "protocol": "http/json",
+            "authRef": {
+              "kind": "inline",
+              "value": "s3cr3t"
+            }
+          }
+        }
+      },
+      {
+        "name": "database path sink",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000014",
+          "sink": {
+            "kind": "otlp-http",
+            "endpoint": "file:///project.workshop/observability/telemetry.sqlite3",
+            "protocol": "http/json"
+          }
+        }
+      },
+      {
+        "name": "bare http sink without otlp scheme",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000015",
+          "sink": {
+            "kind": "otlp-http",
+            "endpoint": "http://127.0.0.1:4318",
+            "protocol": "http/json"
+          }
+        }
+      },
+      {
+        "name": "unknown top-level envelope field",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000016",
+          "sinkEndpoint": "otlp+http://127.0.0.1:4318"
+        }
+      },
+      {
+        "name": "parent missing nodeAttemptId",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000017",
+          "parent": {
+            "workflowInvocationId": "0198e5a1-0000-7000-8000-0000000000d1"
+          }
+        }
+      },
+      {
+        "name": "malformed traceparent",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000018",
+          "trace": {
+            "traceparent": "not-a-w3c-traceparent"
+          }
+        }
+      },
+      {
+        "name": "non-scalar attribute value",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000019",
+          "attributes": {
+            "nested": { "not": "scalar" }
+          }
+        }
+      }
+    ]
+  },
+  "bindings": {
+    "valid": [
+      {
+        "name": "exact otlp-header binding",
+        "value": {
+          "binding_type": "codex.conversation_id",
+          "binding_value": "conv_01HXYZ",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a1",
+          "agent_process_id": "0198e5a1-0000-7000-8000-0000000000b1",
+          "source": "otlp-header",
+          "confidence": "exact",
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000500000000"
+        }
+      },
+      {
+        "name": "exact trace-context binding with span",
+        "value": {
+          "binding_type": "claude.session.id",
+          "binding_value": "sess_abcdef",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a2",
+          "trace_id": "0af7651916cd43dd8448eb211c80319c",
+          "span_id": "b7ad6b7169203331",
+          "source": "trace-context",
+          "confidence": "exact",
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
+        }
+      },
+      {
+        "name": "heuristic events-jsonl import",
+        "value": {
+          "binding_type": "vcs.commit",
+          "binding_value": "abc1234",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a3",
+          "source": "events-jsonl",
+          "confidence": "heuristic",
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
+        }
+      }
+    ],
+    "invalid": [
+      {
+        "name": "unknown confidence value",
+        "value": {
+          "binding_type": "claude.session.id",
+          "binding_value": "sess_abcdef",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a4",
+          "source": "otlp-header",
+          "confidence": "probable",
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
+        }
+      },
+      {
+        "name": "events-jsonl must not be exact",
+        "value": {
+          "binding_type": "claude.session.id",
+          "binding_value": "sess_abcdef",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a5",
+          "source": "events-jsonl",
+          "confidence": "exact",
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
+        }
+      },
+      {
+        "name": "otlp-header must not be heuristic",
+        "value": {
+          "binding_type": "claude.session.id",
+          "binding_value": "sess_abcdef",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a6",
+          "source": "otlp-header",
+          "confidence": "heuristic",
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
+        }
+      },
+      {
+        "name": "non-namespaced binding_type",
+        "value": {
+          "binding_type": "session",
+          "binding_value": "sess_abcdef",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a7",
+          "source": "otlp-header",
+          "confidence": "exact",
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
+        }
+      },
+      {
+        "name": "malformed trace_id length",
+        "value": {
+          "binding_type": "claude.session.id",
+          "binding_value": "sess_abcdef",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a8",
+          "trace_id": "deadbeef",
+          "source": "trace-context",
+          "confidence": "exact",
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
+        }
+      },
+      {
+        "name": "missing agent_invocation_id",
+        "value": {
+          "binding_type": "claude.session.id",
+          "binding_value": "sess_abcdef",
+          "source": "otlp-header",
+          "confidence": "exact",
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
+        }
+      }
+    ]
+  },
+  "agentEvents": {
+    "valid": [
+      {
+        "name": "enriched agent_finished event",
+        "value": {
+          "label": "plan:1.2.3 r1",
+          "phase": "Plan",
+          "adapter": "codex",
+          "run_id": "0198e5a1-0000-7000-8000-000000000f01",
+          "node_attempt_id": "0198e5a1-0000-7000-8000-000000000f02",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-000000000f03",
+          "agent_process_id": "0198e5a1-0000-7000-8000-000000000f04",
+          "cli_attempt": 1
+        }
+      }
+    ],
+    "invalid": [
+      {
+        "name": "missing agent_invocation_id",
+        "value": {
+          "run_id": "0198e5a1-0000-7000-8000-000000000f11",
+          "node_attempt_id": "0198e5a1-0000-7000-8000-000000000f12",
+          "agent_process_id": "0198e5a1-0000-7000-8000-000000000f14",
+          "cli_attempt": 1
+        }
+      },
+      {
+        "name": "cli_attempt below one",
+        "value": {
+          "run_id": "0198e5a1-0000-7000-8000-000000000f21",
+          "node_attempt_id": "0198e5a1-0000-7000-8000-000000000f22",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-000000000f23",
+          "agent_process_id": "0198e5a1-0000-7000-8000-000000000f24",
+          "cli_attempt": 0
+        }
+      }
+    ]
+  },
+  "nodeKeys": {
+    "valid": [
+      "task/1.2.3/normal/plan/round/1",
+      "task/1.2.3/normal/implement/work-item/7c29e8a1",
+      "task/1.2.3/normal/review/round/2/code-review",
+      "task/1.2.3/normal/integrate",
+      "recovery/roadmap-1.2.3/assess",
+      "audit/run/triage"
+    ],
+    "invalid": [
+      "task//plan",
+      "/task/1.2.3",
+      "task/1.2.3/",
+      "Task/1.2.3",
+      "task",
+      "task/1.2.3/plan round/1",
+      "task/1.2.3//integrate",
+      "task/-leading/segment",
+      "task/trailing-/segment"
+    ]
+  }
+}
