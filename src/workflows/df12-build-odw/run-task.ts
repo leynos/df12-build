@@ -1,5 +1,5 @@
 /**
- * @file Shared pipeline stages and the per-task pipeline — used by the
+ * Shared pipeline stages and the per-task pipeline — used by the
  * normal task lane and by continue-mode recovery resume, so a resumed
  * branch runs through exactly the same planning loop, design review,
  * implementation contract, reviewers, and integration path as ordinary
@@ -8,6 +8,8 @@
  * The run wiring (config caps, prompt builders, adapter options, stage
  * locks, retry, assessment, write gate, worktree creation) binds once via
  * makeTaskPipeline.
+ *
+ * @module
  */
 import { fileState } from './exec.ts'
 import {
@@ -71,9 +73,9 @@ export interface StageImpl extends Record<string, unknown> {
   summary?: string
   /** Issues the agent left open, deduplicated and bounded by the caller. */
   openIssues?: string[]
-  // Advisory, non-blocking residual risk carried forward from an ADR 002
-  // recovery assessment; rendered as review/integration context only (#23).
+  /** Advisory caveats carried into review and integration without blocking resume. */
   residualRisk?: string[]
+  /** Count of ExecPlan Progress items ticked, for the aggregate build report. */
   workItemsCompleted?: unknown
   /** Total Progress items in the committed ExecPlan checklist. */
   workItemsTotal?: unknown
@@ -110,7 +112,16 @@ interface DesignVerdict extends Record<string, unknown> {
  * callers can attach further context (proposals, review rounds, an
  * assessment, and so on) without a separate type per stage.
  */
-export type StageResult = Record<string, unknown> & { id: string; status: string; stage?: string; detail?: string }
+export type StageResult = Record<string, unknown> & {
+  /** Roadmap task id this result belongs to. */
+  id: string
+  /** Machine-readable outcome used by the control loop. */
+  status: string
+  /** Pipeline stage that produced the outcome, for resume routing. */
+  stage?: string
+  /** Human-readable failure or halt reason. */
+  detail?: string
+}
 
 type Lock = <T>(fn: () => Promise<T>) => Promise<T>
 type MergeLock = (<T>(fn: () => Promise<T>) => Promise<T>) | null
@@ -159,12 +170,17 @@ export interface TaskPipelineDeps {
   implementWorkItemPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, item: { text: string }, opts?: Record<string, unknown>) => string
   /** Builds the fix prompt for a set of blocking items at the live round. */
   fixPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, blocking: string[], round: number) => string
+  /** Builds the code-review prompt, including advisory implementation context. */
   codeReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, impl?: StageImpl | null) => string
+  /** Builds the expert-review prompt, including advisory implementation context. */
   expertReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, impl?: StageImpl | null) => string
+  /** Builds the fallback review prompt for an addendum implementation. */
   addendumReviewPrompt: (task: SelectedTask, worktree: string, impl: StageImpl | null) => string
   /** Builds the addendum-lane implementation prompt. */
   implementAddendumPrompt: (task: SelectedTask, worktree: string) => string
+  /** Builds the rebase, squash-merge, and push prompt for integration. */
   integratePrompt: (task: SelectedTask, worktree: string, impl?: StageImpl | null) => string
+  /** Shapes adapter options for planner turns. */
   planAgentOptions: AgentOptions
   /** Shapes adapter options for reviewer turns. */
   reviewAgentOptions: AgentOptions

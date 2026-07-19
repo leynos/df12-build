@@ -71,6 +71,7 @@ export interface RecoveryAssessmentFields {
   validation?: string
   /** Evidence the agent could not produce; a non-empty list disqualifies resume. */
   missingEvidence?: readonly string[]
+  /** Advisory caveats carried into review and integration without blocking resume. */
   residualRisk: readonly string[]
 }
 
@@ -194,7 +195,12 @@ export const TASK_BRANCH_RE = /^roadmap-((?:\d+-)*\d+)(-addendum)?$/
  * @returns The dotted roadmap `id` and `isAddendum` flag, or `null` when the
  *   branch does not match {@link TASK_BRANCH_RE}.
  */
-export function branchToRoadmapId(branch: unknown): { id: string; isAddendum: boolean } | null {
+export function branchToRoadmapId(branch: unknown): {
+  /** Dotted roadmap task id, for example `1.2.3`. */
+  id: string
+  /** Whether the branch carried the `-addendum` suffix. */
+  isAddendum: boolean
+} | null {
   const match = TASK_BRANCH_RE.exec(String(branch || ''))
   if (!match) return null
   return { id: match[1].replace(/-/g, '.'), isAddendum: Boolean(match[2]) }

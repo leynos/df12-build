@@ -305,9 +305,9 @@ export async function syntheticRecoveryImpl(
       'recovered branch requires fresh review',
       ...(resolved.error ? [`could not verify the durable ExecPlan: ${resolved.error}`] : []),
     ],
-    // Advisory, non-blocking caveats the assessment carried forward: surfaced to
-    // the resumed reviewer/integrator without downgrading adopt-complete (#23).
+    /** Advisory caveats carried into review and integration without blocking resume. */
     residualRisk: [...(residualRisk || [])],
+    /** Human-readable note that the result was reconstructed from durable git state. */
     summary: 'Recovered adopt-complete branch from durable git state.',
   }
 }
