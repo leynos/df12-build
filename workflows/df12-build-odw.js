@@ -967,8 +967,12 @@ function makeConfig(rawArgs) {
   const STAGE_ATTEMPTS2 = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2));
   const parseBoundedRange = (raw, defaultLow, defaultHigh) => {
     const range = Array.isArray(raw) ? raw : [];
-    const low = Math.max(1, Math.trunc(Number(range[0]) || defaultLow));
-    const high = Math.max(low, Math.trunc(Number(range[1]) || defaultHigh));
+    const bound = (value, fallback) => {
+      const parsed = Number(value);
+      return Math.trunc(Number.isFinite(parsed) && parsed ? parsed : fallback);
+    };
+    const low = Math.max(1, bound(range[0], defaultLow));
+    const high = Math.max(low, bound(range[1], defaultHigh));
     return [low, high];
   };
   const INFRA_RETRY_BACKOFF_SECONDS2 = parseBoundedRange(cfg.infraRetryBackoffSeconds, 5, 30);

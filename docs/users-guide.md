@@ -455,8 +455,8 @@ Common arguments:
   `429`/`529`, an overloaded model, or a gateway timeout). Defaults to `2`.
   Infrastructure faults are retried immediately; provider faults wait a bounded
   backoff (`infraRetryBackoffSeconds`) before each re-run. Product failures are
-  never retried, and the host never re-dispatches a faulted integration stage: a
-  crash between the squash push and the agent's return can leave a hidden
+  never retried, and the host never re-dispatches a faulted integration stage:
+  a crash between the squash push and the agent's return can leave a hidden
   success already landed on `origin/<base>`, which the host cannot detect, so
   repeating the stage risks a double merge. (The integration agent still redoes
   its own squash idempotently on a non-fast-forward push rejection within a
