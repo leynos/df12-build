@@ -1,5 +1,8 @@
 # df12-build
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](
+https://deepwiki.com/leynos/df12-build)
+
 *Happy robots build happy code!*
 
 `df12-build` is the workflow and operator-guidance home for df12-style roadmap
