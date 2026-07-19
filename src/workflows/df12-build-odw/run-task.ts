@@ -41,6 +41,20 @@ import {
 } from './schemas.ts'
 import type { FaultMetrics, SelectedTask } from './types.ts'
 
+
+/**
+ * Shared pipeline stages and the per-task pipeline — used by the
+ * normal task lane and by continue-mode recovery resume, so a resumed
+ * implementation contract, reviewers, and integration path as ordinary
+ * work. Each stage helper returns { fail } (an unassessed result object)
+ * or its stage product; callers decide whether to attach an assessment.
+ * The run wiring (config caps, prompt builders, adapter options, stage
+ * locks, retry, assessment, write gate, worktree creation) binds once via
+ * makeTaskPipeline.
+ *
+ * @module
+ */
+
 /**
  * The planning stage's product: the committed ExecPlan the design review,
  * implementation, and later stages read from. Extends

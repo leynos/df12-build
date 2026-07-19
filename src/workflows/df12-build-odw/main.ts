@@ -88,6 +88,23 @@ import type { SelectionResult } from './roadmap.ts'
 import type { StagePlan, StageResult } from './run-task.ts'
 import type { RecoveryCandidate, SelectedTask } from './types.ts'
 
+
+/**
+ * df12-build-odw entry: the ODW workflow's worker-pool control loop and
+ * fresh-run recovery entrypoint. This module unpacks the run configuration
+ * (config.ts) once, binds each subsystem factory with that configuration
+ * (prompts, write preflight, assessment, remediation, host review, and the
+ * per-task pipeline in run-task.ts), and owns the run-scoped state the
+ * factories must share: the merge queue and stage semaphores, the worker
+ * pool, recovery orchestration over the recovery-decision/-discovery
+ * helpers, per-step remediation flushing, and the terminal run summary.
+ * The build (scripts/build-workflow.mjs) bundles this file and its imports
+ * flat and wraps the whole body for the ODW loader; workflowMain() below is
+ * invoked by the generated footer.
+ *
+ * @module
+ */
+
 type AnyRecord = Record<string, unknown>
 type MergeLockFn = (<T>(fn: () => Promise<T>) => Promise<T>) | null
 
