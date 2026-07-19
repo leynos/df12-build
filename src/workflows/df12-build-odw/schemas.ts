@@ -1,12 +1,15 @@
 /**
- * @file JSON Schema contracts for every structured agent hand-off in the
+ * JSON Schema contracts for every structured agent hand-off in the
  * df12-build-odw workflow: plan, design verdict, implementation, dual review,
  * fix rounds, integration, post-merge audit, and the ADR 002 partial-branch
  * assessment. Downstream JavaScript dereferences `required` fields without
  * optional chaining, and iterates keys assuming `additionalProperties` is
  * false, so treat these as contracts, not documentation;
  * tests/modules/schemas.test.ts pins them.
+ *
+ * @module
  */
+/** @internal */
 export const PLAN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -28,6 +31,7 @@ export const PLAN_SCHEMA = {
  * `additionalProperties: false`, so treat this as a contract, not
  * documentation.
  */
+/** @internal */
 export const DESIGN_VERDICT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -46,6 +50,7 @@ export const DESIGN_VERDICT_SCHEMA = {
  * `required` fields and assumes `additionalProperties: false`, so treat this
  * as a contract, not documentation.
  */
+/** @internal */
 export const IMPL_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -70,6 +75,7 @@ export const IMPL_SCHEMA = {
  * fields and assumes `additionalProperties: false`, so treat this as a
  * contract, not documentation.
  */
+/** @internal */
 export const REVIEW_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -112,6 +118,7 @@ export const REVIEW_SCHEMA = {
  * dereferences `required` fields and assumes `additionalProperties: false`,
  * so treat this as a contract, not documentation.
  */
+/** @internal */
 export const FIX_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -134,6 +141,7 @@ export const FIX_SCHEMA = {
  * `additionalProperties: false`, so treat this as a contract, not
  * documentation.
  */
+/** @internal */
 export const INTEGRATE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -157,6 +165,7 @@ export const INTEGRATE_SCHEMA = {
  * `required` fields and assumes `additionalProperties: false`, so treat
  * this as a contract, not documentation.
  */
+/** @internal */
 export const AUDIT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -216,6 +225,7 @@ export const ASSESSMENT_CLASSIFICATIONS = [
  * fields and assumes `additionalProperties: false`, so treat this as a
  * contract, not documentation.
  */
+/** @internal */
 export const ASSESSMENT_SCHEMA = {
   type: 'object',
   additionalProperties: false,

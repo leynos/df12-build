@@ -893,20 +893,28 @@ async function recoveryExecplanPath(candidate) {
 async function syntheticRecoveryImpl(candidate, evidence, residualRisk = []) {
   const resolved = typeof candidate.execplanPath === "string" ? { execplanPath: candidate.execplanPath, error: "" } : await recoveryExecplanPath(candidate);
   return {
+    /** Always `true`: the synthetic result stands in for a successful implementation phase. */
     ok: true,
+    /** Always `true`: gate re-running is deferred to the downstream deterministic gates. */
     gatesGreen: true,
+    /** Resolved ExecPlan path, or `''` when it could not be located. */
     execplanPath: resolved.execplanPath,
+    /** Zero: no work items were executed by this synthetic bridge. */
     workItemsCompleted: 0,
+    /** Zero: no work-item plan is materialized for a recovered branch. */
     workItemsTotal: 0,
+    /** Commit ids already on the branch, carried through as the delivered work. */
     commits: evidence?.recentCommits || [],
+    /** Zero: no CodeRabbit runs were performed by the bridge. */
     coderabbitRuns: 0,
+    /** Open issues forcing fresh review, plus any ExecPlan-verification fault. */
     openIssues: [
       "recovered branch requires fresh review",
       ...resolved.error ? [`could not verify the durable ExecPlan: ${resolved.error}`] : []
     ],
-    // Advisory, non-blocking caveats the assessment carried forward: surfaced to
-    // the resumed reviewer/integrator without downgrading adopt-complete (#23).
+    /** Advisory caveats carried into review and integration without blocking resume. */
     residualRisk: [...residualRisk || []],
+    /** Human-readable note that the result was reconstructed from durable git state. */
     summary: "Recovered adopt-complete branch from durable git state."
   };
 }
@@ -1400,20 +1408,35 @@ function makePrompts(config) {
     ].join("\n");
   }
   return {
+    /** Builds the `grepai search` invocation used by {@link codeSearchGuidance}. */
     grepaiSearchCommand,
+    /** Memtrace repo-selection guidance, pinned to `MEMTRACE_REPO_ID` when configured. */
     memtraceRepoGuidance,
+    /** Selects and renders the configured code-search backend's guidance text for the preamble. */
     codeSearchGuidance: codeSearchGuidance2,
+    /** Shared standing-rules block prepended to every agent prompt. */
     preamble: preamble2,
+    /** Prompt for the planning stage (initial or revision round). */
     planPrompt: planPrompt2,
+    /** Prompt for the adversarial design review of a submitted plan. */
     designReviewPrompt: designReviewPrompt2,
+    /** Prompt for full-plan implementation (legacy multi-work-item pass). */
     implementPrompt: implementPrompt2,
+    /** Prompt for implementing exactly one work item, dispatched per builder turn. */
     implementWorkItemPrompt: implementWorkItemPrompt2,
+    /** Prompt for a fix round that addresses blocking review findings. */
     fixPrompt: fixPrompt2,
+    /** Prompt for the code-review benchmark of a completed implementation. */
     codeReviewPrompt: codeReviewPrompt2,
+    /** Prompt for the adversarial community-of-experts review. */
     expertReviewPrompt: expertReviewPrompt2,
+    /** Prompt for reviewing a completed addendum pass. */
     addendumReviewPrompt: addendumReviewPrompt2,
+    /** Prompt for implementing an addendum pass's open sub-tasks. */
     implementAddendumPrompt: implementAddendumPrompt2,
+    /** Prompt for rebasing, squash-merging, and pushing a completed task. */
     integratePrompt: integratePrompt2,
+    /** Prompt for the post-merge codebase audit. */
     auditPrompt: auditPrompt2
   };
 }
@@ -1532,7 +1555,12 @@ function makeWritePreflight({ enabled, targets }) {
     if (!taskAgentWritePreflight) taskAgentWritePreflight = runTaskAgentWritePreflight2(worktree, tag);
     return taskAgentWritePreflight;
   }
-  return { runTaskAgentWritePreflight: runTaskAgentWritePreflight2, ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2 };
+  return {
+    /** Runs the host probe then every adapter probe once, unmemoized. */
+    runTaskAgentWritePreflight: runTaskAgentWritePreflight2,
+    /** Memoized per-run entry point: dispatches the preflight at most once and shares its result across concurrent tasks. */
+    ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2
+  };
 }
 
 // src/workflows/df12-build-odw/execplan-durability.ts
@@ -1917,17 +1945,45 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
     const evidence = await collectAssessmentEvidence(task, wt);
     const fast = fastAssessmentClassification(evidence);
     if (fast) {
-      return { evidence, assessment: deterministicAssessment(fast.classification, evidence, fast.reason), assessmentError: "" };
+      return {
+        /** Host-collected git evidence for the candidate branch. */
+        evidence,
+        /** The assessment object (deterministic or model), or null on failure. */
+        assessment: deterministicAssessment(fast.classification, evidence, fast.reason),
+        /** Error text when no structured assessment was produced; '' otherwise. */
+        assessmentError: ""
+      };
     }
     try {
       const label = `recover-assess:${candidate.taskId}${candidate.isAddendum ? "-addendum" : ""}`;
       const assessment = await runModelAssessment(() => recoveryAssessmentPrompt2(task, candidate, evidence), "Recovery", label, evidence);
       if (!assessment) {
-        return { evidence, assessment: null, assessmentError: "assessment agent returned no structured output" };
+        return {
+          /** Host-collected git evidence for the candidate branch. */
+          evidence,
+          /** The assessment object (deterministic or model), or null on failure. */
+          assessment: null,
+          /** Error text when no structured assessment was produced; '' otherwise. */
+          assessmentError: "assessment agent returned no structured output"
+        };
       }
-      return { evidence, assessment: { ...assessment, hostEvidence: evidence }, assessmentError: "" };
+      return {
+        /** Host-collected git evidence for the candidate branch. */
+        evidence,
+        /** The assessment object (deterministic or model), or null on failure. */
+        assessment: { ...assessment, hostEvidence: evidence },
+        /** Error text when no structured assessment was produced; '' otherwise. */
+        assessmentError: ""
+      };
     } catch (error) {
-      return { evidence, assessment: null, assessmentError: error && error.message || String(error) };
+      return {
+        /** Host-collected git evidence for the candidate branch. */
+        evidence,
+        /** The assessment object (deterministic or model), or null on failure. */
+        assessment: null,
+        /** Error text when no structured assessment was produced; '' otherwise. */
+        assessmentError: error && error.message || String(error)
+      };
     }
   }
   function shouldAssessFailure2(result, wt) {
@@ -1970,7 +2026,18 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
       };
     }
   }
-  return { assessmentPrompt: assessmentPrompt2, recoveryAssessmentPrompt: recoveryAssessmentPrompt2, assessRecoveryCandidate: assessRecoveryCandidate2, shouldAssessFailure: shouldAssessFailure2, attachAssessment: attachAssessment2 };
+  return {
+    /** Build the in-run failure-assessment prompt for a surviving branch. */
+    assessmentPrompt: assessmentPrompt2,
+    /** Build the fresh-run recovery-assessment prompt (transcript unavailable by design). */
+    recoveryAssessmentPrompt: recoveryAssessmentPrompt2,
+    /** Assess a discovered recovery candidate through the ADR 002 contract. */
+    assessRecoveryCandidate: assessRecoveryCandidate2,
+    /** The eligibility gate: whether a failed result's branch reaches model assessment. */
+    shouldAssessFailure: shouldAssessFailure2,
+    /** Attach an assessment (or infra-fault salvage) to a task result; never merges or ticks the roadmap. */
+    attachAssessment: attachAssessment2
+  };
 }
 
 // src/workflows/df12-build-odw/remediation.ts
@@ -2071,7 +2138,16 @@ function makeRemediation({ preamble: preamble2, worktreeSafetyNet: worktreeSafet
     if (triageNeedsEscalation(deduped)) options.model = triageEscalationModel;
     return await agent(triagePrompt2(stepPrefix, deduped), triageAgentOptions2(options));
   }
-  return { triagePrompt: triagePrompt2, runTriage: runTriage2, dedupeProposals, triageNeedsEscalation };
+  return {
+    /** Builds the triage agent's prompt for one settled step's proposals. */
+    triagePrompt: triagePrompt2,
+    /** Dedupes and dispatches the triage agent, escalating model choice when warranted. */
+    runTriage: runTriage2,
+    /** Re-exported for callers that need the dedup pass without a full triage run. */
+    dedupeProposals,
+    /** Re-exported for callers that need the escalation check without a full triage run. */
+    triageNeedsEscalation
+  };
 }
 
 // src/workflows/df12-build-odw/host-review.ts
@@ -2117,8 +2193,20 @@ function coderabbitBlockingItems(findings) {
   return (findings || []).filter((finding) => CODERABBIT_BLOCKING_SEVERITIES.has(String(finding.severity || "").toLowerCase())).map((finding) => `CodeRabbit (${finding.severity}) ${finding.fileName || "unknown file"}: ${String(finding.comment || finding.codegenInstructions || "see the recorded suggestions").slice(0, 500)}`);
 }
 var coderabbitCapture = { reviews: 0, findings: 0, rateLimitedRuns: 0, deferred: 0, bySeverity: {}, sinkError: "" };
-var hostGateMetrics = { runs: 0, failures: 0 };
-var csCheckMetrics = { runs: 0, failures: 0, skipped: 0 };
+var hostGateMetrics = {
+  /** Total gate executions attempted. */
+  runs: 0,
+  /** Gate executions that failed. */
+  failures: 0
+};
+var csCheckMetrics = {
+  /** Check executions attempted (excludes skips). */
+  runs: 0,
+  /** Check executions that reported code-health issues. */
+  failures: 0,
+  /** Checks skipped because the configured binary was not on PATH. */
+  skipped: 0
+};
 var gateLogDirCache = null;
 function gateLogRoot() {
   if (!gateLogDirCache) {
@@ -2300,27 +2388,50 @@ ${outcome.tail}`
     return { clean: false, skipped: false, detail: `CodeScene check \`${csCheckCommand}\` reported code-health issues${timedOut}; full log: ${logFile}; output tail:
 ${outcome.tail}`, logFile };
   }
-  return { coderabbitBackoffMinutes: coderabbitBackoffMinutes2, runCoderabbitHostReview: runCoderabbitHostReview2, recordCoderabbitReview: recordCoderabbitReview2, runHostCommitGates: runHostCommitGates2, runCodeSceneCheck: runCodeSceneCheck2 };
+  return {
+    /** Deterministic seeded backoff jitter (minutes) for rate-limit retries. */
+    coderabbitBackoffMinutes: coderabbitBackoffMinutes2,
+    /** Run one host CodeRabbit review against committed changes; backoff is absorbed in wall-clock. */
+    runCoderabbitHostReview: runCoderabbitHostReview2,
+    /** Fold a review's findings into the capture aggregate and the durable sink. */
+    recordCoderabbitReview: recordCoderabbitReview2,
+    /** Re-run the configured commit gates against committed HEAD; host-verifies a gatesGreen claim. */
+    runHostCommitGates: runHostCommitGates2,
+    /** Run the CodeScene code-health check, skipping gracefully when its binary is absent. */
+    runCodeSceneCheck: runCodeSceneCheck2
+  };
 }
 
 // src/workflows/df12-build-odw/run-task.ts
 function summarizeReviewVerdict(review) {
   if (!review) return null;
   return {
+    /** The reviewer's verdict string (e.g. `pass`), empty when unset. */
     verdict: review.verdict || "",
+    /** Blocking items the reviewer raised; empty means nothing blocked. */
     blocking: review.blocking || [],
+    /** The reviewer's summary line, empty when unset. */
     summary: review.summary || ""
   };
 }
 function summarizeFixReport(fix) {
   if (!fix) return null;
-  if (typeof fix === "string") return { summary: fix };
+  if (typeof fix === "string") return {
+    /** Summary carried when the fix report was a bare string. */
+    summary: fix
+  };
   return {
+    /** Commit SHAs the fix produced, defaulted to an empty list. */
     commits: fix.commits || [],
+    /** Whether the fix reported green gates (strictly coerced to a boolean). */
     gatesGreen: fix.gatesGreen === true,
+    /** Count of CodeRabbit runs the fix performed, coerced to a number. */
     coderabbitRuns: Number(fix.coderabbitRuns) || 0,
+    /** Blocking items the fix claims to have resolved. */
     resolved: fix.resolved || [],
+    /** Blocking items the fix left open. */
     openIssues: fix.openIssues || [],
+    /** The fix agent's summary line, empty when unset. */
     summary: fix.summary || ""
   };
 }
@@ -3016,7 +3127,18 @@ function makeTaskPipeline(deps) {
       return await attachAssessment2(task, wt, result);
     }
   }
-  return { runPlanDesignLoop: runPlanDesignLoop2, runWorkItemBuildLoop: runWorkItemBuildLoop2, runImplementationStage: runImplementationStage2, runDualReviewAndIntegration: runDualReviewAndIntegration2, runTask: runTask2 };
+  return {
+    /** Adversarial plan <-> design-review loop; the entry point for continue-mode resume. */
+    runPlanDesignLoop: runPlanDesignLoop2,
+    /** Host-driven checklist build, one turn per unticked ExecPlan Progress item. */
+    runWorkItemBuildLoop: runWorkItemBuildLoop2,
+    /** Implementation stage: work-item loop or single-turn build, then the durability gate. */
+    runImplementationStage: runImplementationStage2,
+    /** Dual review, fix rounds and integration; shared with review-mode recovery resume. */
+    runDualReviewAndIntegration: runDualReviewAndIntegration2,
+    /** Full per-task pipeline from worktree creation through integration. */
+    runTask: runTask2
+  };
 }
 
 // src/workflows/df12-build-odw/main.ts
