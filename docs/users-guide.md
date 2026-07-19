@@ -514,7 +514,8 @@ Common arguments:
   `planModel`/`buildModel`.
 - `writeProbeModelByAdapter`: optional `{ "<adapter>": "<model>" }` map to run
   the probe on a cheaper model per adapter (adapter name lowercased). Defaults
-  to `{}` (the adapter's own default model at minimal effort).
+  to Claude Haiku (`claude-haiku-4-5`) and GPT-5.6 Luna (`gpt-5.6-luna`) for
+  the default planning and build adapters respectively.
 - `assessmentModel`: model for the report-only partial-branch assessment.
   Defaults to a medium model (`claude-sonnet-5`) rather than inheriting the
   Opus-class review model, because a deterministic fast-classifier already
@@ -524,11 +525,13 @@ Common arguments:
   adopt-complete candidate (a branch that committed an ExecPlan). Defaults to
   the review model.
 - `triageModel`: model for remediation triage. Defaults to a medium model
-  (`gpt-5.5`); a deterministic pre-pass collapses exact-duplicate proposals
+  (`gpt-5.6-sol`); a deterministic pre-pass collapses exact-duplicate proposals
   before the agent runs.
+- `triageEffort`: reasoning effort for remediation triage. Defaults to
+  `medium`.
 - `triageEscalationModel`: the stronger model used when the deduped proposals
   span more than one audit/review source (potential cross-phase or conflicting
-  routing). Defaults to `gpt-5.5@high`.
+  routing). Defaults to the same `gpt-5.6-sol` model.
 - `taskId`: run exactly one roadmap task.
 - `dryRun`: when `true`, a fresh task stops before worktree creation — and so
   before planning, review, implementation, integration, or document writes —
@@ -563,21 +566,26 @@ Common arguments:
   implementation, integration, and remediation agents.
 - `planAdapter` and `planModel`: adapter and model for planning agents.
 - `reviewAdapter` and `reviewModel`: adapter and model for design review, code
-  review, expert review, and audit agents.
+  review, expert review, and addendum fallback review agents.
+- `auditAdapter`, `auditModel`, and `auditEffort`: adapter, model, and effort
+  for post-merge audits. Defaults to Claude Code, `claude-sonnet-5`, and
+  `medium`.
 - `triageAdapter` and `triageModel`: adapter and model for remediation triage
   (routing review and audit proposals onto roadmap lanes). Defaults are
-  `codex` and `gpt-5.5@high`.
+  `codex`, `gpt-5.6-sol`, and medium effort.
 - `assessmentAdapter` and `assessmentModel`: adapter and model for partial
   branch assessment. Defaults to the review adapter and model.
 
 Current defaults deliberately split execution and judgement. Build,
-implementation, integration, remediation, and triage stay on the Codex adapter
-defaults, while planning and review judgement default to Claude Code with
+implementation and integration use GPT-5.6 Terra through the medium-effort
+Codex adapter; triage uses GPT-5.6 Sol at medium effort. Planning and review
+judgement default to Claude Code with
 `claude-opus-4-8`. That means the plan stage, design review, code review,
-expert review, addendum fallback review, and post-merge audit all use the
-`reviewAdapter` or `planAdapter` Claude routing unless `args.json` overrides
-them. Set `assessmentAdapter` explicitly when partial-branch assessment should
-stay on Codex instead of inheriting the review adapter.
+expert review, and addendum fallback review use the `reviewAdapter` or
+`planAdapter` Claude routing unless `args.json` overrides them. Post-merge
+audit uses Claude Sonnet 5 at medium effort. Set `assessmentAdapter` explicitly
+when partial-branch assessment should stay on Codex instead of inheriting the
+review adapter.
 
 Example `args.json`:
 
@@ -596,15 +604,19 @@ Example `args.json`:
   "maxTasks": 12,
   "coderabbitFindingsFile": "/home/example/Projects/example-project.workshop/df12-build-run/coderabbit-findings.jsonl",
   "buildAdapter": "codex-medium",
-  "buildModel": "gpt-5.5",
+  "buildModel": "gpt-5.6-terra",
   "planAdapter": "claude",
   "planModel": "claude-opus-4-8",
   "assessmentAdapter": "codex-high",
   "assessmentModel": "gpt-5.5",
-  "triageAdapter": "codex-high",
-  "triageModel": "gpt-5.5",
+  "triageAdapter": "codex",
+  "triageModel": "gpt-5.6-sol",
+  "triageEffort": "medium",
   "reviewAdapter": "claude",
-  "reviewModel": "claude-opus-4-8"
+  "reviewModel": "claude-opus-4-8",
+  "auditAdapter": "claude",
+  "auditModel": "claude-sonnet-5",
+  "auditEffort": "medium"
 }
 ```
 

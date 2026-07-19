@@ -946,7 +946,10 @@ function makeConfig(rawArgs) {
   const WORKTREE_WRITE_PREFLIGHT2 = cfg.worktreeWritePreflight !== false;
   const WRITE_PROBE_EFFORT2 = String(cfg.writeProbeEffort || "minimal");
   const WRITE_PROBE_MODEL_BY_ADAPTER2 = Object.fromEntries(
-    Object.entries(cfg.writeProbeModelByAdapter || {}).map(([adapter, model]) => [String(adapter).toLowerCase(), String(model)])
+    Object.entries(cfg.writeProbeModelByAdapter || {
+      claude: "claude-haiku-4-5",
+      "codex-medium": "gpt-5.6-luna"
+    }).map(([adapter, model]) => [String(adapter).toLowerCase(), String(model)])
   );
   const BUDGET_RESERVE2 = 8e4;
   const SEARCH_BACKEND = String(cfg.searchBackend || cfg.codeSearchBackend || (cfg.memtraceRepoId ? "memtrace" : "grepai")).toLowerCase();
@@ -956,19 +959,24 @@ function makeConfig(rawArgs) {
   const BUILD_ADAPTER2 = cfg.buildAdapter || "codex-medium";
   const PLAN_ADAPTER2 = cfg.planAdapter || "claude";
   const REVIEW_ADAPTER2 = cfg.reviewAdapter || "claude";
+  const AUDIT_ADAPTER2 = cfg.auditAdapter || "claude";
   const TRIAGE_ADAPTER2 = cfg.triageAdapter || "codex";
   const ASSESSMENT_ADAPTER2 = cfg.assessmentAdapter || REVIEW_ADAPTER2;
-  const BUILD_MODEL2 = cfg.buildModel || "gpt-5.5";
+  const BUILD_MODEL2 = cfg.buildModel || "gpt-5.6-terra";
   const PLAN_MODEL2 = cfg.planModel || "claude-opus-4-8";
   const REVIEW_MODEL2 = cfg.reviewModel || "claude-opus-4-8";
-  const TRIAGE_MODEL2 = cfg.triageModel || "gpt-5.5";
-  const TRIAGE_ESCALATION_MODEL2 = cfg.triageEscalationModel || "gpt-5.5@high";
+  const AUDIT_MODEL2 = cfg.auditModel || "claude-sonnet-5";
+  const AUDIT_EFFORT2 = String(cfg.auditEffort || "medium");
+  const TRIAGE_MODEL2 = cfg.triageModel || "gpt-5.6-sol";
+  const TRIAGE_EFFORT2 = String(cfg.triageEffort || "medium");
+  const TRIAGE_ESCALATION_MODEL2 = cfg.triageEscalationModel || TRIAGE_MODEL2;
   const ASSESSMENT_MODEL2 = cfg.assessmentModel || "claude-sonnet-5";
   const ASSESSMENT_ESCALATION_MODEL2 = cfg.assessmentEscalationModel || REVIEW_MODEL2;
   const AUTH_REQUIRED_ADAPTERS2 = new Set([
     BUILD_ADAPTER2,
     PLAN_ADAPTER2,
     REVIEW_ADAPTER2,
+    AUDIT_ADAPTER2,
     TRIAGE_ADAPTER2,
     ASSESSMENT_ADAPTER2
   ].map((adapter) => String(adapter || "").toLowerCase()));
@@ -1038,12 +1046,16 @@ function makeConfig(rawArgs) {
     BUILD_ADAPTER: BUILD_ADAPTER2,
     PLAN_ADAPTER: PLAN_ADAPTER2,
     REVIEW_ADAPTER: REVIEW_ADAPTER2,
+    AUDIT_ADAPTER: AUDIT_ADAPTER2,
     TRIAGE_ADAPTER: TRIAGE_ADAPTER2,
     ASSESSMENT_ADAPTER: ASSESSMENT_ADAPTER2,
     BUILD_MODEL: BUILD_MODEL2,
     PLAN_MODEL: PLAN_MODEL2,
     REVIEW_MODEL: REVIEW_MODEL2,
+    AUDIT_MODEL: AUDIT_MODEL2,
+    AUDIT_EFFORT: AUDIT_EFFORT2,
     TRIAGE_MODEL: TRIAGE_MODEL2,
+    TRIAGE_EFFORT: TRIAGE_EFFORT2,
     TRIAGE_ESCALATION_MODEL: TRIAGE_ESCALATION_MODEL2,
     ASSESSMENT_MODEL: ASSESSMENT_MODEL2,
     ASSESSMENT_ESCALATION_MODEL: ASSESSMENT_ESCALATION_MODEL2,
@@ -3052,12 +3064,16 @@ var {
   BUILD_ADAPTER,
   PLAN_ADAPTER,
   REVIEW_ADAPTER,
+  AUDIT_ADAPTER,
   TRIAGE_ADAPTER,
   ASSESSMENT_ADAPTER,
   BUILD_MODEL,
   PLAN_MODEL,
   REVIEW_MODEL,
+  AUDIT_MODEL,
+  AUDIT_EFFORT,
   TRIAGE_MODEL,
+  TRIAGE_EFFORT,
   TRIAGE_ESCALATION_MODEL,
   ASSESSMENT_MODEL,
   ASSESSMENT_ESCALATION_MODEL,
@@ -3100,8 +3116,11 @@ function planAgentOptions(options = {}) {
 function reviewAgentOptions(options = {}) {
   return { adapter: REVIEW_ADAPTER, model: REVIEW_MODEL, ...options };
 }
+function auditAgentOptions(options = {}) {
+  return { adapter: AUDIT_ADAPTER, model: AUDIT_MODEL, effort: AUDIT_EFFORT, ...options };
+}
 function triageAgentOptions(options = {}) {
-  return { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL, ...options };
+  return { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL, effort: TRIAGE_EFFORT, ...options };
 }
 function assessmentAgentOptions(options = {}) {
   return { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL, ...options };
@@ -3474,7 +3493,7 @@ function writeProbeTargets() {
 }
 async function runAudit(task) {
   phase("Audit");
-  const audit = await agent(auditPrompt(task, null), reviewAgentOptions({ phase: "Audit", label: `audit:after-${task.id}`, schema: AUDIT_SCHEMA }));
+  const audit = await agent(auditPrompt(task, null), auditAgentOptions({ phase: "Audit", label: `audit:after-${task.id}`, schema: AUDIT_SCHEMA }));
   return audit;
 }
 var processed = [];
@@ -3831,7 +3850,8 @@ async function workflowMain() {
       build: { adapter: BUILD_ADAPTER, model: BUILD_MODEL },
       plan: { adapter: PLAN_ADAPTER, model: PLAN_MODEL },
       review: { adapter: REVIEW_ADAPTER, model: REVIEW_MODEL },
-      triage: { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL },
+      audit: { adapter: AUDIT_ADAPTER, model: AUDIT_MODEL, effort: AUDIT_EFFORT },
+      triage: { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL, effort: TRIAGE_EFFORT },
       assessment: { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL }
     },
     maxParallel: MAX_PARALLEL,

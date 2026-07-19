@@ -39,25 +39,32 @@ describe('makeConfig defaults', () => {
     expect(config.RESUME_PARTIAL_BRANCHES).toBe(false)
     expect(config.RESUME_MODE).toBe('assess')
     expect(config.WORKTREE_WRITE_PREFLIGHT).toBe(true)
-    // The write probe is right-sized: minimal effort, no reasoning-model map.
+    // The write probe is right-sized: minimal effort on cheap models.
     expect(config.WRITE_PROBE_EFFORT).toBe('minimal')
-    expect(config.WRITE_PROBE_MODEL_BY_ADAPTER).toEqual({})
+    expect(config.WRITE_PROBE_MODEL_BY_ADAPTER).toEqual({
+      claude: 'claude-haiku-4-5',
+      'codex-medium': 'gpt-5.6-luna',
+    })
   })
 
   test('adapter and model routing', () => {
     expect(config.BUILD_ADAPTER).toBe('codex-medium')
     expect(config.PLAN_ADAPTER).toBe('claude')
     expect(config.REVIEW_ADAPTER).toBe('claude')
+    expect(config.AUDIT_ADAPTER).toBe('claude')
     expect(config.TRIAGE_ADAPTER).toBe('codex')
     expect(config.ASSESSMENT_ADAPTER).toBe('claude')
-    expect(config.BUILD_MODEL).toBe('gpt-5.5')
+    expect(config.BUILD_MODEL).toBe('gpt-5.6-terra')
+    expect(config.AUDIT_MODEL).toBe('claude-sonnet-5')
+    expect(config.AUDIT_EFFORT).toBe('medium')
     // Assessment gets its own MEDIUM default and does not inherit the Opus
     // review model; escalation is the Opus-class model.
     expect(config.ASSESSMENT_MODEL).toBe('claude-sonnet-5')
     expect(config.ASSESSMENT_ESCALATION_MODEL).toBe(config.REVIEW_MODEL)
-    // Triage runs at a MEDIUM default, escalating to high only for complex sets.
-    expect(config.TRIAGE_MODEL).toBe('gpt-5.5')
-    expect(config.TRIAGE_ESCALATION_MODEL).toBe('gpt-5.5@high')
+    // Triage remains on the Sol medium route even for complex sets by default.
+    expect(config.TRIAGE_MODEL).toBe('gpt-5.6-sol')
+    expect(config.TRIAGE_EFFORT).toBe('medium')
+    expect(config.TRIAGE_ESCALATION_MODEL).toBe(config.TRIAGE_MODEL)
     expect([...config.AUTH_REQUIRED_ADAPTERS].sort()).toEqual(['claude', 'codex', 'codex-medium'])
   })
 
@@ -141,8 +148,24 @@ describe('makeConfig overrides and clamps', () => {
   })
 
   test('adapter overrides propagate into the auth-required set, lowercased', () => {
-    const config = makeConfig({ buildAdapter: 'Kimi', planAdapter: 'gemini' })
+    const config = makeConfig({ buildAdapter: 'Kimi', planAdapter: 'gemini', auditAdapter: 'qwen' })
     expect(config.AUTH_REQUIRED_ADAPTERS.has('kimi')).toBe(true)
     expect(config.AUTH_REQUIRED_ADAPTERS.has('gemini')).toBe(true)
+    expect(config.AUTH_REQUIRED_ADAPTERS.has('qwen')).toBe(true)
+  })
+
+  test('task-specific model and effort routes remain overridable', () => {
+    const config = makeConfig({
+      auditModel: 'audit-model',
+      auditEffort: 'low',
+      triageModel: 'triage-model',
+      triageEffort: 'high',
+      writeProbeModelByAdapter: { CLAUDE: 'probe-model' },
+    })
+    expect(config.AUDIT_MODEL).toBe('audit-model')
+    expect(config.AUDIT_EFFORT).toBe('low')
+    expect(config.TRIAGE_MODEL).toBe('triage-model')
+    expect(config.TRIAGE_EFFORT).toBe('high')
+    expect(config.WRITE_PROBE_MODEL_BY_ADAPTER).toEqual({ claude: 'probe-model' })
   })
 })
