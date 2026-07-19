@@ -8,10 +8,12 @@ import path from 'node:path'
 
 import {
   classifyCoderabbitOutcome,
+  coderabbitBlockingItems,
   hostGateLogPath,
   makeHostReview,
   parseCoderabbitAgentOutput,
 } from '../../src/workflows/df12-build-odw/host-review.ts'
+import type { CoderabbitOutcome } from '../../src/workflows/df12-build-odw/host-review.ts'
 
 describe('classifyCoderabbitOutcome terminal completion', () => {
   test('both observed success statuses (review_completed, reviewed) are clean', () => {
@@ -53,9 +55,166 @@ function hostReview(overrides: Partial<Parameters<typeof makeHostReview>[0]> = {
     commitGateTimeoutSeconds: 5,
     csCheck: false,
     csCheckCommand: 'cs-check-changed',
+    reviewTool: 'coderabbit',
+    dakarCommand: 'dakar-review',
+    dakarTimeoutSeconds: 3600,
+    dakarBudgetGbp: 0,
     ...overrides,
   })
 }
+
+// A recording exec mock: it captures every invocation's argv and returns a
+// scripted ExecStatus, so the Dakar/CodeRabbit dispatch and the exact command
+// line can be asserted without ever running a real reviewer CLI.
+function recordingExec(result: Partial<import('../../src/workflows/df12-build-odw/exec.ts').ExecStatus>) {
+  const calls: Array<{ command: string; args: string[] }> = []
+  const exec = async (command: string, args: readonly string[]) => {
+    calls.push({ command, args: [...args] })
+    return { ok: true, stdout: '', stderr: '', ...result }
+  }
+  return { calls, exec }
+}
+
+describe('runDakarHostReview', () => {
+  const junk: string[] = []
+  afterEach(() => {
+    for (const target of junk.splice(0)) if (target) rmSync(target, { recursive: true, force: true })
+  })
+
+  // The dispatcher keys on config.reviewTool; only the Dakar branch is under
+  // test here. A single JSON document on stdout (from the first '{') carries the
+  // verdict, findings, and deferral stage.
+  const dakarJson = (doc: Record<string, unknown>) => `noise before json\n${JSON.stringify(doc)}\n`
+
+  test('the argv names the state root under tmpdir and omits the budget flag by default', async () => {
+    const { calls, exec } = recordingExec({ stdout: dakarJson({ ok: true, verdict: 'pass', findings: [] }) })
+    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar' })
+    const review = await runCoderabbitHostReview('/work/tree', 'label', { exec })
+    expect(review.outcome).toBe('clean')
+    const { command, args } = calls[0]
+    expect(command).toBe('dakar-review')
+    expect(args[args.indexOf('--repo-root') + 1]).toBe('/work/tree')
+    expect(args[args.indexOf('--base') + 1]).toBe('main')
+    expect(args[args.indexOf('--timeout') + 1]).toBe('3600')
+    const stateRoot = args[args.indexOf('--state-root') + 1]
+    expect(stateRoot.startsWith(path.join(tmpdir(), 'df12-dakar-state-'))).toBe(true)
+    junk.push(stateRoot)
+    expect(args).not.toContain('--budget-gbp')
+  })
+
+  test('a configured budget adds the --budget-gbp flag', async () => {
+    const { calls, exec } = recordingExec({ stdout: dakarJson({ ok: true, verdict: 'pass', findings: [] }) })
+    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', dakarBudgetGbp: 3 })
+    await runCoderabbitHostReview('/work/tree', 'label', { exec })
+    const { args } = calls[0]
+    expect(args[args.indexOf('--budget-gbp') + 1]).toBe('3')
+    junk.push(args[args.indexOf('--state-root') + 1])
+  })
+
+  // The outcome-mapping table: each Dakar document maps to exactly one
+  // CoderabbitOutcome, so every run-task deferral/blocking path keeps working.
+  const cases: Array<{ name: string; doc?: Record<string, unknown>; stdout?: string; outcome: CoderabbitOutcome }> = [
+    { name: 'a passing verdict is clean', doc: { ok: true, verdict: 'pass', findings: [] }, outcome: 'clean' },
+    { name: 'a skipped run (nothing unreviewed) is clean', doc: { ok: true, skipped: true }, outcome: 'clean' },
+    { name: 'changes-requested is findings', doc: { ok: true, verdict: 'changes-requested', findings: [{ severity: 'high', path: 'a.ts', title: 't', detail: 'd' }] }, outcome: 'findings' },
+    { name: 'a deferred stage is rate-limited', doc: { ok: false, stage: 'deferred', error: 'budget exhausted' }, outcome: 'rate-limited' },
+    { name: 'a non-deferred failure is an error', doc: { ok: false, stage: 'plan', error: 'pi crashed' }, outcome: 'error' },
+  ]
+  for (const scenario of cases) {
+    test(scenario.name, async () => {
+      const { exec } = recordingExec({ stdout: scenario.stdout ?? dakarJson(scenario.doc as Record<string, unknown>) })
+      const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+      const review = await runCoderabbitHostReview('/w', 'l', { exec })
+      expect(review.outcome).toBe(scenario.outcome)
+    })
+  }
+
+  test('unparsable stdout is an error carrying a bounded detail', async () => {
+    // An oversized stderr payload must be tail-bounded, not passed through
+    // whole: the detail travels into halt records and operator logs.
+    const oversized = 'x'.repeat(50_000)
+    const { exec } = recordingExec({ ok: false, stdout: 'total garbage, no brace', stderr: oversized, message: 'spawn failed' })
+    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+    const review = await runCoderabbitHostReview('/w', 'l', { exec })
+    expect(review.outcome).toBe('error')
+    expect(review.detail.length).toBeGreaterThan(0)
+    expect(review.detail.length).toBeLessThanOrEqual(2_000)
+  })
+
+  test('changes-requested without findings is an error, never a silent pass', async () => {
+    // A reviewer rejection with no findings would otherwise yield zero
+    // blocking items and sail through the fix-round gate as if clean.
+    const { exec } = recordingExec({ ok: true, stdout: '{"ok":true,"verdict":"changes-requested","findings":[]}', stderr: '' })
+    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+    const review = await runCoderabbitHostReview('/w', 'l', { exec })
+    expect(review.outcome).toBe('error')
+    expect(review.detail).toContain('changes-requested')
+  })
+
+  test('a deferred stage backs off and retries like a CodeRabbit rate limit', async () => {
+    let attempts = 0
+    const exec = async (_command: string, args: readonly string[]) => {
+      attempts += 1
+      junk.push(args[args.indexOf('--state-root') + 1])
+      return { ok: false, stdout: `{"ok":false,"stage":"deferred","error":"quota"}`, stderr: '' }
+    }
+    const sleeps: number[] = []
+    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 3 })
+    const review = await runCoderabbitHostReview('/w', 'l', { exec, sleep: async (m: number) => { sleeps.push(m) } })
+    expect(review.outcome).toBe('rate-limited')
+    expect(attempts).toBe(3)
+    expect(sleeps.length).toBe(2)
+  })
+
+  test('findings map Dakar severities onto the CodeRabbit blocking set and sink', async () => {
+    const findingsFile = path.join(mkdtempSync(path.join(tmpdir(), 'dakar-sink-')), 'findings.jsonl')
+    junk.push(path.dirname(findingsFile))
+    const doc = {
+      ok: true,
+      verdict: 'changes-requested',
+      findings: [
+        { severity: 'critical', path: 'crit.ts', line: 3, title: 'Crit', detail: 'boom', evidence: 'e1' },
+        { severity: 'high', path: 'high.ts', title: 'High', detail: 'risky', evidence: 'e2' },
+        { severity: 'medium', path: 'med.ts', title: 'Med', detail: 'meh', evidence: 'e3' },
+        { severity: 'low', path: 'low.ts', title: 'Low', detail: 'minor', evidence: 'e4' },
+        { severity: 'nebulous', path: 'unk.ts', title: 'Unk', detail: 'huh', evidence: 'e5' },
+      ],
+    }
+    const { exec } = recordingExec({ stdout: dakarJson(doc) })
+    const { runCoderabbitHostReview, recordCoderabbitReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1, coderabbitFindingsFile: findingsFile })
+    const review = await runCoderabbitHostReview('/w', 'l', { exec })
+    // critical + high map onto CodeRabbit's blocking critical + major.
+    const blocking = coderabbitBlockingItems(review.findings)
+    expect(blocking.length).toBe(2)
+    expect(blocking.join('\n')).toMatch(/critical/)
+    expect(blocking.join('\n')).toMatch(/major/)
+    // The comment carries the path:line locator when a line is present.
+    const crit = review.findings.find((f) => f.fileName === 'crit.ts')
+    expect(crit?.severity).toBe('critical')
+    expect(String(crit?.comment)).toContain('crit.ts:3')
+    await recordCoderabbitReview('l', review)
+    const sunk = readFileSync(findingsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    expect(sunk.map((entry) => entry.severity).sort()).toEqual(['critical', 'info', 'major', 'minor', 'trivial'])
+  })
+})
+
+describe('reviewTool dispatch', () => {
+  test('the coderabbit tool still routes to the NDJSON classifier', async () => {
+    const ndjson = [
+      '{"type":"status","message":"reviewing"}',
+      '{"type":"complete","status":"review_completed","findings":0}',
+    ].join('\n')
+    const calls: string[] = []
+    const exec = async (command: string) => {
+      calls.push(command)
+      return { ok: true, stdout: ndjson, stderr: '' }
+    }
+    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'coderabbit' })
+    const review = await runCoderabbitHostReview('/w', 'l', { exec })
+    expect(review.outcome).toBe('clean')
+    expect(calls[0]).toBe('coderabbit')
+  })
+})
 
 describe('runCodeSceneCheck', () => {
   const junk: string[] = []

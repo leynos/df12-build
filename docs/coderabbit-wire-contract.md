@@ -1,5 +1,11 @@
 # CodeRabbit agent-mode wire contract: observed live captures
 
+> **Applies to `reviewTool: 'coderabbit'` only.** The host review tool defaults
+> to `reviewTool: 'dakar'`, which parses a single Dakar JSON document rather
+> than this NDJSON stream (see the host-review section of
+> `docs/architecture.md`). The NDJSON contract below governs only the retained
+> CodeRabbit mode.
+
 The host-run CodeRabbit review (`src/workflows/df12-build-odw/host-review.ts`)
 pins its parser and outcome classification to the NDJSON event stream that
 `coderabbit review --agent` emits on stdout. That contract is pinned against

@@ -73,6 +73,39 @@ describe('makeConfig defaults', () => {
     expect(config.GREPAI_PROJECT).toBeNull()
     expect(config.MEMTRACE_REPO_ID).toBeNull()
   })
+
+  test('review tool defaults to Dakar with its own knobs', () => {
+    expect(config.REVIEW_TOOL).toBe('dakar')
+    expect(config.DAKAR_COMMAND).toBe('dakar-review')
+    expect(config.DAKAR_TIMEOUT_SECONDS).toBe(3600)
+    // 0 means "use Dakar's own default budget" (the flag is omitted).
+    expect(config.DAKAR_BUDGET_GBP).toBe(0)
+  })
+})
+
+describe('makeConfig review-tool selection', () => {
+  test('coderabbit is a valid explicit choice', () => {
+    expect(makeConfig({ reviewTool: 'coderabbit' }).REVIEW_TOOL).toBe('coderabbit')
+    expect(makeConfig({ reviewTool: 'CodeRabbit' }).REVIEW_TOOL).toBe('coderabbit')
+  })
+
+  test('an unsupported review tool throws rather than silently defaulting', () => {
+    expect(() => makeConfig({ reviewTool: 'sonarqube' })).toThrow(/Unsupported reviewTool/)
+  })
+
+  test('the Dakar command and timeout are overridable and clamped', () => {
+    expect(makeConfig({ dakarCommand: 'dakar review' }).DAKAR_COMMAND).toBe('dakar review')
+    expect(makeConfig({ dakarTimeoutSeconds: 120 }).DAKAR_TIMEOUT_SECONDS).toBe(120)
+    // Clamp to the 60..7200 band.
+    expect(makeConfig({ dakarTimeoutSeconds: 5 }).DAKAR_TIMEOUT_SECONDS).toBe(60)
+    expect(makeConfig({ dakarTimeoutSeconds: 99999 }).DAKAR_TIMEOUT_SECONDS).toBe(7200)
+  })
+
+  test('the Dakar budget is clamped to the 0..10 GBP band', () => {
+    expect(makeConfig({ dakarBudgetGbp: 2.5 }).DAKAR_BUDGET_GBP).toBe(2.5)
+    expect(makeConfig({ dakarBudgetGbp: -1 }).DAKAR_BUDGET_GBP).toBe(0)
+    expect(makeConfig({ dakarBudgetGbp: 50 }).DAKAR_BUDGET_GBP).toBe(10)
+  })
 })
 
 describe('makeConfig overrides and clamps', () => {

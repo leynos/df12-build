@@ -284,6 +284,16 @@ eligibility on `missingEvidence` alone and never consults `residualRisk`;
 the advisory risk is instead carried forward into the resumed code-review,
 expert-review, and integration prompts as a non-blocking section.
 
+The host review tool is selected by `reviewTool`, which defaults to `dakar`.
+Dakar runs `dakar-review` (overridable with `dakarCommand`) against the
+committed diff, parses a single JSON document, and maps its verdict onto the
+same review contract described below — clean, findings (`critical`/`major`
+blocking), a rate-limit-style `deferred` backoff, or an error — so every
+control-loop call site is tool-agnostic. Dakar reviews via an OpenAI-backed
+model, so its preflight checks `OPENAI_API_KEY` rather than a CLI auth status.
+Set `reviewTool: 'coderabbit'` to restore the NDJSON CodeRabbit path documented
+here (its wire contract lives in `docs/coderabbit-wire-contract.md`).
+
 Host-run CodeRabbit review (`coderabbitHostReview`, default on) moves the
 CLI invocation from agent prompts to the control loop: `coderabbit review
 --agent --type committed --base <base>` (a FIXED host invocation; the

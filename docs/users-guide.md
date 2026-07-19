@@ -107,15 +107,17 @@ agents, four build-stage agents, and review, triage, audit, or assessment
 slack. Keep `maxAgents` high (such as the ODW default of `1000`) because it is
 the per-run dispatch guard rather than the live process-pool size.
 
-Set the adapter `timeout` with the CodeRabbit flow in mind. With the default
-host-run CodeRabbit review (`coderabbitHostReview`, see the configuration
-list), agents never wait on CodeRabbit — the host absorbs rate-limit backoff
-in its own wall-clock — so the adapter timeout only needs to cover honest
-stage work; 4500–5400 seconds (75–90 minutes) is generous, and a longer
-silent stream is a hung connection, not progress. Only when
-`coderabbitHostReview=false` do implementation agents wait through 45–90
-minute CodeRabbit backoffs with `vsleep` themselves, and then the timeout
-must be at least `21600` seconds to avoid killing a healthy task mid-backoff.
+Set the adapter `timeout` with the host-review flow in mind. With the
+default host-run review (`reviewTool: "dakar"` running `dakar-review`, or
+`reviewTool: "coderabbit"` with `coderabbitHostReview`; see the
+configuration list), agents never wait on the reviewer — the host absorbs
+rate-limit and Flex-deferral backoff in its own wall-clock — so the adapter
+timeout only needs to cover honest stage work; 4500–5400 seconds (75–90
+minutes) is generous, and a longer silent stream is a hung connection, not
+progress. Only when `coderabbitHostReview=false` in CodeRabbit mode do
+implementation agents wait through 45–90 minute CodeRabbit backoffs with
+`vsleep` themselves, and then the timeout must be at least `21600` seconds
+to avoid killing a healthy task mid-backoff.
 
 Make sure every adapter named by `args.json` exists in `odw.config.json` or in
 ODW's built-in adapter set. The checked-in ODW workflow now defaults planning
@@ -214,11 +216,14 @@ they never enter a diff, trip `workflow-freshness`, or affect a gate:
   `error.json`. This is entirely ODW's domain — no workflow involvement.
   Regenerate the value per run, or use a shared `~/.odw/runs` for a single
   pool; the sidecar keeps each run's logs beside its config and notes.
-- **CodeRabbit findings** — set `coderabbitFindingsFile` (in `args.json`) to a
+- **Review findings** — set `coderabbitFindingsFile` (in `args.json`) to a
   sidecar JSONL path, e.g. `"$SIDECAR/coderabbit-findings.jsonl"`. Every parsed
   finding (timestamp, task label, severity, file, comment, codegen
   instructions, suggestion count) is appended best-effort: a bad path or full
-  disk degrades logging with a warning and never fails a task.
+  disk degrades logging with a warning and never fails a task. In the default
+  `dakar` mode the sink carries Dakar findings with severities mapped onto
+  the CodeRabbit scale (`critical`/`high` become `critical`/`major`); the
+  field name keeps its historical spelling.
 
 Patch the sidecar copy only to recover or tune a live workshop. Record the patch
 in `operator-notes.md`, validate it there, then promote the proven change back
@@ -430,6 +435,19 @@ Common arguments:
   `searchBackend` to `memtrace`, when GrepAI is unavailable on the host.
 - `coderabbitReviewCommand`: CodeRabbit command used in implementation prompts.
   Defaults to `coderabbit review --agent`.
+- `reviewTool`: which reviewer the host runs against committed work: `dakar`
+  (the default, running the `dakar-review` CLI over OpenAI Flex; requires
+  `dakar-review` and `pi` on `PATH` and `OPENAI_API_KEY` in the host
+  environment) or `coderabbit` (the retained NDJSON CLI path). An
+  unrecognized value fails the run at configuration time.
+- `dakarCommand`: the Dakar CLI the host invokes in `dakar` mode. Defaults to
+  `dakar-review`.
+- `dakarTimeoutSeconds`: the `--timeout` passed to `dakar-review`. Defaults
+  to `3600` (clamped 60–7200); keep it above Dakar's reported
+  `worstCaseReviewSeconds`.
+- `dakarBudgetGbp`: when above `0`, passed as `--budget-gbp` so large task
+  branches admit more finder packs; `0` (the default) defers to Dakar's own
+  hard budget.
 - `maxParallel`: task worker-pool width. Defaults to `8` unless `taskId` is
   set.
 - `maxPlanningParallel`: concurrent planning-stage agents. Defaults to `4`.
@@ -466,11 +484,13 @@ Common arguments:
   automatically; set `false` to force the single-turn build for every task.
 - `maxWorkItemRounds`: builder turns per task before the work-item loop fails
   closed. Defaults to `16`.
-- `coderabbitHostReview`: when `true` (the default), the workflow host runs
-  `coderabbit review --agent` against each task's committed work instead of
-  asking agents to babysit CodeRabbit. Rate-limit backoff is absorbed as host
-  wall-clock (zero agent tokens), and blocking findings feed the fix rounds.
-  Set `false` to restore the legacy agent-run flow.
+- `coderabbitHostReview`: in `reviewTool: "coderabbit"` mode, when `true`
+  (the default) the workflow host runs `coderabbit review --agent` against
+  each task's committed work instead of asking agents to babysit CodeRabbit.
+  Rate-limit backoff is absorbed as host wall-clock (zero agent tokens), and
+  blocking findings feed the fix rounds. Set `false` to restore the legacy
+  agent-run flow. In the default `dakar` mode the host review always runs
+  host-side and this flag has no effect.
 - `hostGatesBetweenWorkItems`: when `true` (the default), and when both
   `hostCommitGates` and `perWorkItemBuild` are on, the host re-runs the
   commit gates after each committed work item — before the between-item

@@ -279,12 +279,16 @@ export function isDeferredReviewIssue(issue: unknown): boolean {
     'retry after',
     'waittime',
     'wait time',
+    'deferred',
     'deferred review',
     'deferred coderabbit review',
     'coderabbit review deferred',
     'unavailable',
   ]
-  return text.includes('coderabbit') && deferredReviewMarkers.some((marker) => text.includes(marker))
+  // Recognize both host reviewers' deferral markers: CodeRabbit rate limits and
+  // Dakar budget/quota deferrals (whose detail carries 'dakar' plus 'deferred').
+  const namesHostReviewer = text.includes('coderabbit') || text.includes('dakar')
+  return namesHostReviewer && deferredReviewMarkers.some((marker) => text.includes(marker))
 }
 
 /**
