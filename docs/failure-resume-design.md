@@ -508,7 +508,7 @@ The wait honours an advertised `retry-after` when the error message carries one
 (parsed best-effort from shapes like `retry-after: N` or
 `try again in N second(s)/minute(s)`) and clamps it into
 `infraRetryBackoffSeconds` so a hostile or huge value cannot stall the run.
-When no wait is advertised the backoff is a deterministic seeded jitter
+When no wait is advertised the backoff is a deterministically seeded jitter
 (DJB2 over `${label}#${attempt}`, `Math.random()` being banned for Claude Code
 dual-compatibility) spread across the same range, keeping sibling tasks that
 hit the same limit from retrying in lockstep. If the limit persists across the
@@ -523,9 +523,10 @@ Error: 529 Overloaded` — so the message satisfies `infrastructureFailureDetail
 *and* `providerFailureDetail` at once. The retry loop resolves the overlap with
 the same precedence as the terminal classifier (`resultFromUnhandledAgentError`):
 auth outranks provider, which outranks infrastructure. A wrapped rate-limit
-therefore takes the backoff path (counted as a `providerRetries`) instead of an
-immediate infra re-run against the still-closed window, and a wrapped auth
-failure stays terminal rather than burning the retry budget.
+therefore takes the backoff path (counted as an increment to the
+`providerRetries` metric) instead of an immediate infra re-run against the
+still-closed window, and a wrapped auth failure stays terminal rather than
+burning the retry budget.
 
 The run result carries bounded-cardinality `faultMetrics` (`infraRetries`,
 `providerRetries`, `infraFaults`, `providerFaults`, `authFaults` — fixed keys,

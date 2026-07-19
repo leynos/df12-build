@@ -166,7 +166,7 @@ Planned work:
   `resultFromUnhandledAgentError`, retry). `withInfraRetry` became a
   factory — `makeWithInfraRetry(attempts, backoffRange, sleep)` in the
   module (the later provider-backoff work added the `backoffRange`/`sleep`
-  args), bound once in `main.js` as `const withInfraRetry =
+  args), bound once in `main.ts` as `const withInfraRetry =
   makeWithInfraRetry(STAGE_ATTEMPTS, INFRA_RETRY_BACKOFF_SECONDS)`
   — so all nine multiline call sites and the source-invariant regexes
   stayed untouched, and no top-level name collides with a module export

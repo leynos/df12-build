@@ -1,8 +1,12 @@
-// Property tests for the fault-backoff arithmetic (decomposition milestone 3).
-// The example-based suite in `faults.test.ts` pins representative cases; these
-// properties span arbitrary inputs to hold the invariants that a constant or
-// off-by-one fallback could otherwise satisfy: jitter range/determinism,
-// retry-after parsing, retry-after clamping, and provider-over-infra precedence.
+/**
+ * @file Property tests for the fault-backoff arithmetic (decomposition milestone
+ * 3). The example-based suite in `faults.test.ts` pins representative cases;
+ * these properties span arbitrary inputs to hold the invariants a constant or
+ * off-by-one fallback could otherwise satisfy: jitter range and determinism,
+ * retry-after parsing, retry-after clamping into the configured range, and the
+ * provider-over-infra classification precedence. Complements the example-based
+ * `faults.test.ts` and the config-clamp coverage in `config.test.ts`.
+ */
 import { describe, expect, test } from 'bun:test'
 import fc from 'fast-check'
 

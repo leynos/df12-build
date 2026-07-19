@@ -1,10 +1,20 @@
-// Run configuration: every `args` default, clamp, validation, and derived
-// guidance string, built once by makeConfig and destructured by the entry.
-// Field names deliberately match the entry's historical constant names so
-// `const { BASE, ROADMAP, ... } = makeConfig(args)` keeps every reference
-// intact. makeConfig is pure: the projectRoot chdir side effect stays with
-// the caller.
+/**
+ * @file Run configuration for the df12-build-odw workflow: every `args` default,
+ * clamp, validation, and derived guidance string, built once by {@link makeConfig}
+ * and destructured by the entry (main.ts). Field names deliberately match the
+ * entry's historical constant names so `const { BASE, ROADMAP, … } =
+ * makeConfig(args)` keeps every reference intact. It reads only the raw `args`
+ * object; the sibling `types.ts` owns the cross-module runtime shapes, and the
+ * derived guidance strings feed the prompt builders in `prompts.ts`. makeConfig
+ * is pure — the projectRoot chdir side effect stays with the caller.
+ */
 
+/**
+ * The untyped `args` surface as received from ODW: every field is optional
+ * because operators pass arbitrary JSON. {@link makeConfig} coerces, clamps, and
+ * defaults each field into a {@link WorkflowConfig}; nothing consumes this shape
+ * directly.
+ */
 export interface RawWorkflowArgs {
   projectRoot?: string
   base?: string
@@ -68,6 +78,12 @@ export interface RawWorkflowArgs {
   commitGates?: unknown
 }
 
+/**
+ * The fully-resolved run configuration: every value coerced, clamped, and
+ * defaulted. The entry destructures this once; the UPPER_SNAKE_CASE keys mirror
+ * the historical top-level constant names so call sites stayed untouched when
+ * the configuration was extracted into this module.
+ */
 export interface WorkflowConfig {
   PROJECT_ROOT: string
   BASE: string
@@ -136,6 +152,16 @@ export interface WorkflowConfig {
   SCRUTINEER_DELEGATION_GUIDANCE: string
 }
 
+/**
+ * Build the run configuration from the raw ODW `args`. Pure and total: every
+ * field is coerced, clamped to a safe range, and defaulted, so a missing or
+ * hostile value degrades gracefully rather than throwing — the sole exception is
+ * an unsupported `resumeMode`, which throws. Returns a {@link WorkflowConfig}
+ * the entry destructures once.
+ *
+ * @param rawArgs The ODW `args` object (or null/undefined for all defaults).
+ * @returns The resolved run configuration.
+ */
 export function makeConfig(rawArgs: Record<string, unknown> | null | undefined): WorkflowConfig {
   const cfg = (rawArgs || {}) as RawWorkflowArgs
   const PROJECT_ROOT = cfg.projectRoot || process.cwd()
@@ -152,14 +178,22 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review cycles
   const STAGE_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2)) // total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, schema-retry exhaustion); product failures are never retried
   // Parse a `[low, high]` range from config: coerce and truncate each bound,
-  // floor low at 1, and floor high at low so high >= low always holds. A
-  // missing or malformed value (non-array, non-numeric, or falsy) falls back to
-  // the supplied defaults. Shared by the provider-backoff and CodeRabbit-backoff
-  // knobs, which differ only in their default bounds.
+  // floor low at 1, and floor high at low so high >= low always holds. A missing
+  // or malformed bound (non-array, non-finite, or falsy) falls back to the
+  // supplied default. Number.isFinite is the gate — a plain `Number(x) ||
+  // default` lets Infinity (and an overflowing literal, which coerces to
+  // Infinity) leak through because Infinity is truthy — while the trailing
+  // truthiness check keeps the existing 0 -> default behaviour. Shared by the
+  // provider-backoff and CodeRabbit-backoff knobs, which differ only in their
+  // default bounds.
   const parseBoundedRange = (raw: unknown, defaultLow: number, defaultHigh: number): [number, number] => {
     const range = Array.isArray(raw) ? raw : []
-    const low = Math.max(1, Math.trunc(Number(range[0]) || defaultLow))
-    const high = Math.max(low, Math.trunc(Number(range[1]) || defaultHigh))
+    const bound = (value: unknown, fallback: number): number => {
+      const parsed = Number(value)
+      return Math.trunc(Number.isFinite(parsed) && parsed ? parsed : fallback)
+    }
+    const low = Math.max(1, bound(range[0], defaultLow))
+    const high = Math.max(low, bound(range[1], defaultHigh))
     return [low, high]
   }
   // Bounded backoff (seconds) between stage-agent retries when the previous
