@@ -177,6 +177,16 @@ describe('makeConfig overrides and clamps', () => {
     expect(makeConfig({ infraRetryBackoffSeconds: [1e400, 2] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 5])
   })
 
+  test('infraRetryBackoffSeconds clamps finite-but-huge bounds to the setTimeout ceiling', () => {
+    // A finite value beyond setTimeout's ~2^31-1 ms limit would overflow the
+    // timer and fire immediately, defeating the backoff; the upper clamp caps
+    // each bound at 2_147_483 seconds while preserving low <= high.
+    expect(makeConfig({ infraRetryBackoffSeconds: [1, 5_000_000] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([1, 2_147_483])
+    expect(makeConfig({ infraRetryBackoffSeconds: [9_000_000, 9_000_000] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([2_147_483, 2_147_483])
+    // The default range is well under the ceiling and unaffected.
+    expect(makeConfig({}).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 30])
+  })
+
   test('coderabbitBackoffMinutes shares the same range parsing with its own defaults', () => {
     // Guards the shared parseBoundedRange helper at its second call site: same
     // clamp/fallback behaviour, different default bounds.

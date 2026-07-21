@@ -508,7 +508,7 @@ The wait honours an advertised `retry-after` when the error message carries one
 (parsed best-effort from shapes like `retry-after: N` or
 `try again in N second(s)/minute(s)`) and clamps it into
 `infraRetryBackoffSeconds` so a hostile or huge value cannot stall the run.
-When no wait is advertised the backoff is a deterministically seeded jitter
+When no wait is advertised, the backoff is a deterministically seeded jitter
 (DJB2 over `${label}#${attempt}`, `Math.random()` being banned for Claude Code
 dual-compatibility) spread across the same range, keeping sibling tasks that
 hit the same limit from retrying in lockstep. If the limit persists across the

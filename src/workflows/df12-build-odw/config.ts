@@ -3,10 +3,11 @@
  * clamp, validation, and derived guidance string, built once by {@link makeConfig}
  * and destructured by the entry (main.ts). Field names deliberately match the
  * entry's historical constant names so `const { BASE, ROADMAP, … } =
- * makeConfig(args)` keeps every reference intact. It reads only the raw `args`
- * object; the sibling `types.ts` owns the cross-module runtime shapes, and the
- * derived guidance strings feed the prompt builders in `prompts.ts`. makeConfig
- * is pure — the projectRoot chdir side effect stays with the caller.
+ * makeConfig(args)` keeps every reference intact. It reads the raw `args` object
+ * plus `process.cwd()` (the default for `PROJECT_ROOT`); the sibling `types.ts`
+ * owns the cross-module runtime shapes, and the derived guidance strings feed
+ * the prompt builders in `prompts.ts`. makeConfig is side-effect-free — the
+ * projectRoot chdir stays with the caller.
  */
 
 /**
@@ -153,11 +154,15 @@ export interface WorkflowConfig {
 }
 
 /**
- * Build the run configuration from the raw ODW `args`. Pure and total: every
- * field is coerced, clamped to a safe range, and defaulted, so a missing or
- * hostile value degrades gracefully rather than throwing — the sole exception is
- * an unsupported `resumeMode`, which throws. Returns a {@link WorkflowConfig}
- * the entry destructures once.
+ * Build the run configuration from the raw ODW `args`. Total and
+ * side-effect-free: it never throws except on an unsupported `resumeMode`, and
+ * each field is normalised as its own type requires rather than uniformly — the
+ * numeric knobs are coerced, truncated, and clamped into a safe range (see
+ * `parseBoundedRange` and the `Math.max`/`Math.trunc` guards); booleans default
+ * by presence; strings fall back to a default; and `PROJECT_ROOT` falls back to
+ * `process.cwd()` when `projectRoot` is unset (the one input read from outside
+ * `args`). Returns a {@link WorkflowConfig} the entry destructures once; the
+ * projectRoot chdir stays with the caller.
  *
  * @param rawArgs The ODW `args` object (or null/undefined for all defaults).
  * @returns The resolved run configuration.
@@ -178,19 +183,22 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review cycles
   const STAGE_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2)) // total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, schema-retry exhaustion); product failures are never retried
   // Parse a `[low, high]` range from config: coerce and truncate each bound,
-  // floor low at 1, and floor high at low so high >= low always holds. A missing
-  // or malformed bound (non-array, non-finite, or falsy) falls back to the
-  // supplied default. Number.isFinite is the gate — a plain `Number(x) ||
-  // default` lets Infinity (and an overflowing literal, which coerces to
-  // Infinity) leak through because Infinity is truthy — while the trailing
-  // truthiness check keeps the existing 0 -> default behaviour. Shared by the
-  // provider-backoff and CodeRabbit-backoff knobs, which differ only in their
-  // default bounds.
+  // clamp it to `[1, MAX_BACKOFF_SECONDS]`, and floor high at low so high >= low
+  // always holds. A missing or malformed bound (non-array, non-finite, or falsy)
+  // falls back to the supplied default. Number.isFinite is the gate — a plain
+  // `Number(x) || default` lets Infinity (and an overflowing literal, which
+  // coerces to Infinity) leak through because Infinity is truthy — while the
+  // trailing truthiness check keeps the existing 0 -> default behaviour. The
+  // upper clamp caps a finite-but-huge bound at setTimeout's ~2^31-1 ms ceiling
+  // (in whole seconds): a larger delay overflows the timer and fires
+  // immediately, defeating the backoff. Shared by the provider-backoff and
+  // CodeRabbit-backoff knobs, which differ only in their default bounds.
   const parseBoundedRange = (raw: unknown, defaultLow: number, defaultHigh: number): [number, number] => {
+    const MAX_BACKOFF_SECONDS = 2_147_483 // floor((2^31 - 1) ms / 1000): the largest setTimeout delay that does not overflow
     const range = Array.isArray(raw) ? raw : []
     const bound = (value: unknown, fallback: number): number => {
       const parsed = Number(value)
-      return Math.trunc(Number.isFinite(parsed) && parsed ? parsed : fallback)
+      return Math.min(MAX_BACKOFF_SECONDS, Math.trunc(Number.isFinite(parsed) && parsed ? parsed : fallback))
     }
     const low = Math.max(1, bound(range[0], defaultLow))
     const high = Math.max(low, bound(range[1], defaultHigh))
