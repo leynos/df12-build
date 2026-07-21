@@ -966,10 +966,11 @@ function makeConfig(rawArgs) {
   const MAX_REVIEW_ROUNDS2 = cfg.maxReviewRounds || 3;
   const STAGE_ATTEMPTS2 = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2));
   const parseBoundedRange = (raw, defaultLow, defaultHigh) => {
+    const MAX_BACKOFF_SECONDS = 2147483;
     const range = Array.isArray(raw) ? raw : [];
     const bound = (value, fallback) => {
       const parsed = Number(value);
-      return Math.trunc(Number.isFinite(parsed) && parsed ? parsed : fallback);
+      return Math.min(MAX_BACKOFF_SECONDS, Math.trunc(Number.isFinite(parsed) && parsed ? parsed : fallback));
     };
     const low = Math.max(1, bound(range[0], defaultLow));
     const high = Math.max(low, bound(range[1], defaultHigh));
