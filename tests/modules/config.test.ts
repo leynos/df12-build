@@ -1,7 +1,10 @@
-// Module tests for the run-configuration record (decomposition milestone 5).
-// makeConfig owns every args default, clamp, and derivation; the entry
-// destructures the record once, so these tests are the contract for the
-// whole `args` surface.
+/**
+ * @file Module tests for the run-configuration record (decomposition milestone
+ * 5). `makeConfig` owns every `args` default, clamp, and derivation; the entry
+ * destructures the record once, so these tests are the contract for the whole
+ * `args` surface — including the shared `parseBoundedRange` clamp behind
+ * `infraRetryBackoffSeconds` and `coderabbitBackoffMinutes`.
+ */
 import { describe, expect, test } from 'bun:test'
 
 import { makeConfig } from '../../src/workflows/df12-build-odw/config.ts'
@@ -144,5 +147,53 @@ describe('makeConfig overrides and clamps', () => {
     const config = makeConfig({ buildAdapter: 'Kimi', planAdapter: 'gemini' })
     expect(config.AUTH_REQUIRED_ADAPTERS.has('kimi')).toBe(true)
     expect(config.AUTH_REQUIRED_ADAPTERS.has('gemini')).toBe(true)
+  })
+
+  test('infraRetryBackoffSeconds defaults, truncates, and clamps low<=high', () => {
+    expect(makeConfig({}).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 30])
+    // An explicit range is coerced, truncated, and honoured.
+    expect(makeConfig({ infraRetryBackoffSeconds: [10, 40] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([10, 40])
+    expect(makeConfig({ infraRetryBackoffSeconds: [2.9, 8.9] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([2, 8])
+    // low floors at the default (0 is falsy), and a high below low is lifted to low.
+    expect(makeConfig({ infraRetryBackoffSeconds: [0, 0] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 30])
+    expect(makeConfig({ infraRetryBackoffSeconds: [20, 3] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([20, 20])
+    // Non-array or malformed input falls back to the defaults.
+    expect(makeConfig({ infraRetryBackoffSeconds: 'nope' }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 30])
+    expect(makeConfig({ infraRetryBackoffSeconds: [] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 30])
+  })
+
+  test('infraRetryBackoffSeconds treats non-finite bounds (Infinity, -Infinity, NaN, overflow) as defaults', () => {
+    // Number.isFinite gates each bound: Infinity is truthy and would leak
+    // through a plain `Number(x) || default`, so pin that each non-finite bound
+    // falls back to its own default rather than propagating Infinity into the
+    // shell-facing backoff guidance.
+    expect(makeConfig({ infraRetryBackoffSeconds: [Infinity, Infinity] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 30])
+    expect(makeConfig({ infraRetryBackoffSeconds: [5, Infinity] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 30])
+    expect(makeConfig({ infraRetryBackoffSeconds: [Infinity, 40] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 40])
+    expect(makeConfig({ infraRetryBackoffSeconds: [-Infinity, 30] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 30])
+    expect(makeConfig({ infraRetryBackoffSeconds: [NaN, NaN] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 30])
+    // 1e400 overflows to Infinity in JS, so it must fall back, not leak: low
+    // defaults to 5 and the honoured high (2) is then lifted to low.
+    expect(makeConfig({ infraRetryBackoffSeconds: [1e400, 2] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 5])
+  })
+
+  test('infraRetryBackoffSeconds clamps finite-but-huge bounds to the setTimeout ceiling', () => {
+    // A finite value beyond setTimeout's ~2^31-1 ms limit would overflow the
+    // timer and fire immediately, defeating the backoff; the upper clamp caps
+    // each bound at 2_147_483 seconds while preserving low <= high.
+    expect(makeConfig({ infraRetryBackoffSeconds: [1, 5_000_000] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([1, 2_147_483])
+    expect(makeConfig({ infraRetryBackoffSeconds: [9_000_000, 9_000_000] }).INFRA_RETRY_BACKOFF_SECONDS).toEqual([2_147_483, 2_147_483])
+    // The default range is well under the ceiling and unaffected.
+    expect(makeConfig({}).INFRA_RETRY_BACKOFF_SECONDS).toEqual([5, 30])
+  })
+
+  test('coderabbitBackoffMinutes shares the same range parsing with its own defaults', () => {
+    // Guards the shared parseBoundedRange helper at its second call site: same
+    // clamp/fallback behaviour, different default bounds.
+    expect(makeConfig({}).CODERABBIT_BACKOFF_MINUTES).toEqual([45, 90])
+    expect(makeConfig({ coderabbitBackoffMinutes: [60, 30] }).CODERABBIT_BACKOFF_MINUTES).toEqual([60, 60])
+    expect(makeConfig({ coderabbitBackoffMinutes: 'x' }).CODERABBIT_BACKOFF_MINUTES).toEqual([45, 90])
+    // The finite-bound guard applies here too (second call site).
+    expect(makeConfig({ coderabbitBackoffMinutes: [Infinity, 90] }).CODERABBIT_BACKOFF_MINUTES).toEqual([45, 90])
   })
 })

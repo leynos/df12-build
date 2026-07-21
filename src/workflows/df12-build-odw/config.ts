@@ -1,10 +1,21 @@
-// Run configuration: every `args` default, clamp, validation, and derived
-// guidance string, built once by makeConfig and destructured by the entry.
-// Field names deliberately match the entry's historical constant names so
-// `const { BASE, ROADMAP, ... } = makeConfig(args)` keeps every reference
-// intact. makeConfig is pure: the projectRoot chdir side effect stays with
-// the caller.
+/**
+ * @file Run configuration for the df12-build-odw workflow: every `args` default,
+ * clamp, validation, and derived guidance string, built once by {@link makeConfig}
+ * and destructured by the entry (main.ts). Field names deliberately match the
+ * entry's historical constant names so `const { BASE, ROADMAP, … } =
+ * makeConfig(args)` keeps every reference intact. It reads the raw `args` object
+ * plus `process.cwd()` (the default for `PROJECT_ROOT`); the sibling `types.ts`
+ * owns the cross-module runtime shapes, and the derived guidance strings feed
+ * the prompt builders in `prompts.ts`. makeConfig is side-effect-free — the
+ * projectRoot chdir stays with the caller.
+ */
 
+/**
+ * The untyped `args` surface as received from ODW: every field is optional
+ * because operators pass arbitrary JSON. {@link makeConfig} coerces, clamps, and
+ * defaults each field into a {@link WorkflowConfig}; nothing consumes this shape
+ * directly.
+ */
 export interface RawWorkflowArgs {
   projectRoot?: string
   base?: string
@@ -20,6 +31,7 @@ export interface RawWorkflowArgs {
   maxDesignRounds?: number
   maxReviewRounds?: number
   stageAttempts?: number | string
+  infraRetryBackoffSeconds?: unknown
   perWorkItemBuild?: boolean
   maxWorkItemRounds?: number | string
   autoMerge?: boolean
@@ -67,6 +79,12 @@ export interface RawWorkflowArgs {
   commitGates?: unknown
 }
 
+/**
+ * The fully-resolved run configuration: every value coerced, clamped, and
+ * defaulted. The entry destructures this once; the UPPER_SNAKE_CASE keys mirror
+ * the historical top-level constant names so call sites stayed untouched when
+ * the configuration was extracted into this module.
+ */
 export interface WorkflowConfig {
   PROJECT_ROOT: string
   BASE: string
@@ -81,6 +99,7 @@ export interface WorkflowConfig {
   MAX_DESIGN_ROUNDS: number
   MAX_REVIEW_ROUNDS: number
   STAGE_ATTEMPTS: number
+  INFRA_RETRY_BACKOFF_SECONDS: [number, number]
   PER_WORK_ITEM_BUILD: boolean
   MAX_WORK_ITEM_ROUNDS: number
   AUTO_MERGE: boolean
@@ -134,6 +153,20 @@ export interface WorkflowConfig {
   SCRUTINEER_DELEGATION_GUIDANCE: string
 }
 
+/**
+ * Build the run configuration from the raw ODW `args`. Total and
+ * side-effect-free: it never throws except on an unsupported `resumeMode`, and
+ * each field is normalised as its own type requires rather than uniformly — the
+ * numeric knobs are coerced, truncated, and clamped into a safe range (see
+ * `parseBoundedRange` and the `Math.max`/`Math.trunc` guards); booleans default
+ * by presence; strings fall back to a default; and `PROJECT_ROOT` falls back to
+ * `process.cwd()` when `projectRoot` is unset (the one input read from outside
+ * `args`). Returns a {@link WorkflowConfig} the entry destructures once; the
+ * projectRoot chdir stays with the caller.
+ *
+ * @param rawArgs The ODW `args` object (or null/undefined for all defaults).
+ * @returns The resolved run configuration.
+ */
 export function makeConfig(rawArgs: Record<string, unknown> | null | undefined): WorkflowConfig {
   const cfg = (rawArgs || {}) as RawWorkflowArgs
   const PROJECT_ROOT = cfg.projectRoot || process.cwd()
@@ -149,6 +182,35 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   const MAX_DESIGN_ROUNDS = cfg.maxDesignRounds || 4 // plan <-> design-review exchanges before halting
   const MAX_REVIEW_ROUNDS = cfg.maxReviewRounds || 3 // review -> fix -> re-review cycles
   const STAGE_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.stageAttempts) || 2)) // total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, schema-retry exhaustion); product failures are never retried
+  // Parse a `[low, high]` range from config: coerce and truncate each bound,
+  // clamp it to `[1, MAX_BACKOFF_SECONDS]`, and floor high at low so high >= low
+  // always holds. A missing or malformed bound (non-array, non-finite, or falsy)
+  // falls back to the supplied default. Number.isFinite is the gate — a plain
+  // `Number(x) || default` lets Infinity (and an overflowing literal, which
+  // coerces to Infinity) leak through because Infinity is truthy — while the
+  // trailing truthiness check keeps the existing 0 -> default behaviour. The
+  // upper clamp caps a finite-but-huge bound at setTimeout's ~2^31-1 ms ceiling
+  // (in whole seconds): a larger delay overflows the timer and fires
+  // immediately, defeating the backoff. Shared by the provider-backoff and
+  // CodeRabbit-backoff knobs, which differ only in their default bounds.
+  const parseBoundedRange = (raw: unknown, defaultLow: number, defaultHigh: number): [number, number] => {
+    const MAX_BACKOFF_SECONDS = 2_147_483 // floor((2^31 - 1) ms / 1000): the largest setTimeout delay that does not overflow
+    const range = Array.isArray(raw) ? raw : []
+    const bound = (value: unknown, fallback: number): number => {
+      const parsed = Number(value)
+      return Math.min(MAX_BACKOFF_SECONDS, Math.trunc(Number.isFinite(parsed) && parsed ? parsed : fallback))
+    }
+    const low = Math.max(1, bound(range[0], defaultLow))
+    const high = Math.max(low, bound(range[1], defaultHigh))
+    return [low, high]
+  }
+  // Bounded backoff (seconds) between stage-agent retries when the previous
+  // attempt hit a provider rate-limit: retrying instantly just burns the
+  // attempt budget against a still-closed window, so pause a seeded-jitter
+  // interval in [low, high] (or the advertised retry-after, clamped into this
+  // range) before the warm re-run. Second-scale, unlike the minute-scale
+  // CodeRabbit host-review backoff, because provider limits recover fast.
+  const INFRA_RETRY_BACKOFF_SECONDS: [number, number] = parseBoundedRange(cfg.infraRetryBackoffSeconds, 5, 30)
 
   // Per-work-item build loop: the host reads the committed ExecPlan's Progress
   // checklist and dispatches ONE builder turn per unticked work item, verifying
@@ -237,12 +299,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   // restores end-of-stage-only host review.
   const CODERABBIT_BETWEEN_WORK_ITEMS = cfg.coderabbitBetweenWorkItems !== false
   const CODERABBIT_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.coderabbitAttempts) || 3)) // total attempts per host review when rate limited
-  const CODERABBIT_BACKOFF_MINUTES: [number, number] = (() => {
-    const range = Array.isArray(cfg.coderabbitBackoffMinutes) ? cfg.coderabbitBackoffMinutes : []
-    const low = Math.max(1, Math.trunc(Number(range[0]) || 45))
-    const high = Math.max(low, Math.trunc(Number(range[1]) || 90))
-    return [low, high]
-  })()
+  const CODERABBIT_BACKOFF_MINUTES: [number, number] = parseBoundedRange(cfg.coderabbitBackoffMinutes, 45, 90)
   // Optional durable JSONL sink for every CodeRabbit finding, so recurring
   // finding classes can be tuned into deterministic lint rules over time.
   const CODERABBIT_FINDINGS_FILE = String(cfg.coderabbitFindingsFile || '')
@@ -309,6 +366,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     MAX_DESIGN_ROUNDS,
     MAX_REVIEW_ROUNDS,
     STAGE_ATTEMPTS,
+    INFRA_RETRY_BACKOFF_SECONDS,
     PER_WORK_ITEM_BUILD,
     MAX_WORK_ITEM_ROUNDS,
     AUTO_MERGE,

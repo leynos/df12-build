@@ -80,6 +80,27 @@ function typecheckRecovery(body: string): { ok: boolean; output: string } {
   return typecheckWithPrelude(RECOVERY_PRELUDE, body, 'cs-recovery-')
 }
 
+// The fault/backoff public surface (#39): the bounded FaultMetrics counter set
+// (types.ts) and the makeWithInfraRetry factory signature (faults.ts). Pin them
+// against the REAL exports so a dropped counter key or a changed argument shape
+// fails at compile time, not only in the runtime Bun suites.
+const FAULTS_PRELUDE = [
+  `import type { FaultMetrics } from '${path.join(ODW_SRC, 'types.ts')}'`,
+  `import type { makeWithInfraRetry } from '${path.join(ODW_SRC, 'faults.ts')}'`,
+].join('\n')
+
+function typecheckFaults(body: string): { ok: boolean; output: string } {
+  return typecheckWithPrelude(FAULTS_PRELUDE, body, 'cs-faults-')
+}
+
+// The resolved run configuration (config.ts): used to pin the
+// INFRA_RETRY_BACKOFF_SECONDS [low, high] tuple shape against widening.
+const CONFIG_PRELUDE = `import type { WorkflowConfig } from '${path.join(ODW_SRC, 'config.ts')}'`
+
+function typecheckConfig(body: string): { ok: boolean; output: string } {
+  return typecheckWithPrelude(CONFIG_PRELUDE, body, 'cs-config-')
+}
+
 describe('compile-time contract', () => {
   test('tsconfig.json keeps the erasable-syntax restriction flags on', async () => {
     const tsconfig = JSON.parse(await Bun.file(path.join(REPO, 'tsconfig.json')).text())
@@ -176,5 +197,66 @@ describe('recovery synthetic-impl type contract', () => {
     const result = typecheckRecovery(`type P = Parameters<typeof syntheticRecoveryImpl>[2]; const bad: P = [1]; void bad`)
     expect(result.ok).toBe(false)
     expect(result.output).toMatch(/TS2322|TS2769|not assignable/)
+  }, 30_000)
+})
+
+// The provider-rate-limit backoff surface (#39): FaultMetrics gained the bounded
+// `providerRetries` counter and makeWithInfraRetry became a three-arg factory
+// (attempts, an optional [low, high] range, and an optional injected sleep). The
+// config carries the range as INFRA_RETRY_BACKOFF_SECONDS: [number, number].
+// These compile-fail probes pin those shapes against the REAL exports.
+describe('fault and config public type contract', () => {
+  test('a FaultMetrics with all five bounded counters type-checks', () => {
+    const result = typecheckFaults([
+      `const m: FaultMetrics = { infraRetries: 0, providerRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 }`,
+      `void m`,
+    ].join('\n'))
+    expect(result.ok).toBe(true)
+  }, 30_000)
+
+  test('FaultMetrics requires the providerRetries counter', () => {
+    const result = typecheckFaults(`const m: FaultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 }; void m`)
+    expect(result.ok).toBe(false)
+    expect(result.output).toMatch(/TS2741|providerRetries/)
+  }, 30_000)
+
+  test('FaultMetrics counters are numbers, not strings', () => {
+    const result = typecheckFaults(`const m: FaultMetrics = { infraRetries: '0', providerRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 }; void m`)
+    expect(result.ok).toBe(false)
+    expect(result.output).toMatch(/TS2322|not assignable/)
+  }, 30_000)
+
+  test('makeWithInfraRetry accepts (attempts), (attempts, range), and (attempts, range, sleep)', () => {
+    const result = typecheckFaults([
+      `type P = Parameters<typeof makeWithInfraRetry>`,
+      `const a: P = [2]`,
+      `const b: P = [2, [5, 30]]`,
+      `const c: P = [2, [5, 30], async (s: number) => { void s }]`,
+      `void a; void b; void c`,
+    ].join('\n'))
+    expect(result.ok).toBe(true)
+  }, 30_000)
+
+  test('makeWithInfraRetry backoff range is a two-number tuple, not a wider array', () => {
+    const result = typecheckFaults(`type P = Parameters<typeof makeWithInfraRetry>; const bad: P = [2, [5, 30, 45]]; void bad`)
+    expect(result.ok).toBe(false)
+    expect(result.output).toMatch(/TS2322|TS2769|not assignable/)
+  }, 30_000)
+
+  test('makeWithInfraRetry sleep must return a Promise', () => {
+    const result = typecheckFaults(`type P = Parameters<typeof makeWithInfraRetry>; const bad: P = [2, [5, 30], (s: number) => s]; void bad`)
+    expect(result.ok).toBe(false)
+    expect(result.output).toMatch(/TS2322|TS2769|not assignable/)
+  }, 30_000)
+
+  test('WorkflowConfig.INFRA_RETRY_BACKOFF_SECONDS is a two-number tuple', () => {
+    const result = typecheckConfig(`const ok: WorkflowConfig['INFRA_RETRY_BACKOFF_SECONDS'] = [5, 30]; void ok`)
+    expect(result.ok).toBe(true)
+  }, 30_000)
+
+  test('INFRA_RETRY_BACKOFF_SECONDS rejects a wrong-arity tuple', () => {
+    const result = typecheckConfig(`const bad: WorkflowConfig['INFRA_RETRY_BACKOFF_SECONDS'] = [5, 30, 45]; void bad`)
+    expect(result.ok).toBe(false)
+    expect(result.output).toMatch(/TS2322|not assignable/)
   }, 30_000)
 })

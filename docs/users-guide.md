@@ -450,15 +450,22 @@ Common arguments:
 - `commitGateTimeoutSeconds`: per-command timeout for host-run gates.
   Defaults to `3600`; a gate that exceeds it is killed and reported as a
   failure with the timeout named in the evidence.
-- `stageAttempts`: total attempts per stage agent when the previous attempt
-  died on an infrastructure fault (an ODW adapter timeout or crash, or
-  schema-retry exhaustion). Defaults to `2`. Product failures are never
-  retried, and the host never re-dispatches a faulted integration stage: a
+- `stageAttempts`: the shared total-attempt budget per stage agent, spent when
+  the previous attempt died on either an infrastructure fault (an ODW adapter
+  timeout or crash, or schema-retry exhaustion) or a transient provider fault (a
+  `429`/`529`, an overloaded model, or a gateway timeout). Defaults to `2`.
+  Infrastructure faults are retried immediately; provider faults wait a bounded
+  backoff (`infraRetryBackoffSeconds`) before each re-run. Product failures are
+  never retried, and the host never re-dispatches a faulted integration stage: a
   crash between the squash push and the agent's return can leave a hidden
   success already landed on `origin/<base>`, which the host cannot detect, so
   repeating the stage risks a double merge. (The integration agent still
   redoes its own squash idempotently on a non-fast-forward push rejection
   within a single turn — see the recovery model.)
+- `infraRetryBackoffSeconds`: `[low, high]` seconds for the bounded backoff
+  before each provider rate-limit retry. An advertised `retry-after` is
+  honoured when present (clamped into this range); otherwise a deterministic
+  seeded jitter in the range is used. Defaults to `[5, 30]`.
 - `perWorkItemBuild`: when `true` (the default), the workflow host reads the
   approved ExecPlan's `## Progress` checklist and dispatches one builder turn
   per unticked work item, verifying committed progress after every turn.
@@ -733,9 +740,15 @@ writes are skipped (as with provider faults), and the halt detail directs the
 operator to relaunch with `resumePartialBranches=true` and
 `resumeMode="continue"`. Integration is the exception: a fault there is never
 retried, because a hidden-success first attempt may already have pushed —
-inspect `origin/<base>` and the roadmap before relaunching. The run result's
-`faultMetrics` object counts retries and terminal faults per class
-(`infraRetries`, `infraFaults`, `providerFaults`, `authFaults`).
+inspect `origin/<base>` and the roadmap before relaunching. Provider faults —
+rate limits (`429`/`529`), an overloaded model, or a gateway timeout — are
+likewise retried in place within the same `stageAttempts` budget, but each
+re-run is preceded by a bounded backoff: an advertised `retry-after` is
+honoured when present, otherwise a deterministic seeded jitter within
+`infraRetryBackoffSeconds` is used. A persistent limit terminates the task as
+`provider-fault`. The run result's `faultMetrics` object counts retries and
+terminal faults per class (`infraRetries`, `providerRetries`, `infraFaults`,
+`providerFaults`, `authFaults`).
 
 That host-level caution is distinct from the integration agent's own retry
 loop, which is idempotent by construction. Because sibling tasks merge through
