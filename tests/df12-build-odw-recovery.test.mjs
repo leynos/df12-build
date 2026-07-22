@@ -266,6 +266,27 @@ test('the always-on guard holds stale branches out of selection when recovery is
   assert.equal(surface.isAlreadyTaken({ id: '2.1.1', isAddendum: false }), false)
 })
 
+test('the guard holds survivors that do not match a set resumeTaskId (issue #33)', async () => {
+  // resumeTaskId scopes RESUME actions to a single task, but the always-on guard
+  // must still hold EVERY surviving roadmap-* branch. The guard discovers with
+  // the resume filters lifted, so a survivor whose id differs from resumeTaskId
+  // (here roadmap-1-2-4 vs a resumeTaskId of 1.2.3) is not silently dropped and
+  // re-opened, which would collide on `git worktree add -b`.
+  const surface = await loadRecoverySurface({ resumeTaskId: '1.2.3' })
+  assert.equal(surface.RESUME_PARTIAL_BRANCHES, false)
+  assert.equal(surface.RESUME_TASK_ID, '1.2.3')
+  const repo = makeRecoveryRepo()
+
+  const guard = await surface.discoverHeldBranches(repo.dir)
+  assert.ok(guard.held.normal.has('1.2.4'), 'non-matching survivor 1.2.4 must still be held')
+  assert.ok(guard.held.normal.has('1.2.3'), 'the resumeTaskId candidate 1.2.3 must be held')
+  assert.equal(guard.held.normal.has('2.1.1'), false, 'completed branch must not be held')
+
+  for (const id of guard.held.normal) surface.recoveryHeldNormal.add(id)
+  for (const id of guard.held.addendum) surface.recoveryHeldAddendum.add(id)
+  assert.equal(surface.isAlreadyTaken({ id: '1.2.4', isAddendum: false }), true)
+})
+
 test('discovery keeps addendum branches for parents with open sub-tasks', async () => {
   const surface = await loadRecoverySurface({})
   const repo = makeRecoveryRepo({ withAddendumWorktree: true })
