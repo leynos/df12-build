@@ -262,3 +262,29 @@ first recovery slice.
     "Deferred decisions".
   - Success: deletion, stash handling, and branch-retention policy are recorded
     before any automated cleanup lands.
+
+## 5. Fault-classification refinements
+
+Idea: if each terminal adapter failure is classified by the durable response it
+warrants — retry warm, defer, or halt for operator resume — then an
+hours-long quota exhaustion never masquerades as a transient death and never
+burns the run's remaining time on a doomed in-window retry.
+
+This phase refines the existing fault taxonomy without adding configuration
+surface; it reuses the halt/resume semantics already carried by provider and
+infrastructure faults.
+
+### 5.1. Classify Codex usage-limit exhaustion distinctly
+
+This step answers whether a spent Codex usage quota can be told apart from a
+transient infrastructure fault it textually resembles, so the run halts for
+resume instead of retrying inside the reset window.
+
+- [x] 5.1.1. Add a `usage-limit-fault` class matched ahead of the infra
+  pattern, suppress its in-window warm retry, halt the run with
+  `resumeMode: "continue"` guidance, and count it in `faultMetrics`.
+  - Requires phase 2.
+  - See `docs/failure-resume-design.md` section "Usage-limit faults".
+  - Success: a Codex build stage that exhausts its usage limit terminates as
+    `usage-limit-fault` with no assessment, no remediation flush, and no wasted
+    retry, and `faultMetrics.usageLimitFaults` records it.

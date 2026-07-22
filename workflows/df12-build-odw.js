@@ -569,7 +569,7 @@ async function fileState(pathValue, baseDir = process.cwd()) {
 }
 
 // src/workflows/df12-build-odw/faults.ts
-var faultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 };
+var faultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0, usageLimitFaults: 0 };
 function authFailureDetail(value) {
   const text = String(value || "");
   const patterns = [
@@ -600,6 +600,18 @@ function providerFailureDetail(value) {
   ];
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
 }
+function usageLimitFailureDetail(value) {
+  const text = String(value || "");
+  const patterns = [
+    /You['’]ve hit your usage limit/i,
+    /purchase more credits/i,
+    /Limits reset every/i,
+    /usage limit reached.*try again at/i,
+    /\brate_limit_exceeded\b/i,
+    /exceeded the rate limit/i
+  ];
+  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
+}
 function infrastructureFailureDetail(value) {
   const text = String(value || "");
   const patterns = [
@@ -612,6 +624,20 @@ function infrastructureFailureDetail(value) {
   ];
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
 }
+function shouldStopInfraRetry(message, attempt, attempts) {
+  if (attempt >= attempts) return true;
+  if (usageLimitFailureDetail(message)) return true;
+  return !infrastructureFailureDetail(message);
+}
+function logTerminalInfraRetry(label, message, attempt, attempts) {
+  if (usageLimitFailureDetail(message)) {
+    log(`[${label}] usage-limit fault; retry deliberately skipped inside the reset window: ${message}`);
+  } else if (infrastructureFailureDetail(message)) {
+    log(`[${label}] infrastructure fault persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`);
+  } else {
+    log(`[${label}] non-infrastructure failure; not retried: ${message}`);
+  }
+}
 function makeWithInfraRetry(attempts) {
   return async function withInfraRetry2(run, label) {
     for (let attempt = 1; ; attempt++) {
@@ -619,12 +645,8 @@ function makeWithInfraRetry(attempts) {
         return await run();
       } catch (error) {
         const message = error && error.message || String(error);
-        if (attempt >= attempts || !infrastructureFailureDetail(message)) {
-          if (infrastructureFailureDetail(message)) {
-            log(`[${label}] infrastructure fault persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`);
-          } else {
-            log(`[${label}] non-infrastructure failure; not retried: ${message}`);
-          }
+        if (shouldStopInfraRetry(message, attempt, attempts)) {
+          logTerminalInfraRetry(label, message, attempt, attempts);
           throw error;
         }
         faultMetrics.infraRetries += 1;
@@ -641,6 +663,18 @@ function resultFromUnhandledAgentError(id, detail, extra = {}) {
       id,
       status: "fatal-auth",
       stage: "auth",
+      detail,
+      proposals: [],
+      ...extra
+    };
+  }
+  const usageLimitDetail = usageLimitFailureDetail(detail);
+  if (usageLimitDetail) {
+    faultMetrics.usageLimitFaults += 1;
+    return {
+      id,
+      status: "usage-limit-fault",
+      stage: "usage-limit",
       detail,
       proposals: [],
       ...extra
@@ -1727,6 +1761,28 @@ function summarizeSalvages(results2) {
   const summarySuffix = salvagedBranches ? ` | salvaged artefacts on ${salvagedBranches} branch(es)` : "";
   return { salvages, salvagedBranches, summarySuffix };
 }
+var NON_ASSESSABLE_STAGES = /* @__PURE__ */ new Set([
+  "worktree",
+  "worktree-write",
+  "auth",
+  "provider",
+  "infrastructure",
+  "usage-limit"
+]);
+var NON_ASSESSABLE_STATUSES = /* @__PURE__ */ new Set([
+  "fatal-auth",
+  "usage-limit-fault",
+  "provider-fault",
+  "infra-fault"
+]);
+function isNonAssessableFaultResult(result) {
+  if (NON_ASSESSABLE_STAGES.has(result.stage || "")) return true;
+  if (NON_ASSESSABLE_STATUSES.has(result.status || "")) return true;
+  const detail = [result.detail, ...result.openIssues || []].filter(Boolean).join("\n");
+  return Boolean(
+    authFailureDetail(detail) || usageLimitFailureDetail(detail) || providerFailureDetail(detail) || infrastructureFailureDetail(detail)
+  );
+}
 function fastAssessmentClassification(evidence) {
   const collectionErrors = evidence?.collectionErrors || [];
   if (collectionErrors.length) {
@@ -1934,9 +1990,7 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
     if (!assessPartialBranches) return false;
     if (!wt?.branch || !wt?.worktreePath) return false;
     if (!result || !["failed", "halted"].includes(result.status || "")) return false;
-    if (result.stage === "worktree" || result.stage === "worktree-write" || result.stage === "auth" || result.stage === "provider" || result.stage === "infrastructure" || result.status === "fatal-auth" || result.status === "provider-fault" || result.status === "infra-fault") return false;
-    const detail = [result.detail, ...result.openIssues || []].filter(Boolean).join("\n");
-    return !authFailureDetail(detail) && !providerFailureDetail(detail) && !infrastructureFailureDetail(detail);
+    return !isNonAssessableFaultResult(result);
   }
   async function salvageInfraFaultArtefacts(task, wt, result) {
     if (!assessPartialBranches || !wt?.branch) return result;
@@ -3434,7 +3488,7 @@ async function runRecovery(root, mergeLock2 = null) {
     log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline (advisory residualRisk: ${residualRisk.length})`);
     const resume = { candidate, enriched, evidence, stage, residualRisk };
     const outcome = await executeResume(task, resume, mergeLock2);
-    if (outcome.status === "fatal-auth" || outcome.status === "provider-fault" || outcome.status === "infra-fault") {
+    if (outcome.status === "fatal-auth" || outcome.status === "usage-limit-fault" || outcome.status === "provider-fault" || outcome.status === "infra-fault") {
       summary.results.push({ ...resultBase, resumeStage: stage, action: "resume-failed", reason: outcome.detail || outcome.status, residualRisk });
       return { summary, taskResults, held, fatal: outcome };
     }
@@ -3698,6 +3752,27 @@ async function fillPool() {
     );
   }
 }
+function nextHaltState(id, result, current) {
+  const { halted: halted2, providerFaultHalt } = current;
+  switch (result.status) {
+    case "fatal-auth":
+      return { halted: `task ${id} fatal auth failure at ${result.stage}: ${result.detail}`, providerFaultHalt };
+    case "provider-fault":
+      return { halted: `task ${id} provider fault at ${result.stage}: ${result.detail}`, providerFaultHalt: true };
+    case "usage-limit-fault":
+      return {
+        halted: `task ${id} Codex usage-limit fault at ${result.stage}: ${result.detail}; branch state is durable \u2014 relaunch with resumeMode: "continue" once the Codex usage limit resets`,
+        providerFaultHalt: true
+      };
+    case "infra-fault":
+      return {
+        halted: `task ${id} infrastructure fault at ${result.stage}: ${result.detail}; branch state is durable \u2014 relaunch with resumeMode: "continue" to resume from the committed ExecPlan`,
+        providerFaultHalt: true
+      };
+    default:
+      return { halted: halted2 || `task ${id} ${result.status} at ${result.stage}: ${result.detail}`, providerFaultHalt };
+  }
+}
 // --- Worker-pool control loop -----------------------------------------------
 async function workflowMain() {
   const authPreflight = await runAuthPreflight();
@@ -3729,7 +3804,7 @@ async function workflowMain() {
       if (outcome.fatal) {
         results.push(outcome.fatal);
         halted = `recovery ${outcome.fatal.status} at ${outcome.fatal.stage}: ${outcome.fatal.detail}`;
-        if (outcome.fatal.status === "provider-fault" || outcome.fatal.status === "infra-fault") providerFaultHalt = true;
+        if (outcome.fatal.status === "usage-limit-fault" || outcome.fatal.status === "provider-fault" || outcome.fatal.status === "infra-fault") providerFaultHalt = true;
         stop = true;
       }
     } catch (error) {
@@ -3772,19 +3847,10 @@ async function workflowMain() {
       markDryRun(done.task);
     } else if (result.status === "manual-merge-ready") {
       markManualMergeReady(done.task);
-    } else if (result.status === "fatal-auth") {
-      halted = `task ${done.id} fatal auth failure at ${result.stage}: ${result.detail}`;
-      stop = true;
-    } else if (result.status === "provider-fault") {
-      halted = `task ${done.id} provider fault at ${result.stage}: ${result.detail}`;
-      providerFaultHalt = true;
-      stop = true;
-    } else if (result.status === "infra-fault") {
-      halted = `task ${done.id} infrastructure fault at ${result.stage}: ${result.detail}; branch state is durable \u2014 relaunch with resumeMode: "continue" to resume from the committed ExecPlan`;
-      providerFaultHalt = true;
-      stop = true;
-    } else if (!halted) {
-      halted = `task ${done.id} ${result.status} at ${result.stage}: ${result.detail}`;
+    } else {
+      const next = nextHaltState(done.id, result, { halted, providerFaultHalt });
+      halted = next.halted;
+      providerFaultHalt = next.providerFaultHalt;
       stop = true;
     }
   }
