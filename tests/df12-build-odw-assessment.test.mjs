@@ -167,6 +167,11 @@ test('auth-shaped implementation issues are fatal, not deferred review', async (
   assert.equal(surface.hasOnlyDeferredReviewIssues(['CodeRabbit rate limit retry after 10m']), true)
   assert.equal(surface.implementationAuthFailureDetail(impl), 'Implementation complete\nCodeRabbit auth failed')
   assert.equal(surface.authFailureDetail('CodeRabbit browser login required'), 'CodeRabbit browser login required')
+  assert.equal(
+    surface.authFailureDetail('Automatic login timed out. Please finish authentication.'),
+    'Automatic login timed out. Please finish authentication.',
+  )
+  assert.equal(surface.authFailureDetail('The review command timeout is configured to 20 minutes.'), '')
   assert.equal(surface.authFailureDetail('{"loggedIn":false}'), '{"loggedIn":false}')
   assert.equal(surface.AUTH_REQUIRED_ADAPTERS.has('claude'), true)
 })
@@ -385,6 +390,7 @@ test('CodeRabbit outcomes classify from events, never exit codes', async () => {
     [{ ...ok, stdout: '{"type":"error","errorType":"rate_limit","message":"Review limit reached","recoverable":true}' }, 'rate-limited'],
     [{ ok: false, stdout: '', stderr: 'Review limit reached — try again later', message: '' }, 'rate-limited'],
     [{ ...ok, stdout: '{"type":"error","errorType":"unknown","message":"Run `coderabbit auth login` to authenticate","recoverable":false}' }, 'auth'],
+    [{ ...ok, stdout: '{"type":"error","errorType":"unknown","message":"Automatic login timed out. Please finish authentication.","recoverable":false}' }, 'auth'],
     [{ ...ok, stdout: '{"type":"error","errorType":"unknown","message":"Failed to get branch information","recoverable":false}' }, 'error'],
     [{ ok: false, stdout: '', stderr: '', message: 'spawn coderabbit ENOENT' }, 'error'],
     [{ ...ok, stdout: complete }, 'clean'],

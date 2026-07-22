@@ -28,6 +28,8 @@ export function authFailureDetail(value: unknown): string {
     /"loggedIn"\s*:\s*false/i,
     /Run `?coderabbit auth login`?/i,
     /Run codex login/i,
+    // CodeRabbit CLI: "Automatic login timed out. Please finish authentication."
+    /\b(?:automatic\s+)?login\s+(?:timed\s+out|timeout)\b|\bfinish\s+authentication\b/i,
   ]
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
 }
