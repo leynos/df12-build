@@ -43,6 +43,18 @@ export async function execFileText(command: string, commandArgs: readonly string
   })
 }
 
+// Flatten an error thrown by execFileText into one human-readable line: the
+// message plus any stderr/stdout the failing child attached. Shared by the
+// call sites that surface a git failure as an operator-facing note.
+export function execFailureDetail(error: unknown): string {
+  const failure = error as ExecError | null
+  return [
+    (failure && failure.message) || String(error),
+    failure?.stderr ? `stderr: ${failure.stderr.trim()}` : '',
+    failure?.stdout ? `stdout: ${failure.stdout.trim()}` : '',
+  ].filter(Boolean).join('; ')
+}
+
 export async function execFileStatus(command: string, commandArgs: readonly string[], options: ExecOptions = {}): Promise<ExecStatus> {
   try {
     return { ok: true, stdout: await execFileText(command, commandArgs, options), stderr: '' }

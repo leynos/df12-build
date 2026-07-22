@@ -79,11 +79,20 @@ export const RECOVERY_ROADMAP = [
 // branches also carry a committed canonical ExecPlan (resume eligibility
 // requires one); pass withParserExecplan: false to model a branch that lost
 // its plan.
+// withStaleAddendumBranch models a completed addendum round left behind by a
+// prior run: a deterministic `roadmap-2-1-2-addendum` branch whose tip is
+// still `origin/main` (fully merged, nothing unique to lose), optionally with a
+// clean worktree still checked out on it. It is what the addendum-collision
+// reclaim path (issue #42) must recognise as safe to reset rather than halting
+// on. Mutually exclusive with withAddendumWorktree, which reuses the same
+// branch name to model a diverged in-progress addendum.
 export function makeRecoveryRepo({
   withAddendumWorktree = false,
   withParserExecplan = true,
   parserExecplanStatus = 'COMPLETE',
   parserExecplanProgress = [],
+  withStaleAddendumBranch = false,
+  staleAddendumWorktree = false,
 } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'df12-recovery-'))
   FIXTURE_ROOTS.push(root)
@@ -135,9 +144,31 @@ export function makeRecoveryRepo({
   if (withAddendumWorktree) {
     addendumWorktree = addBranch('roadmap-2-1-2-addendum', { worktree: true })
   }
+  // A stale completed addendum branch: still pointed at main (== origin/main),
+  // so it is a merged ancestor with no unique commits; commit: false keeps any
+  // attached worktree clean.
+  let staleAddendumBranch = ''
+  let staleAddendumWorktreePath = ''
+  if (withStaleAddendumBranch) {
+    staleAddendumBranch = 'roadmap-2-1-2-addendum'
+    staleAddendumWorktreePath = addBranch(staleAddendumBranch, {
+      worktree: staleAddendumWorktree,
+      commit: false,
+    })
+  }
 
   const cleanup = () => rmSync(root, { recursive: true, force: true })
-  return { root, dir, originDir, baseSha, parserWorktree, addendumWorktree, cleanup }
+  return {
+    root,
+    dir,
+    originDir,
+    baseSha,
+    parserWorktree,
+    addendumWorktree,
+    staleAddendumBranch,
+    staleAddendumWorktreePath,
+    cleanup,
+  }
 }
 
 // Every observable piece of durable state assess-only recovery must not touch:
