@@ -624,13 +624,11 @@ function infrastructureFailureDetail(value) {
   ];
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
 }
-
 function shouldStopInfraRetry(message, attempt, attempts) {
   if (attempt >= attempts) return true;
   if (usageLimitFailureDetail(message)) return true;
   return !infrastructureFailureDetail(message);
 }
-
 function logTerminalInfraRetry(label, message, attempt, attempts) {
   if (usageLimitFailureDetail(message)) {
     log(`[${label}] usage-limit fault; retry deliberately skipped inside the reset window: ${message}`);
@@ -1571,31 +1569,6 @@ function makeWritePreflight({ enabled, targets }) {
   return { runTaskAgentWritePreflight: runTaskAgentWritePreflight2, ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2 };
 }
 
-var NON_ASSESSABLE_STAGES = /* @__PURE__ */ new Set([
-  "worktree",
-  "worktree-write",
-  "auth",
-  "provider",
-  "infrastructure",
-  "usage-limit"
-]);
-
-var NON_ASSESSABLE_STATUSES = /* @__PURE__ */ new Set([
-  "fatal-auth",
-  "usage-limit-fault",
-  "provider-fault",
-  "infra-fault"
-]);
-
-function isNonAssessableFaultResult(result) {
-  if (NON_ASSESSABLE_STAGES.has(result.stage || "")) return true;
-  if (NON_ASSESSABLE_STATUSES.has(result.status || "")) return true;
-  const detail = [result.detail, ...result.openIssues || []].filter(Boolean).join("\n");
-  return Boolean(
-    authFailureDetail(detail) || usageLimitFailureDetail(detail) || providerFailureDetail(detail) || infrastructureFailureDetail(detail)
-  );
-}
-
 // src/workflows/df12-build-odw/execplan-durability.ts
 var TASK_ARTEFACT_PATTERN = /^docs\/execplans\/.+\.md$/;
 function isTaskArtefactPath(candidate) {
@@ -1787,6 +1760,28 @@ function summarizeSalvages(results2) {
   const salvagedBranches = salvages.filter((entry) => entry.committed.length > 0).length;
   const summarySuffix = salvagedBranches ? ` | salvaged artefacts on ${salvagedBranches} branch(es)` : "";
   return { salvages, salvagedBranches, summarySuffix };
+}
+var NON_ASSESSABLE_STAGES = /* @__PURE__ */ new Set([
+  "worktree",
+  "worktree-write",
+  "auth",
+  "provider",
+  "infrastructure",
+  "usage-limit"
+]);
+var NON_ASSESSABLE_STATUSES = /* @__PURE__ */ new Set([
+  "fatal-auth",
+  "usage-limit-fault",
+  "provider-fault",
+  "infra-fault"
+]);
+function isNonAssessableFaultResult(result) {
+  if (NON_ASSESSABLE_STAGES.has(result.stage || "")) return true;
+  if (NON_ASSESSABLE_STATUSES.has(result.status || "")) return true;
+  const detail = [result.detail, ...result.openIssues || []].filter(Boolean).join("\n");
+  return Boolean(
+    authFailureDetail(detail) || usageLimitFailureDetail(detail) || providerFailureDetail(detail) || infrastructureFailureDetail(detail)
+  );
 }
 function fastAssessmentClassification(evidence) {
   const collectionErrors = evidence?.collectionErrors || [];
@@ -3757,7 +3752,6 @@ async function fillPool() {
     );
   }
 }
-
 function nextHaltState(id, result, current) {
   const { halted: halted2, providerFaultHalt } = current;
   switch (result.status) {
@@ -3779,6 +3773,7 @@ function nextHaltState(id, result, current) {
       return { halted: halted2 || `task ${id} ${result.status} at ${result.stage}: ${result.detail}`, providerFaultHalt };
   }
 }
+// --- Worker-pool control loop -----------------------------------------------
 async function workflowMain() {
   const authPreflight = await runAuthPreflight();
   if (authPreflight.length) {
