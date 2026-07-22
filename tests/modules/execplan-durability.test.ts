@@ -123,19 +123,19 @@ describe('verifyExecplanCommitted', () => {
 describe('commitExecplanApproval', () => {
   test('flips the committed status to APPROVED exactly once', async () => {
     const dir = makeWorktree()
-    expect(await commitExecplanApproval(dir, PLAN, '1.2.3')).toEqual({ ok: true, detail: '' })
+    expect(await commitExecplanApproval({ worktree: dir, planPath: PLAN, tag: '1.2.3' })).toEqual({ ok: true, detail: '' })
     expect(readFileSync(path.join(dir, PLAN), 'utf8')).toContain('Status: APPROVED')
     expect(git(dir, 'log', '-1', '--format=%s')).toBe('Approve ExecPlan for task 1.2.3')
     expect(git(dir, 'status', '--porcelain=v1')).toBe('')
 
-    const again = await commitExecplanApproval(dir, PLAN, '1.2.3')
+    const again = await commitExecplanApproval({ worktree: dir, planPath: PLAN, tag: '1.2.3' })
     expect(again.ok).toBe(true)
     expect(again.detail).toBe('already committed as APPROVED')
   })
 
   test('appends a Status line when the plan lacks one', async () => {
     const dir = makeWorktree('# ExecPlan without status\n')
-    expect((await commitExecplanApproval(dir, PLAN, '1.2.3')).ok).toBe(true)
+    expect((await commitExecplanApproval({ worktree: dir, planPath: PLAN, tag: '1.2.3' })).ok).toBe(true)
     expect(readFileSync(path.join(dir, PLAN), 'utf8')).toMatch(/\n\nStatus: APPROVED\n$/)
   })
 })
@@ -150,7 +150,7 @@ describe('symlinked plan paths (untrusted worktree)', () => {
     git(dir, 'add', '.')
     git(dir, 'commit', '-m', 'Swap the plan for a symlink')
 
-    const flipped = await commitExecplanApproval(dir, PLAN, '1.2.3')
+    const flipped = await commitExecplanApproval({ worktree: dir, planPath: PLAN, tag: '1.2.3' })
     expect(flipped.ok).toBe(false)
     expect(flipped.detail).toMatch(/could not update the plan status/)
     // The symlink target must be untouched: no read-modify-write escape.
@@ -162,7 +162,7 @@ describe('commitExecplanDraft', () => {
   test('commits the plan when it is the only dirty path', async () => {
     const dir = makeWorktree()
     writeFileSync(path.join(dir, PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nRevised.\n')
-    expect(await commitExecplanDraft(dir, PLAN, '1.2.3')).toEqual({ ok: true, detail: '' })
+    expect(await commitExecplanDraft({ worktree: dir, planPath: PLAN, tag: '1.2.3' })).toEqual({ ok: true, detail: '' })
     expect(git(dir, 'log', '-1', '--format=%s')).toBe('Draft ExecPlan for task 1.2.3')
     expect(git(dir, 'status', '--porcelain=v1')).toBe('')
   })
@@ -171,13 +171,13 @@ describe('commitExecplanDraft', () => {
     const dir = makeWorktree()
     writeFileSync(path.join(dir, PLAN), 'revised\n')
     writeFileSync(path.join(dir, 'stray.txt'), 'stray\n')
-    const bounced = await commitExecplanDraft(dir, PLAN, '1.2.3')
+    const bounced = await commitExecplanDraft({ worktree: dir, planPath: PLAN, tag: '1.2.3' })
     expect(bounced.ok).toBe(false)
     expect(bounced.detail).toMatch(/beyond the plan file/)
     expect(bounced.detail).toContain('stray.txt')
 
     const clean = makeWorktree()
-    const nothing = await commitExecplanDraft(clean, PLAN, '1.2.3')
+    const nothing = await commitExecplanDraft({ worktree: clean, planPath: PLAN, tag: '1.2.3' })
     expect(nothing.ok).toBe(false)
     expect(nothing.detail).toMatch(/already clean/)
   })
