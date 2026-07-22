@@ -32,6 +32,7 @@ describe('failure classifiers', () => {
     ['codex 401', 'API Error: 401 Unauthorized', 'auth'],
     ['claude signed out', 'You are signed out. Run claude auth login.', 'auth'],
     ['coderabbit login hint', 'Run `coderabbit auth login` to authenticate', 'auth'],
+    ['coderabbit login timeout', 'Automatic login timed out. Please finish authentication.', 'auth'],
     ['logged-in false JSON', '{"loggedIn": false}', 'auth'],
     ['token expired', 'the token expired yesterday', 'auth'],
     ['rate limited', 'API Error: 429 rate limit reached', 'provider'],
@@ -43,6 +44,7 @@ describe('failure classifiers', () => {
     ['no JSON', 'no JSON value found in the reply', 'infra'],
     ['ordinary review failure', 'coderabbit found 3 blocking issues', 'none'],
     ['ordinary gate failure', 'make all failed: tests exited 1', 'none'],
+    ['ordinary timeout', 'The review command timeout is configured to 20 minutes.', 'none'],
     ['prose mentioning auth', 'documented the authorization design', 'none'],
     ['empty', '', 'none'],
   ]

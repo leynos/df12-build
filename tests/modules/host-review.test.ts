@@ -37,6 +37,13 @@ describe('classifyCoderabbitOutcome terminal completion', () => {
     const parsed = parseCoderabbitAgentOutput('{"type":"error","errorType":"rate_limit","message":"Rate limit exceeded"}')
     expect(classifyCoderabbitOutcome({ ok: true, stderr: '', message: '' }, parsed)).toBe('rate-limited')
   })
+
+  test('a login-timeout error classifies as auth', () => {
+    const parsed = parseCoderabbitAgentOutput(
+      '{"type":"error","errorType":"unknown","message":"Automatic login timed out. Please finish authentication."}',
+    )
+    expect(classifyCoderabbitOutcome({ ok: true, stderr: '', message: '' }, parsed)).toBe('auth')
+  })
 })
 
 
