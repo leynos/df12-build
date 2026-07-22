@@ -246,14 +246,16 @@ export function makePrompts(config: WorkflowConfig) {
   }
 
   function designReviewPrompt(task: PromptTask, worktree: string, plan: PromptPlan, round: number) {
+    const execplanPath = plan.execplanPath || `docs/execplans/roadmap-${roadmapIdSlug(task.id)}${task.isAddendum ? '-addendum' : ''}.md`
+    const reviewNotesPath = `${execplanPath.replace(/\.md$/, '')}.review-r${round}.md`
     return [
       preamble(worktree),
-      `TASK: Conduct an ADVERSARIAL Logisphere DESIGN review of the ExecPlan for roadmap task ${task.id} at ${plan.execplanPath}. Round ${round}.`,
+      `TASK: Conduct an ADVERSARIAL Logisphere DESIGN review of the ExecPlan for roadmap task ${task.id} at ${execplanPath}. Round ${round}.`,
       '',
       'Invoke the `logisphere-design-review` skill and run the plan past the full crew (Pandalump structural integrity, Wafflecat alternatives, Buzzy Bee scaling, Telefono contracts, Doggylump failure modes, Dinolump long-term viability), plus the pre-mortem and alternatives checkpoint.',
       `Be genuinely adversarial: assume the plan is flawed until proven otherwise. Check it against the design documents, ADRs, developers guide, and AGENTS.md. Verify the work items are atomic, ordered, testable, and complete; that validation includes the project commit gates (${COMMIT_GATE_TEXT}, cross-checked against the gate targets AGENTS.md actually names) plus markdown gates when markdown changes; that direct formatter/linter file lists only name files guaranteed to exist and changed by that work item; that no standalone red-test commit is required; and that nothing contradicts the deterministic/judgemental boundary or the established contracts.`,
       '',
-      `Read the execplan from disk yourself — do not trust the planner\'s summary. If you leave review notes in a separate file, write them to the one workflow-owned path \`docs/execplans/roadmap-${roadmapIdSlug(task.id)}.review-r${round}.md\` (a sibling of the plan) — the host owns committing that file, so you need not commit it yourself. Do NOT implement anything and do NOT relax the design to make it pass.`,
+      `Read the execplan from disk yourself — do not trust the planner\'s summary. If you leave review notes in a separate file, write them to the one workflow-owned path \`${reviewNotesPath}\` (a sibling of the plan) — the host owns committing that file, so you need not commit it yourself. Do NOT implement anything and do NOT relax the design to make it pass.`,
       'Where the plan asserts any external or locked-library behaviour, verify it against the REAL source (a vendored or sibling checkout if the project has one) and the official docs. Treat any uncited memory-based claim about library behaviour as a blocking defect: the plan must verify and cite official docs when tools permit, or pin the behaviour with a test. Do not reject an otherwise implementable plan solely because Memtrace, GrepAI, Leta, Firecrawl, or sem was unavailable in the planner session; reject it if that unavailability was turned into a hard blocker instead of a documented fallback.',
       '',
       'Set satisfied=true ONLY when you would stake your name on the plan being implementable and design-conformant as written. Otherwise list precise, addressable blocking defects (these go straight back to the planner).',

@@ -345,9 +345,10 @@ write probe:
   <id>`) rather than spending a 30–90 minute planner round on git bookkeeping —
   live runs showed three consecutive rounds burnt on exactly this. The review
   sibling is a second workflow-owned artefact at
-  `docs/execplans/roadmap-<slug>.review-r<N>.md` (a sibling of the plan) where
-  the design reviewer leaves its notes; admitting it into the salvage set stops
-  a stale artefact from a dead run wedging continue-mode recovery in an endless
+  `docs/execplans/<plan-stem>.review-r<N>.md`, derived from the full ExecPlan
+  stem (including the `-addendum` suffix for addendum tasks), where the design
+  reviewer leaves its notes; admitting it into the salvage set stops a stale
+  artefact from a dead run wedging continue-mode recovery in an endless
   plan/salvage loop. Anything else dirty stays foreign: it declines the salvage
   and bounces to the planner as an `EXECPLAN DURABILITY` blocking item carrying
   the evidence (the foreign dirty paths, or the host's own git error when the
