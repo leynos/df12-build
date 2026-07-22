@@ -218,6 +218,38 @@ export async function readExecplanState(
 export const RECOVERY_HOLD_REASONS = new Set(['missing-worktree', 'worktree-probe-fault', 'candidate-cap', 'unreadable-commit', 'assessment-error'])
 
 /**
+ * Turn a read-only recovery discovery into the roadmap task ids whose
+ * surviving `roadmap-*` branch must be held out of selection this run: every
+ * resumable candidate plus every skip whose branch still maps to a selectable
+ * id (see {@link RECOVERY_HOLD_REASONS}).
+ *
+ * Pure — it depends only on the discovery result, {@link branchToRoadmapId},
+ * and {@link RECOVERY_HOLD_REASONS}, reads no run-scoped state, and spawns
+ * nothing — so both the recovery loop and the always-on stale-branch guard can
+ * share one notion of "held" rather than diverging.
+ *
+ * @param discovery - The read-only recovery discovery result to derive holds
+ *   from.
+ * @returns The held roadmap task ids split into `normal` and `addendum` lanes.
+ */
+export function computeHeldFromDiscovery(discovery: RecoveryDiscovery): { normal: Set<string>; addendum: Set<string> } {
+  const held = { normal: new Set<string>(), addendum: new Set<string>() }
+  const holdCandidate = (branchName: string, taskId?: string) => {
+    const parsed = branchToRoadmapId(branchName)
+    if (!parsed) return
+    const lane = parsed.isAddendum ? held.addendum : held.normal
+    lane.add(taskId || parsed.id)
+  }
+  for (const entry of discovery.skipped) {
+    if (RECOVERY_HOLD_REASONS.has(entry.reason)) holdCandidate(entry.branchName, entry.id)
+  }
+  for (const candidate of discovery.candidates) {
+    holdCandidate(candidate.branchName, candidate.taskId)
+  }
+  return held
+}
+
+/**
  * Resolve the canonical durable ExecPlan path for a task branch by probing
  * the filesystem in the candidate's worktree (I/O). An absent plan stays
  * absent: nothing downstream may substitute the canonical path back in after

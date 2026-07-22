@@ -543,8 +543,9 @@ Common arguments:
   failed or halted task branches. Defaults to enabled.
 - `resumePartialBranches`: when `true`, discover surviving `roadmap-*` branches
   on launch and assess them before normal roadmap selection. Defaults to
-  `false`; the default workflow behaviour is unchanged unless an operator opts
-  in.
+  `false`; only the assessment and resume actions are opt-in. A read-only
+  stale-branch guard still runs on every launch regardless of this setting,
+  holding surviving `roadmap-*` branches out of ordinary selection.
 - `resumeMode`: the maximum recovery action for discovered branches. `assess`
   (the default) reports only. `review` may additionally route clean, committed,
   task-scoped `adopt-complete` branches with validation evidence into the
@@ -829,6 +830,14 @@ and the run reports `halted: needs-operator-recovery …` instead of a clean
 stop, so a blocked roadmap frontier is never mistaken for finished work. A fatal
 auth preflight blocks recovery entirely (`recovery.blocked =
 "auth-preflight-failed"`), and dry runs never resume.
+
+The same held-out-of-selection exclusion applies even with
+`resumePartialBranches=false`: an always-on, read-only guard still discovers
+surviving `roadmap-*` branches on launch and holds them out of ordinary
+selection, without assessing or resuming anything. A recovery-off launch will
+therefore still skip a task whose `roadmap-*` branch survives from an earlier
+interrupted run; hoover or resume the branch to free the task for normal
+selection.
 
 Use the `df12-build-supervisor` skill for the detailed operator playbook:
 failure-mode diagnosis, orphan worktree cleanup, remediation triage, stash

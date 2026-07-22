@@ -232,6 +232,27 @@ worktree after a planner round is salvaged host-side (`commitExecplanDraft`
 commits just the plan path) instead of bouncing; any other dirty path still
 bounces to the planner with the salvage-refusal evidence.
 
+When `resumePartialBranches` is false, fresh-run recovery does not run, and
+nothing else would hold a surviving `roadmap-*` branch out of ordinary
+selection: a branch left by an interrupted earlier run could then be
+re-selected and collide on `git worktree add -b`. An always-on stale-branch
+guard closes that gap. `applyStaleBranchGuard` (`main.ts`) runs precisely
+when `resumePartialBranches` is false — it is a deliberate no-op otherwise,
+since `runRecovery` already holds those branches — and calls
+`discoverHeldBranches` (`main.ts`), which reruns the same durable-state
+bootstrap as `runRecovery` (best-effort `git fetch`, canonical roadmap read,
+git-only candidate discovery) with no assess, resume, or agent side effect.
+That discovery is deliberately UNFILTERED: it lifts the `resumeTaskId`
+restriction and candidate cap that ordinary recovery discovery applies, so
+every surviving `roadmap-*` branch is held rather than silently dropped by a
+scoped discovery that would let non-matching survivors collide. The pure
+`computeHeldFromDiscovery` (`recovery-discovery.ts`) then maps the discovery
+to held roadmap task ids — every candidate plus every skip whose reason is in
+`RECOVERY_HOLD_REASONS` — split into `normal` and `addendum` lanes, and merges
+the result into `recoveryHeldNormal`/`recoveryHeldAddendum` ahead of the single
+selection-exclusion point, `takenSnapshot`/`isAlreadyTaken`. A discovery
+failure degrades to a warning and never aborts the run.
+
 Artefact salvage for failing branches is handled by two layers.
 `salvageTaskArtefacts` (`execplan-durability.ts`) is the primitive: it accepts
 a list of candidate paths, filters to those matching `TASK_ARTEFACT_PATTERN`
