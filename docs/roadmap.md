@@ -263,7 +263,6 @@ first recovery slice.
   - Success: deletion, stash handling, and branch-retention policy are recorded
     before any automated cleanup lands.
 
-
 ## 5. Fault-classification refinements
 
 Idea: if each terminal adapter failure is classified by the durable response it
@@ -274,7 +273,6 @@ burns the run's remaining time on a doomed in-window retry.
 This phase refines the existing fault taxonomy without adding configuration
 surface; it reuses the halt/resume semantics already carried by provider and
 infrastructure faults.
-
 
 ### 5.1. Classify Codex usage-limit exhaustion distinctly
 

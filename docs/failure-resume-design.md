@@ -457,7 +457,6 @@ accepted plan.
 | Stage agent dies on an infrastructure fault | Retry the stage agent in place up to `stageAttempts` total attempts; if the fault persists, stop as `infra-fault` without an assessment. |
 | Codex build stage exhausts its usage limit | Stop as `usage-limit-fault` without an in-window retry or an assessment; the operator resumes once the quota window resets. |
 
-
 ### Usage-limit faults
 
 A usage-limit fault is a Codex build stage that exhausted its rolling
