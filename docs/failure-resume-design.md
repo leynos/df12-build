@@ -125,6 +125,12 @@ The diagram has one important constraint: only the `Review -> Integrate` branch
 can mutate the target project, and it is reachable only when the operator opts
 into review-mode resume.
 
+Figure 1 predates the always-on stale-branch guard, so the `off` path it shows
+is not quite complete: even when `resumePartialBranches` is `off`, a read-only,
+hold-only discovery pass still runs before falling through to normal
+selection (see Recovery candidate discovery, below); it never advances past
+discovery into assessment or review.
+
 Accepted ExecPlan reuse sits after deterministic roadmap selection, not inside
 selection itself. Selection remains a pure choice over the current roadmap. Once
 an open, dependency-unblocked task is selected, the workflow may inspect the
@@ -147,7 +153,7 @@ Add these ODW `args` fields:
 
 | Argument | Default | Meaning |
 | - | - | - |
-| `resumePartialBranches` | `false` | Enable fresh-run recovery discovery. |
+| `resumePartialBranches` | `false` | Enable fresh-run recovery discovery. A lightweight, read-only hold-only discovery pass still runs when this is `false`, to keep surviving `roadmap-*` branches out of normal selection; this is distinct from, and much narrower than, the full assess/review/continue recovery pipeline. |
 | `resumeMode` | `"assess"` | One of `"assess"`, `"review"`, or `"continue"`. `"assess"` reports only. `"review"` may route clean `adopt-complete` branches into review and integration. `"continue"` dispatches deterministically on the committed ExecPlan `Status` and re-enters the ordinary pipeline at the plan, implement, or review stage. |
 | `resumeTaskId` | unset | Limit recovery discovery to one roadmap id. This is separate from `taskId`, which selects normal roadmap work. |
 | `resumeMaxCandidates` | `4` | Bound startup recovery fan-in so a messy repository does not consume the whole run. |
@@ -190,6 +196,17 @@ Discovery returns structured candidates, not prose:
   roadmapComplete: false
 }
 ```
+
+The same discovery machinery is reused unconditionally for a lightweight
+hold-only pass, regardless of `resumePartialBranches`. Even when it is
+`false`, `discoverHeldBranches` reruns steps 1-4 above (fetch, canonical
+roadmap read, branch listing, and id mapping) and feeds the result through the
+pure `computeHeldFromDiscovery` to determine which roadmap ids to hold out of
+normal selection. This hold-only pass never assesses, resumes, or spawns an
+agent, and it deliberately skips step 9 (the `resumeTaskId` and
+`resumeMaxCandidates` narrowing), so every surviving branch is held rather
+than silently dropped by a scoped discovery that would let non-matching
+survivors collide on worktree creation.
 
 ## Assessment reuse
 

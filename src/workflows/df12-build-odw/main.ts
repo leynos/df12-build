@@ -229,6 +229,18 @@ const discoverRecoveryCandidates = makeRecoveryDiscovery({
   resumeMaxCandidates: RESUME_MAX_CANDIDATES,
 })
 
+// Unfiltered discovery for the always-on stale-branch guard: the resume filters
+// (resumeTaskId and the candidate cap) must NOT apply here. The guard has to
+// hold EVERY surviving roadmap-* branch out of selection, and a resumeTaskId
+// restriction would silently drop non-matching survivors from discovery so they
+// never reach computeHeldFromDiscovery — leaving them selectable and prone to
+// collide on `git worktree add -b`.
+const discoverAllRecoveryCandidates = makeRecoveryDiscovery({
+  base: BASE,
+  resumeTaskId: null,
+  resumeMaxCandidates: Number.MAX_SAFE_INTEGER,
+})
+
 // Prompt builders with the run configuration bound once (see prompts.ts).
 const {
   preamble,
@@ -482,6 +494,23 @@ async function executeResume(
   }
 }
 
+/**
+ * Read-only stale-branch discovery for the always-on selection guard. It runs
+ * the same durable-state bootstrap runRecovery does — best-effort fetch of the
+ * base branch, canonical roadmap read, then git-only candidate discovery — and
+ * stops there. No agent spawn, no assess/resume, no roadmap mutation: strictly
+ * git evidence, so it is safe to run even when resumePartialBranches is off or
+ * the run has already halted.
+ *
+ * Discovery is UNFILTERED here (via {@link discoverAllRecoveryCandidates}): the
+ * resumeTaskId restriction and candidate cap are deliberately lifted so every
+ * surviving roadmap-* branch is evaluated by {@link computeHeldFromDiscovery},
+ * never silently dropped.
+ *
+ * @param root - The Git root to discover surviving branches within.
+ * @returns The held ids (split into `normal` and `addendum` lanes) plus any
+ *   discovery errors for the caller to log.
+ */
 async function discoverHeldBranches(root: string): Promise<{
   held: { normal: Set<string>; addendum: Set<string> }
   errors: string[]
@@ -498,11 +527,30 @@ async function discoverHeldBranches(root: string): Promise<{
     errors.push(((error as Error | null) && (error as Error).message) || String(error))
     return { held: { normal: new Set<string>(), addendum: new Set<string>() }, errors }
   }
-  const discovery = await discoverRecoveryCandidates(roadmap.text, root)
+  const discovery = await discoverAllRecoveryCandidates(roadmap.text, root)
   errors.push(...discovery.errors)
   return { held: computeHeldFromDiscovery(discovery), errors }
 }
 
+/**
+ * Always-on stale-branch guard. With recovery disabled, runRecovery never runs
+ * and nothing else holds surviving roadmap-* branches out of selection; a
+ * branch left by an interrupted earlier run would then be re-selected and
+ * collide on `git worktree add -b`. So when recovery is enabled this is a
+ * deliberate no-op — runRecovery already holds those branches. Discovery is
+ * pure git evidence with no agent dependency, so it runs even when the auth
+ * preflight has halted the run — a halted run opens no new work, so this is
+ * harmless but keeps the held-set invariant honest. A discovery failure must
+ * never abort the run: degrade to a warning, mirroring the recovery catch in
+ * workflowMain.
+ *
+ * @param root - The Git root to guard.
+ * @param heldNormal - Normal-lane held id set; discovered ids are added to it.
+ * @param heldAddendum - Addendum-lane held id set; discovered ids are added to
+ *   it.
+ * @param errors - Run error accumulator; discovery and guard failures are
+ *   appended as warnings.
+ */
 async function applyStaleBranchGuard(
   root: string,
   heldNormal: Set<string>,

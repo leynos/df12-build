@@ -237,7 +237,8 @@ export function computeHeldFromDiscovery(discovery: RecoveryDiscovery): { normal
   const holdCandidate = (branchName: string, taskId?: string) => {
     const parsed = branchToRoadmapId(branchName)
     if (!parsed) return
-    ;(parsed.isAddendum ? held.addendum : held.normal).add(taskId || parsed.id)
+    const lane = parsed.isAddendum ? held.addendum : held.normal
+    lane.add(taskId || parsed.id)
   }
   for (const entry of discovery.skipped) {
     if (RECOVERY_HOLD_REASONS.has(entry.reason)) holdCandidate(entry.branchName, entry.id)

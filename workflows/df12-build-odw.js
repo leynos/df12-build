@@ -889,7 +889,8 @@ function computeHeldFromDiscovery(discovery) {
   const holdCandidate = (branchName, taskId) => {
     const parsed = branchToRoadmapId(branchName);
     if (!parsed) return;
-    (parsed.isAddendum ? held.addendum : held.normal).add(taskId || parsed.id);
+    const lane = parsed.isAddendum ? held.addendum : held.normal;
+    lane.add(taskId || parsed.id);
   };
   for (const entry of discovery.skipped) {
     if (RECOVERY_HOLD_REASONS.has(entry.reason)) holdCandidate(entry.branchName, entry.id);
@@ -3127,6 +3128,11 @@ var discoverRecoveryCandidates = makeRecoveryDiscovery({
   resumeTaskId: RESUME_TASK_ID,
   resumeMaxCandidates: RESUME_MAX_CANDIDATES
 });
+var discoverAllRecoveryCandidates = makeRecoveryDiscovery({
+  base: BASE,
+  resumeTaskId: null,
+  resumeMaxCandidates: Number.MAX_SAFE_INTEGER
+});
 var {
   preamble,
   codeSearchGuidance,
@@ -3352,7 +3358,7 @@ async function discoverHeldBranches(root) {
     errors.push(error && error.message || String(error));
     return { held: { normal: /* @__PURE__ */ new Set(), addendum: /* @__PURE__ */ new Set() }, errors };
   }
-  const discovery = await discoverRecoveryCandidates(roadmap.text, root);
+  const discovery = await discoverAllRecoveryCandidates(roadmap.text, root);
   errors.push(...discovery.errors);
   return { held: computeHeldFromDiscovery(discovery), errors };
 }
