@@ -204,7 +204,7 @@ Opus/high defaults:
 - Remediation triage is mostly de-duplication plus hypothesis routing, so a
   deterministic pre-pass collapses exact-duplicate proposals and the routing
   agent runs at `triageModel` (`gpt-5.6-sol`) with medium effort. Complex sets
-  still select `triageEscalationModel`, which defaults to the same Sol model so
+  still select `triageEscalationModel`, which defaults to the same Sol model, so
   every triage task remains on that route unless explicitly overridden.
 
 A sidecar that wants a different assessment or triage route must say so in

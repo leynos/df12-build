@@ -175,8 +175,13 @@ provides the doc skills):
    `taskId` (run exactly one), `dryRun`, `autoMerge`, `documentAudit`,
    `assessPartialBranches`, `buildAdapter`/`buildModel`,
    `planAdapter`/`planModel`, `reviewAdapter`/`reviewModel`,
-   `auditAdapter`/`auditModel`/`auditEffort`, and
+   `auditAdapter`/`auditModel`/`auditEffort`,
+   `triageAdapter`/`triageModel`/`triageEffort`/`triageEscalationModel`, and
    `assessmentAdapter`/`assessmentModel`.
+
+   Remediation triage defaults to the `codex` adapter with `gpt-5.6-sol` at
+   medium effort. Its escalation model remains independently configurable and
+   defaults to `triageModel`.
 
    Recovery and enforcement knobs: `resumePartialBranches` (opt-in fresh-run
    discovery of surviving `roadmap-*` branches, default off), `resumeMode`

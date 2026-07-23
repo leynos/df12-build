@@ -574,10 +574,11 @@ Common arguments:
   (routing review and audit proposals onto roadmap lanes). Defaults are
   `codex`, `gpt-5.6-sol`, and medium effort.
 - `assessmentAdapter` and `assessmentModel`: adapter and model for partial
-  branch assessment. Defaults to the review adapter and model.
+  branch assessment. `assessmentAdapter` defaults to the review adapter, while
+  `assessmentModel` independently defaults to `claude-sonnet-5`.
 
 Current defaults deliberately split execution and judgement. Build,
-implementation and integration use GPT-5.6 Terra through the medium-effort
+implementation, and integration use GPT-5.6 Terra through the medium-effort
 Codex adapter; triage uses GPT-5.6 Sol at medium effort. Planning and review
 judgement default to Claude Code with
 `claude-opus-4-8`. That means the plan stage, design review, code review,

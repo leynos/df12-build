@@ -228,6 +228,18 @@ function assessmentAgentOptions(options = {}) {
   return { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL, ...options }
 }
 
+function modelRouting() {
+  return {
+    worktree: { mode: 'deterministic-git-worktree' },
+    build: { adapter: BUILD_ADAPTER, model: BUILD_MODEL },
+    plan: { adapter: PLAN_ADAPTER, model: PLAN_MODEL },
+    review: { adapter: REVIEW_ADAPTER, model: REVIEW_MODEL },
+    audit: { adapter: AUDIT_ADAPTER, model: AUDIT_MODEL, effort: AUDIT_EFFORT },
+    triage: { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL, effort: TRIAGE_EFFORT },
+    assessment: { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL },
+  }
+}
+
 // Stage-agent retry with the run's attempt budget bound once (see faults.ts).
 const withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS)
 
@@ -1150,15 +1162,7 @@ const { salvages, summarySuffix: salvageSummarySuffix } = summarizeSalvages(resu
 
 return {
   base: BASE,
-  modelRouting: {
-    worktree: { mode: 'deterministic-git-worktree' },
-    build: { adapter: BUILD_ADAPTER, model: BUILD_MODEL },
-    plan: { adapter: PLAN_ADAPTER, model: PLAN_MODEL },
-    review: { adapter: REVIEW_ADAPTER, model: REVIEW_MODEL },
-    audit: { adapter: AUDIT_ADAPTER, model: AUDIT_MODEL, effort: AUDIT_EFFORT },
-    triage: { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL, effort: TRIAGE_EFFORT },
-    assessment: { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL },
-  },
+  modelRouting: modelRouting(),
   maxParallel: MAX_PARALLEL,
   maxPlanningParallel: MAX_PLANNING_PARALLEL,
   maxBuildParallel: MAX_BUILD_PARALLEL,
