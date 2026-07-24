@@ -572,7 +572,7 @@ Common arguments:
   `medium`.
 - `triageAdapter` and `triageModel`: adapter and model for remediation triage
   (routing review and audit proposals onto roadmap lanes). Defaults are
-  `codex`, `gpt-5.6-sol`, and medium effort.
+  `codex` and `gpt-5.6-sol`.
 - `assessmentAdapter` and `assessmentModel`: adapter and model for partial
   branch assessment. `assessmentAdapter` defaults to the review adapter, while
   `assessmentModel` independently defaults to `claude-sonnet-5`.
