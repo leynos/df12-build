@@ -502,11 +502,29 @@ export function makeHostReview(config: HostReviewConfig) {
     // Pass the probed name as a positional argument ($1), never interpolated
     // into the command string: csCheckCommand is operator config (a trust
     // boundary), so shell metacharacters in the name must not be interpreted.
-    const probe = await execFileStatus('sh', ['-c', 'command -v "$1"', 'sh', bin], { cwd: worktree })
+    const missingSentinel = '__DF12_CODESCENE_BINARY_MISSING__'
+    const probe = await execFileStatus(
+      'sh',
+      ['-c', 'command -v "$1" >/dev/null 2>&1 || { printf "%s\\n" "$2"; exit 127; }', 'sh', bin, missingSentinel],
+      { cwd: worktree },
+    )
     if (!probe.ok) {
-      csCheckMetrics.skipped += 1
-      log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`)
-      return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: '' }
+      if (probe.stdout.trim() === missingSentinel) {
+        csCheckMetrics.skipped += 1
+        log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`)
+        return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: '' }
+      }
+      csCheckMetrics.failures += 1
+      const fault = [probe.message, probe.stderr, probe.signal ? `signal ${probe.signal}` : '', probe.killed ? 'probe killed' : '']
+        .map((part) => String(part || '').trim())
+        .filter(Boolean)
+        .join('; ')
+      return {
+        clean: false,
+        skipped: false,
+        detail: `CodeScene availability probe for \`${bin}\` failed: ${fault || 'unknown probe failure'}`,
+        logFile: '',
+      }
     }
     csCheckMetrics.runs += 1
     const logFile = hostGateLogPath(tag, `cs-${label}`, 0)

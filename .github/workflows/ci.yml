@@ -8,11 +8,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
     env:
-      MARKDOWNLINT_CLI2_VERSION: '0.22.1'
       NIXIE_CLI_VERSION: '1.1.0'
       NIXIE_PYTHON_VERSION: '3.14'
       DAFNY_VERSION: '4.10.0'
@@ -27,10 +30,9 @@ jobs:
       - uses: astral-sh/setup-uv@c5680ec91f7b9b91406fab4ded5d45245abf7b67
       - name: Install JavaScript dependencies
         run: bun install --frozen-lockfile
-      - name: Install Markdown and Mermaid validators
+      - name: Install Mermaid validator
         run: |
           set -euo pipefail
-          npm install --global "markdownlint-cli2@${MARKDOWNLINT_CLI2_VERSION}"
           uv tool install --python "${NIXIE_PYTHON_VERSION}" --managed-python \
             "nixie-cli==${NIXIE_CLI_VERSION}"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"

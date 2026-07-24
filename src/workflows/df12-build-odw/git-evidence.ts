@@ -197,11 +197,13 @@ export async function collectAssessmentEvidence(
 }
 
 /**
- * Read a worktree file without letting untrusted content redirect the read
- * outside the checkout (see write-preflight.ts). O_NOFOLLOW rejects a symlink
- * at the FINAL component; when a worktree root is given, realpath containment
- * additionally rejects a symlinked PARENT directory that would resolve the
- * ancestry outside the root. Callers treat any failure as an unreadable file.
+ * Read a worktree file while rejecting final-component symlinks and parent
+ * paths that resolve outside the checkout when checked (see write-preflight.ts).
+ * `O_NOFOLLOW` protects the final component, while optional realpath containment
+ * checks the parent ancestry. These checks do not prevent concurrent
+ * replacement of a parent directory, so callers must not rely on this helper
+ * against an attacker who can mutate that ancestry during the read. Callers
+ * treat any failure as an unreadable file.
  */
 export async function readFileText(filePath: string, rootDir?: string): Promise<string> {
   const fs = process.getBuiltinModule('node:fs/promises')

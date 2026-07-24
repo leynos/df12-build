@@ -4,6 +4,7 @@
 // decoy cases are the load-bearing ones.
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, symlinkSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -95,6 +96,14 @@ describe('verifyWriteProbe', () => {
     mkdirSync(subdir)
     const asDir = await verifyWriteProbe(subdir, 'df12-token')
     expect(asDir.ok).toBe(false)
+  })
+
+  test('rejects a FIFO without waiting for a writer', async () => {
+    const fifo = path.join(tmp(), 'probe-fifo')
+    execFileSync('mkfifo', [fifo])
+    const result = await verifyWriteProbe(fifo, 'df12-token')
+    expect(result.ok).toBe(false)
+    expect(result.detail).toMatch(/not a regular file/)
   })
 })
 

@@ -125,13 +125,13 @@ export async function verifyWriteProbe(probeFile: string, token: string): Promis
 }> {
   const fs = process.getBuiltinModule('node:fs/promises')
   const { constants } = process.getBuiltinModule('node:fs')
-  // Open once with O_NOFOLLOW and verify/read through the handle: the check
-  // and the read then target the same inode, so a symlink (or a swap between
-  // a check and a separate path-based read) can never redirect the read.
+  // Open once with O_NOFOLLOW|O_NONBLOCK and verify/read through the handle:
+  // the check and read target one inode, symlinks cannot redirect the read,
+  // and a FIFO cannot block before the regular-file check.
   let handle = null
   let content: string | null = null
   try {
-    handle = await fs.open(probeFile, constants.O_RDONLY | constants.O_NOFOLLOW)
+    handle = await fs.open(probeFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
     const stat = await handle.stat()
     if (stat.isFile()) {
       content = await handle.readFile({ encoding: 'utf8' })
