@@ -1,70 +1,59 @@
 /**
- * @file Prompt builders for every ordinary pipeline stage, plus the shared
+ * Prompt builders for every ordinary pipeline stage, plus the shared
  * agent preamble and code-search guidance. The run configuration binds once
  * via makePrompts (the factory destructures the config record under the
  * historical constant names so the prompt bodies stay verbatim); the entry
  * destructures the returned builders, so call sites keep their shape.
+ *
+ * @module
  */
 import type { WorkflowConfig } from './config.ts'
 import { shellQuote } from './exec.ts'
 import { roadmapIdSlug } from './roadmap.ts'
 
+// The slices of task / plan / implementation records the prompts read.
 /**
- * The slice of a roadmap task record the prompt builders read. Only the
- * fields a prompt actually renders are modelled here, not the full roadmap
- * task shape; `subtasks` is populated for addendum tasks (`isAddendum`
- * true) and identifies the sub-task ids an addendum prompt is scoped to.
+ * The slice of a roadmap task record the prompt builders need. Fields are
+ * optional because prompts are also built for addendum sub-passes and
+ * partial records; callers pass through whatever the roadmap parse yielded.
  */
 export interface PromptTask {
+  /** Roadmap task id, e.g. `"1.2.8"` or `"1.2.8.5"` for a sub-task. */
   id: string
+  /** Human-readable task title, interpolated into prompt headings. */
   title?: string
+  /** True when this task is a lightweight addendum pass, not a full task. */
   isAddendum?: boolean
+  /** Sub-task ids covered by an addendum pass. */
   subtasks?: readonly string[]
 }
 
-/**
- * The slice of a plan record the prompt builders read: the path to the
- * committed ExecPlan for a roadmap task, referenced by prompts that ask an
- * agent to read, revise, or implement against that plan.
- */
+/** The slice of the planner's report the later-stage prompts need. */
 export interface PromptPlan {
+  /** Path to the committed ExecPlan, referenced by every downstream prompt. */
   execplanPath?: string
 }
 
-/**
- * The slice of a builder's implementation report the prompt builders read.
- * `summary` and `openIssues` feed the addendum review prompt; `residualRisk`
- * (advisory, non-blocking) feeds {@link residualRiskLines} for the
- * review/integration prompts. All fields are optional because a report may
- * be absent (e.g. `impl` is `null`/`undefined`) or partially populated.
- */
+/** The slice of the builder's report the addendum-review prompt needs. */
 export interface PromptImpl {
+  /** Builder's own summary, quoted verbatim into the review prompt. */
   summary?: string
+  /** Issues the builder left open, quoted verbatim into the review prompt. */
   openIssues?: readonly string[]
+  /** Advisory, non-blocking caveats carried into review and integration. */
   residualRisk?: readonly string[]
 }
 
-// JSON-encode an untrusted string for a single-line prompt entry. `JSON.stringify`
-// escapes quotes, backslashes, and the `\n`/`\r` line breaks, but NOT U+2028
-// (line separator) or U+2029 (paragraph separator) — both are ECMAScript line
-// terminators, so an item carrying one would still split its numbered line and
-// could break out of the fenced data block. Escape them to their `\u` sequences
-// so every encoded item is guaranteed to occupy exactly one line.
+// JSON-encode untrusted assessment text for one prompt line. JSON.stringify
+// escapes quotes, backslashes, and ordinary line breaks; escape ECMAScript's
+// two additional line separators as well so an item cannot forge the fence.
 function encodeUntrustedLine(value: string): string {
   return JSON.stringify(value).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029')
 }
 
-// Render advisory residual risk (issue #23) as an explicitly non-blocking,
-// clearly delimited data block for the review/integration prompts, mirroring the
-// addendumReviewPrompt "Builder-reported deferred/open issues" precedent. Each
-// item originates from the ADR 002 assessment agent — content that ultimately
-// reflects the task branch — so it is UNTRUSTED input crossing into a downstream
-// reviewer/integrator prompt. Every value is therefore JSON-encoded and its
-// U+2028/U+2029 separators escaped (see encodeUntrustedLine) so an item cannot
-// break out of its line or forge the block fence, and wrapped in a fenced block
-// carrying an explicit "data, not instructions" warning, closing the
-// prompt-injection sink while preserving the stable numbering. Emits nothing when
-// there is no residual risk.
+// Residual risk is advisory data from an assessment agent, not downstream
+// instructions. Fence and encode every item so reviewers can weigh it without
+// creating a prompt-injection path. Emit nothing when no caveats were reported.
 function residualRiskLines(impl: PromptImpl | null | undefined): string[] {
   const items = impl?.residualRisk || []
   if (!items.length) return []
@@ -79,24 +68,18 @@ function residualRiskLines(impl: PromptImpl | null | undefined): string[] {
 }
 
 /**
- * Render the verified git-donkey worktree-creation sequence, shared verbatim
- * by every prompt that tells an agent to build its own inspection worktree
- * (audit here, triage via injection). It mirrors the Worktree phase's fetch →
- * base-arg → verify/reset → re-verify discipline so an inspection worktree
- * can never silently root on a stale local BASE, and — critically — passes
- * the configured base to git donkey rather than relying on its no-argument
- * default, which is always `main` (git_donkey.donkey.choose_base_branch
- * returns "main" for a null origin arg). Omitting the base would root
- * non-main bases on the wrong tree, or fail outright when the target repo
- * has no `main`. Parameterised only on the base branch, so it can be
- * injected into the import-free remediation module without pulling config
- * across the boundary.
- *
- * @param base - The integration branch to root the inspection worktree on
- *   (e.g. the workflow's configured `BASE`).
- * @returns The multi-line prompt fragment instructing the agent to fetch,
- *   create, verify, and — if necessary — re-root the worktree on
- *   `origin/${base}`.
+ * The verified git-donkey worktree-creation sequence, shared verbatim by
+ * every prompt that tells an agent to build its own inspection worktree
+ * (audit here, triage via injection). It mirrors the Worktree phase's
+ * fetch → base-arg → verify/reset → re-verify discipline so an inspection
+ * worktree can never silently root on a stale local BASE, and — critically —
+ * passes the configured base to git donkey rather than relying on its
+ * no-argument default, which is always `main`
+ * (git_donkey.donkey.choose_base_branch returns "main" for a null origin
+ * arg). Omitting the base would root non-main bases on the wrong tree, or
+ * fail outright when the target repo has no `main`. Parameterized only on
+ * the base branch, so it can be injected into the import-free remediation
+ * module without pulling config across the boundary.
  */
 export function worktreeSafetyNet(base: string): string {
   return [
@@ -109,23 +92,10 @@ export function worktreeSafetyNet(base: string): string {
 }
 
 /**
- * Factory that binds the run configuration once and returns the full set of
- * prompt builder functions used by the df12-build pipeline. Destructures
- * `config` under the historical constant names so the prompt bodies remain
- * verbatim, then closes over them so each returned builder never needs the
- * config threaded back in explicitly. The entry point destructures the
- * returned object, so call sites keep the same shape as if the builders
- * were free-standing exports.
- *
- * @param config - The workflow's resolved run configuration (base branch,
- *   roadmap location, search backend, delegation/review guidance text, and
- *   related settings) consumed by the returned prompt builders.
- * @returns An object exposing the prompt/guidance builder functions
- *   (`preamble`, `planPrompt`, `designReviewPrompt`, `implementPrompt`,
- *   `implementWorkItemPrompt`, `fixPrompt`, `codeReviewPrompt`,
- *   `expertReviewPrompt`, `addendumReviewPrompt`, `implementAddendumPrompt`,
- *   `integratePrompt`, `auditPrompt`, and the code-search helpers) for the
- *   pipeline stages to invoke.
+ * Builds every pipeline-stage prompt for one workflow run, closing over the
+ * run configuration once so individual prompt builders stay free of a
+ * config parameter. Call once per run and destructure the returned builders
+ * at the call site.
  */
 export function makePrompts(config: WorkflowConfig) {
   const {
@@ -480,20 +450,35 @@ export function makePrompts(config: WorkflowConfig) {
   }
 
   return {
+    /** Builds the `grepai search` invocation used by {@link codeSearchGuidance}. */
     grepaiSearchCommand,
+    /** Memtrace repo-selection guidance, pinned to `MEMTRACE_REPO_ID` when configured. */
     memtraceRepoGuidance,
+    /** Selects and renders the configured code-search backend's guidance text for the preamble. */
     codeSearchGuidance,
+    /** Shared standing-rules block prepended to every agent prompt. */
     preamble,
+    /** Prompt for the planning stage (initial or revision round). */
     planPrompt,
+    /** Prompt for the adversarial design review of a submitted plan. */
     designReviewPrompt,
+    /** Prompt for full-plan implementation (legacy multi-work-item pass). */
     implementPrompt,
+    /** Prompt for implementing exactly one work item, dispatched per builder turn. */
     implementWorkItemPrompt,
+    /** Prompt for a fix round that addresses blocking review findings. */
     fixPrompt,
+    /** Prompt for the code-review benchmark of a completed implementation. */
     codeReviewPrompt,
+    /** Prompt for the adversarial community-of-experts review. */
     expertReviewPrompt,
+    /** Prompt for reviewing a completed addendum pass. */
     addendumReviewPrompt,
+    /** Prompt for implementing an addendum pass's open sub-tasks. */
     implementAddendumPrompt,
+    /** Prompt for rebasing, squash-merging, and pushing a completed task. */
     integratePrompt,
+    /** Prompt for the post-merge codebase audit. */
     auditPrompt,
   }
 }

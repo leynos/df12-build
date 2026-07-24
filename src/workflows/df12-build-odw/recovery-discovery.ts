@@ -1,11 +1,12 @@
 /**
- * @file Fresh-run recovery discovery (failure resume, phase 1) —
- * reconstruct recovery candidates from durable Git state alone: local
- * roadmap-* branches, live worktrees, and the canonical roadmap. Discovery
- * never mutates the target project; it only reads refs, worktree metadata,
- * and commit ids. Discovery limits (base branch, resumeTaskId, candidate
- * cap) are bound once via makeRecoveryDiscovery so the run configuration
- * stays in the entry.
+ * Fresh-run recovery discovery (failure resume, phase 1) — reconstruct
+ * recovery candidates from durable Git state alone: local roadmap-* branches,
+ * live worktrees, and the canonical roadmap. Discovery never mutates the
+ * target project; it only reads refs, worktree metadata, and commit ids.
+ * Discovery limits (base branch, resumeTaskId, candidate cap) are bound once
+ * via {@link makeRecoveryDiscovery} so the run configuration stays in the entry.
+ *
+ * @module
  */
 import { execFileStatus, fileState } from './exec.ts'
 import { directoryExists, readFileText } from './git-evidence.ts'
@@ -27,11 +28,13 @@ import type { RecoveryCandidate } from './types.ts'
  *   `candidate-cap`).
  */
 export interface RecoverySkip {
+  /** Roadmap task id, or `''` when the branch could not be mapped to one. */
   id: string
+  /** The full branch name that was skipped. */
   branchName: string
+  /** A {@link RECOVERY_SKIP_REASONS} value explaining the exclusion. */
   reason: string
 }
-
 /**
  * The result of a discovery pass over durable Git state: the recoverable
  * candidates found, the branches skipped along with their reasons, and any
@@ -45,11 +48,13 @@ export interface RecoverySkip {
  *   discovery.
  */
 export interface RecoveryDiscovery {
+  /** Branches selected for recovery, ordered by roadmap line then branch name. */
   candidates: RecoveryCandidate[]
+  /** Branches examined but excluded, each with a reason. */
   skipped: RecoverySkip[]
+  /** Non-fatal fault descriptions gathered during discovery (e.g. probe faults). */
   errors: string[]
 }
-
 /**
  * Configuration bound once per run that constrains which candidates
  * discovery may surface.
@@ -63,8 +68,11 @@ export interface RecoveryDiscovery {
  *   `candidate-cap`.
  */
 export interface RecoveryDiscoveryLimits {
+  /** Base branch whose `origin/<base>` merge-base anchors each candidate's diff. */
   base: string
+  /** When set, restrict discovery to this single roadmap task id. */
   resumeTaskId: string | null
+  /** Upper bound on candidates promoted in one run; the rest skip as `candidate-cap`. */
   resumeMaxCandidates: number
 }
 
@@ -232,7 +240,12 @@ export const RECOVERY_HOLD_REASONS = new Set(['missing-worktree', 'worktree-prob
  */
 export async function recoveryExecplanPath(
   candidate: { branchName: string; worktreePath: string },
-): Promise<{ execplanPath: string; error: string }> {
+): Promise<{
+  /** Canonical plan path when it exists, otherwise `''`. */
+  execplanPath: string
+  /** Stat fault detail, or `''` on success. */
+  error: string
+}> {
   const canonicalPlan = `docs/execplans/${candidate.branchName}.md`
   const state = await fileState(canonicalPlan, candidate.worktreePath)
   if (!state.ok) return { execplanPath: '', error: state.detail }
@@ -273,20 +286,28 @@ export async function syntheticRecoveryImpl(
       ? { execplanPath: candidate.execplanPath, error: '' }
       : await recoveryExecplanPath(candidate)
   return {
+    /** Always `true`: the synthetic result stands in for a successful implementation phase. */
     ok: true,
+    /** Always `true`: gate re-running is deferred to the downstream deterministic gates. */
     gatesGreen: true,
+    /** Resolved ExecPlan path, or `''` when it could not be located. */
     execplanPath: resolved.execplanPath,
+    /** Zero: no work items were executed by this synthetic bridge. */
     workItemsCompleted: 0,
+    /** Zero: no work-item plan is materialized for a recovered branch. */
     workItemsTotal: 0,
+    /** Commit ids already on the branch, carried through as the delivered work. */
     commits: evidence?.recentCommits || [],
+    /** Zero: no CodeRabbit runs were performed by the bridge. */
     coderabbitRuns: 0,
+    /** Open issues forcing fresh review, plus any ExecPlan-verification fault. */
     openIssues: [
       'recovered branch requires fresh review',
       ...(resolved.error ? [`could not verify the durable ExecPlan: ${resolved.error}`] : []),
     ],
-    // Advisory, non-blocking caveats the assessment carried forward: surfaced to
-    // the resumed reviewer/integrator without downgrading adopt-complete (#23).
+    /** Advisory caveats carried into review and integration without blocking resume. */
     residualRisk: [...(residualRisk || [])],
+    /** Human-readable note that the result was reconstructed from durable git state. */
     summary: 'Recovered adopt-complete branch from durable git state.',
   }
 }

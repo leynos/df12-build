@@ -510,6 +510,22 @@ files. This validates host-authored workflow syntax without spawning agents:
 make typecheck
 ```
 
+The `docs-check` target (run by `make all`, wrapping `bun run docs:check`) is
+the zero-tolerance documentation gate: TypeDoc's `notDocumented` validation
+expands the configured `src/workflows/df12-build-odw/` entry point. The
+`typedoc.json` configuration excludes declaration files, `meta.js`, and
+internal, private and protected reflections. Every included module must open
+with a `/** … @module */` block and every included exported declaration must
+carry a JSDoc block; validation warnings are errors, the run emits no
+documentation artefacts, and a failure prints the qualified name and location
+of each undocumented declaration. JSON Schema constants are tagged `@internal`
+(their `description` fields are the per-field documentation), so TypeDoc does
+not recurse into the schema literals:
+
+```bash
+make docs-check
+```
+
 Do not use a live `odw run` as a routine gate. Run it only when the task
 explicitly asks for execution or smoke testing, because it can spawn agents and
 mutate target-project state.

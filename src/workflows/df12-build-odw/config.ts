@@ -1,139 +1,289 @@
-// Run configuration: every `args` default, clamp, validation, and derived
-// guidance string, built once by makeConfig and destructured by the entry.
-// Field names deliberately match the entry's historical constant names so
-// `const { BASE, ROADMAP, ... } = makeConfig(args)` keeps every reference
-// intact. makeConfig is pure: the projectRoot chdir side effect stays with
-// the caller.
+/**
+ * Run configuration: every `args` default, clamp, validation, and derived
+ * guidance string, built once by makeConfig and destructured by the entry.
+ * Field names deliberately match the entry's historical constant names so
+ * `const { BASE, ROADMAP, ... } = makeConfig(args)` keeps every reference
+ * intact. makeConfig is pure: the projectRoot chdir side effect stays with
+ * the caller.
+ *
+ * @module
+ */
 
+/**
+ * Raw, caller-supplied workflow overrides before defaults and clamps are
+ * applied. Every field is optional: {@link makeConfig} fills in the house
+ * defaults, so an empty object yields a fully valid {@link WorkflowConfig}.
+ * Several numeric fields accept a string so values passed straight from CLI or
+ * JSON args are coerced rather than rejected.
+ */
 export interface RawWorkflowArgs {
+  /** Absolute path the workflow treats as the project root; defaults to the process CWD. */
   projectRoot?: string
+  /** Integration branch: the rebase and squash-merge target and roadmap source of truth. Defaults to `main`. */
   base?: string
+  /** Roadmap file, relative to the project root, that drives task selection. Defaults to `docs/roadmap.md`. */
   roadmap?: string
+  /** Human phrase naming the design sources cited in agent prompts. */
   designDocs?: string
+  /** Optional project-specific external-library research note (e.g. a vendored lib source path to verify against). */
   researchNote?: string
+  /** Restrict the run to exactly one named roadmap id (e.g. `1.2.1`); forces the task and parallelism ceilings to 1. */
   taskId?: string
+  /** Hard ceiling on roadmap steps processed per run. */
   maxTasks?: number
+  /** Worker-pool width: tasks in flight at once. */
   maxParallel?: number
+  /** Concurrent planning-stage agents. */
   maxPlanningParallel?: number
+  /** Legacy alias for {@link RawWorkflowArgs.maxPlanningParallel}, honoured when the newer key is absent. */
   maxPlanParallel?: number
+  /** Concurrent build-stage agents. */
   maxBuildParallel?: number
+  /** Plan/design-review exchanges before halting. */
   maxDesignRounds?: number
+  /** Review/fix/re-review cycles before halting. */
   maxReviewRounds?: number
+  /** Total attempts per stage agent when a prior attempt died on an infrastructure fault; product failures are never retried. */
   stageAttempts?: number | string
+  /** Enable the per-work-item build loop (one builder turn per unticked checklist item); set false to restore the single-turn whole-task build. */
   perWorkItemBuild?: boolean
+  /** Builder turns per task before failing closed. */
   maxWorkItemRounds?: number | string
+  /** Merge integrated branches automatically; set false to stop after review and leave the branch for manual merge. */
   autoMerge?: boolean
+  /** Write audit findings; set false to return findings only and write nothing. */
   documentAudit?: boolean
+  /** Plan/review/audit only, skipping implement, merge, and doc writes. */
   dryRun?: boolean
+  /** Run local CLI auth checks before spawning agents; set false to skip them. */
   authPreflight?: boolean
+  /** Require CodeRabbit auth once implementation/review can run; forced off under dry run. */
   requireCoderabbitAuth?: boolean
+  /** Run report-only assessment of failed task branches; set false to skip. */
   assessPartialBranches?: boolean
+  /** Opt in to discovering surviving roadmap-* branches on a fresh launch before normal selection. */
   resumePartialBranches?: boolean
+  /** Maximum recovery action for resumed branches: `assess`, `review`, or `continue`. */
   resumeMode?: string
+  /** Limit recovery discovery to one roadmap id (separate from {@link RawWorkflowArgs.taskId}). */
   resumeTaskId?: string | number
+  /** Upper bound on startup recovery fan-in so a messy repository cannot consume the whole run. */
   resumeMaxCandidates?: number | string
+  /** Run the once-per-run probe proving task agents can write into sibling worktrees; set false to skip. */
   worktreeWritePreflight?: boolean
+  /** Reasoning effort for the write-preflight probe agent; kept minimal because the probe tests permission, not reasoning. */
   writeProbeEffort?: string
+  /** Optional per-adapter probe model overrides (keyed by adapter name) to make the write preflight cheaper. */
   writeProbeModelByAdapter?: Record<string, string>
+  /** Code-search backend to use (e.g. `grepai`, `memtrace`); inferred from the other search args when unset. */
   searchBackend?: string
+  /** Legacy alias for {@link RawWorkflowArgs.searchBackend}. */
   codeSearchBackend?: string
+  /** GrepAI workspace name. Defaults to `Projects`. */
   grepaiWorkspace?: string
+  /** Canonical main-branch GrepAI project; set this when the source is a worktree. */
   grepaiProject?: string
+  /** Fallback project identifier used to derive the GrepAI project or Memtrace repo id when the specific key is unset. */
   project?: string
+  /** Canonical Memtrace repo id; discover with `list_indexed_repositories` when unset. */
   memtraceRepoId?: string
+  /** Adapter running the build stage. */
   buildAdapter?: string
+  /** Adapter running the planning stage. */
   planAdapter?: string
+  /** Adapter running the review stage. */
   reviewAdapter?: string
+  /** Adapter running remediation triage. */
   triageAdapter?: string
+  /** Adapter running partial-branch assessment; defaults to the review adapter. */
   assessmentAdapter?: string
+  /** Model for the build stage. */
   buildModel?: string
+  /** Model for the planning stage. */
   planModel?: string
+  /** Model for the review stage. */
   reviewModel?: string
+  /** Medium-tier model for the routine triage pass. */
   triageModel?: string
+  /** Higher-tier model triage escalates to for complex, cross-cutting routing. */
   triageEscalationModel?: string
+  /** Medium-tier model for the routine assessment pass. */
   assessmentModel?: string
+  /** Model assessment escalates to when the medium pass lands on an adopt verdict; defaults to the review model. */
   assessmentEscalationModel?: string
+  /** Legacy agent-run CodeRabbit command told to the agent when host review is off. */
   coderabbitReviewCommand?: string
+  /** Have the host run CodeRabbit against committed work; set false to restore the legacy agent-run flow. */
   coderabbitHostReview?: boolean
+  /** Run the host CodeRabbit review between per-work-item build turns rather than only at end of stage. */
   coderabbitBetweenWorkItems?: boolean
+  /** Total attempts per host CodeRabbit review when rate limited. */
   coderabbitAttempts?: number | string
+  /** Rate-limit backoff window in minutes as a `[low, high]` pair; sanitized into an ordered range. */
   coderabbitBackoffMinutes?: unknown
+  /** Optional durable JSONL sink path for every CodeRabbit finding. */
   coderabbitFindingsFile?: string
+  /** Have the host re-run commit gates against committed HEAD; set false to trust the agent's claim. */
   hostCommitGates?: boolean
+  /** Run the CodeScene code-health check as a gate; set false to skip. */
   csCheck?: boolean
+  /** CodeScene check invocation. Defaults to `cs-check-changed`. */
   csCheckCommand?: string
+  /** Re-run host commit gates between per-work-item build turns rather than only at the review boundary. */
   hostGatesBetweenWorkItems?: boolean
+  /** Timeout, in seconds, for each commit-gate command. */
   commitGateTimeoutSeconds?: number | string
+  /** The deterministic commit-gate command set for the target project; defaults to `['make all']`. */
   commitGates?: unknown
 }
 
+/**
+ * Fully resolved run configuration: every default applied, every value clamped
+ * and validated, and every derived guidance string built. Consumed by
+ * destructuring in the entry point, so property names mirror the entry's
+ * historical constant names rather than the {@link RawWorkflowArgs} camelCase
+ * keys.
+ */
 export interface WorkflowConfig {
+  /** Absolute project root; the caller performs the chdir, this value only records it. */
   PROJECT_ROOT: string
+  /** Integration branch: rebase and squash-merge target and roadmap source of truth. */
   BASE: string
+  /** Roadmap file, relative to the project root, driving task selection. */
   ROADMAP: string
+  /** Human phrase naming the design sources cited in agent prompts. */
   DESIGN_DOCS: string
+  /** Optional external-library research note path, or null when none was supplied. */
   RESEARCH_NOTE: string | null
+  /** The single roadmap id to process, or null to process the roadmap normally. */
   ONLY_TASK: string | null
+  /** Hard ceiling on roadmap steps per run; forced to 1 when {@link WorkflowConfig.ONLY_TASK} is set. */
   MAX_TASKS: number
+  /** Worker-pool width (tasks in flight); at least 1, forced to 1 when a single task is pinned. */
   MAX_PARALLEL: number
+  /** Concurrent planning-stage agents; at least 1. */
   MAX_PLANNING_PARALLEL: number
+  /** Concurrent build-stage agents; at least 1. */
   MAX_BUILD_PARALLEL: number
+  /** Plan/design-review exchanges before halting. */
   MAX_DESIGN_ROUNDS: number
+  /** Review/fix/re-review cycles before halting. */
   MAX_REVIEW_ROUNDS: number
+  /** Attempts per stage agent after an infrastructure fault; at least 1. Product failures are never retried. */
   STAGE_ATTEMPTS: number
+  /** True when the per-work-item build loop is active (the default). */
   PER_WORK_ITEM_BUILD: boolean
+  /** Builder turns per task before failing closed; at least 1. */
   MAX_WORK_ITEM_ROUNDS: number
+  /** True to auto-merge; false stops after review and leaves the branch for manual merge. */
   AUTO_MERGE: boolean
+  /** True to write audit findings; false returns findings only. */
   DOCUMENT_AUDIT: boolean
+  /** True for plan/review/audit only, skipping implement, merge, and doc writes. */
   DRY_RUN: boolean
+  /** True to run local CLI auth checks before spawning agents. */
   AUTH_PREFLIGHT: boolean
+  /** True when CodeRabbit auth is required; always false under dry run. */
   REQUIRE_CODERABBIT_AUTH: boolean
+  /** True to run report-only assessment of failed task branches. */
   ASSESS_PARTIAL_BRANCHES: boolean
+  /** True to discover surviving roadmap-* branches on a fresh launch. */
   RESUME_PARTIAL_BRANCHES: boolean
+  /** Maximum recovery action for resumed branches: `assess`, `review`, or `continue` (validated, lower-cased). */
   RESUME_MODE: string
+  /** Roadmap id to limit recovery discovery to, or null for no restriction. */
   RESUME_TASK_ID: string | null
+  /** Upper bound on startup recovery fan-in; at least 1. */
   RESUME_MAX_CANDIDATES: number
+  /** True to run the sibling-worktree write-preflight probe. */
   WORKTREE_WRITE_PREFLIGHT: boolean
+  /** Reasoning effort for the write-preflight probe agent; `minimal` by default. */
   WRITE_PROBE_EFFORT: string
+  /** Per-adapter probe model overrides, keyed by lower-cased adapter name. */
   WRITE_PROBE_MODEL_BY_ADAPTER: Record<string, string>
+  /** Remaining-budget floor below which no new tasks are opened. */
   BUDGET_RESERVE: number
+  /** Resolved code-search backend name (lower-cased), e.g. `grepai` or `memtrace`. */
   SEARCH_BACKEND: string
+  /** GrepAI workspace name. */
   GREPAI_WORKSPACE: string
+  /** Canonical main-branch GrepAI project, or null when not applicable. */
   GREPAI_PROJECT: string | null
+  /** Canonical Memtrace repo id, or null when not applicable. */
   MEMTRACE_REPO_ID: string | null
+  /** Adapter running the build stage. */
   BUILD_ADAPTER: string
+  /** Adapter running the planning stage. */
   PLAN_ADAPTER: string
+  /** Adapter running the review stage. */
   REVIEW_ADAPTER: string
+  /** Adapter running remediation triage. */
   TRIAGE_ADAPTER: string
+  /** Adapter running partial-branch assessment. */
   ASSESSMENT_ADAPTER: string
+  /** Model for the build stage. */
   BUILD_MODEL: string
+  /** Model for the planning stage. */
   PLAN_MODEL: string
+  /** Model for the review stage. */
   REVIEW_MODEL: string
+  /** Medium-tier model for the routine triage pass. */
   TRIAGE_MODEL: string
+  /** Higher-tier model triage escalates to for complex, cross-cutting routing. */
   TRIAGE_ESCALATION_MODEL: string
+  /** Medium-tier model for the routine assessment pass. */
   ASSESSMENT_MODEL: string
+  /** Model assessment escalates to on an adopt verdict. */
   ASSESSMENT_ESCALATION_MODEL: string
+  /** De-duplicated, lower-cased set of adapters whose CLI auth must be verified. */
   AUTH_REQUIRED_ADAPTERS: Set<string>
+  /** Legacy agent-run CodeRabbit command (agent-run mode only). */
   CODERABBIT_REVIEW_COMMAND: string
+  /** True when the host runs CodeRabbit against committed work. */
   CODERABBIT_HOST_REVIEW: boolean
+  /** True to run the host CodeRabbit review between per-work-item build turns. */
   CODERABBIT_BETWEEN_WORK_ITEMS: boolean
+  /** Attempts per host CodeRabbit review when rate limited; at least 1. */
   CODERABBIT_ATTEMPTS: number
+  /** Ordered `[low, high]` rate-limit backoff window in minutes. */
   CODERABBIT_BACKOFF_MINUTES: [number, number]
+  /** JSONL sink path for CodeRabbit findings, or empty string when disabled. */
   CODERABBIT_FINDINGS_FILE: string
+  /** True when the host re-runs commit gates against committed HEAD. */
   HOST_COMMIT_GATES: boolean
+  /** True when the CodeScene code-health check runs as a gate. */
   CS_CHECK: boolean
+  /** CodeScene check invocation. */
   CS_CHECK_COMMAND: string
+  /** True to re-run host commit gates between per-work-item build turns. */
   HOST_GATES_BETWEEN_WORK_ITEMS: boolean
+  /** Timeout, in seconds, per commit-gate command; at least 1. */
   COMMIT_GATE_TIMEOUT_SECONDS: number
+  /** The deterministic commit-gate command set for the run. */
   COMMIT_GATES: string[]
+  /** Human-readable rendering of {@link WorkflowConfig.COMMIT_GATES} for prompts (backtick-quoted, joined with "then"). */
   COMMIT_GATE_TEXT: string
+  /** Prompt guidance describing the commit-gate contract and host re-run policy. */
   COMMIT_GATE_GUIDANCE: string
+  /** Prompt guidance describing the CodeScene check and smell taxonomy; empty when the check is off. */
   CS_CHECK_GUIDANCE: string
+  /** Prompt guidance describing the CodeRabbit review flow (host-run versus agent-run). */
   CODERABBIT_REVIEW_GUIDANCE: string
+  /** Prompt guidance permitting delegation to the fast Codex subagent for bounded read-only work. */
   SPARK_DELEGATION_GUIDANCE: string
+  /** Prompt guidance for delegating gate execution (and, in agent-run mode, CodeRabbit) to the scrutineer subagent. */
   SCRUTINEER_DELEGATION_GUIDANCE: string
 }
 
+/**
+ * Resolve raw workflow overrides into the fully resolved {@link WorkflowConfig}
+ * used throughout the run: applies every default, clamps numeric bounds,
+ * coerces string-typed args, and precomputes the derived guidance strings. Pure
+ * and side-effect free — the `projectRoot` chdir is left to the caller — so it
+ * is safe to build once and share. A null or missing argument yields the full
+ * default configuration. Throws when `resumeMode` is not one of `assess`,
+ * `review`, or `continue`.
+ */
 export function makeConfig(rawArgs: Record<string, unknown> | null | undefined): WorkflowConfig {
   const cfg = (rawArgs || {}) as RawWorkflowArgs
   const PROJECT_ROOT = cfg.projectRoot || process.cwd()

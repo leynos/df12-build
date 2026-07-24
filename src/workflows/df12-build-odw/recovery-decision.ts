@@ -1,28 +1,35 @@
 /**
- * @file Pure decision helpers for fresh-run recovery (failure-resume
- * design): task-branch naming, `git worktree list --porcelain` parsing,
- * the review-mode and continue-mode decision tables, and committed-ExecPlan
- * state parsing. Everything here is deterministic and free of I/O, injected
- * ODW primitives, and run configuration, so it is unit-testable by direct
- * import.
+ * Pure decision helpers for fresh-run recovery (failure-resume design):
+ * task-branch naming, `git worktree list --porcelain` parsing, the review-mode
+ * and continue-mode decision tables, and committed-ExecPlan state parsing.
+ * Everything here is deterministic and free of I/O, injected ODW primitives,
+ * and run configuration, so it is unit-testable by direct import. The decision
+ * tables have a Dafny-verified twin under `verify/`; keep the branch order and
+ * skip-reason precedence here in step with that specification.
+ *
+ * @module
  */
 
+/** One `git worktree list --porcelain` record, reduced to the fields recovery consults. */
 export interface WorktreeEntry {
+  /** Absolute path of the checked-out worktree, from the `worktree` porcelain line. */
   worktreePath: string
+  /** Short branch name with any `refs/heads/` prefix stripped; empty for a detached HEAD. */
   branch: string
+  /** Commit id the worktree HEAD points at, from the `HEAD` porcelain line. */
   head: string
 }
-
 /**
  * The hygiene-relevant slice of a recovery candidate. Callers pass the full
  * discovery record, but the decision tables only dereference these fields:
  * whether the branch is an addendum, and the path to its committed ExecPlan.
  */
 export interface RecoveryCandidateHygiene {
+  /** Whether the branch is an addendum (`-addendum` suffix); addenda are never auto-resumed. */
   isAddendum?: boolean
+  /** Path to the branch's durable ExecPlan; its absence disqualifies a review-mode resume. */
   execplanPath?: string
 }
-
 /**
  * Host-collected git evidence for a recovery candidate's worktree: any
  * collection errors, the working-tree dirty/clean state, and recent commit
@@ -30,8 +37,11 @@ export interface RecoveryCandidateHygiene {
  * evidence as failing the corresponding hygiene check.
  */
 export interface RecoveryEvidence {
+  /** Faults raised while gathering evidence; any entry blocks resume (fail closed). */
   collectionErrors?: readonly string[]
+  /** Worktree cleanliness marker; anything other than `'clean'` blocks resume. */
   dirtyState?: string
+  /** Commit ids unique to the branch; an empty list means there is no committed work to adopt. */
   recentCommits?: readonly string[]
 }
 
@@ -53,10 +63,15 @@ export interface RecoveryEvidence {
  * typed producers, not the runtime guard.
  */
 export interface RecoveryAssessmentFields {
+  /** The agent's verdict; only `'adopt-complete'` is a candidate for review-mode resume. */
   classification?: string
+  /** Whether the committed work stays within the task's scope; must be `true` to resume. */
   taskScoped?: boolean
+  /** Free-text validation evidence; missing evidence must be reported through `missingEvidence`. */
   validation?: string
+  /** Evidence the agent could not produce; a non-empty list disqualifies resume. */
   missingEvidence?: readonly string[]
+  /** Advisory caveats carried into review and integration without blocking resume. */
   residualRisk: readonly string[]
 }
 
@@ -99,7 +114,9 @@ export type ExecplanStatus =
  * trimmed text and whether it is ticked.
  */
 export interface ExecplanProgressItem {
+  /** The item's label text, trimmed of the checkbox marker. */
   text: string
+  /** Whether the checkbox was ticked (`[x]`/`[X]`) rather than blank (`[ ]`). */
   ticked: boolean
 }
 
@@ -110,10 +127,15 @@ export interface ExecplanProgressItem {
  * read or parse failure.
  */
 export interface ExecplanState {
+  /** Lifecycle status; the sole key continue-mode dispatch acts on. */
   status: ExecplanStatus
+  /** Count of ticked Progress items (informational only). */
   ticked: number
+  /** Count of unticked Progress items (informational only). */
   unticked: number
+  /** Every parsed Progress checkbox, in document order. */
   items: ExecplanProgressItem[]
+  /** Fault detail when the plan could not be read; set only for `unreadable` state. */
   error?: string
 }
 
@@ -130,9 +152,13 @@ export type RecoveryStage = 'plan' | 'implement' | 'review'
  * `reason` when applicable, and whether the candidate was `skip`ped.
  */
 export interface ReviewDecision {
+  /** `'resume'` spends review + integration effort; `'report'` only records the outcome. */
   action: 'report' | 'resume'
+  /** Effective classification: the input verdict, or `'continue-manual'` when downgraded. */
   classification: string
+  /** Disqualifying skip reason, or `''` when the candidate is eligible. */
   reason: string
+  /** Whether the candidate is recorded in `recovery.skipped` rather than resumed. */
   skip: boolean
 }
 
@@ -143,9 +169,13 @@ export interface ReviewDecision {
  * candidate was `skip`ped.
  */
 export interface ContinueDecision {
+  /** `'resume'` re-enters the branch at `stage`; `'report'` only records the outcome. */
   action: 'report' | 'resume'
+  /** Pipeline stage to resume at, or `null` when the candidate is reported rather than resumed. */
   stage: RecoveryStage | null
+  /** Disqualifying skip reason, or `''` when the candidate is eligible. */
   reason: string
+  /** Whether the candidate is recorded in `recovery.skipped` rather than resumed. */
   skip: boolean
 }
 
@@ -165,7 +195,12 @@ export const TASK_BRANCH_RE = /^roadmap-((?:\d+-)*\d+)(-addendum)?$/
  * @returns The dotted roadmap `id` and `isAddendum` flag, or `null` when the
  *   branch does not match {@link TASK_BRANCH_RE}.
  */
-export function branchToRoadmapId(branch: unknown): { id: string; isAddendum: boolean } | null {
+export function branchToRoadmapId(branch: unknown): {
+  /** Dotted roadmap task id, for example `1.2.3`. */
+  id: string
+  /** Whether the branch carried the `-addendum` suffix. */
+  isAddendum: boolean
+} | null {
   const match = TASK_BRANCH_RE.exec(String(branch || ''))
   if (!match) return null
   return { id: match[1].replace(/-/g, '.'), isAddendum: Boolean(match[2]) }
