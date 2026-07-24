@@ -276,11 +276,11 @@ export interface WorkflowConfig {
 }
 
 /**
- * Resolve raw workflow overrides into the immutable {@link WorkflowConfig} used
- * throughout the run: applies every default, clamps numeric bounds, coerces
- * string-typed args, and precomputes the derived guidance strings. Pure and
- * side-effect free — the `projectRoot` chdir is left to the caller — so it is
- * safe to build once and share. A null or missing argument yields the full
+ * Resolve raw workflow overrides into the fully resolved {@link WorkflowConfig}
+ * used throughout the run: applies every default, clamps numeric bounds,
+ * coerces string-typed args, and precomputes the derived guidance strings. Pure
+ * and side-effect free — the `projectRoot` chdir is left to the caller — so it
+ * is safe to build once and share. A null or missing argument yields the full
  * default configuration. Throws when `resumeMode` is not one of `assess`,
  * `review`, or `continue`.
  */

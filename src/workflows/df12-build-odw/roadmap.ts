@@ -75,6 +75,7 @@ export function extractRoadmapIds(text: string): string[] {
  * free text can simply skip the phrase.
  */
 export function expandStepRange(start: string, end: string): string[] {
+  if (!/^\d+\.\d+$/.test(start) || !/^\d+\.\d+$/.test(end)) return []
   const startParts = start.split('.').map(Number)
   const endParts = end.split('.').map(Number)
   if (startParts.length !== 2 || endParts.length !== 2 || startParts[0] !== endParts[0]) return []

@@ -362,6 +362,7 @@ function extractRoadmapIds(text) {
   return [...ids];
 }
 function expandStepRange(start, end) {
+  if (!/^\d+\.\d+$/.test(start) || !/^\d+\.\d+$/.test(end)) return [];
   const startParts = start.split(".").map(Number);
   const endParts = end.split(".").map(Number);
   if (startParts.length !== 2 || endParts.length !== 2 || startParts[0] !== endParts[0]) return [];
@@ -1485,7 +1486,7 @@ async function verifyWriteProbe(probeFile, token) {
   let handle = null;
   let content = null;
   try {
-    handle = await fs.open(probeFile, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await fs.open(probeFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const stat = await handle.stat();
     if (stat.isFile()) {
       content = await handle.readFile({ encoding: "utf8" });
@@ -2072,15 +2073,18 @@ var stepOf = (id) => String(id).split(".").slice(0, 2).join(".");
 function dedupeProposals(proposals) {
   const byKey = /* @__PURE__ */ new Map();
   for (const proposal of proposals || []) {
-    const key = String(proposal?.title || "").trim().toLowerCase().replace(/\s+/g, " ");
-    if (!key) continue;
-    const source = String(proposal?.source || proposal?.rationale || "");
+    const title = typeof proposal?.title === "string" ? proposal.title.trim() : "";
+    const key = title.toLowerCase().replace(/\s+/g, " ");
+    if (!key) throw new TypeError("remediation proposal title must be a non-blank string");
+    const fallback = String(proposal?.source || proposal?.rationale || "");
+    const sources = Array.isArray(proposal.sources) ? proposal.sources.map((source) => String(source)).filter(Boolean) : [];
+    if (fallback && !sources.includes(fallback)) sources.push(fallback);
     const existing = byKey.get(key);
     if (existing) {
-      if (source && !(existing.sources || []).includes(source)) existing.sources = [...existing.sources || [], source];
+      for (const source of sources) if (!existing.sources.includes(source)) existing.sources.push(source);
       continue;
     }
-    byKey.set(key, { ...proposal, sources: source ? [source] : [] });
+    byKey.set(key, { ...proposal, title, sources });
   }
   return [...byKey.values()];
 }
@@ -2372,11 +2376,26 @@ ${outcome.tail}`
   async function runCodeSceneCheck2(worktree, tag, label) {
     if (!csCheck) return { clean: true, skipped: true, detail: "", logFile: "" };
     const bin = csCheckCommand.trim().split(/\s+/)[0] || "cs-check-changed";
-    const probe = await execFileStatus("sh", ["-c", 'command -v "$1"', "sh", bin], { cwd: worktree });
+    const missingSentinel = "__DF12_CODESCENE_BINARY_MISSING__";
+    const probe = await execFileStatus(
+      "sh",
+      ["-c", 'command -v "$1" >/dev/null 2>&1 || { printf "%s\\n" "$2"; exit 127; }', "sh", bin, missingSentinel],
+      { cwd: worktree }
+    );
     if (!probe.ok) {
-      csCheckMetrics.skipped += 1;
-      log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`);
-      return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: "" };
+      if (probe.stdout.trim() === missingSentinel) {
+        csCheckMetrics.skipped += 1;
+        log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`);
+        return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: "" };
+      }
+      csCheckMetrics.failures += 1;
+      const fault = [probe.message, probe.stderr, probe.signal ? `signal ${probe.signal}` : "", probe.killed ? "probe killed" : ""].map((part) => String(part || "").trim()).filter(Boolean).join("; ");
+      return {
+        clean: false,
+        skipped: false,
+        detail: `CodeScene availability probe for \`${bin}\` failed: ${fault || "unknown probe failure"}`,
+        logFile: ""
+      };
     }
     csCheckMetrics.runs += 1;
     const logFile = hostGateLogPath(tag, `cs-${label}`, 0);

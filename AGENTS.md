@@ -233,9 +233,9 @@ monograph):
 ## Dependency management
 
 - The devDependencies (`esbuild`, `fast-check`, `lemmascript`,
-  `@aboviq/bun-test-cucumber`, `typescript`, `@types/bun`) are **build and test
-  tooling only** — the shipped workflow source has no runtime dependencies (the
-  dialect forbids runtime imports).
+  `markdownlint-cli2`, `@aboviq/bun-test-cucumber`, `typescript`, `@types/bun`)
+  are **build and test tooling only** — the shipped workflow source has no
+  runtime dependencies (the dialect forbids runtime imports).
 - Use caret ranges (`^x.y.z`) for direct dependencies unless a narrower range is
   justified. Commit the lockfile and rebuild it deliberately on major tool
   upgrades. Prefer small, actively maintained packages and cull unused ones.

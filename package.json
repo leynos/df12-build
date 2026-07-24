@@ -11,6 +11,7 @@
     "esbuild": "^0.28.1",
     "fast-check": "^4.8.0",
     "lemmascript": "^0.5.9",
+    "markdownlint-cli2": "^0.22.1",
     "typedoc": "^0.28.20",
     "typescript": "^6.0.3"
   }

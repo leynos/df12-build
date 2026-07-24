@@ -38,7 +38,7 @@ typecheck: workflow-parse
 	node_modules/.bin/tsc -p tsconfig.json --noEmit
 
 markdownlint:
-	markdownlint-cli2 $(MARKDOWN_FILES)
+	node_modules/.bin/markdownlint-cli2 $(MARKDOWN_FILES)
 	+$(MAKE) spelling
 
 spelling:

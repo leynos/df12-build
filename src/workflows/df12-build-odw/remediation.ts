@@ -18,7 +18,7 @@
 /** A single review/audit follow-up proposal awaiting triage. */
 export interface RemediationProposal extends Record<string, unknown> {
   /** Short title used as the dedup key (normalized: trimmed, lower-cased). */
-  title?: string
+  title: string
   /** Rationale text; also used as a legacy fallback source tag. */
   rationale?: string
   /** Severity as reported by the originating review or audit. */
@@ -28,6 +28,14 @@ export interface RemediationProposal extends Record<string, unknown> {
   // multi-source escalation. `rationale` is only a legacy fallback.
   /** Canonical origin tag stamped by run-task.ts, e.g. `review:1.2.3`. */
   source?: string
+  /** Origin tags already aggregated by a previous deduplication pass. */
+  sources?: readonly string[]
+}
+
+/** A valid proposal after title deduplication and source aggregation. */
+export interface DedupedRemediationProposal extends RemediationProposal {
+  /** Ordered union of every audit/review origin associated with the title. */
+  sources: string[]
 }
 
 /** Run-scoped dependencies {@link makeRemediation} closes over. */
@@ -99,20 +107,25 @@ export const stepOf = (id: unknown): string => String(id).split('.').slice(0, 2)
  * and first-seen metadata are preserved; the deduped source tags are
  * unioned so a later multi-source escalation check still sees every origin.
  */
-export function dedupeProposals(proposals: readonly RemediationProposal[]): RemediationProposal[] {
-  const byKey = new Map<string, RemediationProposal & { sources?: string[] }>()
+export function dedupeProposals(proposals: readonly Record<string, unknown>[]): DedupedRemediationProposal[] {
+  const byKey = new Map<string, DedupedRemediationProposal>()
   for (const proposal of proposals || []) {
-    const key = String(proposal?.title || '').trim().toLowerCase().replace(/\s+/g, ' ')
-    if (!key) continue
+    const title = typeof proposal?.title === 'string' ? proposal.title.trim() : ''
+    const key = title.toLowerCase().replace(/\s+/g, ' ')
+    if (!key) throw new TypeError('remediation proposal title must be a non-blank string')
     // Canonical origin is `source` (the tag run-task.ts stamps); rationale is a
     // legacy fallback only.
-    const source = String(proposal?.source || proposal?.rationale || '')
+    const fallback = String(proposal?.source || proposal?.rationale || '')
+    const sources = Array.isArray(proposal.sources)
+      ? proposal.sources.map((source) => String(source)).filter(Boolean)
+      : []
+    if (fallback && !sources.includes(fallback)) sources.push(fallback)
     const existing = byKey.get(key)
     if (existing) {
-      if (source && !(existing.sources || []).includes(source)) existing.sources = [...(existing.sources || []), source]
+      for (const source of sources) if (!existing.sources.includes(source)) existing.sources.push(source)
       continue
     }
-    byKey.set(key, { ...proposal, sources: source ? [source] : [] })
+    byKey.set(key, { ...proposal, title, sources })
   }
   return [...byKey.values()]
 }
@@ -179,7 +192,7 @@ export function makeRemediation({ preamble, worktreeSafetyNet, base, roadmap, tr
     ].join('\n')
   }
 
-  async function runTriage(stepPrefix: string, proposals: readonly RemediationProposal[]) {
+  async function runTriage(stepPrefix: string, proposals: readonly Record<string, unknown>[]) {
     phase('Remediation')
     // Deterministic dedup first (zero tokens), then route the remaining set at
     // the medium default, escalating to the stronger model only when the set
