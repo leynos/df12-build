@@ -67,7 +67,7 @@ export interface RecoveryAssessmentFields {
   classification?: string
   /** Whether the committed work stays within the task's scope; must be `true` to resume. */
   taskScoped?: boolean
-  /** Free-text validation evidence; a non-blank value is required to resume. */
+  /** Free-text validation evidence; missing evidence must be reported through `missingEvidence`. */
   validation?: string
   /** Evidence the agent could not produce; a non-empty list disqualifies resume. */
   missingEvidence?: readonly string[]

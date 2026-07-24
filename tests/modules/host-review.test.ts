@@ -98,6 +98,15 @@ describe('runCodeSceneCheck', () => {
     expect(result.detail).toMatch(/not on PATH/)
   })
 
+  test('a probe infrastructure fault fails instead of masquerading as absence', async () => {
+    const missingWorktree = path.join(tmp('cs-probe-parent-'), 'absent')
+    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: 'true' })
+    const result = await runCodeSceneCheck(missingWorktree, '1.2.3', 'r1')
+    expect(result.clean).toBe(false)
+    expect(result.skipped).toBe(false)
+    expect(result.detail).toMatch(/availability probe.*failed/i)
+  })
+
   test('csCheck disabled skips without probing', async () => {
     const dir = tmp('cs-off-')
     const { runCodeSceneCheck } = hostReview({ csCheck: false })

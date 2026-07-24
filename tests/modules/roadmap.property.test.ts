@@ -34,6 +34,14 @@ describe('expandStepRange', () => {
       }),
     )
   })
+
+  test('rejects malformed step ids before numeric conversion', () => {
+    const invalid = ['', '-1.2', '1.-2', '1', '1.', '.2', '1.2.3', ' 1.2', '1.2 ', '0x1.2', '1e2.3']
+    for (const value of invalid) {
+      expect(expandStepRange(value, '1.3')).toEqual([])
+      expect(expandStepRange('1.1', value)).toEqual([])
+    }
+  })
 })
 
 describe('extractRoadmapIds', () => {

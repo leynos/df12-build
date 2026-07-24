@@ -53,8 +53,21 @@ describe('dedupeProposals', () => {
     expect((flaky as { sources?: string[] }).sources?.sort()).toEqual(['audit:1.2.3', 'review:1.2.4'])
   })
 
-  test('drops titleless proposals', () => {
-    expect(dedupeProposals([{ rationale: 'audit:1.1.1' }])).toHaveLength(0)
+  test('rejects titleless proposals explicitly', () => {
+    expect(() => dedupeProposals([{ title: '', rationale: 'audit:1.1.1' }])).toThrow(/non-blank string/)
+  })
+
+  test('preserves aggregated sources across repeated deduplication', () => {
+    const first = dedupeProposals([
+      { title: 'Fix flaky teardown', source: 'audit:1.2.3' },
+      { title: 'fix flaky teardown', source: 'review:1.2.4' },
+    ])
+    const second = dedupeProposals([
+      ...first,
+      { title: ' FIX FLAKY TEARDOWN ', sources: ['audit:1.2.3', 'expert:1.2.5'], source: 'review:1.2.4' },
+    ])
+    expect(second).toHaveLength(1)
+    expect(second[0].sources).toEqual(['audit:1.2.3', 'review:1.2.4', 'expert:1.2.5'])
   })
 })
 
@@ -93,7 +106,7 @@ describe('runTriage tiering', () => {
     expect(models[1]).toBe('gpt-5.5@high')
   })
 
-  test('an all-duplicate set is dropped deterministically with no agent call', async () => {
+  test('an invalid set is rejected explicitly with no agent call', async () => {
     let called = false
     globals.agent = async () => {
       called = true
@@ -107,9 +120,9 @@ describe('runTriage tiering', () => {
       triageAgentOptions: (options: Record<string, unknown>) => options,
       triageEscalationModel: 'gpt-5.5@high',
     })
-    const outcome = await runTriage('1.2', [{ rationale: 'audit:1.2.3' }, { title: '', rationale: 'x' }])
+    const outcome = runTriage('1.2', [{ title: '', rationale: 'audit:1.2.3' }])
     expect(called).toBe(false)
-    expect((outcome as { decisions: unknown[] }).decisions).toEqual([])
+    await expect(outcome).rejects.toThrow(/non-blank string/)
   })
 })
 
