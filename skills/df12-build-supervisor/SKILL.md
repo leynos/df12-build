@@ -136,12 +136,15 @@ provides the doc skills):
    the timeout must be `21600` seconds to avoid killing healthy work.
 
    When copying a newer workflow into an existing sidecar, audit `args.json`
-   before relaunch. Stale `planAdapter`, `reviewAdapter`, or
-   `assessmentAdapter` overrides from a Codex-only run will override the
-   workflow's current Claude/Codex split. Make sure every adapter named in
-   `args.json` exists in `odw.config.json` or in ODW's built-in adapter set;
-   the current ODW workflow expects a `claude` adapter for default planning and
-   review judgement.
+   before relaunch. Stale `planAdapter`, `reviewAdapter`, `auditAdapter`,
+   `triageAdapter`, or `assessmentAdapter` overrides from a Codex-only run will
+   override the workflow's current Claude/Codex split. Audit `auditAdapter`
+   independently: audit no longer follows `reviewAdapter` and defaults to
+   `claude`, so routing every previously listed stage to Codex can still make
+   auth preflight require Claude. Audit and validate `triageAdapter`, alongside
+   every adapter named in `args.json`, against `odw.config.json` or ODW's
+   built-in adapter set before relaunch; the current ODW workflow expects a
+   `claude` adapter for default planning, review judgement, and audit.
 3. **Launch ODW from the sidecar, with the project as `--source`.** Prefer the
    checked-in ODW workflow when running the Codex build-side agents together
    with the Claude Code planning and review agents:
@@ -172,8 +175,14 @@ provides the doc skills):
    `maxDesignRounds` (4), `maxReviewRounds` (3),
    `taskId` (run exactly one), `dryRun`, `autoMerge`, `documentAudit`,
    `assessPartialBranches`, `buildAdapter`/`buildModel`,
-   `planAdapter`/`planModel`, `reviewAdapter`/`reviewModel`, and
+   `planAdapter`/`planModel`, `reviewAdapter`/`reviewModel`,
+   `auditAdapter`/`auditModel`/`auditEffort`,
+   `triageAdapter`/`triageModel`/`triageEffort`/`triageEscalationModel`, and
    `assessmentAdapter`/`assessmentModel`.
+
+   Remediation triage defaults to the `codex` adapter with `gpt-5.6-sol` at
+   medium effort. Its escalation model remains independently configurable and
+   defaults to `triageModel`.
 
    Recovery and enforcement knobs: `resumePartialBranches` (opt-in fresh-run
    discovery of surviving `roadmap-*` branches, default off), `resumeMode`
@@ -249,10 +258,12 @@ provides the doc skills):
    A multi-hour silent stream is a hung connection, not progress.
 
    The checked-in defaults split execution from judgement. Build-side work
-   uses Codex defaults, while planning and review judgement use Claude Code
-   with `claude-opus-4-8`. Partial-branch assessment inherits the review route
-   unless the sidecar `args.json` sets `assessmentAdapter` and
-   `assessmentModel` explicitly.
+   uses GPT-5.6 Terra through the medium-effort Codex adapter, while planning
+   and review judgement use Claude Code with `claude-opus-4-8`. Post-merge
+   audit is independent of review and uses Claude Sonnet 5 at medium effort.
+   Partial-branch assessment inherits the review adapter unless the sidecar
+   `args.json` sets `assessmentAdapter` explicitly, and uses its own
+   `assessmentModel` default.
 5. **For legacy Claude `Workflow({ scriptPath: ... })` launches, use the same
    sidecar rule.** `scriptPath` launches may not receive `args`; if you use
    that harness, retune by editing the copied sidecar script itself and record

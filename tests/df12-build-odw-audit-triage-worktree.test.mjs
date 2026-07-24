@@ -25,6 +25,7 @@ const CONTROL_LOOP_MARKER = '// --- Worker-pool control loop'
 // `triagePrompt` from `makeRemediation({ worktreeSafetyNet, base: BASE, … })`,
 // both bound at the artefact's top level — nothing is stubbed.
 async function loadAuditTriageSurface(args = {}) {
+  const calls = []
   let source = await readFile(WORKFLOW_PATH, 'utf8')
   source = source.replace(/^export const meta\s*=/m, 'const meta =')
   const markerIndex = source.indexOf(CONTROL_LOOP_MARKER)
@@ -38,17 +39,29 @@ async function loadAuditTriageSurface(args = {}) {
     'parallel',
     'budget',
     `${helperSource}
-return { BASE, worktreeSafetyNet, auditPrompt, triagePrompt }
+return {
+  BASE,
+  worktreeSafetyNet,
+  auditPrompt,
+  triagePrompt,
+  runAudit,
+  runTriage,
+  modelRouting,
+}
 `,
   )
-  return factory(
+  const surface = factory(
     args,
     () => {},
     () => {},
-    async () => null,
+    async (prompt, options) => {
+      calls.push({ prompt, options })
+      return { ok: true }
+    },
     async (thunks) => Promise.all(thunks.map((thunk) => thunk())),
     { total: null, remaining: () => Infinity, spent: () => 0 },
   )
+  return { ...surface, calls }
 }
 
 const TASK = { id: '1.2.3', title: 'Implement the parser', isAddendum: false, subtasks: [] }
@@ -99,6 +112,82 @@ test('a non-main base roots audit and triage worktrees on that base end to end',
 
   assert.ok(audit.includes('git donkey <slug> trunk'), 'audit worktree must root on the configured base')
   assert.ok(triage.includes('git donkey <slug> trunk'), 'triage worktree must root on the configured base')
+})
+
+test('the shipped workflow routes audit and triage with their default options', async () => {
+  const surface = await loadAuditTriageSurface()
+
+  await surface.runAudit(TASK)
+  await surface.runTriage('1.2', PROPOSALS)
+
+  assert.deepEqual(
+    surface.calls.map(({ options }) => ({
+      adapter: options.adapter,
+      model: options.model,
+      effort: options.effort,
+      label: options.label,
+    })),
+    [
+      {
+        adapter: 'claude',
+        model: 'claude-sonnet-5',
+        effort: 'medium',
+        label: 'audit:after-1.2.3',
+      },
+      {
+        adapter: 'codex',
+        model: 'gpt-5.6-sol',
+        effort: 'medium',
+        label: 'triage:1.2',
+      },
+    ],
+  )
+  assert.deepEqual(surface.modelRouting().audit, {
+    adapter: 'claude',
+    model: 'claude-sonnet-5',
+    effort: 'medium',
+  })
+  assert.deepEqual(surface.modelRouting().triage, {
+    adapter: 'codex',
+    model: 'gpt-5.6-sol',
+    effort: 'medium',
+  })
+})
+
+test('the shipped workflow preserves independent audit and triage overrides', async () => {
+  const surface = await loadAuditTriageSurface({
+    auditAdapter: 'audit-cli',
+    auditModel: 'audit-model',
+    auditEffort: 'high',
+    triageAdapter: 'triage-cli',
+    triageModel: 'triage-model',
+    triageEffort: 'low',
+  })
+
+  await surface.runAudit(TASK)
+  await surface.runTriage('1.2', PROPOSALS)
+
+  assert.deepEqual(
+    surface.calls.map(({ options }) => ({
+      adapter: options.adapter,
+      model: options.model,
+      effort: options.effort,
+    })),
+    [
+      { adapter: 'audit-cli', model: 'audit-model', effort: 'high' },
+      { adapter: 'triage-cli', model: 'triage-model', effort: 'low' },
+    ],
+  )
+  assert.deepEqual(surface.modelRouting().audit, {
+    adapter: 'audit-cli',
+    model: 'audit-model',
+    effort: 'high',
+  })
+  assert.deepEqual(surface.modelRouting().triage, {
+    adapter: 'triage-cli',
+    model: 'triage-model',
+    effort: 'low',
+  })
 })
 
 test('main.ts injects the shared helper into remediation rather than re-importing it', async () => {

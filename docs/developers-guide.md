@@ -396,10 +396,12 @@ state when survivor branches still block the roadmap frontier. See
 `docs/users-guide.md` for the operator-facing description.
 
 Adapter and model routing are part of the workflow contract. The ODW workflow
-currently uses Codex defaults for build-side work, and Claude Code with
-`claude-opus-4-8` for planning and review judgement. `planAgentOptions` covers
+currently uses `gpt-5.6-terra` at medium effort for build-side work, and Claude
+Code with `claude-opus-4-8` for planning and review judgement.
+`planAgentOptions` covers
 the plan stage. `reviewAgentOptions` covers design review, code review, expert
-review, addendum fallback review, and audit. Because partial-branch assessment
+review, and addendum fallback review. `auditAgentOptions` routes audit to
+`claude-sonnet-5` at medium effort. Because partial-branch assessment
 defaults to the review adapter, keep `assessmentAdapter` explicit in examples
 or operator notes when that stage must remain on Codex.
 
@@ -408,11 +410,10 @@ because most of their work is cheap. `ASSESSMENT_MODEL` has its own medium
 default (`claude-sonnet-5`, not the review model): a deterministic
 fast-classifier resolves the clear cases with zero tokens, and only a genuine
 adopt candidate escalates to `ASSESSMENT_ESCALATION_MODEL` (defaulting to
-`REVIEW_MODEL`). `TRIAGE_MODEL` likewise runs at a medium default after a
-deterministic dedup pre-pass, escalating to `TRIAGE_ESCALATION_MODEL` only when
-the deduped proposals span more than one audit/review source. Each escalation
-model is an independent override, so a sidecar can tune the cheap tier and the
-escalation tier separately.
+`REVIEW_MODEL`). `TRIAGE_MODEL` likewise runs at a medium default
+(`gpt-5.6-sol`) after a deterministic dedup pre-pass. Complex sets select
+`TRIAGE_ESCALATION_MODEL`, which defaults to the same Sol model. Each
+escalation model remains independently overridable.
 
 ## Sidecar tooling contract
 
