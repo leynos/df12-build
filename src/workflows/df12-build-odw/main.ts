@@ -158,12 +158,16 @@ const {
   BUILD_ADAPTER,
   PLAN_ADAPTER,
   REVIEW_ADAPTER,
+  AUDIT_ADAPTER,
   TRIAGE_ADAPTER,
   ASSESSMENT_ADAPTER,
   BUILD_MODEL,
   PLAN_MODEL,
   REVIEW_MODEL,
+  AUDIT_MODEL,
+  AUDIT_EFFORT,
   TRIAGE_MODEL,
+  TRIAGE_EFFORT,
   TRIAGE_ESCALATION_MODEL,
   ASSESSMENT_MODEL,
   ASSESSMENT_ESCALATION_MODEL,
@@ -212,12 +216,28 @@ function reviewAgentOptions(options = {}) {
   return { adapter: REVIEW_ADAPTER, model: REVIEW_MODEL, ...options }
 }
 
+function auditAgentOptions(options = {}) {
+  return { adapter: AUDIT_ADAPTER, model: AUDIT_MODEL, effort: AUDIT_EFFORT, ...options }
+}
+
 function triageAgentOptions(options = {}) {
-  return { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL, ...options }
+  return { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL, effort: TRIAGE_EFFORT, ...options }
 }
 
 function assessmentAgentOptions(options = {}) {
   return { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL, ...options }
+}
+
+function modelRouting() {
+  return {
+    worktree: { mode: 'deterministic-git-worktree' },
+    build: { adapter: BUILD_ADAPTER, model: BUILD_MODEL },
+    plan: { adapter: PLAN_ADAPTER, model: PLAN_MODEL },
+    review: { adapter: REVIEW_ADAPTER, model: REVIEW_MODEL },
+    audit: { adapter: AUDIT_ADAPTER, model: AUDIT_MODEL, effort: AUDIT_EFFORT },
+    triage: { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL, effort: TRIAGE_EFFORT },
+    assessment: { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL },
+  }
 }
 
 // Stage-agent retry with the run's attempt budget bound once (see faults.ts).
@@ -698,7 +718,7 @@ function writeProbeTargets() {
 // ---------------------------------------------------------------------------
 async function runAudit(task: { id: string }) {
   phase('Audit')
-  const audit = await agent(auditPrompt(task, null), reviewAgentOptions({ phase: 'Audit', label: `audit:after-${task.id}`, schema: AUDIT_SCHEMA }))
+  const audit = await agent(auditPrompt(task, null), auditAgentOptions({ phase: 'Audit', label: `audit:after-${task.id}`, schema: AUDIT_SCHEMA }))
   return audit
 }
 
@@ -1142,14 +1162,7 @@ const { salvages, summarySuffix: salvageSummarySuffix } = summarizeSalvages(resu
 
 return {
   base: BASE,
-  modelRouting: {
-    worktree: { mode: 'deterministic-git-worktree' },
-    build: { adapter: BUILD_ADAPTER, model: BUILD_MODEL },
-    plan: { adapter: PLAN_ADAPTER, model: PLAN_MODEL },
-    review: { adapter: REVIEW_ADAPTER, model: REVIEW_MODEL },
-    triage: { adapter: TRIAGE_ADAPTER, model: TRIAGE_MODEL },
-    assessment: { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL },
-  },
+  modelRouting: modelRouting(),
   maxParallel: MAX_PARALLEL,
   maxPlanningParallel: MAX_PLANNING_PARALLEL,
   maxBuildParallel: MAX_BUILD_PARALLEL,

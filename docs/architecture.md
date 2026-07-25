@@ -173,8 +173,9 @@ The key argument groups are:
   dispatches deterministically from the committed ExecPlan `Status`),
   `resumeTaskId`, `resumeMaxCandidates`, and `worktreeWritePreflight` (the
   host-verified task-agent write probe).
-- Agent routing: `buildAdapter`/`buildModel`, `planAdapter`/`planModel`, and
-  `reviewAdapter`/`reviewModel`.
+- Agent routing: `buildAdapter`/`buildModel`, `planAdapter`/`planModel`,
+  `reviewAdapter`/`reviewModel`, and
+  `auditAdapter`/`auditModel`/`auditEffort`.
 - Assessment routing: `assessmentAdapter`/`assessmentModel` with
   `assessmentEscalationModel`.
 - Triage routing: `triageAdapter`/`triageModel` with `triageEscalationModel`.
@@ -183,16 +184,17 @@ The default routing separates execution from judgement. Build-side stages
 default to Codex: worktree creation, implementation, fix rounds, and
 integration use the build adapter/model defaults. Planning and review
 judgement default to Claude Code with `claude-opus-4-8`: the plan stage uses
-`planAdapter`/`planModel`, while design review, code review, expert review,
-addendum fallback review, and audit use `reviewAdapter`/`reviewModel`.
+`planAdapter`/`planModel`, while design review, code review, expert review, and
+addendum fallback review use `reviewAdapter`/`reviewModel`. Audit is separately
+right-sized to `claude-sonnet-5` at medium effort.
 
 Model spend is right-sized to each task's cognitive load, not left at the
 Opus/high defaults:
 
 - The write-preflight probe writes one exact token to one exact path, so it
   keeps the plan/build ADAPTER but runs at `writeProbeEffort` (`minimal` by
-  default) and never inherits `planModel`/`buildModel`; set
-  `writeProbeModelByAdapter` for a cheaper per-adapter probe model.
+  default) and never inherits `planModel`/`buildModel`. Its default model map
+  routes Claude to `claude-haiku-4-5` and Codex to `gpt-5.6-luna`.
 - Partial-branch assessment is report-only, so a deterministic fast-classifier
   handles the clear cases (empty branch, evidence-collection failure) with zero
   tokens, and only genuinely ambiguous branches reach a model — at
@@ -201,9 +203,9 @@ Opus/high defaults:
   adopt-complete candidate (a branch that committed an ExecPlan).
 - Remediation triage is mostly de-duplication plus hypothesis routing, so a
   deterministic pre-pass collapses exact-duplicate proposals and the routing
-  agent runs at `triageModel` (a medium default, `gpt-5.5`), escalating to
-  `triageEscalationModel` (`gpt-5.5@high`) only when the proposals span
-  multiple audit/review sources (potential cross-phase or conflicting routing).
+  agent runs at `triageModel` (`gpt-5.6-sol`) with medium effort. Complex sets
+  still select `triageEscalationModel`, which defaults to the same Sol model, so
+  every triage task remains on that route unless explicitly overridden.
 
 A sidecar that wants a different assessment or triage route must say so in
 `args.json`.

@@ -44,12 +44,16 @@ export interface RawWorkflowArgs {
   buildAdapter?: string
   planAdapter?: string
   reviewAdapter?: string
+  auditAdapter?: string
   triageAdapter?: string
   assessmentAdapter?: string
   buildModel?: string
   planModel?: string
   reviewModel?: string
+  auditModel?: string
+  auditEffort?: string
   triageModel?: string
+  triageEffort?: string
   triageEscalationModel?: string
   assessmentModel?: string
   assessmentEscalationModel?: string
@@ -104,12 +108,16 @@ export interface WorkflowConfig {
   BUILD_ADAPTER: string
   PLAN_ADAPTER: string
   REVIEW_ADAPTER: string
+  AUDIT_ADAPTER: string
   TRIAGE_ADAPTER: string
   ASSESSMENT_ADAPTER: string
   BUILD_MODEL: string
   PLAN_MODEL: string
   REVIEW_MODEL: string
+  AUDIT_MODEL: string
+  AUDIT_EFFORT: string
   TRIAGE_MODEL: string
+  TRIAGE_EFFORT: string
   TRIAGE_ESCALATION_MODEL: string
   ASSESSMENT_MODEL: string
   ASSESSMENT_ESCALATION_MODEL: string
@@ -183,7 +191,10 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   // per-adapter probe model to save more (adapter name lowercased).
   const WRITE_PROBE_EFFORT = String(cfg.writeProbeEffort || 'minimal')
   const WRITE_PROBE_MODEL_BY_ADAPTER: Record<string, string> = Object.fromEntries(
-    Object.entries(cfg.writeProbeModelByAdapter || {}).map(([adapter, model]) => [String(adapter).toLowerCase(), String(model)]),
+    Object.entries(cfg.writeProbeModelByAdapter || {
+      claude: 'claude-haiku-4-5',
+      'codex-medium': 'gpt-5.6-luna',
+    }).map(([adapter, model]) => [String(adapter).toLowerCase(), String(model)]),
   )
   const BUDGET_RESERVE = 80_000 // stop opening new tasks when remaining budget falls below this
   const SEARCH_BACKEND = String(cfg.searchBackend || cfg.codeSearchBackend || (cfg.memtraceRepoId ? 'memtrace' : 'grepai')).toLowerCase()
@@ -193,18 +204,22 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   const BUILD_ADAPTER = cfg.buildAdapter || 'codex-medium'
   const PLAN_ADAPTER = cfg.planAdapter || 'claude'
   const REVIEW_ADAPTER = cfg.reviewAdapter || 'claude'
+  const AUDIT_ADAPTER = cfg.auditAdapter || 'claude'
   const TRIAGE_ADAPTER = cfg.triageAdapter || 'codex'
   const ASSESSMENT_ADAPTER = cfg.assessmentAdapter || REVIEW_ADAPTER
-  const BUILD_MODEL = cfg.buildModel || 'gpt-5.5'
+  const BUILD_MODEL = cfg.buildModel || 'gpt-5.6-terra'
   const PLAN_MODEL = cfg.planModel || 'claude-opus-4-8'
   const REVIEW_MODEL = cfg.reviewModel || 'claude-opus-4-8'
+  const AUDIT_MODEL = cfg.auditModel || 'claude-sonnet-5'
+  const AUDIT_EFFORT = String(cfg.auditEffort || 'medium')
   // Remediation triage is mostly de-duplication plus hypothesis routing. A
   // deterministic pre-pass collapses exact duplicates, and the routing agent
-  // runs at a MEDIUM default, escalating to the escalation model only for
-  // complex triage (proposals spanning multiple audit/review sources, i.e.
-  // potential cross-cutting or conflicting routing).
-  const TRIAGE_MODEL = cfg.triageModel || 'gpt-5.5'
-  const TRIAGE_ESCALATION_MODEL = cfg.triageEscalationModel || 'gpt-5.5@high'
+  // runs at a MEDIUM default. Complex triage (proposals spanning multiple
+  // audit/review sources) selects the independently configurable escalation
+  // model, which defaults to the same Sol route.
+  const TRIAGE_MODEL = cfg.triageModel || 'gpt-5.6-sol'
+  const TRIAGE_EFFORT = String(cfg.triageEffort || 'medium')
+  const TRIAGE_ESCALATION_MODEL = cfg.triageEscalationModel || TRIAGE_MODEL
   // Assessment is report-only; a deterministic fast-classifier (assessment.ts)
   // handles the clear cases with zero tokens, and only genuinely ambiguous
   // adopt decisions reach a model — so assessment gets its own MEDIUM default
@@ -216,6 +231,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     BUILD_ADAPTER,
     PLAN_ADAPTER,
     REVIEW_ADAPTER,
+    AUDIT_ADAPTER,
     TRIAGE_ADAPTER,
     ASSESSMENT_ADAPTER,
   ].map((adapter) => String(adapter || '').toLowerCase()))
@@ -332,12 +348,16 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     BUILD_ADAPTER,
     PLAN_ADAPTER,
     REVIEW_ADAPTER,
+    AUDIT_ADAPTER,
     TRIAGE_ADAPTER,
     ASSESSMENT_ADAPTER,
     BUILD_MODEL,
     PLAN_MODEL,
     REVIEW_MODEL,
+    AUDIT_MODEL,
+    AUDIT_EFFORT,
     TRIAGE_MODEL,
+    TRIAGE_EFFORT,
     TRIAGE_ESCALATION_MODEL,
     ASSESSMENT_MODEL,
     ASSESSMENT_ESCALATION_MODEL,

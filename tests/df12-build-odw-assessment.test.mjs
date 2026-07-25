@@ -763,6 +763,7 @@ test('auth preflight consults Claude only when a stage routes to the claude adap
   const codexOnlyArgs = {
     planAdapter: 'codex',
     reviewAdapter: 'codex',
+    auditAdapter: 'codex',
     triageAdapter: 'codex',
     assessmentAdapter: 'codex',
   }
