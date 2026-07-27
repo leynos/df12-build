@@ -1,3 +1,4 @@
+/** @file Tests for the pure worktree-collision disposition helper. */
 // Module tests for the pure worktree-collision disposition helper
 // (worktree-collision milestone, issue #42): every branch of the decision
 // table that turns host-observed git facts into create / reclaim / fail, so
@@ -41,14 +42,14 @@ describe('decideWorktreeDisposition', () => {
   test('a merged branch with no worktree is reclaimed', () => {
     expect(decideWorktreeDisposition(facts())).toEqual({
       disposition: 'reclaim',
-      reason: 'stale branch is fully merged into the base with no dirty worktree; reclaiming it',
+      reason: 'stale branch is fully merged into the base with no registered worktree; reclaiming it',
     })
   })
 
-  test('a merged branch with a clean worktree is reclaimed', () => {
+  test('a merged branch with a clean registered worktree fails closed', () => {
     expect(decideWorktreeDisposition(facts({ worktreeExists: true, worktreeDirty: false }))).toEqual({
-      disposition: 'reclaim',
-      reason: 'stale branch is fully merged into the base with no dirty worktree; reclaiming it',
+      disposition: 'fail',
+      reason: 'pre-existing branch has a registered clean worktree; refusing to reset a worktree another run may own',
     })
   })
 
@@ -56,7 +57,7 @@ describe('decideWorktreeDisposition', () => {
     expect(decideWorktreeDisposition(facts({ candidateRoadmapComplete: true }))).toEqual({
       disposition: 'reclaim',
       reason:
-        'stale branch is fully merged into the base with no dirty worktree; reclaiming it' +
+        'stale branch is fully merged into the base with no registered worktree; reclaiming it' +
         ' (the roadmap marks this task complete)',
     })
   })
@@ -87,5 +88,21 @@ describe('decideWorktreeDisposition', () => {
         facts({ branchMergedIntoBase: false, candidateRoadmapComplete: true }),
       ),
     ).toEqual({ disposition: 'fail', reason: unmergedReason })
+  })
+
+  test('exhaustively preserves the fail-closed collision invariant', () => {
+    for (let bits = 0; bits < 32; bits++) {
+      const state = facts({
+        branchExists: Boolean(bits & 1),
+        branchMergedIntoBase: Boolean(bits & 2),
+        worktreeExists: Boolean(bits & 4),
+        worktreeDirty: Boolean(bits & 8),
+        candidateRoadmapComplete: Boolean(bits & 16),
+      })
+      const decision = decideWorktreeDisposition(state)
+      if (!state.branchExists) expect(decision.disposition).toBe('create')
+      else if (!state.branchMergedIntoBase || state.worktreeExists) expect(decision.disposition).toBe('fail')
+      else expect(decision.disposition).toBe('reclaim')
+    }
   })
 })

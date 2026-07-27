@@ -1,19 +1,18 @@
-// Pure disposition helper for the deterministic worktree-creation path
-// (failure-resume design, worktree-collision milestone). `createWorktree`
-// builds a deterministic branch name (`roadmap-<id>[-addendum]`) with no
-// unique suffix, so a stale completed addendum branch left over from a prior
-// round collides with `git worktree add -b <branch>` and halts the run. This
-// module turns the host-observed git facts about such a collision into an
-// explicit disposition — create a fresh worktree, reclaim the leftover, or
-// fail closed — without performing any I/O, so the safety rules are directly
-// unit-testable and stay out of the formally-verified recovery-decision twin.
-//
-// The governing rule is reclaim-when-safe, fail-closed-otherwise: a leftover
-// branch is only reclaimed when its tip is already merged into `origin/BASE`
-// and any worktree checked out on it is clean, so the automation never
-// discards unmerged commits or uncommitted work (see docs/adr-003). The
-// destructive-operation policy this encodes is scoped deliberately narrowly;
-// the general `discard`-branch sweeper remains deferred (roadmap 4.2.1).
+/**
+ * @file Pure disposition helper for deterministic worktree creation.
+ *
+ * `createWorktree` builds a deterministic branch name with no unique suffix,
+ * so a stale completed addendum branch can collide with `git worktree add -b`.
+ * This module turns host-observed facts into create, reclaim, or fail without
+ * I/O, keeping the safety rule directly unit-testable and out of the formally
+ * verified recovery-decision twin.
+ *
+ * The governing rule is reclaim-when-safe, fail-closed-otherwise: a leftover
+ * branch is only reclaimed when its tip is already merged into `origin/BASE`
+ * and has no registered worktree, so the automation never resets a tree that
+ * another run may own (see docs/adr-003). The destructive-operation policy is
+ * deliberately narrow; the general `discard`-branch sweeper remains deferred.
+ */
 
 // The host-observed git facts a collision disposition is decided from. Every
 // field is a boolean the caller derives from a single git probe, so the
@@ -42,8 +41,9 @@ export interface WorktreeDispositionDecision {
 }
 
 // Decide what to do when the deterministic worktree branch may already exist.
-// Fail closed: any existing branch with unmerged commits or a dirty worktree
-// is refused so no automation destroys work the operator has not merged.
+// Fail closed: any existing branch with unmerged commits or a registered
+// worktree is refused so no automation destroys work an operator or another
+// workflow run may still own.
 export function decideWorktreeDisposition(facts: WorktreeCollisionFacts): WorktreeDispositionDecision {
   if (!facts.branchExists) {
     return { disposition: 'create', reason: 'no pre-existing branch; creating a fresh worktree' }
@@ -54,10 +54,12 @@ export function decideWorktreeDisposition(facts: WorktreeCollisionFacts): Worktr
       reason: 'pre-existing branch carries commits not merged into the base; refusing to discard unmerged work',
     }
   }
-  if (facts.worktreeExists && facts.worktreeDirty) {
+  if (facts.worktreeExists) {
     return {
       disposition: 'fail',
-      reason: 'pre-existing branch has a dirty worktree; refusing to discard uncommitted work',
+      reason: facts.worktreeDirty
+        ? 'pre-existing branch has a dirty worktree; refusing to discard uncommitted work'
+        : 'pre-existing branch has a registered clean worktree; refusing to reset a worktree another run may own',
     }
   }
   const corroboration = facts.candidateRoadmapComplete
@@ -65,6 +67,6 @@ export function decideWorktreeDisposition(facts: WorktreeCollisionFacts): Worktr
     : ''
   return {
     disposition: 'reclaim',
-    reason: `stale branch is fully merged into the base with no dirty worktree; reclaiming it${corroboration}`,
+    reason: `stale branch is fully merged into the base with no registered worktree; reclaiming it${corroboration}`,
   }
 }

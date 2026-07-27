@@ -8,7 +8,6 @@
  * (but still needs `@file`).
  */
 import { describe, expect, test } from 'bun:test'
-import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -22,13 +21,9 @@ const MODULES = [
 ]
 
 function runChecker(args: string[]): { ok: boolean; output: string } {
-  try {
-    const stdout = execFileSync('node', [SCRIPT, ...args], { cwd: REPO, encoding: 'utf8', stdio: 'pipe' })
-    return { ok: true, output: stdout }
-  } catch (error) {
-    const err = error as { stdout?: string; stderr?: string }
-    return { ok: false, output: `${err.stdout || ''}${err.stderr || ''}` }
-  }
+  const result = Bun.spawnSync(['node', SCRIPT, ...args], { cwd: REPO, stdout: 'pipe', stderr: 'pipe' })
+  const decode = new TextDecoder()
+  return { ok: result.exitCode === 0, output: `${decode.decode(result.stdout)}${decode.decode(result.stderr)}` }
 }
 
 function withProbe(source: string, run: (file: string) => void): void {

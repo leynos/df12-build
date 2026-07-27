@@ -393,6 +393,12 @@ Selection is deliberately simple and reproducible:
 - Sort remaining candidates by roadmap line number.
 - Select the first candidate.
 
+An addendum uses its completed parent's deterministic branch name. If that name
+collides with an orphaned, fully merged branch from an earlier completed run,
+the workflow resets the orphan to `origin/<base>` and continues. A branch with
+unmerged commits, or any registered worktree (clean or dirty), halts for
+operator action: a clean worktree can belong to another active workflow run.
+
 The workflow parses only the mechanical parts needed for scheduling: checkbox
 lines, dotted ids, `Requires` lines, step ranges, and nested addendum subtasks.
 The broader GIST discipline is still required for useful planning and triage:

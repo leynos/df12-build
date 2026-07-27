@@ -42,24 +42,25 @@ otherwise**:
 - no pre-existing branch -> `create` (the unchanged `git worktree add -b`
   path);
 - an existing branch whose tip is a merged ancestor of `origin/<base>` and
-  whose worktree (if any) is clean -> `reclaim`;
-- an existing branch with unmerged commits, or a dirty worktree, -> `fail` with
-  a descriptive note, preserving today's `failed`/`worktree` halt semantics.
+  has no registered worktree -> `reclaim`;
+- an existing branch with unmerged commits, or any registered worktree, ->
+  `fail` with a descriptive note, preserving today's `failed`/`worktree` halt
+  semantics. A clean registered worktree can belong to a live workflow run.
 
 `candidateRoadmapComplete` is treated only as a corroborating signal on the
 `reclaim` path; it never licenses discarding unmerged or uncommitted work.
 
 Reclaim uses only sandbox-permitted git commands (see the supervisor skill's
 environment safety-net constraints): `git worktree prune`, `git branch -f
-<branch> origin/<base>`, plain `git worktree add`, and `git -C <path> reset
---hard origin/<base>` — never `git worktree remove --force` or `git branch -D`.
+<branch> origin/<base>`, and plain `git worktree add` — never `git worktree
+remove --force`, `git branch -D`, or a reset of a registered worktree.
 The existing HEAD-versus-base verification runs afterwards, so a reclaimed
 worktree is proven to sit on `origin/<base>` before any agent writes to it.
 
 ## Scope and the deferred sweeper
 
 This automation is deliberately scoped to branches **fully merged into
-`origin/<base>` with a clean worktree**. It reclaims a specific deterministic
+`origin/<base>` with no registered worktree**. It reclaims a specific deterministic
 name on demand, at the moment of collision; it never enumerates, deletes, or
 sweeps branches speculatively. The general question of whether `discard`
 branches may be deleted by a managed sweeper — including deletion, stash
@@ -70,10 +71,11 @@ and is explicitly out of scope here.
 
 - A stale, merged addendum branch no longer halts the run; the addendum pass
   proceeds on a branch reset to `origin/<base>`.
-- Any leftover that still carries unmerged commits or uncommitted work is left
-  untouched and still halts the run for operator judgement — no work is
-  destroyed automatically.
+- Any leftover that still carries unmerged commits, uncommitted work, or a
+  registered worktree is left untouched and still halts the run for operator
+  judgement — no work is destroyed automatically.
 - The decision logic is a pure function with exhaustive unit coverage
   (`tests/modules/worktree-collision.test.ts`); the real-git leftover state it
   reasons over is modelled by the `withStaleAddendumBranch` fixture option in
-  `tests/fixtures/recovery-repo.mjs`.
+  `tests/fixtures/recovery-repo.mjs` and exercised through the injected
+  provisioning seam.

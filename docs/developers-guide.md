@@ -40,6 +40,7 @@ Relevant paths:
   typed `main.ts` entry (configuration unpacking, factory bindings, and the
   worker-pool control loop), and one TypeScript module per subsystem:
   `config.ts`, `schemas.ts`, `types.ts`, `roadmap.ts`, `exec.ts`,
+  `worktree-collision.ts`, `worktree-provisioning.ts`,
   `faults.ts`, `git-evidence.ts`, `recovery-decision.ts`,
   `recovery-discovery.ts`, `prompts.ts`, `write-preflight.ts`,
   `execplan-durability.ts`, `assessment.ts`, `remediation.ts`,
@@ -148,6 +149,12 @@ intact:
   `unreadable`, and the continue/recovery boundary reports it
   (`plan-unreadable`, `execplan-stat-error`) instead of dispatching over
   durable work.
+- Keep deterministic worktree collisions fail-closed. `worktree-provisioning.ts`
+  injects Git and roadmap readers, while `worktree-collision.ts` decides only
+  from collected facts. `execFailureDetail` preserves child message and output
+  in the operator note. Reclaim is permitted only for a merged orphan with no
+  registered worktree; a registered path may belong to a live run. ADR 003
+  records the destructive-operation boundary.
 - Satisfy the integration completeness gate. Both normal and addendum lanes
   share `integrationIncomplete()`, which requires `ok`, `rebased`,
   `squashMerged`, `pushed`, and `roadmapMarkedDone` to all be truthy in the

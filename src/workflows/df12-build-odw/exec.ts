@@ -1,3 +1,10 @@
+/**
+ * @file Process and filesystem helpers for ODW host interactions.
+ *
+ * Exec wrappers retain child output so callers can report operational faults
+ * without losing the command context; filesystem probes distinguish absence
+ * from an inaccessible path.
+ */
 // Process and filesystem helpers: execFile wrappers with attached stream
 // output, shell quoting, and the absent-vs-fault file probe. All host I/O
 // goes through process.getBuiltinModule so the module loads without imports
@@ -43,6 +50,7 @@ export async function execFileText(command: string, commandArgs: readonly string
   })
 }
 
+/** Flatten an exec failure into an operator-facing detail with child output. */
 // Flatten an error thrown by execFileText into one human-readable line: the
 // message plus any stderr/stdout the failing child attached. Shared by the
 // call sites that surface a git failure as an operator-facing note.

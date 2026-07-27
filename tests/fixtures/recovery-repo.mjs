@@ -82,9 +82,9 @@ export const RECOVERY_ROADMAP = [
 // withStaleAddendumBranch models a completed addendum round left behind by a
 // prior run: a deterministic `roadmap-2-1-2-addendum` branch whose tip is
 // still `origin/main` (fully merged, nothing unique to lose), optionally with a
-// clean worktree still checked out on it. It is what the addendum-collision
-// reclaim path (issue #42) must recognise as safe to reset rather than halting
-// on. Mutually exclusive with withAddendumWorktree, which reuses the same
+// clean worktree still checked out on it. The orphaned form is reclaimable;
+// the registered form must halt because another live run may own it. Mutually
+// exclusive with withAddendumWorktree, which reuses the same
 // branch name to model a diverged in-progress addendum.
 export function makeRecoveryRepo({
   withAddendumWorktree = false,
