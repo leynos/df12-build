@@ -13,7 +13,6 @@
  */
 import {
   branchToRoadmapId,
-  parseWorktreeList,
   parseExecplanState,
   recoveryDecision,
   recoveryContinueDecision,
@@ -31,7 +30,6 @@ import {
   REVIEW_SCHEMA,
 } from './schemas.ts'
 import {
-  candidateRoadmapComplete,
   isComplete,
   isTaskFullyComplete,
   parseRoadmap,
@@ -39,7 +37,7 @@ import {
   roadmapTaskIndex,
   selectRoadmapTask,
 } from './roadmap.ts'
-import { execFileStatus, execFileText, fileState, shellQuote } from './exec.ts'
+import { execFailureDetail, execFileStatus, execFileText, fileState, shellQuote } from './exec.ts'
 import {
   authFailureDetail,
   faultMetrics,
@@ -49,6 +47,7 @@ import {
   resultFromUnhandledAgentError,
 } from './faults.ts'
 import { collectAssessmentEvidence } from './git-evidence.ts'
+import { makeWorktreeProvisioning } from './worktree-provisioning.ts'
 import {
   RECOVERY_HOLD_REASONS,
   makeRecoveryDiscovery,
@@ -382,23 +381,60 @@ function worktreeParentPath() {
   return path.join(path.dirname(cwd), `${path.basename(cwd)}.worktrees`)
 }
 
+const worktreeProvisioning = makeWorktreeProvisioning({
+  base: BASE,
+  gitTimeoutMs: COMMIT_GATE_TIMEOUT_SECONDS * 1000,
+  execFileStatus,
+  execFileText,
+  readRoadmap: readRoadmapForSelection,
+  log,
+})
+
+function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs / 1000}s`)), timeoutMs)
+    operation.then(
+      (value) => { clearTimeout(timer); resolve(value) },
+      (error) => { clearTimeout(timer); reject(error) },
+    )
+  })
+}
+
 async function createWorktree(task: SelectedTask) {
   const fs = process.getBuiltinModule('node:fs/promises')
   const path = process.getBuiltinModule('node:path')
   const branch = slugForTask(task)
   const worktreePath = path.join(worktreeParentPath(), branch)
   const setupCommand = `git worktree add -b ${branch} ${worktreePath} origin/${BASE}`
+  const gitOptions = { timeoutMs: COMMIT_GATE_TIMEOUT_SECONDS * 1000 }
 
   try {
-    await execFileText('git', ['fetch', 'origin', BASE])
-    const baseSha = (await execFileText('git', ['rev-parse', `origin/${BASE}`])).trim()
+    await execFileText('git', ['fetch', 'origin', BASE], gitOptions)
+    const baseSha = (await execFileText('git', ['rev-parse', `origin/${BASE}`], gitOptions)).trim()
     await fs.mkdir(path.dirname(worktreePath), { recursive: true })
-    await execFileText('git', ['worktree', 'add', '-b', branch, worktreePath, `origin/${BASE}`])
-    const worktreeSha = (await execFileText('git', ['-C', worktreePath, 'rev-parse', 'HEAD'])).trim()
-    if (worktreeSha !== baseSha) {
+
+    const disposition = await withTimeout(
+      worktreeProvisioning.provisionWorktreeForBranch({ branch, worktreePath }),
+      COMMIT_GATE_TIMEOUT_SECONDS * 1000,
+      `worktree provisioning for ${branch}`,
+    )
+    if (!disposition.ok) {
       return {
         ok: false,
         worktreePath,
+        branch,
+        baseSha,
+        donkeyInvocation: setupCommand,
+        notes: disposition.reason,
+      }
+    }
+    const { resolvedWorktreePath, createdNote } = disposition
+
+    const worktreeSha = (await execFileText('git', ['-C', resolvedWorktreePath, 'rev-parse', 'HEAD'], gitOptions)).trim()
+    if (worktreeSha !== baseSha) {
+      return {
+        ok: false,
+        worktreePath: resolvedWorktreePath,
         branch,
         baseSha,
         donkeyInvocation: setupCommand,
@@ -407,26 +443,20 @@ async function createWorktree(task: SelectedTask) {
     }
     return {
       ok: true,
-      worktreePath,
+      worktreePath: resolvedWorktreePath,
       branch,
       baseSha,
       donkeyInvocation: setupCommand,
-      notes: 'created deterministically by the ODW control loop; no setup agent required',
+      notes: createdNote,
     }
   } catch (error) {
-    const failure = error as (Error & { stderr?: string; stdout?: string }) | null
-    const details = [
-      (failure && failure.message) || String(error),
-      failure?.stderr ? `stderr: ${failure.stderr.trim()}` : '',
-      failure?.stdout ? `stdout: ${failure.stdout.trim()}` : '',
-    ].filter(Boolean).join('; ')
     return {
       ok: false,
       worktreePath,
       branch,
       baseSha: '',
       donkeyInvocation: setupCommand,
-      notes: details,
+      notes: execFailureDetail(error),
     }
   }
 }
@@ -440,13 +470,7 @@ async function readRoadmapForSelection(root: string = process.cwd()) {
       fallbackReason: '',
     }
   } catch (error) {
-    const failure = error as (Error & { stderr?: string; stdout?: string }) | null
-    const details = [
-      (failure && failure.message) || String(error),
-      failure?.stderr ? `stderr: ${failure.stderr.trim()}` : '',
-      failure?.stdout ? `stdout: ${failure.stdout.trim()}` : '',
-    ].filter(Boolean).join('; ')
-    throw new Error(`Failed to read canonical roadmap ref ${canonicalRef}: ${details}`)
+    throw new Error(`Failed to read canonical roadmap ref ${canonicalRef}: ${execFailureDetail(error)}`)
   }
 }
 

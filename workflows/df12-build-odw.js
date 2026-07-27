@@ -531,6 +531,14 @@ async function execFileText(command, commandArgs, options = {}) {
     });
   });
 }
+function execFailureDetail(error) {
+  const failure = error;
+  return [
+    failure && failure.message || String(error),
+    failure?.stderr ? `stderr: ${failure.stderr.trim()}` : "",
+    failure?.stdout ? `stdout: ${failure.stdout.trim()}` : ""
+  ].filter(Boolean).join("; ");
+}
 async function execFileStatus(command, commandArgs, options = {}) {
   try {
     return { ok: true, stdout: await execFileText(command, commandArgs, options), stderr: "" };
@@ -787,6 +795,103 @@ async function directoryExists(pathValue) {
     }
     return { ok: false, exists: false, detail: `stat failed for ${String(pathValue)}: ${failure && failure.message || String(error)}` };
   }
+}
+
+// src/workflows/df12-build-odw/worktree-collision.ts
+function decideWorktreeDisposition(facts) {
+  if (!facts.branchExists) {
+    return { disposition: "create", reason: "no pre-existing branch; creating a fresh worktree" };
+  }
+  if (!facts.branchMergedIntoBase) {
+    return {
+      disposition: "fail",
+      reason: "pre-existing branch carries commits not merged into the base; refusing to discard unmerged work"
+    };
+  }
+  if (facts.worktreeExists) {
+    return {
+      disposition: "fail",
+      reason: facts.worktreeDirty ? "pre-existing branch has a dirty worktree; refusing to discard uncommitted work" : "pre-existing branch has a registered clean worktree; refusing to reset a worktree another run may own"
+    };
+  }
+  const corroboration = facts.candidateRoadmapComplete ? " (the roadmap marks this task complete)" : "";
+  return {
+    disposition: "reclaim",
+    reason: `stale branch is fully merged into the base with no registered worktree; reclaiming it${corroboration}`
+  };
+}
+
+// src/workflows/df12-build-odw/worktree-provisioning.ts
+function statusDetail(label, status) {
+  return `${label}: ${(status.message || status.stderr || status.stdout || "command failed").trim()}`;
+}
+function makeWorktreeProvisioning(deps) {
+  const gitOptions = { timeoutMs: deps.gitTimeoutMs };
+  async function worktreeBranchExists(branch) {
+    const probe = await deps.execFileStatus("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], gitOptions);
+    return probe.ok;
+  }
+  async function inspectWorktreeCollision(branch) {
+    const merged = await deps.execFileStatus("git", ["merge-base", "--is-ancestor", branch, `origin/${deps.base}`], gitOptions);
+    const list = await deps.execFileStatus("git", ["worktree", "list", "--porcelain"], gitOptions);
+    if (!list.ok) return { error: statusDetail("could not inspect registered worktrees", list) };
+    const entry = parseWorktreeList(list.stdout).find((candidate) => candidate.branch === branch);
+    const worktreeExists = Boolean(entry?.worktreePath);
+    let worktreeDirty = false;
+    if (entry?.worktreePath) {
+      const status = await deps.execFileStatus("git", ["-C", entry.worktreePath, "status", "--porcelain"], gitOptions);
+      if (!status.ok) return { error: statusDetail("could not inspect registered worktree status", status) };
+      worktreeDirty = status.stdout.trim() !== "";
+    }
+    const notes = [];
+    let roadmapComplete = false;
+    const parsed = branchToRoadmapId(branch);
+    if (parsed) {
+      try {
+        const roadmap = await deps.readRoadmap();
+        const roadmapTask = roadmapTaskIndex(roadmap.text).get(parsed.id);
+        if (roadmapTask) roadmapComplete = candidateRoadmapComplete(roadmapTask, parsed.isAddendum);
+      } catch (error) {
+        notes.push(`roadmap corroboration unavailable: ${error.message || String(error)}`);
+      }
+    }
+    return {
+      facts: {
+        branchExists: true,
+        branchMergedIntoBase: merged.ok,
+        worktreeExists,
+        worktreeDirty,
+        candidateRoadmapComplete: roadmapComplete
+      },
+      notes
+    };
+  }
+  async function reclaimOrphanedBranch(branch, worktreePath) {
+    const prune = await deps.execFileStatus("git", ["worktree", "prune"], gitOptions);
+    if (!prune.ok) throw new Error(statusDetail("could not prune stale worktree registrations", prune));
+    await deps.execFileText("git", ["branch", "-f", branch, `origin/${deps.base}`], gitOptions);
+    await deps.execFileText("git", ["worktree", "add", worktreePath, branch], gitOptions);
+  }
+  async function provisionWorktreeForBranch(target) {
+    const { branch, worktreePath } = target;
+    if (!await worktreeBranchExists(branch)) {
+      await deps.execFileText("git", ["worktree", "add", "-b", branch, worktreePath, `origin/${deps.base}`], gitOptions);
+      deps.log(JSON.stringify({ event: "worktree_collision", disposition: "create", branch, worktree: "absent" }));
+      return { ok: true, resolvedWorktreePath: worktreePath, createdNote: "created deterministically by the ODW control loop; no setup agent required" };
+    }
+    const inspection = await inspectWorktreeCollision(branch);
+    if ("error" in inspection) {
+      deps.log(JSON.stringify({ event: "worktree_collision", disposition: "fail", branch, reason: inspection.error }));
+      return { ok: false, reason: inspection.error };
+    }
+    const decision = decideWorktreeDisposition(inspection.facts);
+    deps.log(JSON.stringify({ event: "worktree_collision", disposition: decision.disposition, branch, worktree: inspection.facts.worktreeExists ? "present" : "absent", reason: decision.reason }));
+    if (decision.disposition === "fail") return { ok: false, reason: decision.reason };
+    await reclaimOrphanedBranch(branch, worktreePath);
+    const corroboration = inspection.notes.length ? `; ${inspection.notes.join("; ")}` : "";
+    return { ok: true, resolvedWorktreePath: worktreePath, createdNote: `reclaimed stale branch ${branch}: ${decision.reason}${corroboration}` };
+  }
+  return { provisionWorktreeForBranch };
 }
 
 // src/workflows/df12-build-odw/recovery-discovery.ts
@@ -3251,22 +3356,61 @@ function worktreeParentPath() {
   const cwd = process.cwd();
   return path.join(path.dirname(cwd), `${path.basename(cwd)}.worktrees`);
 }
+var worktreeProvisioning = makeWorktreeProvisioning({
+  base: BASE,
+  gitTimeoutMs: COMMIT_GATE_TIMEOUT_SECONDS * 1e3,
+  execFileStatus,
+  execFileText,
+  readRoadmap: readRoadmapForSelection,
+  log
+});
+function withTimeout(operation, timeoutMs, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs / 1e3}s`)), timeoutMs);
+    operation.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
 async function createWorktree(task) {
   const fs = process.getBuiltinModule("node:fs/promises");
   const path = process.getBuiltinModule("node:path");
   const branch = slugForTask(task);
   const worktreePath = path.join(worktreeParentPath(), branch);
   const setupCommand = `git worktree add -b ${branch} ${worktreePath} origin/${BASE}`;
+  const gitOptions = { timeoutMs: COMMIT_GATE_TIMEOUT_SECONDS * 1e3 };
   try {
-    await execFileText("git", ["fetch", "origin", BASE]);
-    const baseSha = (await execFileText("git", ["rev-parse", `origin/${BASE}`])).trim();
+    await execFileText("git", ["fetch", "origin", BASE], gitOptions);
+    const baseSha = (await execFileText("git", ["rev-parse", `origin/${BASE}`], gitOptions)).trim();
     await fs.mkdir(path.dirname(worktreePath), { recursive: true });
-    await execFileText("git", ["worktree", "add", "-b", branch, worktreePath, `origin/${BASE}`]);
-    const worktreeSha = (await execFileText("git", ["-C", worktreePath, "rev-parse", "HEAD"])).trim();
-    if (worktreeSha !== baseSha) {
+    const disposition = await withTimeout(
+      worktreeProvisioning.provisionWorktreeForBranch({ branch, worktreePath }),
+      COMMIT_GATE_TIMEOUT_SECONDS * 1e3,
+      `worktree provisioning for ${branch}`
+    );
+    if (!disposition.ok) {
       return {
         ok: false,
         worktreePath,
+        branch,
+        baseSha,
+        donkeyInvocation: setupCommand,
+        notes: disposition.reason
+      };
+    }
+    const { resolvedWorktreePath, createdNote } = disposition;
+    const worktreeSha = (await execFileText("git", ["-C", resolvedWorktreePath, "rev-parse", "HEAD"], gitOptions)).trim();
+    if (worktreeSha !== baseSha) {
+      return {
+        ok: false,
+        worktreePath: resolvedWorktreePath,
         branch,
         baseSha,
         donkeyInvocation: setupCommand,
@@ -3275,26 +3419,20 @@ async function createWorktree(task) {
     }
     return {
       ok: true,
-      worktreePath,
+      worktreePath: resolvedWorktreePath,
       branch,
       baseSha,
       donkeyInvocation: setupCommand,
-      notes: "created deterministically by the ODW control loop; no setup agent required"
+      notes: createdNote
     };
   } catch (error) {
-    const failure = error;
-    const details = [
-      failure && failure.message || String(error),
-      failure?.stderr ? `stderr: ${failure.stderr.trim()}` : "",
-      failure?.stdout ? `stdout: ${failure.stdout.trim()}` : ""
-    ].filter(Boolean).join("; ");
     return {
       ok: false,
       worktreePath,
       branch,
       baseSha: "",
       donkeyInvocation: setupCommand,
-      notes: details
+      notes: execFailureDetail(error)
     };
   }
 }
@@ -3307,13 +3445,7 @@ async function readRoadmapForSelection(root = process.cwd()) {
       fallbackReason: ""
     };
   } catch (error) {
-    const failure = error;
-    const details = [
-      failure && failure.message || String(error),
-      failure?.stderr ? `stderr: ${failure.stderr.trim()}` : "",
-      failure?.stdout ? `stdout: ${failure.stdout.trim()}` : ""
-    ].filter(Boolean).join("; ");
-    throw new Error(`Failed to read canonical roadmap ref ${canonicalRef}: ${details}`);
+    throw new Error(`Failed to read canonical roadmap ref ${canonicalRef}: ${execFailureDetail(error)}`);
   }
 }
 async function executeResume(task, resume, mergeLock2) {

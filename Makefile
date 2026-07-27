@@ -36,7 +36,7 @@ clean:
 
 # Regenerate the ODW workflow artifact from the module tree under src/.
 workflow-build:
-	bun scripts/build-workflow.mjs
+	node scripts/build-workflow.mjs
 
 # Fail when the committed artifact is stale relative to the src tree.
 workflow-freshness: workflow-build

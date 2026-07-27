@@ -10,6 +10,7 @@ import fc from 'fast-check'
 import {
   execFileStatus,
   execFileText,
+  execFailureDetail,
   fileState,
   shellQuote,
 } from '../../src/workflows/df12-build-odw/exec.ts'
@@ -45,6 +46,14 @@ describe('execFileText / execFileStatus', () => {
 
   test('execFileText rejects with stdout and stderr attached', async () => {
     await expect(execFileText('sh', ['-c', 'exit 7'])).rejects.toMatchObject({ stdout: '', stderr: '' })
+  })
+})
+
+describe('execFailureDetail', () => {
+  test('retains the message and non-empty child streams for operator notes', () => {
+    expect(execFailureDetail({ message: 'git failed', stderr: 'bad ref\n', stdout: 'hint\n' })).toBe(
+      'git failed; stderr: bad ref; stdout: hint',
+    )
   })
 })
 

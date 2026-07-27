@@ -7,7 +7,6 @@
 // tsconfig regression that drops the flag fails loudly here rather than
 // silently letting non-erasable syntax into the artefact.
 import { describe, expect, test } from 'bun:test'
-import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -18,17 +17,17 @@ const TSC = path.join(REPO, 'node_modules', '.bin', 'tsc')
 // them to the committed config so the two cannot drift.
 const FLAGS = ['--noEmit', '--strict', '--target', 'esnext', '--module', 'esnext', '--moduleResolution', 'bundler', '--erasableSyntaxOnly', '--verbatimModuleSyntax', '--isolatedModules']
 
+function runTsc(args: string[], cwd: string): { ok: boolean; output: string } {
+  const result = Bun.spawnSync([TSC, ...args], { cwd, stdout: 'pipe', stderr: 'pipe' })
+  const decode = new TextDecoder()
+  return { ok: result.exitCode === 0, output: `${decode.decode(result.stdout)}${decode.decode(result.stderr)}` }
+}
+
 function typecheck(source: string): { ok: boolean; output: string } {
   const dir = mkdtempSync(path.join(tmpdir(), 'cs-compile-'))
   writeFileSync(path.join(dir, 'probe.ts'), source)
   try {
-    // Run from the temp dir (which has no tsconfig.json) so tsc accepts the
-    // command-line file instead of erroring TS5112 against the repo config.
-    execFileSync(TSC, [...FLAGS, 'probe.ts'], { cwd: dir, encoding: 'utf8', stdio: 'pipe' })
-    return { ok: true, output: '' }
-  } catch (error) {
-    const err = error as { stdout?: string; stderr?: string }
-    return { ok: false, output: `${err.stdout || ''}${err.stderr || ''}` }
+    return runTsc([...FLAGS, 'probe.ts'], dir)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -50,11 +49,7 @@ function typecheckWithPrelude(prelude: string, body: string, tmpPrefix: string):
   const dir = mkdtempSync(path.join(tmpdir(), tmpPrefix))
   writeFileSync(path.join(dir, 'probe.ts'), `${prelude}\n${body}\n`)
   try {
-    execFileSync(TSC, [...SALVAGE_FLAGS, ODW_GLOBALS, 'probe.ts'], { cwd: dir, encoding: 'utf8', stdio: 'pipe' })
-    return { ok: true, output: '' }
-  } catch (error) {
-    const err = error as { stdout?: string; stderr?: string }
-    return { ok: false, output: `${err.stdout || ''}${err.stderr || ''}` }
+    return runTsc([...SALVAGE_FLAGS, ODW_GLOBALS, 'probe.ts'], dir)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
