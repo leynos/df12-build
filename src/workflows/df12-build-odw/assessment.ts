@@ -12,6 +12,7 @@ import {
   authFailureDetail,
   infrastructureFailureDetail,
   providerFailureDetail,
+  usageLimitFailureDetail,
 } from './faults.ts'
 import { collectAssessmentEvidence } from './git-evidence.ts'
 import type { AssessmentEvidence } from './git-evidence.ts'
@@ -116,6 +117,36 @@ export interface AssessmentWorktree {
   baseSha?: string
 }
 
+const NON_ASSESSABLE_STAGES = new Set([
+  'worktree',
+  'worktree-write',
+  'auth',
+  'provider',
+  'infrastructure',
+  'usage-limit',
+])
+
+const NON_ASSESSABLE_STATUSES = new Set([
+  'fatal-auth',
+  'usage-limit-fault',
+  'provider-fault',
+  'infra-fault',
+])
+
+// These three checks cover normalized stage/status values and fault signatures
+// that may survive only in detail or openIssues when those fields are unset or
+// inconsistent.
+function isNonAssessableFaultResult(result: AssessableResult): boolean {
+  if (NON_ASSESSABLE_STAGES.has(result.stage || '')) return true
+  if (NON_ASSESSABLE_STATUSES.has(result.status || '')) return true
+  const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
+  return Boolean(
+    authFailureDetail(detail) ||
+      usageLimitFailureDetail(detail) ||
+      providerFailureDetail(detail) ||
+      infrastructureFailureDetail(detail),
+  )
+}
 /** The run wiring `makeAssessment` binds once: the prompt preamble, the enable switch, adapter routing, the escalation model, and the shared infra-retry wrapper. */
 export interface AssessmentDeps {
   preamble: (worktree: string | null | undefined) => string
@@ -255,8 +286,19 @@ function isInfraFaultResult(result: AssessableResult | null | undefined): boolea
   // detail happens to embed infra-shaped text (e.g. a provider error that quotes
   // an underlying SchemaValidationError). Only a genuine product failure whose
   // detail matches the ODW infrastructure patterns falls through.
-  if (result.status === 'done' || result.status === 'provider-fault' || result.status === 'fatal-auth') return false
-  if (result.stage === 'provider' || result.stage === 'auth' || result.stage === 'worktree' || result.stage === 'worktree-write') return false
+  if (
+    result.status === 'done' ||
+    result.status === 'usage-limit-fault' ||
+    result.status === 'provider-fault' ||
+    result.status === 'fatal-auth'
+  ) return false
+  if (
+    result.stage === 'usage-limit' ||
+    result.stage === 'provider' ||
+    result.stage === 'auth' ||
+    result.stage === 'worktree' ||
+    result.stage === 'worktree-write'
+  ) return false
   const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
   return Boolean(infrastructureFailureDetail(detail))
 }
@@ -483,9 +525,7 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     if (!assessPartialBranches) return false
     if (!wt?.branch || !wt?.worktreePath) return false
     if (!result || !['failed', 'halted'].includes(result.status || '')) return false
-    if (result.stage === 'worktree' || result.stage === 'worktree-write' || result.stage === 'auth' || result.stage === 'provider' || result.stage === 'infrastructure' || result.status === 'fatal-auth' || result.status === 'provider-fault' || result.status === 'infra-fault') return false
-    const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
-    return !authFailureDetail(detail) && !providerFailureDetail(detail) && !infrastructureFailureDetail(detail)
+    return !isNonAssessableFaultResult(result)
   }
 
   // Schema-retry exhaustion — the exact failure issue #18 targets — is

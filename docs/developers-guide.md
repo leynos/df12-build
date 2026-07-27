@@ -266,15 +266,27 @@ when partial-branch assessment is disabled (`assessPartialBranches=false`):
 does not run when the stage is disabled — so neither path attempts salvage.
 
 Failure classification is layered: `authFailureDetail` (fatal-auth), then
-`providerFailureDetail` (provider-fault), then `infrastructureFailureDetail`
-(infra-fault, pinned to ODW's own adapter-timeout / exit-code / schema-retry
-error strings), and only then ordinary `failed`. Infra faults are agent-process
-deaths carrying no branch evidence: `withInfraRetry` re-runs the stage agent up
-to `stageAttempts` total attempts (default 2), and a persistent fault
-terminates as `infra-fault` with no assessment agent and no remediation triage
-writes. Never wrap the integration agent in `withInfraRetry` — its push to
-`origin/<base>` is not idempotent, and a source-invariant test pins both call
-sites as unwrapped.
+`usageLimitFailureDetail` (usage-limit-fault), then `providerFailureDetail`
+(provider-fault), then `infrastructureFailureDetail` (infra-fault, pinned to
+ODW's own adapter-timeout / exit-code / schema-retry error strings), and only
+then ordinary `failed`. Infra faults are agent-process deaths carrying no branch
+evidence: `withInfraRetry` re-runs the stage agent up to `stageAttempts` total
+attempts (default 2), and a persistent fault terminates as `infra-fault` with no
+assessment agent and no remediation triage writes. Never wrap the integration
+agent in `withInfraRetry` — its push to `origin/<base>` is not idempotent, and a
+source-invariant test pins both call sites as unwrapped.
+
+A **usage-limit fault** is a Codex build stage that exhausted its rolling
+five-hour (or weekly) usage quota. Its wording (`You've hit your usage limit`,
+`Limits reset every …`, `rate_limit_exceeded`) arrives under the same `exited
+with code N` prefix that `infrastructureFailureDetail` matches, so
+`usageLimitFailureDetail` is ordered ahead of the infra classifier and
+`withInfraRetry` skips the retry (`infrastructureFailureDetail(message) &&
+!usageLimitFailureDetail(message)`) rather than spending a warm attempt inside
+the hours-long reset window. The task terminates as `usage-limit-fault`
+(`stage: "usage-limit"`), halting the run with `resumeMode: "continue"` guidance
+and skipping the assessment agent and remediation triage exactly as infra faults
+do.
 
 Recovery assessment carries two distinct evidence channels, typed by
 `RecoveryAssessmentFields` in `recovery-decision.ts`: blocking
@@ -389,7 +401,8 @@ The run result exposes the contract for operators and tests: `commitGates`
 (the effective deterministic gate list; agents must never assume `make all`
 aggregates a project's gates), `stageAttempts`, bounded-cardinality
 `faultMetrics` (`infraRetries`, `infraFaults`, `providerFaults`,
-`authFaults` — fixed keys only, never keyed by task id or error text),
+`authFaults`, `usageLimitFaults` — fixed keys only, never keyed by task id or
+error text),
 `recovery.unresolved`, and the `needs-operator-recovery` terminal `halted`
 state when survivor branches still block the roadmap frontier. See
 `docs/failure-resume-design.md` for the full design and
