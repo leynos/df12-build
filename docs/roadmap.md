@@ -69,8 +69,8 @@ later review-mode resume.
 
 ### 1.3. Reuse ADR 002 assessment for recovered candidates
 
-This step answers whether fresh-run discovery can share the existing
-assessment contract instead of creating a second recovery classifier.
+This step answers whether fresh-run discovery can share the existing assessment
+contract instead of creating a second recovery classifier.
 
 - [x] 1.3.1. Route discovered candidates through the existing assessment
   evidence collector and schema.

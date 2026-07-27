@@ -34,8 +34,8 @@ ______________________________________________________________________
 
 Clone this repository and make sure the df12 toolchain,
 [Open Dynamic Workflows (ODW)](https://github.com/xz1220/open-dynamic-workflows),
-Codex and Claude adapters, Git, Node.js, `markdownlint-cli2`, and
-`nixie` are available on the machine that will supervise the workshop.
+Codex and Claude adapters, Git, Node.js, `markdownlint-cli2`, and `nixie` are
+available on the machine that will supervise the workshop.
 
 Verify the checked-in workflow assets before launching a workshop:
 
@@ -97,8 +97,8 @@ ______________________________________________________________________
 
 For each unblocked roadmap task the host creates an isolated git worktree,
 verifies the task agent can write into it, then drives the task through
-planning, implementation, review, and integration — serializing only the
-steps that advance `origin/<base>`. Failed or halted branches are assessed
+planning, implementation, review, and integration — serializing only the steps
+that advance `origin/<base>`. Failed or halted branches are assessed
 report-only rather than discarded.
 
 ```mermaid

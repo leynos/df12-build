@@ -22,7 +22,7 @@ DOCSTRING_MODULES := \
 	src/workflows/df12-build-odw/schemas.ts
 DOCSTRING_MIN ?= 80
 
-.PHONY: all clean check-fmt lint typecheck markdownlint nixie spelling test test-modules test-workflow verify-modules verify-modules-strict workflow-parse workflow-build workflow-freshness docstring-coverage
+.PHONY: all clean fmt check-fmt lint typecheck markdownlint nixie spelling test test-modules test-workflow verify-modules verify-modules-strict workflow-parse workflow-build workflow-freshness docstring-coverage
 
 all: check-fmt lint typecheck markdownlint nixie docstring-coverage test workflow-freshness verify-modules
 
@@ -33,6 +33,9 @@ all: check-fmt lint typecheck markdownlint nixie docstring-coverage test workflo
 clean:
 	rm -rf node_modules
 	rm -f .typos-oxendict-base.json .typos-oxendict-base.toml
+
+fmt:
+	mdformat-all
 
 # Regenerate the ODW workflow artifact from the module tree under src/.
 workflow-build:

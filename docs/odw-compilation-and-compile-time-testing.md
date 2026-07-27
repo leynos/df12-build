@@ -7,9 +7,9 @@ and how the behaviour that only exists at compile time is tested. It is written
 for contributors who change the module tree, the build script, or the gates
 that police them.
 
-The companion operational rules live in the developers' guide (see
-"Submodule architecture and composition"); this document is the reference for
-*why* those rules exist.
+The companion operational rules live in the developers' guide (see "Submodule
+architecture and composition"); this document is the reference for *why* those
+rules exist.
 
 ## Why there is a compiler at all
 
@@ -54,15 +54,15 @@ flowchart LR
 fail-closed checks, and only written if every check passes.
 
 1. **Banner** — `src/workflows/df12-build-odw/meta.js`, concatenated
-   **verbatim**. The build never parses or transforms it, so the `export const
-   meta` literal survives byte-for-byte, exactly as the loader will extract and
-   evaluate it. This is why `meta.js` stays plain JavaScript forever: it is the
-   one region that must reach the artefact unmodified.
+   **verbatim**. The build never parses or transforms it, so the
+   `export const meta` literal survives byte-for-byte, exactly as the loader
+   will extract and evaluate it. This is why `meta.js` stays plain JavaScript
+   forever: it is the one region that must reach the artefact unmodified.
 2. **Bundle** — the esbuild output for `main.ts` and everything it imports,
    configured (`format: 'esm'`, `platform: 'neutral'`, `treeShaking: false`) so
-   that a no-export entry produces flat top-level code with no `import`/`export`
-   statements, free identifiers (`agent`, `log`, `args`, …) left untouched as
-   the injected primitives, and every top-level name preserved.
+   that a no-export entry produces flat top-level code with no `import`/
+   `export` statements, free identifiers (`agent`, `log`, `args`, …) left
+   untouched as the injected primitives, and every top-level name preserved.
 3. **Footer** — a generated `return await workflowMain()` that hands control to
    the entry function once every helper and the control loop are in scope.
 
@@ -75,10 +75,10 @@ A tidier bundle would wrap everything in an immediately-invoked function
 expression. This build deliberately does not, for two reasons. First, the ODW
 loader already supplies the function wrapper; a second wrapper would nest the
 `return` and change the injected-primitive scoping. Second, the helper-surface
-tests slice the *source* and compile named helpers in isolation, and the build's
-own rename-survival check (below) relies on every exported helper existing as a
-plain top-level declaration under its own name. A flat namespace keeps the
-artefact readable and keeps those checks meaningful.
+tests slice the *source* and compile named helpers in isolation, and the
+build's own rename-survival check (below) relies on every exported helper
+existing as a plain top-level declaration under its own name. A flat namespace
+keeps the artefact readable and keeps those checks meaningful.
 
 ### Why tree-shaking is off
 
@@ -94,9 +94,9 @@ tree.
 `main.ts` is the entry module. It unpacks the run configuration once, binds the
 subsystem factories, and runs the worker-pool control loop. Every subsystem
 module exports a `makeX(deps)` factory (for example `makeConfig`,
-`makeTaskPipeline`, `makeHostReview`, `makeRecoveryDiscovery`,
-`makePrompts`, `makeAssessment`, `makeRemediation`), and `main.ts` binds each
-one exactly once against the resolved configuration and shared locks:
+`makeTaskPipeline`, `makeHostReview`, `makeRecoveryDiscovery`, `makePrompts`,
+`makeAssessment`, `makeRemediation`), and `main.ts` binds each one exactly once
+against the resolved configuration and shared locks:
 
 ```ts
 const { runTask } = makeTaskPipeline({ CS_CHECK, runCodeSceneCheck, /* … */ })
@@ -113,8 +113,8 @@ with the single-file compile:
   top-level namespace stays collision-free.
 - **It preserves call-site shapes.** The source-invariant tests match structural
   tokens (function names, option keys, status literals) in the source. Binding
-  the dependencies once and keeping the call sites stable means those invariants
-  survive refactors that move a helper between modules.
+  the dependencies once and keeping the call sites stable means those
+  invariants survive refactors that move a helper between modules.
 - **It keeps the wiring explicit.** Configuration flows in one direction, from
   `main.ts` into the factories, so there is a single place to see how a run is
   parameterized.
@@ -137,16 +137,16 @@ at runtime, where debugging is expensive:
   rejects.
 - **Rename survival.** For every `export function|class|const|let|var NAME` in
   every module, the bundle must still contain a top-level declaration of that
-  same `NAME`. This catches the esbuild collision-rename described above, and it
-  also catches a subtler case: **a module authored but never imported.** If
+  same `NAME`. This catches the esbuild collision-rename described above, and
+  it also catches a subtler case: **a module authored but never imported.** If
   nothing in `main.ts`'s import graph reaches a new module, its exported names
   never enter the bundle, and the build fails closed rather than shipping an
   artefact that silently omits the new code.
 - **Exactly one `async function workflowMain()`.** The generated footer calls
   it; two or zero would be ambiguous or broken.
 - **Loader-wrap parse.** Finally the build mirrors the loader: it strips the
-  `meta` export and requires the whole artefact to parse as the body of an async
-  function (`new Function('return (async function … () { … })')`). If the
+  `meta` export and requires the whole artefact to parse as the body of an
+  async function (`new Function('return (async function … () { … })')`). If the
   framed artefact would not parse under the loader's wrap, the build fails
   before writing it.
 
@@ -156,9 +156,9 @@ section below.
 
 ## The TypeScript restriction
 
-The `src` tree is TypeScript, but restricted to **erasable syntax only** so that
-type stripping yields valid workflow JavaScript with no runtime shape of its
-own. `tsconfig.json` sets:
+The `src` tree is TypeScript, but restricted to **erasable syntax only** so
+that type stripping yields valid workflow JavaScript with no runtime shape of
+its own. `tsconfig.json` sets:
 
 - `erasableSyntaxOnly` — rejects constructs that emit runtime code (enums,
   parameter properties, namespaces with runtime members). Type annotations,
@@ -174,8 +174,8 @@ The injected ODW primitives are declared ambiently in `odw-globals.d.ts`, never
 imported, so the source type-checks while the bundle leaves them as free
 identifiers for the loader to inject.
 
-Two further dialect rules are enforced by ODW's dual-compatibility scan and must
-be respected in the source: `Date.now()`, `Math.random()`, and arg-less
+Two further dialect rules are enforced by ODW's dual-compatibility scan and
+must be respected in the source: `Date.now()`, `Math.random()`, and arg-less
 `new Date()` are banned (they break deterministic run resumption under Claude
 Code's reader). Hash a seed instead of calling `Math.random()`, and shell out to
 `date` for timestamps.
@@ -202,15 +202,14 @@ Code's reader). Hash a seed instead of calling `Math.random()`, and shell out to
 Most of what this build guarantees cannot be observed by *running* the workflow
 — running it needs the ODW runtime and spends agent budget, and a compile-time
 regression (a banned construct, a lost helper, a stale artefact) would surface
-only late, inside a run. So the compile-time contract is enforced statically and
-by dedicated meta-tests, layered as follows.
+only late, inside a run. So the compile-time contract is enforced statically
+and by dedicated meta-tests, layered as follows.
 
 ### Layer 1: the type gate
 
 `make typecheck` runs `tsc -p tsconfig.json --noEmit` over the whole tree. This
 is the primary enforcement of the erasable-syntax restriction and of ordinary
-type safety. A non-erasable construct (an `enum`, say) fails here with
-`TS1294`.
+type safety. A non-erasable construct (an `enum`, say) fails here with `TS1294`.
 
 ### Layer 2: the parse gate
 
@@ -250,15 +249,15 @@ command-line file instead of erroring on the repository config.
 
 ### Layer 5: source-invariant tests read the source, not the artefact
 
-The helper-surface and wiring-invariant suites read the **`src` tree**
-(via `readWorkflowSource()` / `readModuleSource()` in
+The helper-surface and wiring-invariant suites read the **`src` tree** (via
+`readWorkflowSource()` / `readModuleSource()` in
 `tests/support/workflow-source.mjs`), not the reprinted artefact. esbuild
 normalizes quotes and strips comments, so an assertion pinned against the
 artefact would break on cosmetic reprinting; pinning against the source keeps
 those invariants meaningful, and `make workflow-freshness` ties the artefact
 back to that source. When an invariant's tokens all live in one module, scope
-the read to that module with `readModuleSource(name)` so an ordered match cannot
-span module boundaries in the concatenated tree.
+the read to that module with `readModuleSource(name)` so an ordered match
+cannot span module boundaries in the concatenated tree.
 
 ## Adding a module (worked checklist)
 

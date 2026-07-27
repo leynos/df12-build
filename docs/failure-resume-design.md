@@ -16,8 +16,8 @@ Companion documents:
 
 ## Problem
 
-ADR 002 added report-only assessment for task branches that fail or halt after a
-worktree exists. That helps an operator decide what to do with a surviving
+ADR 002 added report-only assessment for task branches that fail or halt after
+a worktree exists. That helps an operator decide what to do with a surviving
 branch, but it does not make a fresh run discover that branch or re-enter the
 workflow at a safe stage.
 
@@ -29,22 +29,22 @@ transcripts, hidden sessions, or the host agent's context.
 
 A related but distinct failure mode exists when a task has a durable ExecPlan
 that already passed design review, but no implementation has landed yet. The
-workflow should have a clean way to reuse that accepted plan instead of spending
-another planning/design-review loop on the same task. This is plan-state
-continuation, not branch-state continuation: the durable artefact is the
-accepted ExecPlan plus freshness evidence, not a completed task branch.
+workflow should have a clean way to reuse that accepted plan instead of
+spending another planning/design-review loop on the same task. This is
+plan-state continuation, not branch-state continuation: the durable artefact is
+the accepted ExecPlan plus freshness evidence, not a completed task branch.
 
 ## Research summary
 
 Firecrawl research found two relevant external constraints.
 
-| Source | Finding | Design effect |
-| - | - | - |
-| ODW README | ODW runs are detached background workers with `status`, `logs --follow`, `result`, `pause`, `resume`, and `stop` commands, and run output is backed by a run directory. | `df12-build` can use ODW run results for operator visibility, but recovery must still use target-project Git state because task work lives in real worktrees. |
-| ODW README | ODW uses JSON Schema as the reliable hand-off between agent calls. | Recovery decisions that JavaScript consumes must remain schema-bound. |
-| ODW README | Upstream ODW lists resume, journalling, and replay determinism as future roadmap items. | `df12-build` must not wait for upstream checkpointing; this design stays at the workflow layer. |
-| Claude Code workflow docs | Claude Code workflow resume works within the same session; a later session starts the workflow fresh. | This design treats same-session resume as insufficient for system failure and token-exhaustion recovery. |
-| Claude Code workflow docs | Workflow scripts coordinate agents; intermediate results live in script variables. | Durable resume cannot depend on script variables surviving process death. |
+| Source                    | Finding                                                                                                                                                                 | Design effect                                                                                                                                                 |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ODW README                | ODW runs are detached background workers with `status`, `logs --follow`, `result`, `pause`, `resume`, and `stop` commands, and run output is backed by a run directory. | `df12-build` can use ODW run results for operator visibility, but recovery must still use target-project Git state because task work lives in real worktrees. |
+| ODW README                | ODW uses JSON Schema as the reliable hand-off between agent calls.                                                                                                      | Recovery decisions that JavaScript consumes must remain schema-bound.                                                                                         |
+| ODW README                | Upstream ODW lists resume, journalling, and replay determinism as future roadmap items.                                                                                 | `df12-build` must not wait for upstream checkpointing; this design stays at the workflow layer.                                                               |
+| Claude Code workflow docs | Claude Code workflow resume works within the same session; a later session starts the workflow fresh.                                                                   | This design treats same-session resume as insufficient for system failure and token-exhaustion recovery.                                                      |
+| Claude Code workflow docs | Workflow scripts coordinate agents; intermediate results live in script variables.                                                                                      | Durable resume cannot depend on script variables surviving process death.                                                                                     |
 
 References are listed at the end of this document.
 
@@ -74,30 +74,30 @@ References are listed at the end of this document.
 
 ## Design intent
 
-Resume means "discover durable branch state and re-enter the workflow at a
-safe stage", not "continue the old conversation". The workflow should behave as
+Resume means "discover durable branch state and re-enter the workflow at a safe
+stage", not "continue the old conversation". The workflow should behave as
 though a cautious operator found the branch, read the assessment, and chose the
 least powerful recovery action that preserves correctness.
 
 ## Terminology
 
-| Term | Meaning |
-| - | - |
-| Recovery candidate | A surviving task branch or worktree whose name maps to a roadmap id. |
-| Assessment | The ADR 002 schema-bound classification and evidence summary. |
-| Resume mode | The maximum action the workflow may take for recovery candidates. |
-| Assess-only | Discovery plus assessment, returning JSON only. |
-| Review resume | Re-entering the existing review and integration path for an `adopt-complete` branch. |
-| Accepted ExecPlan | A committed `docs/execplans/roadmap-<id>.md` whose metadata records the roadmap id, approval state, approving design-review evidence, source roadmap commit, and design-input fingerprint. |
-| Plan reuse | Re-entering the existing implementation path for an open roadmap task by adopting a fresh accepted ExecPlan instead of running the planner and design reviewer again. |
+| Term               | Meaning                                                                                                                                                                                    |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Recovery candidate | A surviving task branch or worktree whose name maps to a roadmap id.                                                                                                                       |
+| Assessment         | The ADR 002 schema-bound classification and evidence summary.                                                                                                                              |
+| Resume mode        | The maximum action the workflow may take for recovery candidates.                                                                                                                          |
+| Assess-only        | Discovery plus assessment, returning JSON only.                                                                                                                                            |
+| Review resume      | Re-entering the existing review and integration path for an `adopt-complete` branch.                                                                                                       |
+| Accepted ExecPlan  | A committed `docs/execplans/roadmap-<id>.md` whose metadata records the roadmap id, approval state, approving design-review evidence, source roadmap commit, and design-input fingerprint. |
+| Plan reuse         | Re-entering the existing implementation path for an open roadmap task by adopting a fresh accepted ExecPlan instead of running the planner and design reviewer again.                      |
 
 ## Architecture
 
 The current workflow already owns task selection, worktree creation,
-implementation, assessment, review, and integration. Full resume adds a
-startup recovery phase before normal task selection. That phase constructs
-synthetic task results from Git evidence, then either reports them or routes
-eligible branches into existing review and integration code.
+implementation, assessment, review, and integration. Full resume adds a startup
+recovery phase before normal task selection. That phase constructs synthetic
+task results from Git evidence, then either reports them or routes eligible
+branches into existing review and integration code.
 
 Figure 1 shows the intended control flow.
 
@@ -126,10 +126,10 @@ can mutate the target project, and it is reachable only when the operator opts
 into review-mode resume.
 
 Accepted ExecPlan reuse sits after deterministic roadmap selection, not inside
-selection itself. Selection remains a pure choice over the current roadmap. Once
-an open, dependency-unblocked task is selected, the workflow may inspect the
-matching ExecPlan and either adopt it for implementation or fall back to the
-ordinary plan/design loop. This keeps stale or ambiguous plan state from
+selection itself. Selection remains a pure choice over the current roadmap.
+Once an open, dependency-unblocked task is selected, the workflow may inspect
+the matching ExecPlan and either adopt it for implementation or fall back to
+the ordinary plan/design loop. This keeps stale or ambiguous plan state from
 changing the frontier.
 
 The existing task phases remain responsible for writing into real task
@@ -145,15 +145,15 @@ fault, not as a reviewable task plan.
 
 Add these ODW `args` fields:
 
-| Argument | Default | Meaning |
-| - | - | - |
-| `resumePartialBranches` | `false` | Enable fresh-run recovery discovery. |
-| `resumeMode` | `"assess"` | One of `"assess"`, `"review"`, or `"continue"`. `"assess"` reports only. `"review"` may route clean `adopt-complete` branches into review and integration. `"continue"` dispatches deterministically on the committed ExecPlan `Status` and re-enters the ordinary pipeline at the plan, implement, or review stage. |
-| `resumeTaskId` | unset | Limit recovery discovery to one roadmap id. This is separate from `taskId`, which selects normal roadmap work. |
-| `resumeMaxCandidates` | `4` | Bound startup recovery fan-in so a messy repository does not consume the whole run. |
-| `reuseAcceptedExecPlans` | `false` | Enable accepted-plan adoption after normal roadmap selection. When disabled, every normal task still enters the existing plan/design loop. |
-| `acceptedPlanMode` | `"verify"` | One of `"verify"` or `"build"`. `"verify"` reports whether a matching plan is adoptable. `"build"` may enter implementation when the plan is fresh and accepted. |
-| `stageAttempts` | `2` | Total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, killed CLI, schema-retry exhaustion). Product failures are never retried. |
+| Argument                 | Default    | Meaning                                                                                                                                                                                                                                                                                                              |
+| ------------------------ | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `resumePartialBranches`  | `false`    | Enable fresh-run recovery discovery.                                                                                                                                                                                                                                                                                 |
+| `resumeMode`             | `"assess"` | One of `"assess"`, `"review"`, or `"continue"`. `"assess"` reports only. `"review"` may route clean `adopt-complete` branches into review and integration. `"continue"` dispatches deterministically on the committed ExecPlan `Status` and re-enters the ordinary pipeline at the plan, implement, or review stage. |
+| `resumeTaskId`           | unset      | Limit recovery discovery to one roadmap id. This is separate from `taskId`, which selects normal roadmap work.                                                                                                                                                                                                       |
+| `resumeMaxCandidates`    | `4`        | Bound startup recovery fan-in so a messy repository does not consume the whole run.                                                                                                                                                                                                                                  |
+| `reuseAcceptedExecPlans` | `false`    | Enable accepted-plan adoption after normal roadmap selection. When disabled, every normal task still enters the existing plan/design loop.                                                                                                                                                                           |
+| `acceptedPlanMode`       | `"verify"` | One of `"verify"` or `"build"`. `"verify"` reports whether a matching plan is adoptable. `"build"` may enter implementation when the plan is fresh and accepted.                                                                                                                                                     |
+| `stageAttempts`          | `2`        | Total attempts per stage agent when the previous attempt died on an infrastructure fault (adapter timeout, killed CLI, schema-retry exhaustion). Product failures are never retried.                                                                                                                                 |
 
 `resumeMode` is intentionally not called `autoResume`. The name should force an
 operator to choose the maximum action allowed by the run.
@@ -206,14 +206,14 @@ ordinary recovery candidate unless its durable evidence says otherwise.
 
 Accepted plan reuse addresses an open roadmap task that is not yet built, but
 whose plan has already been reviewed and accepted in durable project state. It
-is not a substitute for branch recovery, and it must not treat an old transcript
-or dashboard line as approval.
+is not a substitute for branch recovery, and it must not treat an old
+transcript or dashboard line as approval.
 
 The workflow should look for a candidate plan only after the deterministic
 selector has picked an ordinary open task. The expected path is
 `docs/execplans/roadmap-<id-with-dashes>.md`, with a later implementation free
-to support an explicit path in metadata if needed. A plan is adoptable only when
-all of these checks pass:
+to support an explicit path in metadata if needed. A plan is adoptable only
+when all of these checks pass:
 
 1. The roadmap task is still open, dependency-unblocked, and has the same id
    and materially the same task text the plan records.
@@ -229,9 +229,9 @@ all of these checks pass:
 6. The plan names validation commands that remain path-safe and compatible with
    the current repository gates.
 
-If any check fails, the workflow must ignore the plan for automation and run the
-normal plan/design loop. It may still report the stale or incomplete plan in the
-result so the operator can inspect it.
+If any check fails, the workflow must ignore the plan for automation and run
+the normal plan/design loop. It may still report the stale or incomplete plan
+in the result so the operator can inspect it.
 
 When `acceptedPlanMode="build"` and the checks pass, the workflow constructs a
 normal plan object from the ExecPlan metadata and enters the existing
@@ -254,19 +254,19 @@ is:
 
 The workflow applies this decision table after assessment:
 
-| Classification | `resumeMode="assess"` | `resumeMode="review"` |
-| - | - | - |
-| `adopt-complete` | Report candidate. | Review and integrate only if the branch is clean, committed, task-scoped, and has validation evidence. |
-| `adopt-partial` | Report candidate. | Report candidate; do not merge automatically. |
-| `continue-manual` | Report candidate. | Report candidate; do not merge automatically. |
-| `discard` | Report candidate. | Report candidate; do not delete automatically. |
+| Classification    | `resumeMode="assess"` | `resumeMode="review"`                                                                                  |
+| ----------------- | --------------------- | ------------------------------------------------------------------------------------------------------ |
+| `adopt-complete`  | Report candidate.     | Review and integrate only if the branch is clean, committed, task-scoped, and has validation evidence. |
+| `adopt-partial`   | Report candidate.     | Report candidate; do not merge automatically.                                                          |
+| `continue-manual` | Report candidate.     | Report candidate; do not merge automatically.                                                          |
+| `discard`         | Report candidate.     | Report candidate; do not delete automatically.                                                         |
 
 `resumeMode="review"` must still fail closed. If any required evidence is
 missing, the candidate remains `continue-manual` in the returned recovery
-summary even when the assessment said `adopt-complete`. Advisory
-`residualRisk` is exempt from this downgrade: it never disqualifies an
-otherwise eligible resume, and is instead threaded into the synthetic
-implementation report and the resumed review and integration prompts.
+summary even when the assessment said `adopt-complete`. Advisory `residualRisk`
+is exempt from this downgrade: it never disqualifies an otherwise eligible
+resume, and is instead threaded into the synthetic implementation report and
+the resumed review and integration prompts.
 
 ## Review-mode resume path
 
@@ -295,16 +295,16 @@ and integration requirements remain decisive.
 
 ## Continue-mode resume path
 
-`resumeMode="continue"` removes the judgement agent from recovery entirely.
-The committed ExecPlan is the durable source of truth for where a task stands,
-so a fresh run can dispatch a survivor branch from durable state alone:
+`resumeMode="continue"` removes the judgement agent from recovery entirely. The
+committed ExecPlan is the durable source of truth for where a task stands, so a
+fresh run can dispatch a survivor branch from durable state alone:
 
-| Committed ExecPlan `Status` | Continue-mode action |
-| - | - |
-| file missing, `DRAFT`, or unrecognized | Re-enter the plan/design-review loop; the planner completes or revises the existing draft in place. |
-| `APPROVED` or `IN PROGRESS` | Re-enter implementation; with the per-work-item build loop (the default) the host itself dispatches from the first unticked Progress item, so resume needs no builder judgement at all. |
-| `COMPLETE` | Re-enter dual review and integration via the synthetic implementation bridge. |
-| `BLOCKED` | Report for the operator (`plan-blocked` skip reason). |
+| Committed ExecPlan `Status`            | Continue-mode action                                                                                                                                                                    |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| file missing, `DRAFT`, or unrecognized | Re-enter the plan/design-review loop; the planner completes or revises the existing draft in place.                                                                                     |
+| `APPROVED` or `IN PROGRESS`            | Re-enter implementation; with the per-work-item build loop (the default) the host itself dispatches from the first unticked Progress item, so resume needs no builder judgement at all. |
+| `COMPLETE`                             | Re-enter dual review and integration via the synthetic implementation bridge.                                                                                                           |
+| `BLOCKED`                              | Report for the operator (`plan-blocked` skip reason).                                                                                                                                   |
 
 Hygiene checks still fail closed before any dispatch: addendum branches,
 evidence-collection errors, and dirty worktrees are reported, and a `COMPLETE`
@@ -313,8 +313,8 @@ stage they would have resumed.
 
 Safety comes from the downstream gates a resumed branch still has to pass —
 design review, the deterministic commit gates, dual review, and serialized
-integration — not from an up-front classification. The worst case of resuming
-a half-built branch is the same as a fresh task failing review.
+integration — not from an up-front classification. The worst case of resuming a
+half-built branch is the same as a fresh task failing review.
 
 Continue mode depends on an agent-side durability contract enforced by the
 prompts:
@@ -344,19 +344,18 @@ write probe:
   (hermetic identity, `Draft ExecPlan for task <id>`) rather than spending a
   30–90 minute planner round on git bookkeeping — live runs showed three
   consecutive rounds burnt on exactly this. Anything else dirty declines the
-  salvage and bounces to the planner as an `EXECPLAN DURABILITY` blocking
-  item carrying the evidence (the foreign dirty paths, or the host's own git
-  error when the environment blocks committing), without spending the design
-  reviewer;
+  salvage and bounces to the planner as an `EXECPLAN DURABILITY` blocking item
+  carrying the evidence (the foreign dirty paths, or the host's own git error
+  when the environment blocks committing), without spending the design reviewer;
 - when the design reviewer is satisfied, the control loop itself rewrites the
   header to `Status: APPROVED` and commits only the plan path as a
   deterministic machine commit, so the reviewer stays read-only and the
   transition can never be skipped;
 - when an implementation returns `ok`, the worktree must be fully committed;
   uncommitted state fails the stage with the exact paths, because uncommitted
-  work is unreviewable and would be lost at the squash merge. A committed
-  plan whose status is not `COMPLETE` is only logged: it costs a resumed run
-  one redundant stage, never correctness.
+  work is unreviewable and would be lost at the squash merge. A committed plan
+  whose status is not `COMPLETE` is only logged: it costs a resumed run one
+  redundant stage, never correctness.
 
 ## Returned result shape
 
@@ -401,13 +400,12 @@ Per-task `results[]` entries should remain the primary place for review and
 integration outcomes. The recovery summary is an index for operators and
 supervision tools.
 
-`unresolved` lists every survivor branch the run reported but did not
-integrate (reported classifications, `resume-failed` branches, and discovery
-holds such as `missing-worktree`). These ids stay held out of normal selection
-while their branches survive, so the frontier remains blocked until an
-operator closes, resumes, splits, or hoovers each one. The run's terminal
-state makes this explicit rather than ending indistinguishably from a dry
-frontier:
+`unresolved` lists every survivor branch the run reported but did not integrate
+(reported classifications, `resume-failed` branches, and discovery holds such as
+`missing-worktree`). These ids stay held out of normal selection while their
+branches survive, so the frontier remains blocked until an operator closes,
+resumes, splits, or hoovers each one. The run's terminal state makes this
+explicit rather than ending indistinguishably from a dry frontier:
 
 - A failed or halted review-mode resume sets `halted` to
   `recovery resume of task <id> <status> at <stage>: <detail>` (the same
@@ -442,68 +440,68 @@ accepted plan.
 
 ## Failure modes
 
-| Failure | Behaviour |
-| - | - |
-| Candidate branch cannot be mapped to a roadmap id | Skip and report `unmapped-branch`. |
-| Roadmap id is complete on `origin/<base>` | Skip and report `already-complete`. |
-| Candidate has dirty files | Assess, but do not review-resume automatically. |
-| Candidate lacks validation evidence | Assess, but do not review-resume automatically. |
-| Assessment agent fails | Return `assessmentError` and keep normal roadmap selection available. |
-| Review or integration fails after resume | Halt through the existing failure path with the recovered branch left intact. |
-| Accepted plan is missing, draft, stale, or uncommitted | Report the reason when plan reuse is enabled, then fall back to the normal plan/design loop. |
-| Accepted plan metadata is prompt-injected or unparsable | Treat the plan as unavailable for automation and run the normal plan/design loop. |
-| Accepted plan build fails | Halt through the existing implementation failure path with the task branch left intact. |
-| Auth preflight fails | Stop as `fatal-auth`; do not assess or resume branches. |
-| Stage agent dies on an infrastructure fault | Retry the stage agent in place up to `stageAttempts` total attempts; if the fault persists, stop as `infra-fault` without an assessment. |
+| Failure                                                 | Behaviour                                                                                                                                |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Candidate branch cannot be mapped to a roadmap id       | Skip and report `unmapped-branch`.                                                                                                       |
+| Roadmap id is complete on `origin/<base>`               | Skip and report `already-complete`.                                                                                                      |
+| Candidate has dirty files                               | Assess, but do not review-resume automatically.                                                                                          |
+| Candidate lacks validation evidence                     | Assess, but do not review-resume automatically.                                                                                          |
+| Assessment agent fails                                  | Return `assessmentError` and keep normal roadmap selection available.                                                                    |
+| Review or integration fails after resume                | Halt through the existing failure path with the recovered branch left intact.                                                            |
+| Accepted plan is missing, draft, stale, or uncommitted  | Report the reason when plan reuse is enabled, then fall back to the normal plan/design loop.                                             |
+| Accepted plan metadata is prompt-injected or unparsable | Treat the plan as unavailable for automation and run the normal plan/design loop.                                                        |
+| Accepted plan build fails                               | Halt through the existing implementation failure path with the task branch left intact.                                                  |
+| Auth preflight fails                                    | Stop as `fatal-auth`; do not assess or resume branches.                                                                                  |
+| Stage agent dies on an infrastructure fault             | Retry the stage agent in place up to `stageAttempts` total attempts; if the fault persists, stop as `infra-fault` without an assessment. |
 
 ### Infrastructure faults
 
 An infrastructure fault is an agent process that died without producing a
-verdict: a hung stream killed by the adapter hard timeout (`adapter 'claude'
-timed out`), a CLI that exited non-zero (`exited with code 143`), or
-schema-retry exhaustion after the reply channel failed (`did not satisfy the
-schema after N attempt(s)`). These strings are pinned from ODW's own error
-messages (`bridge.ts`).
+verdict: a hung stream killed by the adapter hard timeout
+(`adapter 'claude' timed out`), a CLI that exited non-zero
+(`exited with code 143`), or schema-retry exhaustion after the reply channel
+failed (`did not satisfy the schema after N attempt(s)`). These strings are
+pinned from ODW's own error messages (`bridge.ts`).
 
-Such a fault carries no evidence about the task branch, so it is handled
-unlike a product failure:
+Such a fault carries no evidence about the task branch, so it is handled unlike
+a product failure:
 
 1. **Retry in place.** The stage agent is re-run (bounded by `stageAttempts`,
-   default 2 total attempts). The ExecPlan durability contract makes the
-   retry a warm start: the committed plan and any committed work are already
-   on the branch, and every stage prompt tolerates re-entry. In the dual
-   review, a reviewer thunk that dies on an infrastructure fault is retried
-   inside its `parallel` slot; a residual fault is recorded so it cannot be
-   mistaken for a reviewer that returned nothing. Integration is the one
-   exception: it is never retried, because its push to `origin/<base>` is not
-   idempotent — a hidden-success first attempt re-run after an adapter death
-   could squash and push the same task twice. A fault there terminates
-   immediately and the detail tells the operator to inspect `origin/<base>`
-   and the roadmap before relaunching.
+   default 2 total attempts). The ExecPlan durability contract makes the retry
+   a warm start: the committed plan and any committed work are already on the
+   branch, and every stage prompt tolerates re-entry. In the dual review, a
+   reviewer thunk that dies on an infrastructure fault is retried inside its
+   `parallel` slot; a residual fault is recorded so it cannot be mistaken for a
+   reviewer that returned nothing. Integration is the one exception: it is
+   never retried, because its push to `origin/<base>` is not idempotent — a
+   hidden-success first attempt re-run after an adapter death could squash and
+   push the same task twice. A fault there terminates immediately and the
+   detail tells the operator to inspect `origin/<base>` and the roadmap before
+   relaunching.
 2. **Terminal `infra-fault`, not `failed`.** If the fault persists, the task
    result carries `status: "infra-fault"`, `stage: "infrastructure"` (or
    `stage: "review"` when the dual review was interrupted, or
    `stage: "integrate"` for the unretried integration fault). No assessment
-   agent is spawned — there is nothing about the branch to judge — and, as
-   with provider faults, end-of-run remediation triage skips its roadmap
-   writes so an outage never masquerades as task evidence.
+   agent is spawned — there is nothing about the branch to judge — and, as with
+   provider faults, end-of-run remediation triage skips its roadmap writes so
+   an outage never masquerades as task evidence.
 3. **Resume via `continue` mode.** The `halted` detail directs the operator
    to relaunch with `resumeMode: "continue"`; the committed ExecPlan `Status`
    dispatches the branch back into the pipeline at the stage where it died.
 
 The run result carries bounded-cardinality `faultMetrics` (`infraRetries`,
-`infraFaults`, `providerFaults`, `authFaults` — fixed keys, never keyed by
-task id or error text) so operators can read retry pressure and terminal
-fault classes straight from the result instead of scraping logs.
+`infraFaults`, `providerFaults`, `authFaults` — fixed keys, never keyed by task
+id or error text) so operators can read retry pressure and terminal fault
+classes straight from the result instead of scraping logs.
 
 Host filesystem access around the durable ExecPlan fails closed. Agent-supplied
 plan paths pass through a containment check (`execplanRelPath`) that rejects
 absolute paths outside the worktree and `../` escapes before any read, write,
 or git call. Stat and read faults are never conflated with "the file is
-absent": only `ENOENT`/`ENOTDIR` mean absent, and any other fault surfaces as
-a structured error — continue-mode recovery reports it as `plan-unreadable`
-(or `execplan-stat-error` in assess mode) rather than dispatching a planner
-over durable work it could not verify.
+absent": only `ENOENT`/`ENOTDIR` mean absent, and any other fault surfaces as a
+structured error — continue-mode recovery reports it as `plan-unreadable` (or
+`execplan-stat-error` in assess mode) rather than dispatching a planner over
+durable work it could not verify.
 
 The bounded retry cannot shorten a hang itself: ODW's adapter timeout is
 adapter-level configuration (`timeout` in the ODW config), not a per-call
@@ -515,16 +513,16 @@ stream is a hang, not progress.
 ## Security and permissions
 
 Assess-only mode needs read access to branches, worktrees, roadmap text,
-ExecPlans, and validation evidence. Accepted-plan verification needs read access
-to the selected ExecPlan, roadmap text, design docs, and Git commit metadata.
-Review-mode resume and accepted-plan build mode need the same write and push
-permissions as ordinary task integration because they can merge and push via the
-existing integration path.
+ExecPlans, and validation evidence. Accepted-plan verification needs read
+access to the selected ExecPlan, roadmap text, design docs, and Git commit
+metadata. Review-mode resume and accepted-plan build mode need the same write
+and push permissions as ordinary task integration because they can merge and
+push via the existing integration path.
 
-All assessment, recovery, and accepted-plan evidence can be sent to the selected
-assessment and review adapters. The security guide's prompt-injection warning
-applies to every piece of recovered branch content and every committed ExecPlan
-body the workflow asks an agent to read.
+All assessment, recovery, and accepted-plan evidence can be sent to the
+selected assessment and review adapters. The security guide's prompt-injection
+warning applies to every piece of recovered branch content and every committed
+ExecPlan body the workflow asks an agent to read.
 
 ## Verification
 

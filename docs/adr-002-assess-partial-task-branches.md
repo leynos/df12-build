@@ -19,8 +19,8 @@ contain real commits, ExecPlans, and validation evidence.
 This model is robust, but it is blunt when an implementation agent times out or
 exits after producing a coherent partial slice. Today the operator must inspect
 that task branch manually, decide whether it is adoptable, commit any recovery
-notes, integrate the slice if it is complete, and relaunch the workflow from the
-fresh roadmap state.
+notes, integrate the slice if it is complete, and relaunch the workflow from
+the fresh roadmap state.
 
 The workflow needs a safer equivalent of "re-injecting" partial work without
 pretending that an old agent turn can be resumed. The continuation mechanism
@@ -30,15 +30,15 @@ must be Git state, not transcript state.
 
 Add an assessment stage for halted or failed task branches. The first
 implementation is report-only: it returns structured assessment recommendations
-in workflow result JSON, but it does not automatically merge, cherry-pick, push,
-or mark roadmap tasks complete.
+in workflow result JSON, but it does not automatically merge, cherry-pick,
+push, or mark roadmap tasks complete.
 
 The assessment stage inspects a surviving task branch or worktree after a task
 fails, then classifies it as one of:
 
 - `adopt-complete`: the branch satisfies the roadmap task's success criterion,
-  has an up-to-date ExecPlan, passes required gates, and can proceed through the
-  normal review and integration path.
+  has an up-to-date ExecPlan, passes required gates, and can proceed through
+  the normal review and integration path.
 - `adopt-partial`: the branch contains a coherent partial slice worth keeping,
   but the roadmap task must remain unchecked and the workflow should relaunch
   against `origin/<base>` after the partial slice is integrated or explicitly
@@ -71,16 +71,16 @@ The assessment prompt must ask for bounded, evidence-first output:
 The workflow host consumes assessment output through a schema. Free-text
 recommendations must not drive integration directly.
 
-The assessment separates two evidence channels: `missingEvidence` is
-BLOCKING and disqualifies a resume (an eligible `adopt-complete` is
-downgraded to `continue-manual`), while `residualRisk` is ADVISORY and
-non-blocking — it never downgrades an eligible `adopt-complete` branch, and
-is instead carried forward into the resumed review and integration prompts.
+The assessment separates two evidence channels: `missingEvidence` is BLOCKING
+and disqualifies a resume (an eligible `adopt-complete` is downgraded to
+`continue-manual`), while `residualRisk` is ADVISORY and non-blocking — it
+never downgrades an eligible `adopt-complete` branch, and is instead carried
+forward into the resumed review and integration prompts.
 
 `adopt-complete` can enter the ordinary review and integration path only after
-the branch is clean, contains committed work, passes relevant gates, and has not
-marked the roadmap task complete unless the task's success criterion is actually
-satisfied.
+the branch is clean, contains committed work, passes relevant gates, and has
+not marked the roadmap task complete unless the task's success criterion is
+actually satisfied.
 
 `adopt-partial` must preserve work through Git state without falsely completing
 the task. The normal pattern is:
@@ -99,9 +99,9 @@ The assessment stage also salvages task-scoped planning and review artefacts
 that a kept branch left uncommitted, so an ExecPlan or review file written just
 before a failure is preserved rather than lost to later worktree cleanup.
 Salvage runs for a model-based `continue-manual` or `adopt-partial`
-classification (and for infra-fault results that never reach the model);
-it commits only the eligible `docs/execplans/*.md` artefacts onto the branch's
-own history and never merges, pushes, or marks the roadmap. A deterministic
+classification (and for infra-fault results that never reach the model); it
+commits only the eligible `docs/execplans/*.md` artefacts onto the branch's own
+history and never merges, pushes, or marks the roadmap. A deterministic
 `continue-manual` raised on untrustworthy host evidence records a
 salvage-skipped note instead of touching Git. Salvage is part of this
 assessment stage, so it only runs when partial-branch assessment is enabled
@@ -220,10 +220,11 @@ An implementation branch for this decision should include:
 - an ODW wrapper parse check for `workflows/df12-build-odw.js`.
 
 The first implementation should default to reporting assessment recommendations
-without automatic partial adoption. Automatic adoption can be enabled later only
-after the manual recommendation path has been dogfooded.
+without automatic partial adoption. Automatic adoption can be enabled later
+only after the manual recommendation path has been dogfooded.
 
-The implemented verification path includes focused Node tests for the assessment
-schema, eligibility guard, auth skipping, and git evidence collection, plus the
-repository `make all` gate. A live `odw run` remains outside routine
-verification because it can spawn agents and mutate target-project state.
+The implemented verification path includes focused Node tests for the
+assessment schema, eligibility guard, auth skipping, and git evidence
+collection, plus the repository `make all` gate. A live `odw run` remains
+outside routine verification because it can spawn agents and mutate
+target-project state.

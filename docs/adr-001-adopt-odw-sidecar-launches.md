@@ -71,9 +71,9 @@ blurs the source-of-truth boundary and makes recovery depend on checkout state.
 
 ### Keep launch artefacts in `.claude/` or `/tmp`
 
-Rejected. These locations are convenient scratch areas, but they are not durable
-operator state. Cleanup can delete the workflow copy, configuration, or notes
-needed to understand a halted run.
+Rejected. These locations are convenient scratch areas, but they are not
+durable operator state. Cleanup can delete the workflow copy, configuration, or
+notes needed to understand a halted run.
 
 ### Use only the checked-in workflow path
 
@@ -90,7 +90,7 @@ and live run-control state while matching ODW's explicit `--source`,
 
 ## Verification
 
-Changes to the sidecar contract are verified by documentation linting and an ODW
-wrapper parse check for the workflow source. A live `odw run` is not part of the
-default verification contract because it can spawn agents and mutate
+Changes to the sidecar contract are verified by documentation linting and an
+ODW wrapper parse check for the workflow source. A live `odw run` is not part
+of the default verification contract because it can spawn agents and mutate
 target-project state.

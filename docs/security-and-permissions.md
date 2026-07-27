@@ -1,8 +1,8 @@
 # df12-build security and permissions guide
 
 `df12-build` is not a passive documentation tool. A normal ODW/Codex workshop
-can create branches, create worktrees, edit source, run commands, commit,
-push, request CodeRabbit review, write audit files, and update roadmap state in
+can create branches, create worktrees, edit source, run commands, commit, push,
+request CodeRabbit review, write audit files, and update roadmap state in
 another repository. Do not run it with credentials or filesystem access that
 would not be granted to an autonomous engineer working on that target project.
 
@@ -17,8 +17,8 @@ File access:
 - Read access to this `df12-build` checkout, so the operator can copy the
   checked-in workflow into the sidecar.
 - Read and write access to the `.workshop` sidecar for `df12-build-odw.js`,
-  `odw.config.json`, `args.json`, `operator-notes.md`, and temporary
-  validation logs.
+  `odw.config.json`, `args.json`, `operator-notes.md`, and temporary validation
+  logs.
 - Read and write access to the target project checkout and its sibling
   `...worktrees/roadmap-*` worktrees.
 - Adapter sandbox write scope for task agents must include the assigned
@@ -29,10 +29,9 @@ File access:
   caches. Do not point build outputs at `/tmp`; use the project's normal cache
   policy.
 - Read access to installed skills and sub-agents used by the workflow, such as
-  `execplans`, `logisphere-design-review`, `logisphere-experts`,
-  `code-review`, `scrutineer`, `leta`, `sem`, `rebase`, `roadmap-doc`,
-  `roadmap-grooming`, `tech-design-doc`, `commit-message`, and
-  `pr-creation`.
+  `execplans`, `logisphere-design-review`, `logisphere-experts`, `code-review`,
+  `scrutineer`, `leta`, `sem`, `rebase`, `roadmap-doc`, `roadmap-grooming`,
+  `tech-design-doc`, `commit-message`, and `pr-creation`.
 
 Git access:
 

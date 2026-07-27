@@ -29,8 +29,8 @@ workflow assets, or understanding why the system is shaped the way it is.
   explains how the shipped workflow artefact is produced from the TypeScript
   module tree and why the compilation is shaped that way.
 - [CodeRabbit wire contract](coderabbit-wire-contract.md): pins the parser and
-  outcome classification to the NDJSON event stream that `coderabbit review
-  --agent` emits.
+  outcome classification to the NDJSON event stream that
+  `coderabbit review --agent` emits.
 - [Documentation style guide](documentation-style-guide.md): the conventions
   every document in this repository follows.
 
@@ -39,8 +39,7 @@ workflow assets, or understanding why the system is shaped the way it is.
 - [ADR 001: Adopt ODW sidecar launches](adr-001-adopt-odw-sidecar-launches.md):
   records the decision to launch Codex-oriented runs from a sidecar directory.
 - [ADR 002: Assess partial task branches](adr-002-assess-partial-task-branches.md):
-  records the decision to assess surviving task branches before a fresh
-  restart.
+  records the decision to assess surviving task branches before a fresh restart.
 
 ## Plans
 

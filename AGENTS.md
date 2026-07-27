@@ -9,11 +9,11 @@ runtime targets.
 - `workflows/df12-build-odw.js` is the Open Dynamic Workflows (ODW) flow. It
   currently targets Codex CLI adapters and follows the ODW workflow contract.
   It is a GENERATED artefact: edit the TypeScript module tree under
-  `src/workflows/df12-build-odw/` instead (`meta.js` is the one file that
-  stays plain JavaScript), then run `make workflow-build` to regenerate it
-  (and commit both). `make workflow-freshness` fails when the committed
-  artefact is stale, and `make typecheck` enforces erasable-syntax-only
-  TypeScript across the tree.
+  `src/workflows/df12-build-odw/` instead (`meta.js` is the one file that stays
+  plain JavaScript), then run `make workflow-build` to regenerate it (and
+  commit both). `make workflow-freshness` fails when the committed artefact is
+  stale, and `make typecheck` enforces erasable-syntax-only TypeScript across
+  the tree.
 
 Before editing, reviewing, or validating either workflow file, load and follow
 the `odw-authoring` skill so the workflow dialect, injected primitives, schema
@@ -22,9 +22,9 @@ contracts, workspace mode, and validation expectations are understood.
 **This codebase is not common-or-garden TypeScript/JavaScript.** The ODW source
 is a restricted dialect that compiles to a single-file workflow artefact. Where
 general TS/JS advice below conflicts with the ODW dialect (no runtime imports,
-no CommonJS, forbidden temporal/random calls, JSON-Schema validation rather than
-a runtime validator library), the ODW rule wins — those points are called out
-explicitly.
+no CommonJS, forbidden temporal/random calls, JSON-Schema validation rather
+than a runtime validator library), the ODW rule wins — those points are called
+out explicitly.
 
 ## Editing the ODW module tree
 
@@ -74,9 +74,10 @@ why.
 - **Small, single-responsibility functions** obedient to command/query
   separation.
 - **Name things precisely.** Boolean names prefer `is`, `has`, or `should`.
-- **Structure logically and group by feature.** Each `src/workflows/df12-build-odw/`
-  module encapsulates one subsystem (config, recovery, host review, assessment,
-  the task pipeline, …); keep its helpers, schemas, and tests colocated.
+- **Structure logically and group by feature.** Each
+  `src/workflows/df12-build-odw/` module encapsulates one subsystem (config,
+  recovery, host review, assessment, the task pipeline, …); keep its helpers,
+  schemas, and tests colocated.
 - **en-GB Oxford spelling** (`-ize` / `-yse` / `-our`, the `en-gb-oxendict`
   skill) in all prose, comments, and commits, except references to external
   APIs.
@@ -84,8 +85,8 @@ why.
   large by necessity (the control loop, the task pipeline); extract when a
   module or function takes on multiple responsibilities. The CodeScene
   code-health gate (`csCheck`, see the users' guide) is the machine signal for
-  oversized or complex code — treat its findings, not a fixed line count, as the
-  size/complexity threshold.
+  oversized or complex code — treat its findings, not a fixed line count, as
+  the size/complexity threshold.
 
 ## Documentation maintenance
 
@@ -140,11 +141,11 @@ Assess the code regularly for refactoring opportunities, and act when you see:
   own); or
 - shotgun surgery (one change requiring many small edits across modules).
 
-Several of these are now machine-enforced: the CodeScene code-health gate
-flags Complex Method, Bumpy Road, Primitive Obsession, DRY violations, and
-related smells on changed files before CodeRabbit. Clear a flag by refactoring;
-only where further refinement would be deleterious, suppress the specific smell
-with a justified `@codescene(disable:"…")` comment.
+Several of these are now machine-enforced: the CodeScene code-health gate flags
+Complex Method, Bumpy Road, Primitive Obsession, DRY violations, and related
+smells on changed files before CodeRabbit. Clear a flag by refactoring; only
+where further refinement would be deleterious, suppress the specific smell with
+a justified `@codescene(disable:"…")` comment.
 
 Do refactoring as a **separate, atomic commit after** the functional change,
 with behavioural tests passing before and after and the refactor commit itself
@@ -165,10 +166,10 @@ passing every gate.
 
 ## TypeScript in the ODW dialect
 
-The `src` tree is TypeScript, but it is **not** ordinary application
-TypeScript — it is a restricted dialect that type-strips into the single-file
-ODW workflow.
-Apply the general clarity and strictness goals, subject to these ODW rules:
+The `src` tree is TypeScript, but it is **not** ordinary application TypeScript
+— it is a restricted dialect that type-strips into the single-file ODW
+workflow. Apply the general clarity and strictness goals, subject to these ODW
+rules:
 
 - **Erasable syntax only.** `tsconfig.json` sets `erasableSyntaxOnly`,
   `verbatimModuleSyntax`, and `isolatedModules` under `strict`. No enums,
@@ -179,8 +180,8 @@ Apply the general clarity and strictness goals, subject to these ODW rules:
   Either makes esbuild emit a module-closure wrapper that fails the build. Keep
   the tree acyclic ESM.
 - **The workflow source has no runtime dependencies and imports nothing at
-  runtime** except sibling `.ts` modules (with the explicit `.ts` extension) and
-  Node builtins via `process.getBuiltinModule('node:…')`. ODW primitives
+  runtime** except sibling `.ts` modules (with the explicit `.ts` extension)
+  and Node builtins via `process.getBuiltinModule('node:…')`. ODW primitives
   (`agent`, `parallel`, `pipeline`, `phase`, `log`, `args`, `budget`,
   `workflow`, `validate`) are ambient (`odw-globals.d.ts`), never imported.
 - **Validate agent I/O with JSON Schema, not a validator library.** Structured
@@ -209,19 +210,19 @@ monograph):
 
 - **Module tests** (`tests/modules/`, `make test-modules`) run under `bun test`
   against the individual `src` modules — Gherkin scenarios via
-  `@aboviq/bun-test-cucumber`, `fast-check` properties, and the LemmaScript/Dafny
-  differential test.
+  `@aboviq/bun-test-cucumber`, `fast-check` properties, and the
+  LemmaScript/Dafny differential test.
 - **Artefact tests** (`tests/*.test.mjs`, `make test-workflow`) run under
-  `node --test` against the built `workflows/df12-build-odw.js`, plus the Python
-  operator-script tests.
+  `node --test` against the built `workflows/df12-build-odw.js`, plus the
+  Python operator-script tests.
 - **Compile-time behaviour** is guarded by `tsc`, the `workflow-parse` gate, the
   build's own fail-closed assertions, and
   `tests/modules/compile-time-contract.test.ts`.
 - Keep tests deterministic (the banned temporal/random calls already help);
-  prefer fixtures and factories (`tests/fixtures/`, `tests/support/`) over ad hoc
-  object literals; drive variations with helpers or compact loops; and pin
-  source-invariant assertions against the `src` tree via
-  `readWorkflowSource()` / `readModuleSource()`, not the reprinted artefact.
+  prefer fixtures and factories (`tests/fixtures/`, `tests/support/`) over ad
+  hoc object literals; drive variations with helpers or compact loops; and pin
+  source-invariant assertions against the `src` tree via `readWorkflowSource()`
+  / `readModuleSource()`, not the reprinted artefact.
 - Do not run format, lint, or test suites in parallel — the build cache rewards
   sequential runs. The `scrutineer` subagent is the sanctioned gate-runner.
 

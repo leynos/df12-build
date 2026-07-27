@@ -54,8 +54,8 @@ provides the doc skills):
   gates) run whenever markdown changes. If a project names its gate
   differently, it is not yet df12-conformant — align it first. With
   `hostCommitGates` on (the workflow default), the workflow host re-runs the
-  configured `commitGates` itself before review and integration, so agent
-  gate claims are verified, never trusted.
+  configured `commitGates` itself before review and integration, so agent gate
+  claims are verified, never trusted.
 - **`coderabbit review --agent`** as the AI review (a shared, rate-limited
   quota — see the throughput note below). With `coderabbitHostReview` on (the
   workflow default) the HOST runs it against committed work per review round
@@ -87,8 +87,8 @@ provides the doc skills):
    The sidecar is the durable operator workspace for the run. It survives root
    branch switches, `git clean -fdx`, workflow-created worktree cleanup, and
    accidental cleanup under `.claude/`. Do not place durable scripts, configs,
-   or notes in `.claude/`, `/tmp`, the project source tree, or a
-   workflow-owned `...worktrees/roadmap-*` worktree.
+   or notes in `.claude/`, `/tmp`, the project source tree, or a workflow-owned
+   `...worktrees/roadmap-*` worktree.
 2. **Put all run-control artefacts in that sidecar.** At minimum keep:
 
    - `df12-build-odw.js` — a copied workflow script that the live run executes.
@@ -118,22 +118,22 @@ provides the doc skills):
    product repository. `origin/<BASE>` remains the only product source of
    truth. Patch the sidecar script during a live workshop when needed, validate
    it there, record the change in `operator-notes.md`, and later promote the
-   proven change back to the `df12-build` repository as an ordinary branch.
-   For normal Codex and Claude Code workshops, set ODW `concurrency` to `16`;
-   keep `maxAgents` high (for example `1000`) because it is the per-run
-   dispatch guard, not the live process-pool size. Set `runsRoot` (in
-   `odw.config.json`) to an absolute path inside this sidecar, e.g.
-   `"$SIDECAR/runs"`, so ODW writes each run's `events.jsonl`, `result.json`,
-   and `error.json` beside the run's config and notes instead of pooling them
-   under a shared `~/.odw/runs`. These are inspectable agent logs written
-   entirely by ODW, decoupled from workflow control flow — a run that cannot
-   write them still proceeds. (A shared `~/.odw/runs` also works for a single
-   pool; the sidecar simply keeps each run self-contained.) With host-run CodeRabbit
-   review (the default), agents never wait on CodeRabbit, so the adapter
-   `timeout` only needs to cover honest stage work — see the timeout
-   recommendation below. Only with `coderabbitHostReview=false` do agents
-   sleep through three 45–90 minute CodeRabbit retries themselves, and then
-   the timeout must be `21600` seconds to avoid killing healthy work.
+   proven change back to the `df12-build` repository as an ordinary branch. For
+   normal Codex and Claude Code workshops, set ODW `concurrency` to `16`; keep
+   `maxAgents` high (for example `1000`) because it is the per-run dispatch
+   guard, not the live process-pool size. Set `runsRoot` (in `odw.config.json`)
+   to an absolute path inside this sidecar, e.g. `"$SIDECAR/runs"`, so ODW
+   writes each run's `events.jsonl`, `result.json`, and `error.json` beside the
+   run's config and notes instead of pooling them under a shared `~/.odw/runs`.
+   These are inspectable agent logs written entirely by ODW, decoupled from
+   workflow control flow — a run that cannot write them still proceeds. (A
+   shared `~/.odw/runs` also works for a single pool; the sidecar simply keeps
+   each run self-contained.) With host-run CodeRabbit review (the default),
+   agents never wait on CodeRabbit, so the adapter `timeout` only needs to
+   cover honest stage work — see the timeout recommendation below. Only with
+   `coderabbitHostReview=false` do agents sleep through three 45–90 minute
+   CodeRabbit retries themselves, and then the timeout must be `21600` seconds
+   to avoid killing healthy work.
 
    When copying a newer workflow into an existing sidecar, audit `args.json`
    before relaunch. Stale `planAdapter`, `reviewAdapter`, `auditAdapter`,
@@ -162,23 +162,21 @@ provides the doc skills):
 
    Start the run in the background and supervise it through `odw status`,
    `odw logs`, `odw result`, and the dashboard. Keep periodic health notes in
-   `operator-notes.md`; the notes should be good enough for another operator
-   to continue after context compaction.
+   `operator-notes.md`; the notes should be good enough for another operator to
+   continue after context compaction.
 4. **Config (the `args` object / top-of-file consts):** `base` (default `main`),
    `roadmap` (default `docs/roadmap.md`), `designDocs`, `researchNote` (a
    project-specific external-library research pointer, e.g. a vendored lib's
    source path), `grepaiWorkspace`, `grepaiProject` (the canonical main-branch
    GrepAI project name; set this when agents run from sidecar or worktree
-   paths), `maxParallel` (task pool width — default 8),
-   `maxPlanningParallel` (planning-stage width — default 4),
-   `maxBuildParallel` (build-stage width — default 4), `maxTasks`,
-   `maxDesignRounds` (4), `maxReviewRounds` (3),
+   paths), `maxParallel` (task pool width — default 8), `maxPlanningParallel`
+   (planning-stage width — default 4), `maxBuildParallel` (build-stage width —
+   default 4), `maxTasks`, `maxDesignRounds` (4), `maxReviewRounds` (3),
    `taskId` (run exactly one), `dryRun`, `autoMerge`, `documentAudit`,
-   `assessPartialBranches`, `buildAdapter`/`buildModel`,
-   `planAdapter`/`planModel`, `reviewAdapter`/`reviewModel`,
-   `auditAdapter`/`auditModel`/`auditEffort`,
-   `triageAdapter`/`triageModel`/`triageEffort`/`triageEscalationModel`, and
-   `assessmentAdapter`/`assessmentModel`.
+   `assessPartialBranches`, `buildAdapter`/`buildModel`, `planAdapter`/
+   `planModel`, `reviewAdapter`/`reviewModel`, `auditAdapter`/`auditModel`/
+   `auditEffort`, `triageAdapter`/`triageModel`/`triageEffort`/
+   `triageEscalationModel`, and `assessmentAdapter`/`assessmentModel`.
 
    Remediation triage defaults to the `codex` adapter with `gpt-5.6-sol` at
    medium effort. Its escalation model remains independently configurable and
@@ -191,19 +189,19 @@ provides the doc skills):
    the ordinary review + integration path; `continue` dispatches each survivor
    deterministically from its committed ExecPlan `Status` — DRAFT re-plans,
    APPROVED/IN PROGRESS re-implements, COMPLETE re-reviews, BLOCKED reports —
-   with no judgement agent), `resumeTaskId` (narrow discovery
-   to one id; separate from `taskId`), `resumeMaxCandidates` (default 4),
-   `stageAttempts` (total attempts per stage agent when the previous attempt
-   died on an infrastructure fault such as an adapter timeout or schema-retry
-   exhaustion — default 2; product failures are never retried), and
-   `worktreeWritePreflight` (host-verified probe that the plan and build
-   adapters can write into sibling task worktrees; on by default).
+   with no judgement agent), `resumeTaskId` (narrow discovery to one id;
+   separate from `taskId`), `resumeMaxCandidates` (default 4), `stageAttempts`
+   (total attempts per stage agent when the previous attempt died on an
+   infrastructure fault such as an adapter timeout or schema-retry exhaustion —
+   default 2; product failures are never retried), and `worktreeWritePreflight`
+   (host-verified probe that the plan and build adapters can write into sibling
+   task worktrees; on by default).
 
    CodeRabbit knobs: `coderabbitHostReview` (default on — the host runs
    `coderabbit review --agent --type committed` per review round and per
    addendum, absorbs rate-limit backoff in wall-clock with zero agent tokens,
-   and feeds `critical`/`major` findings into the fix rounds; a rate limit
-   that outlives the attempts defers with an `openIssues` entry rather than
+   and feeds `critical`/`major` findings into the fix rounds; a rate limit that
+   outlives the attempts defers with an `openIssues` entry rather than
    blocking, and a CodeRabbit auth failure halts as `fatal-auth`),
    `coderabbitAttempts` (default 3), `coderabbitBackoffMinutes` (default
    `[45, 90]`), and `coderabbitFindingsFile` (point it at a durable sidecar
@@ -213,54 +211,53 @@ provides the doc skills):
 
    Host gate knobs: `hostCommitGates` (default on — the host re-runs the
    `commitGates` commands against committed HEAD at the start of every
-   dual-review round and once per addendum, serialized pool-wide behind a
-   gate lock for build-cache friendliness; a red gate goes straight to a fix
-   round with the host log as evidence, and an addendum whose green claim
-   the host cannot reproduce fails outright) and `commitGateTimeoutSeconds`
-   (default 3600 — a gate exceeding it is killed and reported with the
-   timeout named). Host gate logs land in a secure per-run directory,
+   dual-review round and once per addendum, serialized pool-wide behind a gate
+   lock for build-cache friendliness; a red gate goes straight to a fix round
+   with the host log as evidence, and an addendum whose green claim the host
+   cannot reproduce fails outright) and `commitGateTimeoutSeconds` (default
+   3600 — a gate exceeding it is killed and reported with the timeout named).
+   Host gate logs land in a secure per-run directory,
    `/tmp/df12-gates-XXXXXX/gate-<task>-<round>-N.out` on the runner (each
-   result carries its exact `logFile` path); read them before re-running a
-   gate by hand.
+   result carries its exact `logFile` path); read them before re-running a gate
+   by hand.
 
-   CodeScene gate knobs: `csCheck` (default on — a CodeScene code-health
-   check on the committed changed files runs as a second deterministic gate
-   after the commit gates and before CodeRabbit at every gate point; a
-   regression drives a bounded fix round, and the build agent clears it by
-   refactoring, or — only where refactoring would be deleterious — by
-   suppressing the specific smell with a justified
-   `@codescene(disable:"...")` comment) and
-   `csCheckCommand` (default `cs-check-changed`, the operator-provided wrapper
-   — override with the exact invocation, e.g. `cs check --changed --base
-   main`). The check skips gracefully when its binary is absent, so a runner
-   without CodeScene is not blocked; install `cs-check-changed` on the runner
-   to make the gate active.
+   CodeScene gate knobs: `csCheck` (default on — a CodeScene code-health check
+   on the committed changed files runs as a second deterministic gate after the
+   commit gates and before CodeRabbit at every gate point; a regression drives
+   a bounded fix round, and the build agent clears it by refactoring, or — only
+   where refactoring would be deleterious — by suppressing the specific smell
+   with a justified `@codescene(disable:"...")` comment) and `csCheckCommand`
+   (default `cs-check-changed`, the operator-provided wrapper — override with
+   the exact invocation, e.g. `cs check --changed --base main`). The check
+   skips gracefully when its binary is absent, so a runner without CodeScene is
+   not blocked; install `cs-check-changed` on the runner to make the gate
+   active.
 
-   Build-loop knobs: `perWorkItemBuild` (default on — the host dispatches
-   one builder turn per unticked ExecPlan `## Progress` item, labelled
+   Build-loop knobs: `perWorkItemBuild` (default on — the host dispatches one
+   builder turn per unticked ExecPlan `## Progress` item, labelled
    `implement:<id> wi<n>` in the events, verifying committed progress after
-   every turn; a turn that returns ok without committing a tick is bounced
-   once with the defect named, and two consecutive no-progress turns fail
-   the task; plans without a Progress checklist fall back to the single-turn
-   build) and `maxWorkItemRounds` (default 16 — builder turns per task
-   before the loop fails closed).
+   every turn; a turn that returns ok without committing a tick is bounced once
+   with the defect named, and two consecutive no-progress turns fail the task;
+   plans without a Progress checklist fall back to the single-turn build) and
+   `maxWorkItemRounds` (default 16 — builder turns per task before the loop
+   fails closed).
 
    Set the ODW adapter `timeout` (in the ODW config, not workflow args) well
    below its 6-hour default. ODW has no per-call timeout, so the workflow's
-   `stageAttempts` retry can only begin after the adapter kills the process —
-   a hung API stream always costs the full adapter timeout first. Plan and
-   review stages normally finish within tens of minutes, so 4500–5400 seconds
-   (75–90 minutes) is generous: a hang then costs roughly 1.5 hours plus one
-   warm retry from the committed ExecPlan, instead of 6 hours and a dead run.
-   With `perWorkItemBuild` on (the default), each build turn is a single
-   work item, so the BUILD adapter can sit even tighter — roughly 3600
-   seconds — and a hang costs at most one work item plus a warm retry.
-   A multi-hour silent stream is a hung connection, not progress.
+   `stageAttempts` retry can only begin after the adapter kills the process — a
+   hung API stream always costs the full adapter timeout first. Plan and review
+   stages normally finish within tens of minutes, so 4500–5400 seconds (75–90
+   minutes) is generous: a hang then costs roughly 1.5 hours plus one warm
+   retry from the committed ExecPlan, instead of 6 hours and a dead run. With
+   `perWorkItemBuild` on (the default), each build turn is a single work item,
+   so the BUILD adapter can sit even tighter — roughly 3600 seconds — and a
+   hang costs at most one work item plus a warm retry. A multi-hour silent
+   stream is a hung connection, not progress.
 
-   The checked-in defaults split execution from judgement. Build-side work
-   uses GPT-5.6 Terra through the medium-effort Codex adapter, while planning
-   and review judgement use Claude Code with `claude-opus-4-8`. Post-merge
-   audit is independent of review and uses Claude Sonnet 5 at medium effort.
+   The checked-in defaults split execution from judgement. Build-side work uses
+   GPT-5.6 Terra through the medium-effort Codex adapter, while planning and
+   review judgement use Claude Code with `claude-opus-4-8`. Post-merge audit is
+   independent of review and uses Claude Sonnet 5 at medium effort.
    Partial-branch assessment inherits the review adapter unless the sidecar
    `args.json` sets `assessmentAdapter` explicitly, and uses its own
    `assessmentModel` default.
@@ -279,34 +276,32 @@ phase), `$SIDECAR/runs/<run>/error.json` (present only on a terminal failure),
 and `$SIDECAR/coderabbit-findings.jsonl` (accumulated findings across runs).
 
 1. **Parse the result JSON.** Key fields: `processed` (ids merged this run),
-   `results[]` (per-task `{id, status, stage, detail}` plus any
-   `assessment`; recovery-resumed branches carry `kind: "recovery-resume"`;
-   review-stage failures carry `reviewRounds[]` — the per-round reviewer
-   verdicts and structured fix-agent gate/CodeRabbit reports, which are the
-   freshest validation evidence for the branch), `assessments[]` (summaries
-   for failed or halted branches that were assessed), `recovery` (the
-   fresh-run recovery index when `resumePartialBranches=true`: `candidates`,
-   `assessed`, `resumed`, per-candidate `results` with
-   classification/action/reason, `skipped` with machine-readable reasons, and
-   `unresolved` — survivor branches the run reported but did not integrate),
-   `commitGates` (the deterministic gate set every branch agent was told to
-   run — audit reported gate greenness against it), `hostGates` (host gate
-   verification: enabled flag, per-gate timeout, and run/failure counters;
-   with host gates on, `gatesGreen` is host-verified at review time and
-   per-round pass/fail sits in failed tasks' `reviewRounds[].hostGates`
-   with per-run `/tmp/df12-gates-*/gate-*.out` log paths),
-   `workItemBuild` (whether the host
+   `results[]` (per-task `{id, status, stage, detail}` plus any `assessment`;
+   recovery-resumed branches carry `kind: "recovery-resume"`; review-stage
+   failures carry `reviewRounds[]` — the per-round reviewer verdicts and
+   structured fix-agent gate/CodeRabbit reports, which are the freshest
+   validation evidence for the branch), `assessments[]` (summaries for failed
+   or halted branches that were assessed), `recovery` (the fresh-run recovery
+   index when `resumePartialBranches=true`: `candidates`, `assessed`,
+   `resumed`, per-candidate `results` with classification/action/reason,
+   `skipped` with machine-readable reasons, and `unresolved` — survivor
+   branches the run reported but did not integrate), `commitGates` (the
+   deterministic gate set every branch agent was told to run — audit reported
+   gate greenness against it), `hostGates` (host gate verification: enabled
+   flag, per-gate timeout, and run/failure counters; with host gates on,
+   `gatesGreen` is host-verified at review time and per-round pass/fail sits in
+   failed tasks' `reviewRounds[].hostGates` with per-run
+   `/tmp/df12-gates-*/gate-*.out` log paths), `workItemBuild` (whether the host
    drove the build one Progress item at a time, and the round cap),
-   `stageAttempts` (the
-   in-run retry budget for stage agents that die on infrastructure faults;
-   a result with `status: "infra-fault"` means the fault outlived that budget
-   and carries no evidence about the branch), `coderabbit` (host-review
-   configuration plus counters: reviews run, findings by severity,
+   `stageAttempts` (the in-run retry budget for stage agents that die on
+   infrastructure faults; a result with `status: "infra-fault"` means the fault
+   outlived that budget and carries no evidence about the branch), `coderabbit`
+   (host-review configuration plus counters: reviews run, findings by severity,
    rate-limited runs, deferred reviews — rising `deferred` means the quota is
    exhausted and wall-clock is absorbing it; check the task results'
-   `openIssues` for the deferral evidence), `halted` (null on a clean
-   stop; `needs-operator-recovery: …` when unresolved recovery survivors still
-   block the frontier), `audits[]`, `remediationTriage[]`, `pendingProposals`
+   `openIssues` for the deferral evidence), `halted` (null on a clean stop;
+   `needs-operator-recovery: …` when unresolved recovery survivors still block
+   the frontier), `audits[]`, `remediationTriage[]`, `pendingProposals`
    (proposals left unwritten because the run halted — triage them manually
    later).
 2. **Hoover orphan worktrees.** For each non-root worktree under
@@ -347,8 +342,8 @@ and `$SIDECAR/coderabbit-findings.jsonl` (accumulated findings across runs).
    - **Halted (anything else):** diagnose with the failure-mode playbook, apply
      the fix to the roadmap (or environment), then relaunch.
 5. **Run mandatory roadmap maintenance before editing the roadmap.** If the run
-   produced `remediationTriage`, `pendingProposals`, audit findings, addenda, or
-   any roadmap restructure work, load `roadmap-grooming` together with
+   produced `remediationTriage`, `pendingProposals`, audit findings, addenda,
+   or any roadmap restructure work, load `roadmap-grooming` together with
    `roadmap-doc` before changing `docs/roadmap.md`. This is a supervisor
    requirement, not an optional clean-up pass. Do not groom merely because a
    normal run is in progress; use the trigger thresholds below.
@@ -386,11 +381,13 @@ For every active `roadmap-*` worktree, check:
   round, a draft with foreign dirt bounces back to the planner with the dirty
   paths named, the `APPROVED` flip is a deterministic host commit, and a green
   implementation that leaves uncommitted state fails at `implement`). Dirt is
-  normal only *mid*-agent-turn. Repeated `host salvage declined: git commit
-  failed` bounces mean the ENVIRONMENT blocks committing in that worktree
-  (hooks, identity, permissions) — stop and repair rather than relaunch;
+  normal only *mid*-agent-turn. Repeated
+  `host salvage declined: git commit failed` bounces mean the ENVIRONMENT
+  blocks committing in that worktree (hooks, identity, permissions) — stop and
+  repair rather than relaunch;
 - advertised gate logs exist (with `hostCommitGates` on, the decisive gate
-  evidence is the host's own `/tmp/df12-gates-*/gate-*.out` logs, not agent claims);
+  evidence is the host's own `/tmp/df12-gates-*/gate-*.out` logs, not agent
+  claims);
 - claimed commits, dirty files, or clean branches match the agent output.
 
 If a planner returns an ExecPlan path but the file is missing, inspect the
@@ -629,17 +626,16 @@ reviewer.
     boundary when there are two), correct the fact in the task so the planner
     cannot repeat it.
 - **Implement halt** (often a turn-budget/size issue): with
-  `perWorkItemBuild` off, a task with many work items, each gated by
-  `make all` (plus a per-item coderabbit review in the legacy
-  `coderabbitHostReview=false` flow), can exceed one agent turn — the
-  per-work-item build loop exists precisely to remove this failure mode, so
-  check that knob first when you see one.
-  Check `result.assessment` before decomposing the task. A
-  timeout may leave a coherent partial slice worth preserving, but the roadmap
-  task stays unchecked unless its success criterion is complete and gates/review
-  prove it. If the assessment does not identify useful partial work, decompose
-  into fewer-work-item tasks. This and design-review size halts are the same
-  root cause: tasks that are too big for one plan/implement turn.
+  `perWorkItemBuild` off, a task with many work items, each gated by `make all`
+  (plus a per-item coderabbit review in the legacy `coderabbitHostReview=false`
+  flow), can exceed one agent turn — the per-work-item build loop exists
+  precisely to remove this failure mode, so check that knob first when you see
+  one. Check `result.assessment` before decomposing the task. A timeout may
+  leave a coherent partial slice worth preserving, but the roadmap task stays
+  unchecked unless its success criterion is complete and gates/review prove it.
+  If the assessment does not identify useful partial work, decompose into
+  fewer-work-item tasks. This and design-review size halts are the same root
+  cause: tasks that are too big for one plan/implement turn.
 - **Integrate halt** (rebase conflict the agent would not resolve safely):
   inspect the conflict; resolve it preserving the intent of both sides (favour
   the design docs/contracts), or re-file the task. The branch is left unmerged
@@ -648,23 +644,23 @@ reviewer.
   and green gates, but did not satisfy the strict `ok=true` schema contract —
   either with no open issues at all, or with open issues that are ALL
   deferred/recoverable review faults such as a CodeRabbit 429): preserve the
-  branch and verify it manually before any merge. The result's `openIssues`
-  and `detail` carry the exact missing evidence. Rerun the project commit
-  gates (the result's `commitGates` list; `make all` only where that IS the
-  gate aggregate) plus `make markdownlint`/`make nixie` when Markdown changed,
-  retry or supersede the deferred CodeRabbit review, reconcile the roadmap
-  sub-task checkbox, then integrate or discard. Do not relaunch before
-  deciding, or the same open addendum can be selected again from
-  `origin/BASE`. The workflow deliberately does NOT spend an assessment agent
-  on this state: the remaining work is bounded and mechanical.
+  branch and verify it manually before any merge. The result's `openIssues` and
+  `detail` carry the exact missing evidence. Rerun the project commit gates
+  (the result's `commitGates` list; `make all` only where that IS the gate
+  aggregate) plus `make markdownlint`/`make nixie` when Markdown changed, retry
+  or supersede the deferred CodeRabbit review, reconcile the roadmap sub-task
+  checkbox, then integrate or discard. Do not relaunch before deciding, or the
+  same open addendum can be selected again from `origin/BASE`. The workflow
+  deliberately does NOT spend an assessment agent on this state: the remaining
+  work is bounded and mechanical.
 - **Review halt** (dual review unsatisfied within the cap): the branch is left
   unmerged with the blocking items. Check `result.assessment` first. If it says
   `adopt-complete`, verify gates and continue through the ordinary review and
-  integration path. If it says `adopt-partial`, preserve only the coherent slice
-  without ticking the roadmap task. If it says `continue-manual`, inspect the
-  branch before deciding. If it says `discard`, hoover it unless live evidence
-  contradicts the recommendation. Either hand-fix and merge, or fold the
-  findings back into the roadmap and re-file.
+  integration path. If it says `adopt-partial`, preserve only the coherent
+  slice without ticking the roadmap task. If it says `continue-manual`, inspect
+  the branch before deciding. If it says `discard`, hoover it unless live
+  evidence contradicts the recommendation. Either hand-fix and merge, or fold
+  the findings back into the roadmap and re-file.
 - **Roadmap-prose-fix halt** (an addendum/task whose sole deliverable is editing
   the roadmap's *own* text — a wrong success criterion, a misstated contract):
   this is structurally un-runnable, because sub-agents are forbidden to edit
@@ -677,24 +673,23 @@ reviewer.
 - **Recoverable API faults (500 / 429 / 529):** wait and retry. The ODW
   variant reports these as `provider-fault` halts, skips partial-branch
   assessment, and leaves pending remediation unwritten, so an outage is not
-  mistaken for task evidence. CodeRabbit 429 backoffs are **expected and
-  fine** — never shorten them. For a broad outage, schedule a long wake-up
-  (≈1h) and relaunch; the fresh-restart model means nothing is lost.
+  mistaken for task evidence. CodeRabbit 429 backoffs are **expected and fine**
+  — never shorten them. For a broad outage, schedule a long wake-up (≈1h) and
+  relaunch; the fresh-restart model means nothing is lost.
 - **Worktree base-skew:** git-donkey can root a worktree on a stale local `BASE`
   (its pull-rebase prompt defaults to "no" non-interactively). The workflow's
   worktree step already mitigates this (it roots the setup worktree on
-  `origin/BASE` and verifies the base sha), and the audit and triage prompts now
-  reuse a verified fetch → base-arg → reset → verify sequence for their
-  inspection worktrees: they pass the configured base to `git donkey <slug>
-  BASE` (whose no-argument default is always `main`, so a non-`main` base would
-  otherwise root on the wrong tree, or fail when the repo has no `main`), then
-  `git reset --hard origin/BASE` inside the new worktree and re-verify the base
-  sha. When "based on a stale commit" failures appear, that mitigation is the
-  place to look.
+  `origin/BASE` and verifies the base sha), and the audit and triage prompts
+  now reuse a verified fetch → base-arg → reset → verify sequence for their
+  inspection worktrees: they pass the configured base to
+  `git donkey <slug> BASE` (whose no-argument default is always `main`, so a
+  non-`main` base would otherwise root on the wrong tree, or fail when the repo
+  has no `main`), then `git reset --hard origin/BASE` inside the new worktree
+  and re-verify the base sha. When "based on a stale commit" failures appear,
+  that mitigation is the place to look.
 - **A run that dies mid-flight:** do not try to resume transcripts or cached
   scheduler state. Worker interleaving is non-deterministic, so prefix-resume
-  is unreliable by design. Three recovery options exist, in order of
-  preference:
+  is unreliable by design. Three recovery options exist, in order of preference:
   1. **Continue-mode relaunch:** relaunch with `resumePartialBranches=true`
      and `resumeMode="continue"`. Each clean survivor branch is dispatched
      from its committed ExecPlan `Status` — a DRAFT plan re-enters the
@@ -733,30 +728,29 @@ reviewer.
 Recovery assessments are **work inputs, not status reports**. Once a recovery
 run has assessed survivor branches, the supervisor must use those assessments
 to close, resume, or re-file each branch and keep the roadmap moving. A run
-that ends with `processed: []`, no unblocked tasks, and survivor branches
-still in place has NOT finished the build — the frontier is blocked behind the
+that ends with `processed: []`, no unblocked tasks, and survivor branches still
+in place has NOT finished the build — the frontier is blocked behind the
 survivors, and every held id stays out of selection on relaunch too. The
 workflow surfaces this as `halted: needs-operator-recovery: …` with the ids in
 `recovery.unresolved`; treat that terminal state as your queue.
 
 Drive the pass from `recovery.unresolved` and any live survivor branches on
 disk (reported classifications, `resume-failed` branches, and holds such as
-`missing-worktree`). Keep discovery-only entries such as `candidate-cap` out
-of the disposition loop: a capped candidate was never assessed, so there is
-no evidence to classify it against — raise `resumeMaxCandidates` and
-relaunch so the next recovery pass assesses it, and do NOT work through
+`missing-worktree`). Keep discovery-only entries such as `candidate-cap` out of
+the disposition loop: a capped candidate was never assessed, so there is no
+evidence to classify it against — raise `resumeMaxCandidates` and relaunch so
+the next recovery pass assesses it, and do NOT work through
 `recovery.skipped[]` wholesale (non-hold entries like `unmapped-branch` and
 `already-complete` are not actionable survivors at all). Use
-`recovery.results[]`, `results[]`, and `assessments[]` as the evidence for
-each remaining unresolved id, and choose exactly one disposition per
-survivor:
+`recovery.results[]`, `results[]`, and `assessments[]` as the evidence for each
+remaining unresolved id, and choose exactly one disposition per survivor:
 
 1. **Close/integrate** — for `adopt-complete` and `resume-failed` branches
    whose remaining blockers are mechanical: retry or supersede any deferred
    CodeRabbit review, run the project's named commit gates at the branch tip,
    route residual review proposals into roadmap tasks/addenda (load
-   `roadmap-grooming` first), then merge through the protected integration
-   path and tick the roadmap task.
+   `roadmap-grooming` first), then merge through the protected integration path
+   and tick the roadmap task.
 2. **Resume** — the default for any clean survivor whose work should simply
    be finished: relaunch with `resumeMode="continue"` (optionally
    `resumeTaskId`) and the workflow dispatches each branch from its committed
@@ -765,9 +759,9 @@ survivor:
    integration. Use `resumeMode="review"` instead when only a pristine
    `adopt-complete` branch should re-enter and everything else should stay
    parked. Note that a `resume-failed` outcome now halts the run with the
-   blocking review items in `halted` and the per-round evidence in the
-   result's `reviewRounds` — do not simply relaunch the same resume; act on
-   the blockers first.
+   blocking review items in `halted` and the per-round evidence in the result's
+   `reviewRounds` — do not simply relaunch the same resume; act on the blockers
+   first.
 3. **Split / add addenda** — for partial branches whose remaining scope no
    longer matches the original task: preserve the coherent slice, convert the
    remaining work into a completion task or addendum sub-tasks (via
@@ -777,11 +771,11 @@ survivor:
 4. **Preserve-for-manual** — for `continue-manual` branches (typically
    planning-stage survivors): record an explicit operator decision in
    `operator-notes.md`. Do not let them block dependents indefinitely — decide
-   within the current supervision cycle whether to finish them by hand,
-   re-file them, or discard.
+   within the current supervision cycle whether to finish them by hand, re-file
+   them, or discard.
 5. **Discard** — for `discard` classifications (and stale holds like
-   `missing-worktree` you choose not to revive): hoover the branch with a
-   named stash (`kind=discard`) so selection can rebuild the task fresh.
+   `missing-worktree` you choose not to revive): hoover the branch with a named
+   stash (`kind=discard`) so selection can rebuild the task fresh.
 
 Rules that make this safe:
 
@@ -810,17 +804,16 @@ restructuring). While a run may be live:
   push. If a run is live: push with a fetch-rebase-retry loop (the roadmap has
   a merge driver that weaves concurrent edits; rebases are usually clean).
 - **Use `mapsplice` for structural roadmap edits.** The `mapsplice` CLI (load
-  its skill for usage) appends, inserts, deletes, and replaces numbered
-  phases, steps, tasks, and addendum sub-tasks while preserving renumbering
-  and `Requires` references. Prefer it over hand-editing whenever the change
-  is structural rather than prose-only.
+  its skill for usage) appends, inserts, deletes, and replaces numbered phases,
+  steps, tasks, and addendum sub-tasks while preserving renumbering and
+  `Requires` references. Prefer it over hand-editing whenever the change is
+  structural rather than prose-only.
 - **Large restructures deserve a deterministic transform.** For a big renumber
   (e.g. collapsing bucket-steps), drive it with `mapsplice` where its
   operations fit; otherwise write a script that preserves task bodies
   byte-for-byte and remaps ids + cross-references via an explicit map. Either
-  way, **validate hard before merging**: task-count in == out, every
-  `Requires` resolves, gates green, and the unrelated phases are untouched.
-  Measure twice.
+  way, **validate hard before merging**: task-count in == out, every `Requires`
+  resolves, gates green, and the unrelated phases are untouched. Measure twice.
 - **Place new work at step boundaries** (`phase.step.task`), live and
   fix-debt-first, so the pool picks it up on the next refill.
 

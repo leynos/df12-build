@@ -1,11 +1,11 @@
 # df12-build user guide
 
-`df12-build` drives a df12-house GIST roadmap forward with a parallel [Open
-Dynamic Workflows (ODW)](https://github.com/xz1220/open-dynamic-workflows)
+`df12-build` drives a df12-house GIST roadmap forward with a parallel
+[Open Dynamic Workflows (ODW)](https://github.com/xz1220/open-dynamic-workflows)
 workflow. It plans, reviews, implements, gates, integrates, audits, and files
-remediation work through isolated worker branches. Use it only for projects that
-already have a roadmap, design documentation, `AGENTS.md`, repository gates, and
-the df12 skill/toolchain installed.
+remediation work through isolated worker branches. Use it only for projects
+that already have a roadmap, design documentation, `AGENTS.md`, repository
+gates, and the df12 skill/toolchain installed.
 
 ## Workflow at a glance
 
@@ -29,9 +29,9 @@ sequenceDiagram
 
 *Figure 1 — the build pipeline.* `make workflow-build` runs
 `scripts/build-workflow.mjs`, which regenerates the committed single-file
-artefact `workflows/df12-build-odw.js` from the module tree. `make
-workflow-freshness` then re-runs the build and fails if the committed artefact
-differs, so a stale artefact can never land.
+artefact `workflows/df12-build-odw.js` from the module tree.
+`make workflow-freshness` then re-runs the build and fails if the committed
+artefact differs, so a stale artefact can never land.
 
 Figure 2 shows fresh-run recovery of surviving task branches.
 
@@ -76,8 +76,8 @@ through the merge lock or halts it for the operator.
 Current ODW launches use a `.workshop` sidecar outside the target project's Git
 worktree. Do not launch a long-running workshop from `.claude/`, `/tmp`, the
 project source tree, or a workflow-owned `...worktrees/roadmap-*` worktree.
-Those locations can be cleaned, switched, or removed while the workshop is still
-recoverable.
+Those locations can be cleaned, switched, or removed while the workshop is
+still recoverable.
 
 The sidecar is durable run-control state. The target repository remains the
 source of truth for product changes, and `origin/<base>` remains the recovery
@@ -109,13 +109,13 @@ the per-run dispatch guard rather than the live process-pool size.
 
 Set the adapter `timeout` with the CodeRabbit flow in mind. With the default
 host-run CodeRabbit review (`coderabbitHostReview`, see the configuration
-list), agents never wait on CodeRabbit — the host absorbs rate-limit backoff
-in its own wall-clock — so the adapter timeout only needs to cover honest
-stage work; 4500–5400 seconds (75–90 minutes) is generous, and a longer
-silent stream is a hung connection, not progress. Only when
-`coderabbitHostReview=false` do implementation agents wait through 45–90
-minute CodeRabbit backoffs with `vsleep` themselves, and then the timeout
-must be at least `21600` seconds to avoid killing a healthy task mid-backoff.
+list), agents never wait on CodeRabbit — the host absorbs rate-limit backoff in
+its own wall-clock — so the adapter timeout only needs to cover honest stage
+work; 4500–5400 seconds (75–90 minutes) is generous, and a longer silent stream
+is a hung connection, not progress. Only when `coderabbitHostReview=false` do
+implementation agents wait through 45–90 minute CodeRabbit backoffs with
+`vsleep` themselves, and then the timeout must be at least `21600` seconds to
+avoid killing a healthy task mid-backoff.
 
 Make sure every adapter named by `args.json` exists in `odw.config.json` or in
 ODW's built-in adapter set. The checked-in ODW workflow now defaults planning
@@ -220,9 +220,9 @@ they never enter a diff, trip `workflow-freshness`, or affect a gate:
   instructions, suggestion count) is appended best-effort: a bad path or full
   disk degrades logging with a warning and never fails a task.
 
-Patch the sidecar copy only to recover or tune a live workshop. Record the patch
-in `operator-notes.md`, validate it there, then promote the proven change back
-to the `df12-build` repository through a normal branch.
+Patch the sidecar copy only to recover or tune a live workshop. Record the
+patch in `operator-notes.md`, validate it there, then promote the proven change
+back to the `df12-build` repository through a normal branch.
 
 ## Starting a run
 
@@ -244,8 +244,8 @@ Use an absolute or fully expanded sidecar path for the workflow script. When
 project, not under the shell's current working directory.
 
 Start normal workshop runs in the background. Supervise them with `odw status`,
-`odw logs`, `odw result`, and the ODW dashboard. Keep `operator-notes.md` current
-enough that another operator can continue after context compaction.
+`odw logs`, `odw result`, and the ODW dashboard. Keep `operator-notes.md`
+current enough that another operator can continue after context compaction.
 
 When adopting a newer checked-in workflow into an existing sidecar, audit
 `args.json` before relaunching. Older sidecars may still carry Codex-only
@@ -259,8 +259,8 @@ surface. Operator scripts in `scripts/` add workshop-oriented views over ODW
 run directories, Git branch movement, and sibling worktree filesystem activity.
 
 `scripts/odw-list-runs` tabulates runs from the ODW runs root, showing the
-source project, status, last update, run id, and workflow name. It defaults
-to running runs; filters widen or narrow the view:
+source project, status, last update, run id, and workflow name. It defaults to
+running runs; filters widen or narrow the view:
 
 ```bash
 scripts/odw-list-runs                        # running runs only
@@ -269,9 +269,9 @@ scripts/odw-list-runs -s failed -s stopped   # explicit statuses
 scripts/odw-list-runs --source my-project    # substring match on source
 ```
 
-`scripts/odw-watch` tails events for every *running* run whose metadata
-records a given source directory, printing recent history and then following
-new events, discovering newly started runs as it polls:
+`scripts/odw-watch` tails events for every *running* run whose metadata records
+a given source directory, printing recent history and then following new
+events, discovering newly started runs as it polls:
 
 ```bash
 scripts/odw-watch "$PROJECT" -n 20        # last 20 events, then follow
@@ -309,8 +309,8 @@ create with `git donkey <slug> <base>` (the configured base is passed
 explicitly, because git donkey's no-argument default is always `main`), then
 `git reset --hard origin/<base>` inside the new worktree and re-verify its base
 sha. So audit and triage always inspect the current `origin/<base>` and can
-never silently root on a stale local base. If an audit or triage agent reports a
-"based on a stale commit" style failure, that sequence is where to look.
+never silently root on a stale local base. If an audit or triage agent reports
+a "based on a stale commit" style failure, that sequence is where to look.
 
 ## Roadmap format
 
@@ -371,8 +371,8 @@ complete when every task under that prefix is complete. For example, if every
 task under `1.2.*` is complete, then `1.2` can satisfy a later `Requires 1.2`
 dependency.
 
-Completed tasks may carry nested unchecked addendum subtasks. These are used for
-small follow-up corrections that do not need a full plan and review cycle:
+Completed tasks may carry nested unchecked addendum subtasks. These are used
+for small follow-up corrections that do not need a full plan and review cycle:
 
 ```markdown
 - [x] 1.2.8. Implement the parser state machine.
@@ -401,8 +401,8 @@ answers, and each task should include a clear `Success:` criterion.
 
 Treat this section as the baseline contract for future roadmap tooling. A
 roadmap editor or linter should preserve these parseable forms, verify that
-`Requires` references resolve, and flag malformed ids or dependency lines before
-a long-running workshop starts.
+`Requires` references resolve, and flag malformed ids or dependency lines
+before a long-running workshop starts.
 
 ## Workflow arguments
 
@@ -424,8 +424,8 @@ Common arguments:
   when `memtraceRepoId` is set.
 - `grepaiWorkspace`: GrepAI workspace name. Defaults to `Projects`.
 - `grepaiProject`: canonical main-branch GrepAI project name. Set this when the
-  ODW source path or worker worktree path would make `$(get-project)` resolve to
-  the wrong project.
+  ODW source path or worker worktree path would make `$(get-project)` resolve
+  to the wrong project.
 - `memtraceRepoId`: canonical Memtrace repository id. Set this, or set
   `searchBackend` to `memtrace`, when GrepAI is unavailable on the host.
 - `coderabbitReviewCommand`: CodeRabbit command used in implementation prompts.
@@ -440,9 +440,8 @@ Common arguments:
 - `commitGates`: ordered list of deterministic gate commands every task,
   addendum, fix, and remediation agent must run before declaring work green.
   Defaults to `["make all"]`. The run result echoes the effective list so
-  operators can audit reported gate greenness against it; agents are told
-  never to assume `make all` aggregates the gates a project names in
-  `AGENTS.md`.
+  operators can audit reported gate greenness against it; agents are told never
+  to assume `make all` aggregates the gates a project names in `AGENTS.md`.
 - `hostCommitGates`: when `true` (the default), the workflow host re-runs the
   `commitGates` commands itself against each branch's committed HEAD before
   review and integration, so a `gatesGreen` claim is verified rather than
@@ -456,38 +455,38 @@ Common arguments:
   retried, and the host never re-dispatches a faulted integration stage: a
   crash between the squash push and the agent's return can leave a hidden
   success already landed on `origin/<base>`, which the host cannot detect, so
-  repeating the stage risks a double merge. (The integration agent still
-  redoes its own squash idempotently on a non-fast-forward push rejection
-  within a single turn — see the recovery model.)
+  repeating the stage risks a double merge. (The integration agent still redoes
+  its own squash idempotently on a non-fast-forward push rejection within a
+  single turn — see the recovery model.)
 - `perWorkItemBuild`: when `true` (the default), the workflow host reads the
   approved ExecPlan's `## Progress` checklist and dispatches one builder turn
-  per unticked work item, verifying committed progress after every turn.
-  Plans without a Progress checklist fall back to the single-turn build
+  per unticked work item, verifying committed progress after every turn. Plans
+  without a Progress checklist fall back to the single-turn build
   automatically; set `false` to force the single-turn build for every task.
 - `maxWorkItemRounds`: builder turns per task before the work-item loop fails
   closed. Defaults to `16`.
 - `coderabbitHostReview`: when `true` (the default), the workflow host runs
   `coderabbit review --agent` against each task's committed work instead of
   asking agents to babysit CodeRabbit. Rate-limit backoff is absorbed as host
-  wall-clock (zero agent tokens), and blocking findings feed the fix rounds.
-  Set `false` to restore the legacy agent-run flow.
+  wall-clock (zero agent tokens), and blocking findings feed the fix rounds. Set
+  `false` to restore the legacy agent-run flow.
 - `hostGatesBetweenWorkItems`: when `true` (the default), and when both
-  `hostCommitGates` and `perWorkItemBuild` are on, the host re-runs the
-  commit gates after each committed work item — before the between-item
-  CodeRabbit review — so a committed work item whose gates are actually red
-  is caught at the item boundary instead of only at the dual-review stage.
-  A red gate drives a bounded fix loop; if it cannot be made green the work
-  item fails. Set `false` to verify gates only at the dual-review boundary
-  (cheaper: one gate run per review round rather than one per work item).
+  `hostCommitGates` and `perWorkItemBuild` are on, the host re-runs the commit
+  gates after each committed work item — before the between-item CodeRabbit
+  review — so a committed work item whose gates are actually red is caught at
+  the item boundary instead of only at the dual-review stage. A red gate drives
+  a bounded fix loop; if it cannot be made green the work item fails. Set
+  `false` to verify gates only at the dual-review boundary (cheaper: one gate
+  run per review round rather than one per work item).
 - `csCheck`: when `true` (the default), the host runs a CodeScene code-health
-  check on the committed changed files as a deterministic gate AFTER the
-  commit gates and BEFORE CodeRabbit (both free checks precede the
-  quota-limited CodeRabbit and the token-spending reviewer agents). A
-  regression drives a bounded fix round; the build agent clears it by
-  refactoring or, only where refactoring would be deleterious, suppresses the
-  specific smell with a justified `@codescene(disable:"...")` comment. The
-  check skips gracefully when its binary is absent, like `make verify-modules`
-  without Dafny. Set `false` to disable it.
+  check on the committed changed files as a deterministic gate AFTER the commit
+  gates and BEFORE CodeRabbit (both free checks precede the quota-limited
+  CodeRabbit and the token-spending reviewer agents). A regression drives a
+  bounded fix round; the build agent clears it by refactoring or, only where
+  refactoring would be deleterious, suppresses the specific smell with a
+  justified `@codescene(disable:"...")` comment. The check skips gracefully
+  when its binary is absent, like `make verify-modules` without Dafny. Set
+  `false` to disable it.
 - `csCheckCommand`: the command the CodeScene check runs in the worktree.
   Defaults to `cs-check-changed` (an operator-provided wrapper); override it
   with the exact invocation, e.g. `cs check --changed --base main`.
@@ -498,8 +497,8 @@ Common arguments:
   whole implementation stage. Blocking findings drive a bounded fix loop; if
   they cannot be cleared the work item fails, and if CodeRabbit stays
   rate-limited or errors after its retries the task halts for assessment
-  instead of continuing unreviewed. Set `false` to review only once at the
-  end of the implementation stage.
+  instead of continuing unreviewed. Set `false` to review only once at the end
+  of the implementation stage.
 - `coderabbitAttempts`: total host review attempts when CodeRabbit rate
   limits. Defaults to `3`.
 - `coderabbitBackoffMinutes`: `[low, high]` range for the deterministic
@@ -519,8 +518,8 @@ Common arguments:
 - `assessmentModel`: model for the report-only partial-branch assessment.
   Defaults to a medium model (`claude-sonnet-5`) rather than inheriting the
   Opus-class review model, because a deterministic fast-classifier already
-  handles the clear cases (empty branch, evidence-collection failure) with
-  zero tokens and only genuinely ambiguous branches reach the model.
+  handles the clear cases (empty branch, evidence-collection failure) with zero
+  tokens and only genuinely ambiguous branches reach the model.
 - `assessmentEscalationModel`: the stronger model used for a strong
   adopt-complete candidate (a branch that committed an ExecPlan). Defaults to
   the review model.
@@ -559,9 +558,9 @@ Common arguments:
 - `resumeMaxCandidates`: bound on recovery candidates per run. Defaults to `4`;
   excess candidates are reported as skipped with reason `candidate-cap`.
 - `worktreeWritePreflight`: when `false`, skip the once-per-run probe that
-  proves the planning and build adapters can write into sibling task
-  worktrees. Defaults to enabled; a failed probe fails the task at stage
-  `worktree-write` as an environment fault.
+  proves the planning and build adapters can write into sibling task worktrees.
+  Defaults to enabled; a failed probe fails the task at stage `worktree-write`
+  as an environment fault.
 - `buildAdapter` and `buildModel`: adapter and model for worktree creation,
   implementation, integration, and remediation agents.
 - `planAdapter` and `planModel`: adapter and model for planning agents.
@@ -571,8 +570,8 @@ Common arguments:
   for post-merge audits. Defaults to Claude Code, `claude-sonnet-5`, and
   `medium`.
 - `triageAdapter` and `triageModel`: adapter and model for remediation triage
-  (routing review and audit proposals onto roadmap lanes). Defaults are
-  `codex` and `gpt-5.6-sol`.
+  (routing review and audit proposals onto roadmap lanes). Defaults are `codex`
+  and `gpt-5.6-sol`.
 - `assessmentAdapter` and `assessmentModel`: adapter and model for partial
   branch assessment. `assessmentAdapter` defaults to the review adapter, while
   `assessmentModel` independently defaults to `claude-sonnet-5`.
@@ -580,13 +579,12 @@ Common arguments:
 Current defaults deliberately split execution and judgement. Build,
 implementation, and integration use GPT-5.6 Terra through the medium-effort
 Codex adapter; triage uses GPT-5.6 Sol at medium effort. Planning and review
-judgement default to Claude Code with
-`claude-opus-4-8`. That means the plan stage, design review, code review,
-expert review, and addendum fallback review use the `reviewAdapter` or
-`planAdapter` Claude routing unless `args.json` overrides them. Post-merge
-audit uses Claude Sonnet 5 at medium effort. Set `assessmentAdapter` explicitly
-when partial-branch assessment should stay on Codex instead of inheriting the
-review adapter.
+judgement default to Claude Code with `claude-opus-4-8`. That means the plan
+stage, design review, code review, expert review, and addendum fallback review
+use the `reviewAdapter` or `planAdapter` Claude routing unless `args.json`
+overrides them. Post-merge audit uses Claude Sonnet 5 at medium effort. Set
+`assessmentAdapter` explicitly when partial-branch assessment should stay on
+Codex instead of inheriting the review adapter.
 
 Example `args.json`:
 
@@ -624,8 +622,8 @@ Example `args.json`:
 ## Host-run CodeRabbit review
 
 By default the workflow host — not the task agents — runs
-`coderabbit review --agent --type committed` against each task branch: once
-per dual-review round (alongside the code and expert reviewers) and once per
+`coderabbit review --agent --type committed` against each task branch: once per
+dual-review round (alongside the code and expert reviewers) and once per
 addendum implementation. Because only committed changes are reviewed, the
 ExecPlan durability contract doubles as the review contract. The host parses
 the CLI's structured findings; `critical` and `major` severities join the
@@ -634,16 +632,16 @@ severities are captured without gating integration.
 
 Rate limits are absorbed by the host: a rate-limited review waits a
 deterministic 45–90 minutes (`coderabbitBackoffMinutes`) and retries, up to
-`coderabbitAttempts` total attempts, costing wall-clock but zero agent
-tokens. A rate limit that outlives every attempt — or a CLI fault — defers
-the review with a documented `openIssues` entry on the task result instead of
-blocking integration; the dual reviewers remain decisive. A CodeRabbit
-authentication failure halts the task as `fatal-auth`.
+`coderabbitAttempts` total attempts, costing wall-clock but zero agent tokens.
+A rate limit that outlives every attempt — or a CLI fault — defers the review
+with a documented `openIssues` entry on the task result instead of blocking
+integration; the dual reviewers remain decisive. A CodeRabbit authentication
+failure halts the task as `fatal-auth`.
 
 The run result's `coderabbit` object reports the effective configuration and
 bounded counters (reviews run, findings by severity, rate-limited runs,
-deferred reviews). When `coderabbitFindingsFile` is set, every finding is
-also appended as JSONL for cross-run linter tuning.
+deferred reviews). When `coderabbitFindingsFile` is set, every finding is also
+appended as JSONL for cross-run linter tuning.
 
 ## Per-work-item builds
 
@@ -652,20 +650,20 @@ records the plan's work items as `- [ ] WI-<n>: <imperative title>` checklist
 lines in the ExecPlan's `## Progress` section, and after design approval the
 host loops: read the committed checklist, dispatch a builder turn scoped to
 exactly the first unticked item, then verify that the turn left the worktree
-fully committed and moved the committed checklist forward. A turn that
-returns `ok` without committing a tick is bounced once with the defect named
-in the next prompt; two consecutive no-progress turns fail the task. The
-loop is bounded by `maxWorkItemRounds`, and the committed checklist — not the
-agent's say-so — decides when the build is done.
+fully committed and moved the committed checklist forward. A turn that returns
+`ok` without committing a tick is bounced once with the defect named in the
+next prompt; two consecutive no-progress turns fail the task. The loop is
+bounded by `maxWorkItemRounds`, and the committed checklist — not the agent's
+say-so — decides when the build is done.
 
 Small turns change the failure economics: each builder turn does one work
 item's worth of code, tests, docs, gates, and one atomic commit, so the ODW
 build adapter can sit on a tight timeout (roughly 3600 seconds) and a hung
-stream costs at most one work item plus a warm `stageAttempts` retry from
-the committed ExecPlan — not a whole task. Legacy plans whose Progress
-section is prose ticks rather than work items still work: the loop
-dispatches "the first unticked item" by its text, and a plan with no
-checklist at all falls back to the single-turn build.
+stream costs at most one work item plus a warm `stageAttempts` retry from the
+committed ExecPlan — not a whole task. Legacy plans whose Progress section is
+prose ticks rather than work items still work: the loop dispatches "the first
+unticked item" by its text, and a plan with no checklist at all falls back to
+the single-turn build.
 
 The run result's `workItemBuild` object reports the effective configuration.
 Work-item turns appear in the events as `implement:<id> wi<n>` labels.
@@ -676,18 +674,17 @@ By default the workflow host also re-runs the deterministic `commitGates`
 commands itself — a `gatesGreen` claim from an agent is verified, never
 trusted. The gates run at the start of every dual-review round (before any
 reviewer agent spends tokens; a red branch goes straight to a fix round
-carrying the host's log evidence) and once per addendum implementation
-(addenda have no fix rounds, so an unreproducible green claim fails the
-addendum outright). Gate runs are serialized across the whole worker pool so
-sequential execution benefits from the target project's build caching, and
-each command's full output is streamed to a log in a secure per-run
-directory (`/tmp/df12-gates-XXXXXX/gate-<task>-<round>-N.out`, created with
-mode `0700` and opened exclusively without following symlinks) with a bounded
-tail quoted in the failure evidence. A command that
-exceeds `commitGateTimeoutSeconds` is killed and reported as a failure. The
-run result's `hostGates` object reports the configuration and bounded
-counters (gate runs, failures); per-round pass/fail detail appears in each
-failed task's `reviewRounds[].hostGates`.
+carrying the host's log evidence) and once per addendum implementation (addenda
+have no fix rounds, so an unreproducible green claim fails the addendum
+outright). Gate runs are serialized across the whole worker pool so sequential
+execution benefits from the target project's build caching, and each command's
+full output is streamed to a log in a secure per-run directory
+(`/tmp/df12-gates-XXXXXX/gate-<task>-<round>-N.out`, created with mode `0700`
+and opened exclusively without following symlinks) with a bounded tail quoted
+in the failure evidence. A command that exceeds `commitGateTimeoutSeconds` is
+killed and reported as a failure. The run result's `hostGates` object reports
+the configuration and bounded counters (gate runs, failures); per-round
+pass/fail detail appears in each failed task's `reviewRounds[].hostGates`.
 
 ## Recovery model
 
@@ -710,8 +707,8 @@ classification is one of:
 - `discard`: the branch is stale, unsafe, incoherent, or too incomplete to keep.
 
 Assessment is report-only. It never marks roadmap checkboxes, pushes, merges,
-or cherry-picks. Use it to decide whether to preserve, manually finish, park, or
-discard the branch before relaunching from `origin/<base>`.
+or cherry-picks. Use it to decide whether to preserve, manually finish, park,
+or discard the branch before relaunching from `origin/<base>`.
 
 After an `adopt-partial` or `continue-manual` verdict — and also after an
 infrastructure fault such as schema-retry exhaustion — the workflow commits any
@@ -720,53 +717,53 @@ worktree cleanup. This is artefact salvage. It never merges, pushes, or ticks a
 roadmap checkbox; it commits only under a deterministic machine identity
 (`df12-build`). Paths outside the `docs/execplans/` tree, symlinks, and paths
 that escape the worktree are all rejected before the commit. Salvage does not
-run for `adopt-complete` (which proceeds through the ordinary path) or `discard`
-(thrown away); it also skips when host evidence collection failed and is
-therefore untrustworthy (the deterministic `continue-manual` from a
+run for `adopt-complete` (which proceeds through the ordinary path) or
+`discard` (thrown away); it also skips when host evidence collection failed and
+is therefore untrustworthy (the deterministic `continue-manual` from a
 collection-error), or when no worktree path is present in the assessment
 evidence. The per-task result carries a `result.salvage` field
 (`{ classification, committed, skipped, sha, detail }`) for every branch where
 salvage ran or was skipped; the top-level run result includes a `salvages`
-summary array and the summary string appends `| salvaged artefacts on N
-branch(es)` when N > 0. Salvage runs only when partial-branch assessment is
-enabled (`assessPartialBranches=true`), the same switch that governs
-assessment; it does not run when that setting is disabled. Auth failures,
-provider outages such as `429`, `500`, or `529`, worktree-creation failures,
-dry runs, successful tasks, and manual-merge-ready branches are not assessed.
-Provider outages also suppress the final remediation flush, so transient
-adapter failures do not create roadmap work.
+summary array and the summary string appends
+`| salvaged artefacts on N branch(es)` when N > 0. Salvage runs only when
+partial-branch assessment is enabled (`assessPartialBranches=true`), the same
+switch that governs assessment; it does not run when that setting is disabled.
+Auth failures, provider outages such as `429`, `500`, or `529`,
+worktree-creation failures, dry runs, successful tasks, and manual-merge-ready
+branches are not assessed. Provider outages also suppress the final remediation
+flush, so transient adapter failures do not create roadmap work.
 
 Infrastructure faults are classified separately from product failures. When a
 stage agent's process dies — an ODW adapter timeout or crash, or schema-retry
 exhaustion — the failure carries no evidence about the task branch, so the
-workflow retries the stage agent in place up to `stageAttempts` total
-attempts. A persistent fault terminates the task with status `infra-fault`
-rather than `failed`: no assessment agent is spawned, remediation triage
-writes are skipped (as with provider faults), and the halt detail directs the
-operator to relaunch with `resumePartialBranches=true` and
-`resumeMode="continue"`. Integration is the exception: a fault there is never
-retried, because a hidden-success first attempt may already have pushed —
-inspect `origin/<base>` and the roadmap before relaunching. The run result's
-`faultMetrics` object counts retries and terminal faults per class
-(`infraRetries`, `infraFaults`, `providerFaults`, `authFaults`).
+workflow retries the stage agent in place up to `stageAttempts` total attempts.
+A persistent fault terminates the task with status `infra-fault` rather than
+`failed`: no assessment agent is spawned, remediation triage writes are skipped
+(as with provider faults), and the halt detail directs the operator to relaunch
+with `resumePartialBranches=true` and `resumeMode="continue"`. Integration is
+the exception: a fault there is never retried, because a hidden-success first
+attempt may already have pushed — inspect `origin/<base>` and the roadmap
+before relaunching. The run result's `faultMetrics` object counts retries and
+terminal faults per class (`infraRetries`, `infraFaults`, `providerFaults`,
+`authFaults`).
 
 That host-level caution is distinct from the integration agent's own retry
 loop, which is idempotent by construction. Because sibling tasks merge through
 a single merge lock, `origin/<base>` can advance between a task's rebase and
-its squash push. The agent lands each squash on a throwaway branch created
-with `git switch --discard-changes -C integrate-<slug> origin/<base>`: the
-`-C` force-resets `integrate-<slug>` onto the freshly fetched base whether or
-not the branch already exists, and `--discard-changes` restores the index and
+its squash push. The agent lands each squash on a throwaway branch created with
+`git switch --discard-changes -C integrate-<slug> origin/<base>`: the `-C`
+force-resets `integrate-<slug>` onto the freshly fetched base whether or not
+the branch already exists, and `--discard-changes` restores the index and
 working tree to that base, throwing away any half-finished squash a prior
 attempt left staged. (The earlier `git switch -c` form instead failed with
 `a branch named 'integrate-<slug>' already exists` the moment a first attempt
 had created the branch.) So when the push is rejected non-fast-forward, the
 agent re-fetches, re-rebases the task branch onto the new `origin/<base>`,
-re-runs that reset, and retries the push — with no manual cleanup, no
-collision with the branch the previous attempt left behind, and no stale
-squash carried forward. It retries until the push lands. The host simply does
-not extend that idempotence across a process crash, where a hidden success may
-already have merged.
+re-runs that reset, and retries the push — with no manual cleanup, no collision
+with the branch the previous attempt left behind, and no stale squash carried
+forward. It retries until the push lands. The host simply does not extend that
+idempotence across a process crash, where a hidden success may already have
+merged.
 
 Separately from that in-agent retry loop, the host validates the integration
 agent's report before counting a task done. All five fields — `ok`, `rebased`,
@@ -774,8 +771,8 @@ agent's report before counting a task done. All five fields — `ok`, `rebased`,
 that was squash-merged and pushed but never rebased onto `origin/<base>` (so
 `rebased` is false or absent) halts the task at `stage: integrate`. The
 `detail` field reports the integration agent's `conflicts` text or its
-`summary`, whichever is set first; only when both are absent does it fall
-back to the generic
+`summary`, whichever is set first; only when both are absent does it fall back
+to the generic
 `'integration incomplete (need ok+rebased+squashMerged+pushed+roadmapMarkedDone)'`.
 Inspect the halted task result's `detail` field, rebase the branch manually if
 it is salvageable, and relaunch; otherwise discard the branch and relaunch from
@@ -819,9 +816,9 @@ Set `resumePartialBranches=true` and choose the maximum action with
   project exactly as ordinary integration does, so grant it the same
   permissions and trust.
 - **Continue-mode resume** (`resumeMode="continue"`): no judgement agent at
-  all. The workflow collects host git evidence and reads the committed
-  ExecPlan `Status:` line, then dispatches deterministically: `DRAFT` (or a
-  missing plan) re-enters planning, `APPROVED` or `IN PROGRESS` re-enters
+  all. The workflow collects host git evidence and reads the committed ExecPlan
+  `Status:` line, then dispatches deterministically: `DRAFT` (or a missing
+  plan) re-enters planning, `APPROVED` or `IN PROGRESS` re-enters
   implementation, `COMPLETE` re-enters the dual review, and `BLOCKED` is
   reported. The downstream gates and reviewers are the judgement. Dirty
   worktrees, addendum branches, evidence-collection failures, and plans the
@@ -839,9 +836,9 @@ or resume it before expecting normal selection to rebuild that task. Survivor
 branches that are still unresolved when the run ends are listed in
 `recovery.unresolved` (id, branch, last classification, action, and reason),
 and the run reports `halted: needs-operator-recovery …` instead of a clean
-stop, so a blocked roadmap frontier is never mistaken for finished work. A fatal
-auth preflight blocks recovery entirely (`recovery.blocked =
-"auth-preflight-failed"`), and dry runs never resume.
+stop, so a blocked roadmap frontier is never mistaken for finished work. A
+fatal auth preflight blocks recovery entirely
+(`recovery.blocked = "auth-preflight-failed"`), and dry runs never resume.
 
 Use the `df12-build-supervisor` skill for the detailed operator playbook:
 failure-mode diagnosis, orphan worktree cleanup, remediation triage, stash

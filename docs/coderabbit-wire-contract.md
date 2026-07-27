@@ -3,11 +3,10 @@
 The host-run CodeRabbit review (`src/workflows/df12-build-odw/host-review.ts`)
 pins its parser and outcome classification to the NDJSON event stream that
 `coderabbit review --agent` emits on stdout. That contract is pinned against
-CLI internals rather than any published specification, so this page records
-the evidence: bounded excerpts from real CLI sessions captured on the
-development host between 2026-06-25 and 2026-07-06 (the `/tmp/coderabbit-*.out`
-gate logs). Long string values are truncated with `…`; everything else is
-verbatim.
+CLI internals rather than any published specification, so this page records the
+evidence: bounded excerpts from real CLI sessions captured on the development
+host between 2026-06-25 and 2026-07-06 (the `/tmp/coderabbit-*.out` gate logs).
+Long string values are truncated with `…`; everything else is verbatim.
 
 Two properties observed across every capture drive the implementation:
 
@@ -15,8 +14,8 @@ Two properties observed across every capture drive the implementation:
    service errors). Outcome classification must therefore read the event
    stream, never the exit code.
 2. Every event is a single JSON object per line with a `type` discriminator.
-   Six types were observed: `review_context`, `status`, `heartbeat`,
-   `finding`, `complete`, and `error`.
+   Six types were observed: `review_context`, `status`, `heartbeat`, `finding`,
+   `complete`, and `error`.
 
 ## A complete clean session
 
@@ -54,8 +53,8 @@ CLI could not attribute the repository to an organization plan:
  "message":"CodeRabbit couldn't verify this repository's organization right now, so this review will use the free…"}
 ```
 
-Treat `message` as informational prose: it changes wording between CLI
-versions and must never be parsed for control flow.
+Treat `message` as informational prose: it changes wording between CLI versions
+and must never be parsed for control flow.
 
 ## `finding`
 
@@ -69,9 +68,9 @@ Observed keys: `type`, `severity`, `fileName`, `codegenInstructions`,
  "suggestions":[]}
 ```
 
-`coderabbitBlockingItems` treats only `critical` and `major` as blocking;
-every finding is counted in the run-result aggregate and, when configured,
-appended to the `coderabbitFindingsFile` JSONL sink.
+`coderabbitBlockingItems` treats only `critical` and `major` as blocking; every
+finding is counted in the run-result aggregate and, when configured, appended
+to the `coderabbitFindingsFile` JSONL sink.
 
 ## `complete`
 
@@ -88,15 +87,15 @@ host-review test fixtures were recorded against). `classifyCoderabbitOutcome`
 therefore treats a `complete` event as clean only when its `status` is in
 `CODERABBIT_SUCCESS_STATUSES` (`review_completed` or `reviewed`); any other
 terminal completion status — a cancelled or aborted review — falls through to
-`error` rather than being mistaken for a clean pass. Extend that set here and
-in `host-review.ts` if a new success spelling is observed.
+`error` rather than being mistaken for a clean pass. Extend that set here and in
+`host-review.ts` if a new success spelling is observed.
 
 ## `error` (rate limit)
 
 The quota error is `errorType: "rate_limit"` with `recoverable: true` and a
 humanized `waitTime` string inside `metadata` (not machine-parseable as a
-duration — the workflow uses its own deterministic backoff instead). Two
-shapes were captured live.
+duration — the workflow uses its own deterministic backoff instead). Two shapes
+were captured live.
 
 Organization-attributed (2026-07-05, this branch's first review attempt):
 
@@ -118,9 +117,9 @@ connection; note the extra `details` object and the optional
   "orgAttributed":false,"cliReviewLightRequested":true,"cliReviewPolicyMode":"light"}}
 ```
 
-`classifyCoderabbitOutcome` keys on `errorType === "rate_limit"` (with a
-regex fallback over the error text for older CLI builds), and treats any
-other `error` event as `error` unless the text matches the auth patterns in
+`classifyCoderabbitOutcome` keys on `errorType === "rate_limit"` (with a regex
+fallback over the error text for older CLI builds), and treats any other
+`error` event as `error` unless the text matches the auth patterns in
 `faults.ts`, which classify as `auth`.
 
 ## Maintenance
@@ -128,5 +127,5 @@ other `error` event as `error` unless the text matches the auth patterns in
 When a CLI upgrade changes this stream, capture a fresh session
 (`coderabbit review --agent --type committed --base <branch> | tee <log>`),
 update the excerpts here, and re-run the wire-contract suites in
-`tests/df12-build-odw-assessment.test.mjs` (parser and classification
-tables) before adjusting `host-review.ts`.
+`tests/df12-build-odw-assessment.test.mjs` (parser and classification tables)
+before adjusting `host-review.ts`.

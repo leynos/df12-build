@@ -1,20 +1,19 @@
 # Implement partial task branch assessment
 
-This ExecPlan (execution plan) is a living document. The sections
-`Constraints`, `Tolerances`, `Risks`, `Progress`, `Surprises & Discoveries`,
-`Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work
-proceeds.
+This ExecPlan (execution plan) is a living document. The sections `Constraints`,
+`Tolerances`, `Risks`, `Progress`, `Surprises & Discoveries`, `Decision Log`,
+and `Outcomes & Retrospective` must be kept up to date as work proceeds.
 
 Status: COMPLETE
 
 ## Purpose / big picture
 
 After this change, `workflows/df12-build-odw.js` will inspect a failed roadmap
-task branch before the workflow forgets about it. A failed task that still has a
-real git worktree will receive a structured assessment saying whether the work
-looks complete, partially adoptable, manually reviewable, or discardable. The
-first implementation only reports the recommendation; it must not automatically
-merge or cherry-pick partial work.
+task branch before the workflow forgets about it. A failed task that still has
+a real git worktree will receive a structured assessment saying whether the
+work looks complete, partially adoptable, manually reviewable, or discardable.
+The first implementation only reports the recommendation; it must not
+automatically merge or cherry-pick partial work.
 
 Success is visible in the ODW result JSON. A task that fails after worktree
 creation has an `assessment` object with a classification from ADR 002, the
@@ -42,7 +41,8 @@ recommendation. Auth failures and pre-worktree failures do not get assessed.
 - Do not auto-adopt partial branches in this milestone. `adopt-complete` and
   `adopt-partial` are returned as recommendations only.
 - Keep operations that can advance `origin/<base>` behind the existing merge
-  lock. This milestone should not add any new path that advances `origin/<base>`.
+  lock. This milestone should not add any new path that advances
+  `origin/<base>`.
 - Update user-facing and operator documentation in the same branch as the
   workflow change.
 
@@ -68,40 +68,30 @@ conflict in `Decision Log`, and ask for direction.
 ## Risks
 
 - Risk: The assessment agent may recommend adoption from incomplete or
-  prompt-injected evidence.
-  Severity: high
-  Likelihood: medium
-  Mitigation: Host code must consume a schema, never free text, and this
-  milestone must only report recommendations.
+  prompt-injected evidence. Severity: high Likelihood: medium Mitigation: Host
+  code must consume a schema, never free text, and this milestone must only
+  report recommendations.
 
 - Risk: The workflow could assess failures that happened before any durable
-  branch exists.
-  Severity: medium
-  Likelihood: medium
-  Mitigation: Gate assessment on a known branch name and worktree path from the
-  successful worktree creation step.
+  branch exists. Severity: medium Likelihood: medium Mitigation: Gate
+  assessment on a known branch name and worktree path from the successful
+  worktree creation step.
 
 - Risk: Dirty worktrees may contain useful uncommitted work, but also unsafe
-  generated files or unrelated edits.
-  Severity: medium
-  Likelihood: high
+  generated files or unrelated edits. Severity: medium Likelihood: high
   Mitigation: Report dirty state explicitly and require manual judgement unless
   the branch is clean, committed, scoped, and gated.
 
 - Risk: Tests can become brittle because `df12-build-odw.js` is an ODW script,
-  not an importable Node module.
-  Severity: medium
-  Likelihood: medium
+  not an importable Node module. Severity: medium Likelihood: medium
   Mitigation: Use a small Node `vm`/`Function` harness that evaluates only the
   helper and schema portion of the workflow source and does not launch agents.
 
 - Risk: ODW and Claude Code workflow documentation describe overlapping but not
-  identical runtimes.
-  Severity: medium
-  Likelihood: medium
-  Mitigation: Follow the checked-in ODW workflow and local `odw-authoring`
-  skill for implementation. Use Claude Code docs only as prior art for the
-  orchestration model, not as the runtime contract for this file.
+  identical runtimes. Severity: medium Likelihood: medium Mitigation: Follow
+  the checked-in ODW workflow and local `odw-authoring` skill for
+  implementation. Use Claude Code docs only as prior art for the orchestration
+  model, not as the runtime contract for this file.
 
 ## Progress
 
@@ -127,8 +117,7 @@ conflict in `Decision Log`, and ask for direction.
   architecture, developer guide, security guide, and supervisor skill for the
   report-only assessment behaviour.
 - [x] (2026-06-30T15:47:19Z) Ran `make all`; diff check, Markdown lint, ODW
-  wrapper parse, Nixie diagram validation, and Node assessment tests all
-  passed.
+  wrapper parse, Nixie diagram validation, and Node assessment tests all passed.
 - [x] (2026-06-30T16:11:11Z) Verified three review findings against current
   code: auth-shaped implementation issues were not fatal, assessment evidence
   fields were optional in the schema, and two docs still called ADR 002
@@ -142,28 +131,26 @@ conflict in `Decision Log`, and ask for direction.
 ## Surprises & discoveries
 
 - Observation: This repository initially had no build-driver file, package
-  manifest, or existing test directory.
-  Evidence: the post-turn hook failed because no supported build driver was
-  available.
-  Impact: this branch now adds a small `Makefile` for hook-compatible
-  validation, while the plan still uses Node's built-in `node --test` for the
-  future focused assessment tests.
+  manifest, or existing test directory. Evidence: the post-turn hook failed
+  because no supported build driver was available. Impact: this branch now adds
+  a small `Makefile` for hook-compatible validation, while the plan still uses
+  Node's built-in `node --test` for the future focused assessment tests.
 
 - Observation: The developer guide already anticipates future `docs/execplans/`
-  use, but the directory did not exist yet.
-  Evidence: `docs/developers-guide.md` says future branches that add
-  `docs/execplans/` should keep matching plans updated.
-  Impact: This plan creates `docs/execplans/` as the durable plan location.
+  use, but the directory did not exist yet. Evidence:
+  `docs/developers-guide.md` says future branches that add `docs/execplans/`
+  should keep matching plans updated. Impact: This plan creates
+  `docs/execplans/` as the durable plan location.
 
 - Observation: Claude Code's dynamic workflow docs say workflow scripts cannot
   directly access filesystem or shell state; agents perform those actions. This
   repository's ODW workflow already uses `process.getBuiltinModule` in the
-  workflow host script for deterministic git and file reads.
-  Evidence: Firecrawl scrape of `https://code.claude.com/docs/en/workflows`;
-  local inspection of `workflows/df12-build-odw.js`.
-  Impact: The assessment implementation may follow the existing ODW/Codex
-  workflow style, but the plan explicitly avoids applying that assumption to
-  the Claude Code-targeted `workflows/df12-build.js`.
+  workflow host script for deterministic git and file reads. Evidence:
+  Firecrawl scrape of `https://code.claude.com/docs/en/workflows`; local
+  inspection of `workflows/df12-build-odw.js`. Impact: The assessment
+  implementation may follow the existing ODW/Codex workflow style, but the plan
+  explicitly avoids applying that assumption to the Claude Code-targeted
+  `workflows/df12-build.js`.
 
 - Observation: Claude Code workflows resume only within the same Claude Code
   session, while ADR 002 requires fresh restart from durable git state.
@@ -175,78 +162,72 @@ conflict in `Decision Log`, and ask for direction.
 - Observation: ODW's public README and primitive references stress schema
   handoffs, detached run directories, injected globals, and order-independent
   reductions. Some versioned docs differ on whether newer primitives such as
-  nested `workflow()` or precise budget accounting are implemented.
-  Evidence: Firecrawl scrapes of the ODW README, `skill/references/primitives.md`,
+  nested `workflow()` or precise budget accounting are implemented. Evidence:
+  Firecrawl scrapes of the ODW README, `skill/references/primitives.md`,
   `docs/dynamic-workflows-research.md`, and
-  `docs/dynamic-workflows-tech-plan.md`.
-  Impact: This plan relies only on stable primitives already used by the
-  workflow: `agent`, `phase`, `args`, schemas, deterministic JavaScript
-  reductions, and existing Node helper style.
+  `docs/dynamic-workflows-tech-plan.md`. Impact: This plan relies only on
+  stable primitives already used by the workflow: `agent`, `phase`, `args`,
+  schemas, deterministic JavaScript reductions, and existing Node helper style.
 
 ## Decision log
 
 - Decision: Implement a report-only assessment stage first.
   Rationale: ADR 002 says automatic adoption should wait until the manual
   recommendation path has been dogfooded. Reporting keeps recovery observable
-  without adding a new merge path.
-  Date/Author: 2026-06-30T15:12:48Z / Codex.
+  without adding a new merge path. Date/Author: 2026-06-30T15:12:48Z / Codex.
 
 - Decision: Collect basic git evidence in workflow host code before asking the
-  assessment agent to classify the branch.
-  Rationale: Branch name, base commit, current commit, dirty state, and changed
-  files are deterministic facts. Capturing them in JavaScript reduces the
-  amount of prompt-enforced evidence and gives tests a pure surface to verify.
-  Date/Author: 2026-06-30T15:12:48Z / Codex.
+  assessment agent to classify the branch. Rationale: Branch name, base commit,
+  current commit, dirty state, and changed files are deterministic facts.
+  Capturing them in JavaScript reduces the amount of prompt-enforced evidence
+  and gives tests a pure surface to verify. Date/Author: 2026-06-30T15:12:48Z /
+  Codex.
 
 - Decision: Add lightweight Node tests without adding a package dependency.
   Rationale: The repo has no package manifest, and adding one only for tests
-  would exceed the smallest useful change. Node's built-in test runner is enough
-  for schema and helper behaviour.
-  Date/Author: 2026-06-30T15:12:48Z / Codex.
+  would exceed the smallest useful change. Node's built-in test runner is
+  enough for schema and helper behaviour. Date/Author: 2026-06-30T15:12:48Z /
+  Codex.
 
 - Decision: Treat the assessment stage as a workflow-pattern combination of
   orchestrator-worker plus evaluator, with host-enforced gates around the
-  recommendation.
-  Rationale: Anthropic's agent guidance favours simple composable workflows,
-  transparent planning, and programmatic gates. The host can gather deterministic
-  git evidence and enforce eligibility; the assessment agent can evaluate the
-  branch, but its recommendation must remain data rather than control flow.
-  Date/Author: 2026-06-30T15:12:48Z / Codex.
+  recommendation. Rationale: Anthropic's agent guidance favours simple
+  composable workflows, transparent planning, and programmatic gates. The host
+  can gather deterministic git evidence and enforce eligibility; the assessment
+  agent can evaluate the branch, but its recommendation must remain data rather
+  than control flow. Date/Author: 2026-06-30T15:12:48Z / Codex.
 
 - Decision: Do not use Claude Code same-session workflow resume as prior art
-  for this recovery path.
-  Rationale: ADR 002 explicitly chooses git-state recovery after system failure
-  or token exhaustion. Same-session transcript or journal resume is a different
-  reliability model and can disappear across process/session boundaries.
-  Date/Author: 2026-06-30T15:12:48Z / Codex.
+  for this recovery path. Rationale: ADR 002 explicitly chooses git-state
+  recovery after system failure or token exhaustion. Same-session transcript or
+  journal resume is a different reliability model and can disappear across
+  process/session boundaries. Date/Author: 2026-06-30T15:12:48Z / Codex.
 
 - Decision: Include the focused assessment test in `make all`.
   Rationale: Assessment is now executable workflow behaviour, not just
   documentation. The repository gate should fail when the schema, eligibility
-  guard, or deterministic git evidence collector regresses.
-  Date/Author: 2026-06-30T15:35:32Z / Codex.
+  guard, or deterministic git evidence collector regresses. Date/Author:
+  2026-06-30T15:35:32Z / Codex.
 
 - Decision: Assess unhandled post-worktree agent errors inside `runTask`.
-  Rationale: A thrown agent call after worktree creation is still a failure with
-  a durable branch. Catching it inside `runTask` preserves the worktree context
-  so ADR 002 assessment can run; auth-shaped failures still bypass assessment.
-  Date/Author: 2026-06-30T15:35:32Z / Codex.
+  Rationale: A thrown agent call after worktree creation is still a failure
+  with a durable branch. Catching it inside `runTask` preserves the worktree
+  context so ADR 002 assessment can run; auth-shaped failures still bypass
+  assessment. Date/Author: 2026-06-30T15:35:32Z / Codex.
 
 - Decision: Treat auth-shaped implementation issues as fatal before any review
-  or integration fallback.
-  Rationale: ADR 002 says auth failures remain fatal, and authentication
-  failures are not useful partial-branch evidence. Both normal and addendum
-  implementation results now share the same auth detector and return
-  `fatal-auth` before deferred-review handling or mergeability checks.
-  Date/Author: 2026-06-30T16:11:11Z / Codex.
+  or integration fallback. Rationale: ADR 002 says auth failures remain fatal,
+  and authentication failures are not useful partial-branch evidence. Both
+  normal and addendum implementation results now share the same auth detector
+  and return `fatal-auth` before deferred-review handling or mergeability
+  checks. Date/Author: 2026-06-30T16:11:11Z / Codex.
 
 - Decision: Require the assessment agent to return all core evidence fields in
-  the schema.
-  Rationale: The schema is the hard contract between the assessment agent and
-  the workflow host. `taskScoped`, `execPlan`, `roadmap`, `validation`,
-  `rationale`, and `nextActions` must be present so an operator does not
-  receive a bare classification without the evidence ADR 002 relies on.
-  Date/Author: 2026-06-30T16:11:11Z / Codex.
+  the schema. Rationale: The schema is the hard contract between the assessment
+  agent and the workflow host. `taskScoped`, `execPlan`, `roadmap`,
+  `validation`, `rationale`, and `nextActions` must be present so an operator
+  does not receive a bare classification without the evidence ADR 002 relies
+  on. Date/Author: 2026-06-30T16:11:11Z / Codex.
 
 ## Outcomes & retrospective
 
@@ -263,10 +244,10 @@ cleanup, so a planning or review artefact written just before a failure is
 preserved rather than lost. The one exception is a deterministic
 `continue-manual` raised from untrustworthy collection-error evidence: it
 records a salvage skip instead of committing because that evidence cannot be
-trusted. This extends preservation only through the
-branch's own Git history; it does not merge, push, or mark the roadmap, so
-the report-only, manual-adoption conclusion above still holds. Each per-task
-assessment result now also carries a `result.salvage` record
+trusted. This extends preservation only through the branch's own Git history;
+it does not merge, push, or mark the roadmap, so the report-only,
+manual-adoption conclusion above still holds. Each per-task assessment result
+now also carries a `result.salvage` record
 (`{ classification, committed, skipped, sha, detail }`), and the run result
 carries a top-level `salvages` array; salvage runs only when partial-branch
 assessment is enabled (`assessPartialBranches=true`). See
@@ -304,8 +285,8 @@ creation. It does not currently assess those branches before stopping the pool.
 
 Firecrawl research added five relevant context points.
 
-Claude Code dynamic workflows move orchestration into a JavaScript script run by
-a background runtime. The plan, loops, branch decisions, and intermediate
+Claude Code dynamic workflows move orchestration into a JavaScript script run
+by a background runtime. The plan, loops, branch decisions, and intermediate
 results live in script variables, while the user's conversation receives only
 the final result. This supports the `df12-build` design choice to keep recovery
 state out of host-agent context. Source:
@@ -318,18 +299,18 @@ for assessment, gathers deterministic git evidence, and prevents assessment
 output from directly mutating integration state. Source:
 `https://code.claude.com/docs/en/workflows`.
 
-Claude Code worktree docs define a worktree as a separate working directory with
-its own files and branch, sharing repository history and remote state. They also
-say worktrees with changes or commits are preserved for later inspection rather
-than silently removed in non-interactive runs. This supports treating surviving
-task worktrees and branches as durable recovery artefacts. Source:
-`https://code.claude.com/docs/en/worktrees`.
+Claude Code worktree docs define a worktree as a separate working directory
+with its own files and branch, sharing repository history and remote state.
+They also say worktrees with changes or commits are preserved for later
+inspection rather than silently removed in non-interactive runs. This supports
+treating surviving task worktrees and branches as durable recovery artefacts.
+Source: `https://code.claude.com/docs/en/worktrees`.
 
 ODW's public README describes the same workflow dialect ODW targets:
-`export const meta`, injected `agent`/`parallel`/`pipeline`/`phase`/`log`/`args`
-and `budget`, JSON-Schema handoffs, detached background runs, and observable run
-directories. This supports schema-driven assessment output and result JSON as
-the observable recovery surface. Source:
+`export const meta`, injected `agent`/`parallel`/`pipeline`/`phase`/`log`/
+`args` and `budget`, JSON-Schema handoffs, detached background runs, and
+observable run directories. This supports schema-driven assessment output and
+result JSON as the observable recovery surface. Source:
 `https://github.com/xz1220/open-dynamic-workflows/blob/main/README.md`.
 
 Anthropic's "Building Effective Agents" recommends simple composable workflows,
@@ -344,9 +325,9 @@ milestone. Source:
 Stage A preserves the existing ODW contract and adds tests first. Create
 `tests/df12-build-odw-assessment.test.mjs`. The test file reads
 `workflows/df12-build-odw.js`, rewrites the single `export const meta =` line to
-`const meta =`, evaluates the helper/schema section inside an async wrapper, and
-returns only the assessment helpers under test. It must not call `agent()` or
-run the workflow control loop. Add red tests for these behaviours:
+`const meta =`, evaluates the helper/schema section inside an async wrapper,
+and returns only the assessment helpers under test. It must not call `agent()`
+or run the workflow control loop. Add red tests for these behaviours:
 
 - `ASSESSMENT_SCHEMA` contains only the four ADR 002 classifications.
 - `shouldAssessFailure(result, wt)` returns true for `failed` and `halted`
@@ -410,12 +391,12 @@ This helper follows the existing `df12-build-odw.js` ODW/Codex style, where the
 workflow host script already uses Node built-ins for deterministic git and file
 operations. It is not a Claude Code workflow portability claim.
 
-Add `assessmentPrompt(task, wt, result, evidence)`. The prompt must be read-only
-and evidence-first. It must instruct the agent to inspect the worktree and git
-state, read the ExecPlan and roadmap if present, review validation evidence,
-and classify using only the ADR 002 enum. It must explicitly say not to edit,
-commit, stash, merge, push, mark roadmap checkboxes, or resume the failed
-agent's transcript.
+Add `assessmentPrompt(task, wt, result, evidence)`. The prompt must be
+read-only and evidence-first. It must instruct the agent to inspect the
+worktree and git state, read the ExecPlan and roadmap if present, review
+validation evidence, and classify using only the ADR 002 enum. It must
+explicitly say not to edit, commit, stash, merge, push, mark roadmap
+checkboxes, or resume the failed agent's transcript.
 
 Add `shouldAssessFailure(result, wt)` and `attachAssessment(task, wt, result)`.
 `shouldAssessFailure` is the host guard. It should require
@@ -434,8 +415,8 @@ Stage C wires assessment into task failure returns. In `runTask`, keep the
 successful path unchanged. For every failed or halted return after successful
 worktree creation, return `await attachAssessment(task, wt, result)`. This
 includes normal task failures in planning, design review, implementation,
-review, and integration, plus addendum implementation, addendum fallback review,
-and addendum integration failures. Do not assess `DRY_RUN`,
+review, and integration, plus addendum implementation, addendum fallback
+review, and addendum integration failures. Do not assess `DRY_RUN`,
 `manual-merge-ready`, successful `done`, worktree creation failure, or fatal
 auth failure.
 
