@@ -91,6 +91,16 @@ test('combination: resumePartialBranches=false holds stale survivor branches wit
       ['1.2.4', 'held'],
     ],
   )
+  // Guard-held survivors never produce a recovery result, so their unresolved
+  // entries must still carry branch provenance (branch name and recovery-disabled
+  // hold reason) for the operator to act on (issue #33).
+  assert.deepEqual(
+    result.recovery.unresolved.map((entry) => [entry.id, entry.branchName, entry.reason]),
+    [
+      ['1.2.3', 'roadmap-1-2-3', 'recovery-disabled: live-worktree'],
+      ['1.2.4', 'roadmap-1-2-4', 'recovery-disabled: missing-worktree'],
+    ],
+  )
   // The guard is pure read-only git evidence: the fixture repository is
   // untouched.
   assert.deepEqual(repoStateSnapshot(repo), before)

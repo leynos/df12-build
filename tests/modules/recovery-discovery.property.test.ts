@@ -1,3 +1,10 @@
+/**
+ * @file Property tests for `computeHeldFromDiscovery` — the pure held-set
+ * computation the always-on stale-branch guard (issue #33) relies on. The suite
+ * quantifies lane routing, hold-reason filtering, and the unmapped-branch and
+ * error-invariance properties over generated `RecoveryDiscovery` results, rather
+ * than hand-picked examples.
+ */
 // Property tests for the pure held-set computation the always-on stale-branch
 // guard (issue #33) depends on. computeHeldFromDiscovery maps a discovery to the
 // roadmap ids whose surviving branch must be held out of ordinary selection, so

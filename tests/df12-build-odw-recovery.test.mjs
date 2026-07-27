@@ -109,6 +109,7 @@ return {
   runRecovery,
   computeHeldFromDiscovery,
   discoverHeldBranches,
+  applyStaleBranchGuard,
   takenSnapshot,
   isAlreadyTaken,
   recoveryHeldNormal,
@@ -285,6 +286,45 @@ test('the guard holds survivors that do not match a set resumeTaskId (issue #33)
   for (const id of guard.held.normal) surface.recoveryHeldNormal.add(id)
   for (const id of guard.held.addendum) surface.recoveryHeldAddendum.add(id)
   assert.equal(surface.isAlreadyTaken({ id: '1.2.4', isAddendum: false }), true)
+})
+
+test('discoverHeldBranches preserves per-branch provenance for held survivors (issue #33)', async () => {
+  // recovery.unresolved needs branch name and hold reason for guard-held
+  // survivors, which never produce a recovery result. discoverHeldBranches must
+  // therefore surface provenance alongside the bare id sets.
+  const surface = await loadRecoverySurface({})
+  const repo = makeRecoveryRepo()
+
+  const guard = await surface.discoverHeldBranches(repo.dir)
+  const byId = new Map(guard.provenance.map((entry) => [entry.id, entry]))
+  // roadmap-1-2-4 survives with no worktree (missing-worktree, a skip reason).
+  assert.deepEqual(byId.get('1.2.4'), { id: '1.2.4', isAddendum: false, branchName: 'roadmap-1-2-4', reason: 'missing-worktree' })
+  // roadmap-1-2-3 is a resumable candidate that still has its worktree.
+  assert.deepEqual(byId.get('1.2.3'), { id: '1.2.3', isAddendum: false, branchName: 'roadmap-1-2-3', reason: 'live-worktree' })
+  // The completed branch is never held, so it carries no provenance.
+  assert.equal(byId.has('2.1.1'), false)
+})
+
+test('the guard degrades a discovery failure to a warning without aborting (issue #33)', async () => {
+  // A discovery failure must never abort the run. Pointing the guard at a
+  // directory that is not a git repository makes the fetch/roadmap-read fail;
+  // applyStaleBranchGuard must append a `stale-branch guard:` warning, leave the
+  // held sets untouched, and return normally so ordinary selection continues.
+  const surface = await loadRecoverySurface({})
+  assert.equal(surface.RESUME_PARTIAL_BRANCHES, false)
+  const notARepo = makeFixtureDir('df12-recovery-guard-empty-')
+
+  const heldNormal = new Set()
+  const heldAddendum = new Set()
+  const provenance = new Map()
+  const errors = []
+  await surface.applyStaleBranchGuard(notARepo, heldNormal, heldAddendum, provenance, errors)
+
+  assert.equal(heldNormal.size, 0)
+  assert.equal(heldAddendum.size, 0)
+  assert.equal(provenance.size, 0)
+  assert.ok(errors.some((entry) => entry.startsWith('stale-branch guard: ')), 'a discovery failure must degrade to a warning')
+  assert.ok(!errors.some((entry) => entry.startsWith('stale-branch guard failed:')), 'the reachable failure path is warning-only, not the defensive catch')
 })
 
 test('discovery keeps addendum branches for parents with open sub-tasks', async () => {

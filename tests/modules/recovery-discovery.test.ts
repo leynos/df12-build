@@ -1,3 +1,9 @@
+/**
+ * @file Module tests for fresh-run recovery discovery: `makeRecoveryDiscovery`
+ * against the shared recovery fixture repo, the committed-ExecPlan reader, the
+ * synthetic implementation bridge, and the pure held-set helpers
+ * (`computeHeldFromDiscovery`, `heldBranchesFromDiscovery`).
+ */
 // Module tests for fresh-run recovery discovery (decomposition milestone 4):
 // makeRecoveryDiscovery against the shared recovery fixture repo, the
 // committed-ExecPlan reader, and the synthetic implementation bridge.
@@ -10,6 +16,7 @@ import { makeRecoveryRepo, RECOVERY_ROADMAP } from '../fixtures/recovery-repo.mj
 import {
   RECOVERY_HOLD_REASONS,
   computeHeldFromDiscovery,
+  heldBranchesFromDiscovery,
   makeRecoveryDiscovery,
   readExecplanState,
   recoveryExecplanPath,
@@ -209,6 +216,31 @@ describe('computeHeldFromDiscovery', () => {
     })
     expect(held.addendum.has('2.1.2')).toBe(true)
     expect(held.normal.has('2.1.2')).toBe(false)
+  })
+})
+
+describe('heldBranchesFromDiscovery', () => {
+  test('preserves branch name and hold reason for each held survivor', () => {
+    // Provenance the guard needs so recovery.unresolved can name each held
+    // branch: skips carry their discovery reason; a resumable candidate that
+    // still has its worktree is labelled `live-worktree`; completed/unmapped
+    // branches carry no provenance at all.
+    const held = heldBranchesFromDiscovery({
+      candidates: [
+        { taskId: '1.2.3', taskTitle: '', branchName: 'roadmap-1-2-3', worktreePath: '/wt', baseCommit: '', currentCommit: '', roadmapComplete: false, isAddendum: false, line: 1 },
+      ],
+      skipped: [
+        { id: '1.2.4', branchName: 'roadmap-1-2-4', reason: 'missing-worktree' },
+        { id: '2.1.2', branchName: 'roadmap-2-1-2-addendum', reason: 'candidate-cap' },
+        { id: '2.1.1', branchName: 'roadmap-2-1-1', reason: 'already-complete' },
+      ],
+      errors: [],
+    })
+    expect(held).toEqual([
+      { id: '1.2.4', isAddendum: false, branchName: 'roadmap-1-2-4', reason: 'missing-worktree' },
+      { id: '2.1.2', isAddendum: true, branchName: 'roadmap-2-1-2-addendum', reason: 'candidate-cap' },
+      { id: '1.2.3', isAddendum: false, branchName: 'roadmap-1-2-3', reason: 'live-worktree' },
+    ])
   })
 })
 

@@ -874,17 +874,17 @@ host gates and host review in the review rounds and addendum lane), and
 `runRecovery`, which runs only when `resumePartialBranches` is on. With
 recovery off, normal selection could still pick a surviving `roadmap-*` branch
 that had no live worktree, after which `git worktree add -b` collided with the
-stale branch. The pure held-set computation was lifted out of `runRecovery`
-into `computeHeldFromDiscovery` (in `recovery-discovery.ts`, where its
-dependencies — the discovery result, `branchToRoadmapId`, and
-`RECOVERY_HOLD_REASONS` — already live), and a read-only `discoverHeldBranches`
-helper in `main.ts` reruns the same durable-state bootstrap (best-effort fetch,
-canonical roadmap read, git-only discovery) without any assess/resume side
-effect. `workflowMain` now runs that guard whenever `resumePartialBranches` is
-off, merging its held ids into `recoveryHeldNormal`/`recoveryHeldAddendum` so
-the existing `takenSnapshot`/`isAlreadyTaken` exclusion point drops the stale
-ids. A discovery failure degrades to a warning and never aborts the run,
-mirroring the recovery `catch`. Tests: a module test for
-`computeHeldFromDiscovery` against the real-git `makeRecoveryRepo` fixture, and
-an artefact test that drives `discoverHeldBranches` with recovery off and
-asserts the held stale id reaches `takenSnapshot`/`isAlreadyTaken`.
+stale branch. The pure held-set computation was lifted out of `runRecovery` into
+`computeHeldFromDiscovery` (in `recovery-discovery.ts`, where its dependencies
+— the discovery result, `branchToRoadmapId`, and `RECOVERY_HOLD_REASONS` —
+already live), and a read-only `discoverHeldBranches` helper in `main.ts`
+reruns the same durable-state bootstrap (best-effort fetch, canonical roadmap
+read, git-only discovery) without any assess/resume side effect. `workflowMain`
+now runs that guard whenever `resumePartialBranches` is off, merging its held
+ids into `recoveryHeldNormal`/`recoveryHeldAddendum` so the existing
+`takenSnapshot`/`isAlreadyTaken` exclusion point drops the stale ids. A
+discovery failure degrades to a warning and never aborts the run, mirroring the
+recovery `catch`. Tests: a module test for `computeHeldFromDiscovery` against
+the real-git `makeRecoveryRepo` fixture, and an artefact test that drives
+`discoverHeldBranches` with recovery off and asserts the held stale id reaches
+`takenSnapshot`/`isAlreadyTaken`.

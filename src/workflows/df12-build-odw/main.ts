@@ -54,7 +54,9 @@ import {
   recoveryExecplanPath,
   syntheticRecoveryImpl,
   computeHeldFromDiscovery,
+  heldBranchesFromDiscovery,
 } from './recovery-discovery.ts'
+import type { HeldBranch } from './recovery-discovery.ts'
 import { makeConfig } from './config.ts'
 import { makePrompts, worktreeSafetyNet } from './prompts.ts'
 import { makeWritePreflight } from './write-preflight.ts'
@@ -515,6 +517,19 @@ async function executeResume(
 }
 
 /**
+ * Key a held branch by roadmap id and lane so provenance survives the id-set
+ * exclusion: `normal` and `addendum` lanes can hold the same id independently,
+ * so both parts are needed to avoid collision.
+ *
+ * @param id - The dotted roadmap task id.
+ * @param isAddendum - Whether the branch is an addendum lane branch.
+ * @returns A stable lane-qualified key.
+ */
+function heldProvenanceKey(id: string, isAddendum: boolean): string {
+  return `${isAddendum ? 'a' : 'n'}:${id}`
+}
+
+/**
  * Read-only stale-branch discovery for the always-on selection guard. It runs
  * the same durable-state bootstrap runRecovery does — best-effort fetch of the
  * base branch, canonical roadmap read, then git-only candidate discovery — and
@@ -528,11 +543,13 @@ async function executeResume(
  * never silently dropped.
  *
  * @param root - The Git root to discover surviving branches within.
- * @returns The held ids (split into `normal` and `addendum` lanes) plus any
- *   discovery errors for the caller to log.
+ * @returns The held ids (split into `normal` and `addendum` lanes), the per-
+ *   branch provenance ({@link HeldBranch}: id, lane, branch name, hold reason)
+ *   for operator diagnosis, plus any discovery errors for the caller to log.
  */
 async function discoverHeldBranches(root: string): Promise<{
   held: { normal: Set<string>; addendum: Set<string> }
+  provenance: HeldBranch[]
   errors: string[]
 }> {
   const errors: string[] = []
@@ -545,11 +562,11 @@ async function discoverHeldBranches(root: string): Promise<{
     roadmap = await readRoadmapForSelection(root)
   } catch (error) {
     errors.push(((error as Error | null) && (error as Error).message) || String(error))
-    return { held: { normal: new Set<string>(), addendum: new Set<string>() }, errors }
+    return { held: { normal: new Set<string>(), addendum: new Set<string>() }, provenance: [], errors }
   }
   const discovery = await discoverAllRecoveryCandidates(roadmap.text, root)
   errors.push(...discovery.errors)
-  return { held: computeHeldFromDiscovery(discovery), errors }
+  return { held: computeHeldFromDiscovery(discovery), provenance: heldBranchesFromDiscovery(discovery), errors }
 }
 
 /**
@@ -568,6 +585,10 @@ async function discoverHeldBranches(root: string): Promise<{
  * @param heldNormal - Normal-lane held id set; discovered ids are added to it.
  * @param heldAddendum - Addendum-lane held id set; discovered ids are added to
  *   it.
+ * @param provenance - Held-branch provenance map keyed by
+ *   {@link heldProvenanceKey}; each held branch's {@link HeldBranch} record is
+ *   recorded so the terminal result can report branch name and hold reason for
+ *   guard-held survivors that never produced a recovery result.
  * @param errors - Run error accumulator; discovery and guard failures are
  *   appended as warnings.
  */
@@ -575,6 +596,7 @@ async function applyStaleBranchGuard(
   root: string,
   heldNormal: Set<string>,
   heldAddendum: Set<string>,
+  provenance: Map<string, HeldBranch>,
   errors: string[],
 ): Promise<void> {
   if (RESUME_PARTIAL_BRANCHES) return
@@ -582,7 +604,14 @@ async function applyStaleBranchGuard(
     const guard = await discoverHeldBranches(root)
     for (const id of guard.held.normal) heldNormal.add(id)
     for (const id of guard.held.addendum) heldAddendum.add(id)
+    for (const branch of guard.provenance) provenance.set(heldProvenanceKey(branch.id, branch.isAddendum), branch)
     for (const detail of guard.errors) errors.push(`stale-branch guard: ${detail}`)
+    const heldCount = guard.held.normal.size + guard.held.addendum.size
+    const heldIds = guard.provenance.map((branch) => branch.branchName).join(', ')
+    log(
+      `[recovery] stale-branch guard: recovery disabled; held ${heldCount} surviving branch(es) out of selection` +
+        `${heldCount ? ` (${heldIds})` : ''}${guard.errors.length ? `; ${guard.errors.length} discovery warning(s)` : ''}`,
+    )
   } catch (error) {
     const detail = ((error as Error | null) && (error as Error).message) || String(error)
     errors.push(`stale-branch guard failed: ${detail}`)
@@ -813,6 +842,11 @@ const dryRunNormal = new Set<string>()
 const dryRunAddendum = new Set<string>()
 const recoveryHeldNormal = new Set<string>()
 const recoveryHeldAddendum = new Set<string>()
+// Provenance for guard-held survivors (recovery disabled), keyed by
+// heldProvenanceKey. The stale-branch guard produces no recovery result, so
+// this is the only source of branch name and hold reason for those ids when
+// the terminal state assembles recovery.unresolved.
+const recoveryHeldProvenance = new Map<string, HeldBranch>()
 let recovery: RecoveryRunSummary = {
   enabled: RESUME_PARTIAL_BRANCHES,
   mode: RESUME_MODE,
@@ -1116,7 +1150,7 @@ if (RESUME_PARTIAL_BRANCHES && !halted) {
 }
 // Hold surviving roadmap-* branches out of selection when recovery is disabled
 // (a no-op otherwise). See applyStaleBranchGuard for the full rationale.
-await applyStaleBranchGuard(process.cwd(), recoveryHeldNormal, recoveryHeldAddendum, recovery.errors)
+await applyStaleBranchGuard(process.cwd(), recoveryHeldNormal, recoveryHeldAddendum, recoveryHeldProvenance, recovery.errors)
 
 while (true) {
   if (!stop && !halted) {
@@ -1206,13 +1240,19 @@ const unresolvedRecovery = [
 recovery.unresolved = unresolvedRecovery.map((entry) => {
   const reported = (recovery.results || []).filter((result) => result.id === entry.id)
   const last = reported[reported.length - 1]
+  // Guard-held survivors (recovery disabled) never produced a recovery result,
+  // so fall back to the guard provenance for branch name and hold reason. When
+  // a reported candidate carries no explicit reason, surface its classification
+  // as the reason so every unresolved entry names why it is still held.
+  const held = recoveryHeldProvenance.get(heldProvenanceKey(entry.id, entry.isAddendum))
+  const reason = last?.reason || last?.classification || (held ? `recovery-disabled: ${held.reason}` : '')
   return {
     id: entry.id,
     isAddendum: entry.isAddendum,
-    branchName: last?.branchName || '',
+    branchName: last?.branchName || held?.branchName || '',
     classification: last?.classification || '',
     action: last?.action || 'held',
-    ...(last?.reason ? { reason: last.reason } : {}),
+    ...(reason ? { reason } : {}),
   }
 })
 if (!halted && unresolvedRecovery.length) {
