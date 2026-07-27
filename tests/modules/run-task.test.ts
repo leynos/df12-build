@@ -13,6 +13,7 @@ import {
   summarizeFixReport,
   summarizeReviewVerdict,
 } from '../../src/workflows/df12-build-odw/run-task.ts'
+import { classifyCoderabbitOutcome, parseCoderabbitAgentOutput } from '../../src/workflows/df12-build-odw/host-review.ts'
 
 const globals = globalThis as Record<string, unknown>
 
@@ -615,6 +616,35 @@ describe('runTask', () => {
     expect(outcome.stage).toBe('code-review')
     expect(outcome.detail).toMatch(/could not complete/)
     expect(outcome.assessed).toBe(true)
+    expect(labels.some((label) => label.startsWith('integrate:'))).toBe(false)
+  })
+
+  test('between-item CodeRabbit login timeout halts as fatal auth', async () => {
+    const worktree = makeWorktree()
+    writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: IN PROGRESS\n\n## Progress\n\n- [ ] WI-1: only\n')
+    git(worktree, 'add', '.')
+    git(worktree, 'commit', '-m', 'One-item checklist')
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('implement:')) {
+        writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: COMPLETE\n\n## Progress\n\n- [x] WI-1: only\n')
+        git(worktree, 'commit', '-aqm', 'Tick WI-1')
+        return { ok: true, gatesGreen: true, workItemsCompleted: 1, workItemsTotal: 1, commits: ['c1'], coderabbitRuns: 0, openIssues: [], summary: 'done' }
+      }
+      return happyScript()(label, prompt)
+    })
+    const detail = 'Automatic login timed out. Use the printed fallback URL to finish authentication.'
+    const parsed = parseCoderabbitAgentOutput(`{"type":"error","errorType":"unknown","message":"${detail}"}`)
+    const coderabbitOutcome = classifyCoderabbitOutcome({ ok: true, stderr: '', message: '' }, parsed)
+    const pipe = subject(worktree, {
+      PER_WORK_ITEM_BUILD: true,
+      CODERABBIT_HOST_REVIEW: true,
+      CODERABBIT_BETWEEN_WORK_ITEMS: true,
+      runCoderabbitHostReview: async () => ({ outcome: coderabbitOutcome, attempts: 1, findings: [], detail }),
+    })
+    const outcome = await pipe.runTask(task, null)
+    expect(outcome.status).toBe('fatal-auth')
+    expect(outcome.stage).toBe('auth')
+    expect(outcome.assessed).toBeUndefined()
     expect(labels.some((label) => label.startsWith('integrate:'))).toBe(false)
   })
 

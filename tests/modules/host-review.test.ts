@@ -38,7 +38,7 @@ describe('classifyCoderabbitOutcome terminal completion', () => {
     expect(classifyCoderabbitOutcome({ ok: true, stderr: '', message: '' }, parsed)).toBe('rate-limited')
   })
 
-  test('a login-timeout error classifies as auth, not a deferred error', () => {
+  test('a complete login-timeout abandonment error classifies as auth', () => {
     const parsed = parseCoderabbitAgentOutput(
       '{"type":"error","errorType":"unknown","message":"Automatic login timed out. Use the printed fallback URL to finish authentication."}',
     )
