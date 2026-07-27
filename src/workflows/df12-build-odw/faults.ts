@@ -121,7 +121,7 @@ export async function hostSleepSeconds(seconds: number): Promise<void> {
  * Deterministic backoff jitter, in whole seconds, spread across `[low, high]`. A
  * DJB2 hash of the seed picks a point in the range, so `Math.random()` (banned
  * for Claude Code workflow dual-compatibility — ODW scanDualCompat) is never
- * called, yet distinct seeds still de-synchronise sibling tasks that hit the
+ * called, yet distinct seeds still de-synchronize sibling tasks that hit the
  * same provider limit at once. The result is stable for a given seed and range.
  * Mirrors `coderabbitBackoffMinutes` in host-review.ts.
  *
