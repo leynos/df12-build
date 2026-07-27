@@ -46,8 +46,9 @@ describe('failure classifiers', () => {
     ['codex usage limit hit', "You've hit your usage limit. Purchase more credits to continue.", 'usage-limit'],
     ['codex usage limit reset window', 'Usage limit reached. Limits reset every 5 hours.', 'usage-limit'],
     ['codex usage limit try again at', 'Usage limit reached; try again at 14:00 UTC', 'usage-limit'],
-    ['api rate_limit_exceeded', 'API Error: rate_limit_exceeded', 'usage-limit'],
-    ['api exceeded the rate limit', 'You have exceeded the rate limit for this account', 'usage-limit'],
+    ['transient API rate_limit_exceeded', 'API Error: 429 rate_limit_exceeded', 'provider'],
+    ['generic exceeded rate limit', 'You have exceeded the rate limit for this account', 'none'],
+    ['quota-specific rate_limit_exceeded', 'API Error: rate_limit_exceeded; usage quota exhausted', 'usage-limit'],
     ['ordinary review failure', 'coderabbit found 3 blocking issues', 'none'],
     ['ordinary gate failure', 'make all failed: tests exited 1', 'none'],
     ['prose mentioning auth', 'documented the authorization design', 'none'],
@@ -102,6 +103,21 @@ describe('makeWithInfraRetry', () => {
     expect(faultMetrics.infraRetries).toBe(0)
   })
 
+  test('a transient provider 429 that also matches the infra prefix is retried', async () => {
+    const withInfraRetry = makeWithInfraRetry(2)
+    let calls = 0
+    const flaky = async () => {
+      calls += 1
+      if (calls === 1) {
+        throw new Error("adapter 'codex' exited with code 1: API Error: 429 rate_limit_exceeded")
+      }
+      return 'ok'
+    }
+    expect(await withInfraRetry(flaky, 'stage')).toBe('ok')
+    expect(calls).toBe(2)
+    expect(faultMetrics.infraRetries).toBe(1)
+  })
+
   test('a transient fault that recovers returns the eventual value', async () => {
     const withInfraRetry = makeWithInfraRetry(2)
     let calls = 0
@@ -130,6 +146,17 @@ describe('resultFromUnhandledAgentError', () => {
     expect(result.stage).toBe('usage-limit')
     expect(faultMetrics.usageLimitFaults).toBe(1)
     expect(faultMetrics.infraFaults).toBe(0)
+  })
+
+  test('an ordinary provider 429 is not claimed as a usage-limit fault', () => {
+    const result = resultFromUnhandledAgentError(
+      '1.1',
+      "adapter 'codex' exited with code 1: API Error: 429 rate_limit_exceeded",
+    )
+    expect(result.status).toBe('provider-fault')
+    expect(result.stage).toBe('provider')
+    expect(faultMetrics.providerFaults).toBe(1)
+    expect(faultMetrics.usageLimitFaults).toBe(0)
   })
 
   test('extra fields ride along and proposals default empty', () => {

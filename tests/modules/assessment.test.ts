@@ -395,6 +395,42 @@ describe('infra-fault artefact salvage (#18)', () => {
     expect(result.salvage).toBeUndefined()
     expect(git(dir, 'status', '--porcelain=v1')).toBe(`?? ${REVIEW_REL}`)
   })
+
+  for (const [label, result] of [
+    [
+      'status',
+      {
+        id: '1.2.3',
+        status: 'usage-limit-fault',
+        stage: 'review',
+        detail: 'SchemaValidationError while reporting usage exhaustion',
+      },
+    ],
+    [
+      'stage',
+      {
+        id: '1.2.3',
+        status: 'failed',
+        stage: 'usage-limit',
+        detail: 'SchemaValidationError while reporting usage exhaustion',
+      },
+    ],
+  ] as const) {
+    test(`a usage-limit fault with infra-shaped detail does not trigger infra-fault salvage (${label})`, async () => {
+      const { dir, baseSha } = makeRepoWithExecplans()
+      addUntrackedReview(dir)
+      globals.agent = async () => {
+        throw new Error('the model must not be called for a usage-limit fault')
+      }
+      const attached = await subject().attachAssessment(
+        { id: '1.2.3', title: 'Parser' },
+        { branch: 'roadmap-1-2-3', worktreePath: dir, baseSha },
+        result,
+      )
+      expect(attached.salvage).toBeUndefined()
+      expect(git(dir, 'status', '--porcelain=v1')).toBe(`?? ${REVIEW_REL}`)
+    })
+  }
 })
 
 // The terminal-summary aggregation (main.ts) is a pure helper so it can be

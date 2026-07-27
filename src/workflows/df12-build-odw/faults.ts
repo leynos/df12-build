@@ -54,15 +54,18 @@ export function providerFailureDetail(value: unknown): string {
 // vocabulary so ordinary prose does not match.
 export function usageLimitFailureDetail(value: unknown): string {
   const text = String(value || '')
-  const patterns = [
+  const usageLimitPatterns = [
     /You['’]ve hit your usage limit/i,
     /purchase more credits/i,
     /Limits reset every/i,
     /usage limit reached.*try again at/i,
-    /\brate_limit_exceeded\b/i,
-    /exceeded the rate limit/i,
   ]
-  return patterns.some((pattern) => pattern.test(text)) ? text.trim() : ''
+  const apiRateLimitPattern = /\brate_limit_exceeded\b|exceeded the rate limit/i
+  const quotaContextPattern = /\b(?:usage (?:limit|quota)|quota (?:exhausted|spent)|limits? reset|purchase more credits)\b/i
+  const isUsageLimit =
+    usageLimitPatterns.some((pattern) => pattern.test(text)) ||
+    (apiRateLimitPattern.test(text) && quotaContextPattern.test(text))
+  return isUsageLimit ? text.trim() : ''
 }
 
 // ODW-level infrastructure faults: the agent process died or its reply

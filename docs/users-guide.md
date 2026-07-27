@@ -756,7 +756,7 @@ stage spends its rolling five-hour (or weekly) usage quota, the workflow does
 **not** retry it in place — the reset window is hours long, so a warm retry
 would waste the run's remaining time. The task terminates with status
 `usage-limit-fault`, the run halts, no assessment agent is spawned, and (as
-with provider faults) the final remediation flush is skipped so an exhausted
+with provider faults) the final remediation flush is skipped, so an exhausted
 quota never looks like task evidence. The halt detail directs the operator to
 relaunch with `resumePartialBranches=true` and `resumeMode="continue"` once the
 Codex usage limit resets; the committed ExecPlan makes that resume a warm

@@ -133,6 +133,9 @@ const NON_ASSESSABLE_STATUSES = new Set([
   'infra-fault',
 ])
 
+// These three checks cover normalized stage/status values and fault signatures
+// that may survive only in detail or openIssues when those fields are unset or
+// inconsistent.
 function isNonAssessableFaultResult(result: AssessableResult): boolean {
   if (NON_ASSESSABLE_STAGES.has(result.stage || '')) return true
   if (NON_ASSESSABLE_STATUSES.has(result.status || '')) return true
@@ -283,8 +286,19 @@ function isInfraFaultResult(result: AssessableResult | null | undefined): boolea
   // detail happens to embed infra-shaped text (e.g. a provider error that quotes
   // an underlying SchemaValidationError). Only a genuine product failure whose
   // detail matches the ODW infrastructure patterns falls through.
-  if (result.status === 'done' || result.status === 'provider-fault' || result.status === 'fatal-auth') return false
-  if (result.stage === 'provider' || result.stage === 'auth' || result.stage === 'worktree' || result.stage === 'worktree-write') return false
+  if (
+    result.status === 'done' ||
+    result.status === 'usage-limit-fault' ||
+    result.status === 'provider-fault' ||
+    result.status === 'fatal-auth'
+  ) return false
+  if (
+    result.stage === 'usage-limit' ||
+    result.stage === 'provider' ||
+    result.stage === 'auth' ||
+    result.stage === 'worktree' ||
+    result.stage === 'worktree-write'
+  ) return false
   const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
   return Boolean(infrastructureFailureDetail(detail))
 }
