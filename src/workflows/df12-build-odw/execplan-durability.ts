@@ -6,13 +6,16 @@
  * write-probe: prompts request, the host verifies.
  */
 import { execFileStatus, fileState } from './exec.ts'
-import { addAndCommit, isReviewSibling, porcelainLines, porcelainPath } from './git-worktree.ts'
+import { addAndCommit, isReviewSibling, partitionExecplanDirtyPaths, porcelainLines, porcelainPath } from './git-worktree.ts'
 import { parseExecplanState } from './recovery-decision.ts'
 
 /** The pass/fail outcome of a durability check: whether the target is durable, and why not when it is not. */
 export interface DurabilityVerdict {
   ok: boolean
   detail: string
+  committedPathCount?: number
+  skippedPathCount?: number
+  errorClass?: string
 }
 
 /** Task worktree, untrusted plan path, and task tag for a host-owned commit. */
@@ -110,7 +113,7 @@ export async function commitExecplanApproval({ worktree, planPath, tag }: Execpl
   const fs = process.getBuiltinModule('node:fs/promises')
   const path = process.getBuiltinModule('node:path')
   const contained = execplanRelPath(worktree, planPath)
-  if (!contained.ok) return { ok: false, detail: contained.detail }
+  if (!contained.ok) return { ok: false, detail: contained.detail, errorClass: 'path-containment' }
   const relPath = contained.relPath
   const absPath = path.join(worktree, relPath)
   try {
@@ -138,14 +141,15 @@ export async function commitExecplanApproval({ worktree, planPath, tag }: Execpl
       }
     }
   } catch (error) {
-    return { ok: false, detail: `could not update the plan status: ${((error as Error | null) && (error as Error).message) || String(error)}` }
+    return { ok: false, detail: `could not update the plan status: ${((error as Error | null) && (error as Error).message) || String(error)}`, errorClass: 'plan-status-update' }
   }
   const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1', '--', relPath])
   if (!status.ok) {
-    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || '').trim()}` }
+    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || '').trim()}`, errorClass: 'git-status' }
   }
-  if (!String(status.stdout).trim()) return { ok: true, detail: 'already committed as APPROVED' }
-  return addAndCommit(worktree, [relPath], `Approve ExecPlan for task ${tag}`)
+  if (!String(status.stdout).trim()) return { ok: true, detail: 'already committed as APPROVED', committedPathCount: 0, skippedPathCount: 0 }
+  const outcome = await addAndCommit(worktree, [relPath], `Approve ExecPlan for task ${tag}`)
+  return { ...outcome, committedPathCount: outcome.ok ? 1 : 0, skippedPathCount: 0 }
 }
 
 /**
@@ -166,22 +170,25 @@ export async function commitExecplanApproval({ worktree, planPath, tag }: Execpl
  */
 export async function commitExecplanDraft({ worktree, planPath, tag }: ExecplanCommit): Promise<DurabilityVerdict> {
   const contained = execplanRelPath(worktree, planPath)
-  if (!contained.ok) return { ok: false, detail: contained.detail }
+  if (!contained.ok) return { ok: false, detail: contained.detail, committedPathCount: 0, skippedPathCount: 0, errorClass: 'path-containment' }
   const relPath = contained.relPath
   const status = await porcelainLines(worktree)
-  if (!status.ok) return { ok: false, detail: status.detail }
+  if (!status.ok) return { ok: false, detail: status.detail, committedPathCount: 0, skippedPathCount: 0, errorClass: 'git-status' }
   const lines = status.lines
-  if (!lines.length) return { ok: false, detail: 'nothing to commit: the worktree is already clean' }
-  const foreign = lines.filter((line) => {
-    const dirty = porcelainPath(line)
-    return dirty !== relPath && !isReviewSibling(dirty, relPath)
-  })
+  if (!lines.length) return { ok: false, detail: 'nothing to commit: the worktree is already clean', committedPathCount: 0, skippedPathCount: 0, errorClass: 'already-clean' }
+  const { allowed, foreign } = partitionExecplanDirtyPaths(lines, relPath)
   if (foreign.length) {
     const sample = foreign.slice(0, 8).map((line) => line.trim()).join('; ')
-    return { ok: false, detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? '; …' : ''})` }
+    return {
+      ok: false,
+      detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? '; …' : ''})`,
+      committedPathCount: 0,
+      skippedPathCount: foreign.length,
+      errorClass: 'foreign-dirt',
+    }
   }
-  const allowed = lines.map(porcelainPath)
-  return addAndCommit(worktree, allowed, `Draft ExecPlan for task ${tag}`)
+  const outcome = await addAndCommit(worktree, allowed, `Draft ExecPlan for task ${tag}`)
+  return { ...outcome, committedPathCount: outcome.ok ? allowed.length : 0, skippedPathCount: 0 }
 }
 
 /**
@@ -192,13 +199,14 @@ export async function commitExecplanDraft({ worktree, planPath, tag }: ExecplanC
  */
 export async function commitReviewArtefacts({ worktree, planPath, tag }: ExecplanCommit): Promise<DurabilityVerdict> {
   const contained = execplanRelPath(worktree, planPath)
-  if (!contained.ok) return { ok: false, detail: contained.detail }
+  if (!contained.ok) return { ok: false, detail: contained.detail, committedPathCount: 0, skippedPathCount: 0, errorClass: 'path-containment' }
   const relPath = contained.relPath
   const status = await porcelainLines(worktree)
-  if (!status.ok) return { ok: false, detail: status.detail }
+  if (!status.ok) return { ok: false, detail: status.detail, committedPathCount: 0, skippedPathCount: 0, errorClass: 'git-status' }
   const siblings = status.lines.map(porcelainPath).filter((dirty) => isReviewSibling(dirty, relPath))
-  if (!siblings.length) return { ok: true, detail: '' }
-  return addAndCommit(worktree, siblings, `Commit design-review notes for task ${tag}`)
+  if (!siblings.length) return { ok: true, detail: '', committedPathCount: 0, skippedPathCount: 0 }
+  const outcome = await addAndCommit(worktree, siblings, `Commit design-review notes for task ${tag}`)
+  return { ...outcome, committedPathCount: outcome.ok ? siblings.length : 0, skippedPathCount: 0 }
 }
 
 /**

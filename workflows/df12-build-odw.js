@@ -1561,6 +1561,16 @@ function isReviewSibling(relPath, planRelPath) {
   const escaped = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`^${escaped}\\.review-r\\d+\\.md$`).test(path.basename(relPath));
 }
+function partitionExecplanDirtyPaths(lines, planRelPath) {
+  const allowed = [];
+  const foreign = [];
+  for (const line of lines) {
+    const dirty = porcelainPath(line);
+    if (dirty === planRelPath || isReviewSibling(dirty, planRelPath)) allowed.push(dirty);
+    else foreign.push(line);
+  }
+  return { allowed, foreign };
+}
 async function porcelainLines(worktree) {
   const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
   if (!status.ok) return { ok: false, lines: [], detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
@@ -1568,7 +1578,7 @@ async function porcelainLines(worktree) {
 }
 async function addAndCommit(worktree, paths, message) {
   const add = await execFileStatus("git", ["-C", worktree, "add", "--", ...paths]);
-  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}` };
+  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || "").trim()}`, errorClass: "git-add" };
   const commit = await execFileStatus("git", [
     "-C",
     worktree,
@@ -1582,7 +1592,7 @@ async function addAndCommit(worktree, paths, message) {
     "--",
     ...paths
   ]);
-  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}` };
+  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || "").trim()}`, errorClass: "git-commit" };
   return { ok: true, detail: "" };
 }
 
@@ -1617,7 +1627,7 @@ async function commitExecplanApproval({ worktree, planPath, tag }) {
   const fs = process.getBuiltinModule("node:fs/promises");
   const path = process.getBuiltinModule("node:path");
   const contained = execplanRelPath(worktree, planPath);
-  if (!contained.ok) return { ok: false, detail: contained.detail };
+  if (!contained.ok) return { ok: false, detail: contained.detail, errorClass: "path-containment" };
   const relPath = contained.relPath;
   const absPath = path.join(worktree, relPath);
   try {
@@ -1642,43 +1652,48 @@ Status: APPROVED
       }
     }
   } catch (error) {
-    return { ok: false, detail: `could not update the plan status: ${error && error.message || String(error)}` };
+    return { ok: false, detail: `could not update the plan status: ${error && error.message || String(error)}`, errorClass: "plan-status-update" };
   }
   const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1", "--", relPath]);
   if (!status.ok) {
-    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || "").trim()}` };
+    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || "").trim()}`, errorClass: "git-status" };
   }
-  if (!String(status.stdout).trim()) return { ok: true, detail: "already committed as APPROVED" };
-  return addAndCommit(worktree, [relPath], `Approve ExecPlan for task ${tag}`);
+  if (!String(status.stdout).trim()) return { ok: true, detail: "already committed as APPROVED", committedPathCount: 0, skippedPathCount: 0 };
+  const outcome = await addAndCommit(worktree, [relPath], `Approve ExecPlan for task ${tag}`);
+  return { ...outcome, committedPathCount: outcome.ok ? 1 : 0, skippedPathCount: 0 };
 }
 async function commitExecplanDraft({ worktree, planPath, tag }) {
   const contained = execplanRelPath(worktree, planPath);
-  if (!contained.ok) return { ok: false, detail: contained.detail };
+  if (!contained.ok) return { ok: false, detail: contained.detail, committedPathCount: 0, skippedPathCount: 0, errorClass: "path-containment" };
   const relPath = contained.relPath;
   const status = await porcelainLines(worktree);
-  if (!status.ok) return { ok: false, detail: status.detail };
+  if (!status.ok) return { ok: false, detail: status.detail, committedPathCount: 0, skippedPathCount: 0, errorClass: "git-status" };
   const lines = status.lines;
-  if (!lines.length) return { ok: false, detail: "nothing to commit: the worktree is already clean" };
-  const foreign = lines.filter((line) => {
-    const dirty = porcelainPath(line);
-    return dirty !== relPath && !isReviewSibling(dirty, relPath);
-  });
+  if (!lines.length) return { ok: false, detail: "nothing to commit: the worktree is already clean", committedPathCount: 0, skippedPathCount: 0, errorClass: "already-clean" };
+  const { allowed, foreign } = partitionExecplanDirtyPaths(lines, relPath);
   if (foreign.length) {
     const sample = foreign.slice(0, 8).map((line) => line.trim()).join("; ");
-    return { ok: false, detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? "; \u2026" : ""})` };
+    return {
+      ok: false,
+      detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? "; \u2026" : ""})`,
+      committedPathCount: 0,
+      skippedPathCount: foreign.length,
+      errorClass: "foreign-dirt"
+    };
   }
-  const allowed = lines.map(porcelainPath);
-  return addAndCommit(worktree, allowed, `Draft ExecPlan for task ${tag}`);
+  const outcome = await addAndCommit(worktree, allowed, `Draft ExecPlan for task ${tag}`);
+  return { ...outcome, committedPathCount: outcome.ok ? allowed.length : 0, skippedPathCount: 0 };
 }
 async function commitReviewArtefacts({ worktree, planPath, tag }) {
   const contained = execplanRelPath(worktree, planPath);
-  if (!contained.ok) return { ok: false, detail: contained.detail };
+  if (!contained.ok) return { ok: false, detail: contained.detail, committedPathCount: 0, skippedPathCount: 0, errorClass: "path-containment" };
   const relPath = contained.relPath;
   const status = await porcelainLines(worktree);
-  if (!status.ok) return { ok: false, detail: status.detail };
+  if (!status.ok) return { ok: false, detail: status.detail, committedPathCount: 0, skippedPathCount: 0, errorClass: "git-status" };
   const siblings = status.lines.map(porcelainPath).filter((dirty) => isReviewSibling(dirty, relPath));
-  if (!siblings.length) return { ok: true, detail: "" };
-  return addAndCommit(worktree, siblings, `Commit design-review notes for task ${tag}`);
+  if (!siblings.length) return { ok: true, detail: "", committedPathCount: 0, skippedPathCount: 0 };
+  const outcome = await addAndCommit(worktree, siblings, `Commit design-review notes for task ${tag}`);
+  return { ...outcome, committedPathCount: outcome.ok ? siblings.length : 0, skippedPathCount: 0 };
 }
 async function salvageTaskArtefacts(worktree, candidatePaths, tag) {
   const skipped = [];
@@ -2404,13 +2419,26 @@ function makeTaskPipeline(deps) {
     runCoderabbitHostReview: runCoderabbitHostReview2,
     recordCoderabbitReview: recordCoderabbitReview2
   } = deps;
-  async function commitDesignApproval(task, worktree, plan, extra) {
+  const MAX_REVIEW_ARTEFACT_COMMIT_FAILURES = 9999;
+  let reviewArtefactCommitFailures = 0;
+  function logReviewArtefactBoundary(boundary, tag, round, outcome) {
+    if (boundary === "approval-review" && !outcome.ok) {
+      reviewArtefactCommitFailures = Math.min(reviewArtefactCommitFailures + 1, MAX_REVIEW_ARTEFACT_COMMIT_FAILURES);
+    }
+    const committed = outcome.committedPathCount || 0;
+    const skipped = outcome.skippedPathCount || 0;
+    const status = outcome.ok ? committed ? "committed" : "no-op" : "failed";
+    log(`[review-artefact] boundary=${boundary} task=${tag} round=${round} status=${status} committed_paths=${committed} skipped_paths=${skipped} error_class=${outcome.errorClass || "none"} failure_count=${reviewArtefactCommitFailures}`);
+  }
+  async function commitDesignApproval(task, worktree, plan, round, extra) {
     const tag = task.id;
     const approved = await commitExecplanApproval({ worktree, planPath: plan.execplanPath, tag });
+    logReviewArtefactBoundary("approval-plan", tag, round, approved);
     if (!approved.ok) {
       return { id: tag, status: "failed", stage: "design-review", detail: `failed to record the committed ExecPlan approval: ${approved.detail}`, plan, worktree, proposals: [], ...extra };
     }
     const reviewCommitted = await commitReviewArtefacts({ worktree, planPath: plan.execplanPath, tag });
+    logReviewArtefactBoundary("approval-review", tag, round, reviewCommitted);
     if (!reviewCommitted.ok) {
       return { id: tag, status: "failed", stage: "design-review", detail: `failed to commit the design-review notes: ${reviewCommitted.detail}`, plan, worktree, proposals: [], ...extra };
     }
@@ -2455,6 +2483,7 @@ function makeTaskPipeline(deps) {
       let salvageNote = "";
       if (!durability.ok) {
         const salvage = await commitExecplanDraft({ worktree, planPath: plan.execplanPath, tag });
+        logReviewArtefactBoundary("draft-salvage", tag, round, salvage);
         if (salvage.ok) {
           log(`[task ${tag}] plan round ${round}: ${durability.detail}; host committed the drafted plan`);
           durability = await verifyExecplanCommitted(worktree, plan.execplanPath);
@@ -2480,7 +2509,7 @@ function makeTaskPipeline(deps) {
       })), `design-review:${tag} r${round}`));
       if (designVerdict?.satisfied) {
         log(`[task ${tag}] design approved in round ${round}`);
-        const approvalFail = await commitDesignApproval(task, worktree, plan, extra);
+        const approvalFail = await commitDesignApproval(task, worktree, plan, round, extra);
         if (approvalFail) return { fail: approvalFail };
         return { plan };
       }
