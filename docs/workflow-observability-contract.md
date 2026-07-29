@@ -67,6 +67,15 @@ The identifiers, and which component mints each, are fixed as follows.
 _Table 1: The identity model. Concrete executions use UUIDv7; logical
 identities use readable keys or hashes._
 
+Every UUIDv7 field must be the lower-case canonical form,
+`xxxxxxxx-xxxx-7xxx-[89ab]xxx-xxxxxxxxxxxx`. The casing is normative rather
+than cosmetic: these values are compared as exact strings when joining
+telemetry to workflow nodes, so an upper-case spelling of the same identifier
+would silently become a different join key. The schemas enforce this shape;
+`correlationId` is deliberately exempt because the contract allows it to be a
+stable readable key instead. The ODW run identifier carried in agent events
+(section 12) is a concrete execution and takes the same shape.
+
 The distinctions carry weight and must not be collapsed:
 
 - A logical node identity (`nodeLogicalId`) says _what_ operation this is.
@@ -182,7 +191,10 @@ envelope. Its authoritative shape is
   when `parent` is present.
 - `trace` (optional): W3C trace context, as `trace.traceparent` (required
   when `trace` is present) and optional `trace.tracestate`. The `traceparent`
-  value must match the W3C format `version-traceid-spanid-flags`.
+  value must match the W3C format `version-traceid-spanid-flags` in lower-case
+  hexadecimal. Three values the width check alone would admit are invalid per
+  the W3C specification and are rejected: the reserved version `ff`, an
+  all-zero trace id, and an all-zero parent (span) id.
 - `sink` (optional): the telemetry destination, described in section 7. When
   absent, telemetry is disabled and the run proceeds normally.
 - `attributes` (optional): a flat map of scalar (string, number, or boolean)
@@ -224,7 +236,9 @@ migrations; a workflow must not open the SQLite store directly.
   the scheme `otlp+http://` or `otlp+https://`. A filesystem path or a
   `file://`, `sqlite:`, or bare `http://` value is invalid. The `otlp+unix://`
   scheme is reserved for a future transport (ADR 003 outstanding decision) and
-  is not valid in version 1.
+  is not valid in version 1. The endpoint must not carry URI userinfo: a value
+  such as `otlp+http://user:password@host:4318` is rejected, because it would
+  otherwise smuggle a credential past the rule below.
 - `sink.protocol` is the constant `http/json`.
 - `sink.authRef` (optional) references a credential by environment variable,
   as `authRef.kind` (constant `environment`) and `authRef.variable` (an
@@ -363,8 +377,10 @@ shape is `schemas/observability/agent-event-extensions.v1.json`. The fields use
 snake_case and are additive: existing event fields (`label`, `phase`,
 `adapter`, and so on) are unchanged. The extension fields are `run_id`,
 `node_attempt_id`, `agent_invocation_id`, `agent_process_id`, and
-`cli_attempt`. These fields are provisional until ODW implements them; the
-names are reserved here so the collector and later steps can code to them.
+`cli_attempt`. The four identifier fields all name concrete executions and so
+take the UUIDv7 shape of section 2; `cli_attempt` is an integer from 1. These
+fields are provisional until ODW implements them; the names are reserved here
+so the collector and later steps can code to them.
 
 ## 13. Schema files and versioning _(normative)_
 

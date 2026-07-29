@@ -170,7 +170,98 @@
           "schemaVersion": 1,
           "correlationId": "0198e5a1-0000-7000-8000-000000000019",
           "attributes": {
-            "nested": { "not": "scalar" }
+            "nested": {
+              "not": "scalar"
+            }
+          }
+        }
+      },
+      {
+        "name": "credentialed endpoint with user and password",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000020",
+          "sink": {
+            "kind": "otlp-http",
+            "endpoint": "otlp+http://user:password@127.0.0.1:4318",
+            "protocol": "http/json"
+          }
+        }
+      },
+      {
+        "name": "credentialed endpoint with bare user",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000021",
+          "sink": {
+            "kind": "otlp-http",
+            "endpoint": "otlp+https://token@collector.internal:4318",
+            "protocol": "http/json"
+          }
+        }
+      },
+      {
+        "name": "traceparent with an all-zero trace id",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000022",
+          "trace": {
+            "traceparent": "00-00000000000000000000000000000000-b7ad6b7169203331-01"
+          }
+        }
+      },
+      {
+        "name": "traceparent with an all-zero parent id",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000023",
+          "trace": {
+            "traceparent": "00-0af7651916cd43dd8448eb211c80319c-0000000000000000-01"
+          }
+        }
+      },
+      {
+        "name": "traceparent with the reserved ff version",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000024",
+          "trace": {
+            "traceparent": "ff-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+          }
+        }
+      },
+      {
+        "name": "workflowInvocationId that is not a UUIDv7",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000025",
+          "workflowInvocationId": "not-a-uuid"
+        }
+      },
+      {
+        "name": "workflowInvocationId with a version nibble other than 7",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000026",
+          "workflowInvocationId": "0198e5a1-0000-4000-8000-0000000000c1"
+        }
+      },
+      {
+        "name": "upper-case workflowInvocationId breaks exact join keys",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000027",
+          "workflowInvocationId": "0198E5A1-0000-7000-8000-0000000000C1"
+        }
+      },
+      {
+        "name": "parent nodeAttemptId that is not a UUIDv7",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000028",
+          "parent": {
+            "workflowInvocationId": "0198e5a1-0000-7000-8000-0000000000d1",
+            "nodeAttemptId": "attempt-1"
           }
         }
       }
@@ -290,6 +381,31 @@
           "first_seen_ns": "1721000000000000000",
           "last_seen_ns": "1721000000000000000"
         }
+      },
+      {
+        "name": "agent_invocation_id that is not a UUIDv7",
+        "value": {
+          "binding_type": "claude.session.id",
+          "binding_value": "sess_abcdef",
+          "agent_invocation_id": "invocation-1",
+          "source": "otlp-header",
+          "confidence": "exact",
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
+        }
+      },
+      {
+        "name": "agent_process_id with a bad variant nibble",
+        "value": {
+          "binding_type": "claude.session.id",
+          "binding_value": "sess_abcdef",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a1",
+          "agent_process_id": "0198e5a1-0000-7000-c000-0000000000b1",
+          "source": "otlp-header",
+          "confidence": "exact",
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
+        }
       }
     ]
   },
@@ -327,6 +443,16 @@
           "agent_invocation_id": "0198e5a1-0000-7000-8000-000000000f23",
           "agent_process_id": "0198e5a1-0000-7000-8000-000000000f24",
           "cli_attempt": 0
+        }
+      },
+      {
+        "name": "agent_invocation_id that is not a UUIDv7",
+        "value": {
+          "run_id": "0198e5a1-0000-7000-8000-000000000f31",
+          "node_attempt_id": "0198e5a1-0000-7000-8000-000000000f32",
+          "agent_invocation_id": "plan-1.2.3-r1",
+          "agent_process_id": "0198e5a1-0000-7000-8000-000000000f34",
+          "cli_attempt": 1
         }
       }
     ]

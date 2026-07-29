@@ -97,6 +97,10 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
 - [x] (2026-07-19) Milestone 4: cross-linked the contract from ADR 003, the
   developers' guide, and the contents index; ticked 5.1.1 in the roadmap; ran
   the full gate and a CodeRabbit review.
+- [x] (2026-07-29) Review follow-up: hardened the schemas after review, so
+  they reject credentialed endpoints, W3C-invalid traceparent values, and
+  malformed UUIDv7 identifiers. Suite now 44 tests; each new negative fixture
+  was checked to fail on its intended rule rather than incidentally.
 
 ## Surprises & discoveries
 
@@ -113,6 +117,16 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
   `first_seen_ns` and `last_seen_ns` as decimal strings, and the contract
   (section 9) states this with rationale; the SQLite store holds them as 64-bit
   integers.
+- Observation: a schema can satisfy its prose and still leave a hole. The
+  first endpoint pattern (`^otlp\+https?://`) admitted
+  `otlp+http://user:password@host:4318`, which defeats section 7's rule that
+  credentials never travel inline; and the first traceparent pattern checked
+  only field widths, so it admitted the reserved `ff` version and the all-zero
+  trace and span ids the W3C specification rejects. Evidence: review of the
+  version-1 schemas. Impact: both fields now pair a positive pattern with `not`
+  clauses, the identifier fields carry a real UUIDv7 shape, and the fixtures
+  cover each case. The wider lesson for step 5.1.2 is to write the negative
+  fixture first and confirm it fails on the intended rule.
 - Observation: ajv strict mode rejects a scalar union type
   (`["string","number","boolean"]`) unless `allowUnionTypes` is set. Evidence:
   `strictTypes` error at the envelope `attributes` value schema. Impact: the
@@ -132,11 +146,13 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
   Rationale: the envelope crosses workflow boundaries, so consumers must be
   able to pin an exact version. Date/Author: 2026-07-18, this plan.
 - Decision: the test file is `tests/modules/observability-contract.test.ts`,
-  not the top-level `tests/observability-contract.test.ts` named in the plan of
-  work. Rationale: `make test-modules` runs `bun test tests/modules`, so only
+  not the top-level `tests/observability-contract.test.ts` this plan originally
+  named. Rationale: `make test-modules` runs `bun test tests/modules`, so only
   files under `tests/modules/` are covered by `make all`; a top-level file
   would be ungated. The `tsconfig.json` `include` also lists `tests/modules`,
-  so the file is typechecked there. Date/Author: 2026-07-19, implementation.
+  so the file is typechecked there. The plan of work, concrete steps, and
+  acceptance text were corrected to the gated path so no stale reference
+  remains. Date/Author: 2026-07-19, implementation.
 - Decision: the contract uses three naming domains rather than one, and
   documents the split normatively — camelCase for the cross-process envelope (a
   TypeScript/JSON interface), snake_case for ODW JSON Lines event extensions
@@ -217,10 +233,12 @@ confidence levels; and the metrics cardinality policy (allowed dimensions,
 forbidden identifiers). Mark normative sections explicitly, and mark
 provisional fields that await upstream ODW behaviour.
 
-Milestone 2 (red): add `tests/observability-contract.test.ts` with
+Milestone 2 (red): add `tests/modules/observability-contract.test.ts` (under
+`tests/modules/`, the only test directory `make test-modules` gates) with
 fixture-driven cases before the schemas exist: valid envelopes (full parent
 context; minimal correlation-only; sink absent), invalid envelopes (missing
-`schemaVersion`, inline credential material in `sink`, database-path sink,
+`schemaVersion`, inline credential material in `sink`, a credentialed endpoint,
+database-path sink, malformed UUIDv7 identifiers, invalid traceparent values,
 unknown `confidence` value), and logical-node-key strings that must match or
 fail a documented pattern. Run the suite and record the expected failures.
 
@@ -241,9 +259,9 @@ gates; update this plan's living sections and mark 5.1.1 complete in
 All commands run from the repository root.
 
     bun install --frozen-lockfile
-    bun test tests/observability-contract.test.ts   # red at milestone 2
-    make markdownlint && make nixie                  # document gates
-    make all                                         # full gate before commit
+    bun test tests/modules/observability-contract.test.ts   # red at milestone 2
+    make markdownlint && make nixie                         # document gates
+    make all                                                # full gate before commit
 
 Expected red transcript at milestone 2:
 
@@ -252,15 +270,16 @@ Expected red transcript at milestone 2:
 
 ## Validation and acceptance
 
-Red: at milestone 2, `bun test tests/observability-contract.test.ts` fails
-because the schemas and fixtures do not exist; failures name the missing files.
+Red: at milestone 2, `bun test tests/modules/observability-contract.test.ts`
+fails because the schemas and fixtures do not exist; failures name the missing
+files.
 
 Green: from milestone 3 the same command passes. Acceptance for the task: the
-three valid fixture envelopes validate; each invalid fixture is rejected with
-the documented reason (including the inline-credential and database-path-sink
-cases); logical node keys match the documented pattern and malformed keys fail;
-and `make all` passes, proving the contract document survives the Markdown and
-spelling gates.
+valid fixture envelopes validate; each invalid fixture is rejected with the
+documented reason (including the inline-credential, credentialed-endpoint,
+database-path-sink, malformed-UUIDv7, and invalid-traceparent cases); logical
+node keys match the documented pattern and malformed keys fail; and `make all`
+passes, proving the contract document survives the Markdown and spelling gates.
 
 Quality criteria: every identifier, attribute, header, and event field named in
 ADR 003's decision sections appears in the contract document exactly once as a

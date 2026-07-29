@@ -130,6 +130,18 @@ describe('schema versioning', () => {
     }
   })
 
+  test('every schema constrains concrete-execution ids with one shared UUIDv7 shape', () => {
+    // The schemas stay standalone so a consumer can pin one file without
+    // resolving the others, so the shape is repeated rather than cross-$ref'd.
+    // This asserts the copies have not drifted apart.
+    const shapes = SCHEMAS.map(({ name, schema }) => {
+      const defs = schema.$defs as Record<string, unknown> | undefined
+      expect(defs?.uuidv7, name).toBeDefined()
+      return JSON.stringify(defs?.uuidv7)
+    })
+    expect(new Set(shapes).size).toBe(1)
+  })
+
   test('the envelope pins schemaVersion to the constant 1', () => {
     const properties = contextSchema.properties as Record<string, { const?: number }>
     expect(properties.schemaVersion.const).toBe(1)

@@ -14,7 +14,7 @@
       "$ref": "#/$defs/identifier"
     },
     "workflowInvocationId": {
-      "$ref": "#/$defs/identifier"
+      "$ref": "#/$defs/uuidv7"
     },
     "parent": {
       "type": "object",
@@ -22,10 +22,10 @@
       "required": ["workflowInvocationId", "nodeAttemptId"],
       "properties": {
         "workflowInvocationId": {
-          "$ref": "#/$defs/identifier"
+          "$ref": "#/$defs/uuidv7"
         },
         "nodeAttemptId": {
-          "$ref": "#/$defs/identifier"
+          "$ref": "#/$defs/uuidv7"
         }
       }
     },
@@ -35,8 +35,7 @@
       "required": ["traceparent"],
       "properties": {
         "traceparent": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+          "$ref": "#/$defs/traceparent"
         },
         "tracestate": {
           "type": "string"
@@ -55,8 +54,24 @@
   },
   "$defs": {
     "identifier": {
+      "description": "A free-form identifier. Used for correlationId, which the contract allows to be a UUIDv7 or a stable readable key.",
       "type": "string",
       "minLength": 1
+    },
+    "uuidv7": {
+      "description": "Lower-case canonical UUIDv7. Concrete executions use this shape; the casing is fixed because these values are exact string join keys.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "traceparent": {
+      "description": "A W3C traceparent header value. Rejects the reserved ff version, an all-zero trace id, and an all-zero parent id.",
+      "type": "string",
+      "allOf": [
+        { "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$" },
+        { "not": { "pattern": "^ff-" } },
+        { "not": { "pattern": "^[0-9a-f]{2}-0{32}-" } },
+        { "not": { "pattern": "-0{16}-[0-9a-f]{2}$" } }
+      ]
     },
     "sink": {
       "type": "object",
@@ -67,8 +82,12 @@
           "const": "otlp-http"
         },
         "endpoint": {
+          "description": "An OTLP collector endpoint. The second clause rejects URI userinfo, so credentials cannot ride inline in the authority component.",
           "type": "string",
-          "pattern": "^otlp\\+https?://"
+          "allOf": [
+            { "pattern": "^otlp\\+https?://" },
+            { "not": { "pattern": "^otlp\\+https?://[^/?#]*@" } }
+          ]
         },
         "protocol": {
           "const": "http/json"
