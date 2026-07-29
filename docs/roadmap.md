@@ -263,26 +263,24 @@ first recovery slice.
   - Success: deletion, stash handling, and branch-retention policy are recorded
     before any automated cleanup lands.
 
-
 ## 5. Workshop observability
 
 Idea: if the workflow host mints a durable identity for every agent dispatch,
 and both provider CLIs export their native OpenTelemetry signals to a local
-collector that stores them beside a versioned relational projection,
-operators can cross-reference workflow nodes and agent telemetry exactly,
-even under parallelism, retries, and recovery.
+collector that stores them beside a versioned relational projection, operators
+can cross-reference workflow nodes and agent telemetry exactly, even under
+parallelism, retries, and recovery.
 
-This phase implements ADR 003. Correlation is identity-first: labels,
-phases, and timestamps are evidence, never primary join keys. Telemetry is
-advisory and must never alter workflow control flow.
-
+This phase implements ADR 003. Correlation is identity-first: labels, phases,
+and timestamps are evidence, never primary join keys. Telemetry is advisory and
+must never alter workflow control flow.
 
 ### 5.1. Observability contract and telemetry collector
 
-This step answers what identity and schema contract every producer must
-share before any instrumentation lands. Its output is the narrow waist that
-ODW, df12-build, the providers, and sibling workflows all depend on, so it
-must settle before the substrate work starts.
+This step answers what identity and schema contract every producer must share
+before any instrumentation lands. Its output is the narrow waist that ODW,
+df12-build, the providers, and sibling workflows all depend on, so it must
+settle before the substrate work starts.
 
 - [x] 5.1.1. Define the workflow observability contract.
   - See `docs/adr-003-opentelemetry-observability.md` sections "Identity
@@ -323,9 +321,9 @@ must settle before the substrate work starts.
 ### 5.2. ODW correlation substrate
 
 This step answers whether ODW can generate identity at dispatch and carry it
-into agent processes. The work lands upstream in the ODW runtime, so this
-step also learns whether the ODW maintenance loop can absorb the contract
-without breaking existing workflows.
+into agent processes. The work lands upstream in the ODW runtime, so this step
+also learns whether the ODW maintenance loop can absorb the contract without
+breaking existing workflows.
 
 - [ ] 5.2.1. Extend ODW with dispatch identity and telemetry context.
   Requires 5.1.1.
@@ -338,7 +336,6 @@ without breaking existing workflows.
     cursor.
   - Success: an ODW run emits agent events carrying the new identifiers, and
     a probe child process observes the injected per-invocation environment.
-
 
 ### 5.3. Workflow and provider instrumentation
 
@@ -367,11 +364,10 @@ exact agent bindings, using the substrate rather than bespoke wiring.
     `invoke_agent` spans and Codex records bound by headers at `exact`
     confidence.
 
-
 ### 5.4. Operator query surfaces
 
-This step answers whether the store supports the acceptance test: from one
-task id, reach every downstream execution fact without archaeology.
+This step answers whether the store supports the acceptance test: from one task
+id, reach every downstream execution fact without archaeology.
 
 - [ ] 5.4.1. Add query views and the `df12-obs` CLI. Requires 5.1.3 and
   5.3.2.
@@ -383,11 +379,10 @@ task id, reach every downstream execution fact without archaeology.
     invocations, provider sessions, model requests, token and cost records,
     tool calls, errors, commits, and recovery lineage through the CLI alone.
 
-
 ### 5.5. Cross-workflow correlation
 
-This step answers whether the contract genuinely generalizes beyond
-df12-build by carrying identity and sink through a Dakar call.
+This step answers whether the contract genuinely generalizes beyond df12-build
+by carrying identity and sink through a Dakar call.
 
 - [ ] 5.5.1. Pass the observability context through Dakar calls.
   Requires 5.1.3.

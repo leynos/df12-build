@@ -10,23 +10,23 @@
   decision. Where this contract and the ADR disagree, the ADR wins and this
   document must be corrected.
 
-This document fixes the shared identity model, attribute names, span
-topology, cross-workflow envelope, correlation headers, event extensions,
-binding records, and metrics policy that every producer in the fabric builds
-against. It is the narrow waist that ODW (roadmap step 5.2), the collector
-(step 5.1.2 onward), and Dakar (step 5.5) all depend upon; those steps must
-not diverge from the definitions below.
+This document fixes the shared identity model, attribute names, span topology,
+cross-workflow envelope, correlation headers, event extensions, binding
+records, and metrics policy that every producer in the fabric builds against.
+It is the narrow waist that ODW (roadmap step 5.2), the collector (step 5.1.2
+onward), and Dakar (step 5.5) all depend upon; those steps must not diverge
+from the definitions below.
 
 Sections marked _(normative)_ define requirements. Sections marked
 _(informative)_ explain intent and may be revised without a version bump.
-Fields marked _provisional_ depend on upstream ODW behaviour that does not
-yet exist; they may change before ODW implements them, but their names are
-reserved now so consumers can code to them.
+Fields marked _provisional_ depend on upstream ODW behaviour that does not yet
+exist; they may change before ODW implements them, but their names are reserved
+now so consumers can code to them.
 
 The three machine-readable schemas that accompany this document live under
 `schemas/observability/`. They are the authoritative shape; the prose here
-explains and constrains them but the schema files are what consumers
-validate against.
+explains and constrains them but the schema files are what consumers validate
+against.
 
 ## 1. Terminology _(informative)_
 
@@ -37,8 +37,8 @@ validate against.
 - Span: one timed operation in a trace, optionally the parent of child
   spans.
 - Binding: a recorded association between a provider identifier (for example
-  a session, request, or tool call) and an ODW agent invocation, tagged with
-  a confidence level.
+  a session, request, or tool call) and an ODW agent invocation, tagged with a
+  confidence level.
 - Envelope: the `WorkflowObservabilityContextV1` object one workflow passes
   to another so telemetry from the child joins the parent's correlation.
 - Workshop: one long multi-agent run driving a target project.
@@ -51,9 +51,8 @@ primary join keys, because parallelism and retries make temporal matching
 unsound.
 
 Concrete executions are identified by Universally Unique Identifier version 7
-(UUIDv7) values. Stable logical identities use readable keys or content
-hashes. The identifiers, and which component mints each, are fixed as
-follows.
+(UUIDv7) values. Stable logical identities use readable keys or content hashes.
+The identifiers, and which component mints each, are fixed as follows.
 
 | Identifier             | Minted by                | Format                | Meaning                                                                                           |
 | ---------------------- | ------------------------ | --------------------- | ------------------------------------------------------------------------------------------------- |
@@ -78,10 +77,10 @@ The distinctions carry weight and must not be collapsed:
   the native telemetry.
 
 A schema retry starts a new process, and therefore a new `agentProcessId` and
-an incremented `cliAttempt`, under the same `agentInvocationId`. Work-item
-node keys hash normalized checklist text rather than relying on index
-position, so an edited execution plan (ExecPlan) cannot silently make
-"work item 3" refer to something else.
+an incremented `cliAttempt`, under the same `agentInvocationId`. Work-item node
+keys hash normalized checklist text rather than relying on index position, so
+an edited execution plan (ExecPlan) cannot silently make "work item 3" refer to
+something else.
 
 Reserved-field rules, restated from ADR 003 so consumers do not reintroduce
 them:
@@ -95,9 +94,9 @@ them:
 
 ## 3. Naming domains _(normative)_
 
-The fabric spans four surfaces, and each keeps the casing its consumers
-already use. Implementers must not "unify" these; a single casing would
-misrepresent at least one surface.
+The fabric spans four surfaces, and each keeps the casing its consumers already
+use. Implementers must not "unify" these; a single casing would misrepresent at
+least one surface.
 
 - Cross-process envelope: camelCase (`workflowInvocationId`). It is a
   TypeScript and JSON interface passed between processes.
@@ -110,18 +109,17 @@ misrepresent at least one surface.
 
 The same logical identifier therefore appears under three spellings —
 `agentInvocationId` in the envelope, `agent_invocation_id` in an event, and
-`leynos.agent.invocation.id` on a span. This is intentional and the mapping
-is one-to-one.
+`leynos.agent.invocation.id` on a span. This is intentional and the mapping is
+one-to-one.
 
 ## 4. The `leynos.*` attribute registry _(normative)_
 
 Workflow-neutral identity travels on spans and logs under the `leynos.*`
-namespace. Workflow-specific detail uses `df12.*` or `dakar.*`; provider
-detail uses the standard `gen_ai.*`, `service.*`, `error.*`, and `vcs.*`
-namespaces. The cardinality class governs where an attribute may appear:
-`high` attributes are identifier-like and are forbidden as metric dimensions
-(section 11); `low` attributes are bounded and may be used as metric
-dimensions.
+namespace. Workflow-specific detail uses `df12.*` or `dakar.*`; provider detail
+uses the standard `gen_ai.*`, `service.*`, `error.*`, and `vcs.*` namespaces.
+The cardinality class governs where an attribute may appear: `high` attributes
+are identifier-like and are forbidden as metric dimensions (section 11); `low`
+attributes are bounded and may be used as metric dimensions.
 
 | Attribute                                | Type   | Cardinality | May appear on               |
 | ---------------------------------------- | ------ | ----------- | --------------------------- |
@@ -146,8 +144,8 @@ forbidden as metric dimensions._
 ## 5. Span topology and naming _(normative)_
 
 Span names stay low-cardinality; task-specific detail goes in attributes, not
-in the span name. Version 1 uses these operation names, aligned with the
-GenAI semantic conventions where one applies:
+in the span name. Version 1 uses these operation names, aligned with the GenAI
+semantic conventions where one applies:
 
 - `invoke_workflow` for a workflow root span, with `gen_ai.workflow.name`
   set (for example `df12-build`).
@@ -159,22 +157,21 @@ GenAI semantic conventions where one applies:
 
 Every span in the fabric carries the `leynos.*` identity attributes for its
 level: a workflow root carries the correlation and invocation identifiers, a
-node span adds the node attempt and logical identifiers, and an agent span
-adds the agent invocation and process identifiers. Provider spans inherit
-identity through trace parenting (Claude) or header binding (Codex), so they
-need not repeat the `leynos.*` attributes.
+node span adds the node attempt and logical identifiers, and an agent span adds
+the agent invocation and process identifiers. Provider spans inherit identity
+through trace parenting (Claude) or header binding (Codex), so they need not
+repeat the `leynos.*` attributes.
 
 Because the GenAI agent and workflow conventions are still at Development
-status, queries must target the schema-versioned relational projection
-(ADR 003), not the raw convention field names, so a convention rename cannot
-break stored history.
+status, queries must target the schema-versioned relational projection (ADR
+003), not the raw convention field names, so a convention rename cannot break
+stored history.
 
 ## 6. The workflow observability context envelope _(normative)_
 
 A workflow that calls another passes a `WorkflowObservabilityContextV1`
 envelope. Its authoritative shape is
-`schemas/observability/workflow-observability-context.v1.json`. The fields
-are:
+`schemas/observability/workflow-observability-context.v1.json`. The fields are:
 
 - `schemaVersion` (required): the constant integer `1`.
 - `correlationId` (required): the logical objective identifier (section 2).
@@ -184,9 +181,8 @@ are:
   `parent.workflowInvocationId` and `parent.nodeAttemptId`. Both are required
   when `parent` is present.
 - `trace` (optional): W3C trace context, as `trace.traceparent` (required
-  when `trace` is present) and optional `trace.tracestate`. The
-  `traceparent` value must match the W3C format
-  `version-traceid-spanid-flags`.
+  when `trace` is present) and optional `trace.tracestate`. The `traceparent`
+  value must match the W3C format `version-traceid-spanid-flags`.
 - `sink` (optional): the telemetry destination, described in section 7. When
   absent, telemetry is disabled and the run proceeds normally.
 - `attributes` (optional): a flat map of scalar (string, number, or boolean)
@@ -226,21 +222,21 @@ migrations; a workflow must not open the SQLite store directly.
 - `sink.kind` is the constant `otlp-http`.
 - `sink.endpoint` is an OTLP collector uniform resource identifier (URI) with
   the scheme `otlp+http://` or `otlp+https://`. A filesystem path or a
-  `file://`, `sqlite:`, or bare `http://` value is invalid. The
-  `otlp+unix://` scheme is reserved for a future transport (ADR 003
-  outstanding decision) and is not valid in version 1.
+  `file://`, `sqlite:`, or bare `http://` value is invalid. The `otlp+unix://`
+  scheme is reserved for a future transport (ADR 003 outstanding decision) and
+  is not valid in version 1.
 - `sink.protocol` is the constant `http/json`.
 - `sink.authRef` (optional) references a credential by environment variable,
   as `authRef.kind` (constant `environment`) and `authRef.variable` (an
-  uppercase environment variable name). Credentials must never travel inline
-  in the envelope, because a child workflow's arguments can be persisted in
-  run artefacts.
+  uppercase environment variable name). Credentials must never travel inline in
+  the envelope, because a child workflow's arguments can be persisted in run
+  artefacts.
 
 ## 8. Correlation headers and collector validation _(normative)_
 
 Because Codex has no documented inbound trace-context handling, identity
-reaches the collector as OTLP exporter request headers. ODW sets these on
-every provider export:
+reaches the collector as OTLP exporter request headers. ODW sets these on every
+provider export:
 
 - `x-df12-workshop-id`
 - `x-df12-run-id`
@@ -255,8 +251,7 @@ The collector must, on every received batch:
 1. Read the headers and reject a batch whose `x-df12-schema-version` it does
    not support.
 2. Validate `x-df12-agent-invocation-id` against a registered invocation;
-   an unregistered invocation is recorded as a diagnostic, not silently
-   dropped.
+   an unregistered invocation is recorded as a diagnostic, not silently dropped.
 3. Attach the resolved binding to every record in the batch at `exact`
    confidence (section 9).
 4. Preserve native provider trace identifiers unchanged; a Codex trace is
@@ -264,18 +259,17 @@ The collector must, on every received batch:
 
 For Claude, ODW additionally injects W3C trace context so the
 `claude_code.interaction` span parents under the ODW `invoke_agent` span; the
-headers still carry identity so logs and metrics, which may lack trace
-context, remain joinable.
+headers still carry identity so logs and metrics, which may lack trace context,
+remain joinable.
 
 ## 9. Telemetry bindings and confidence _(normative)_
 
-A binding row records how a provider identifier maps to an ODW invocation.
-Its authoritative shape is
-`schemas/observability/telemetry-binding.v1.json`. Binding rows use
-snake_case (section 3). The fields are `binding_type`, `binding_value`,
-`agent_invocation_id`, optional `agent_process_id`, optional `trace_id` and
-`span_id` (lower-hex of 32 and 16 characters respectively), `source`,
-`confidence`, `first_seen_ns`, and `last_seen_ns`. The two nanosecond
+A binding row records how a provider identifier maps to an ODW invocation. Its
+authoritative shape is `schemas/observability/telemetry-binding.v1.json`.
+Binding rows use snake_case (section 3). The fields are `binding_type`,
+`binding_value`, `agent_invocation_id`, optional `agent_process_id`, optional
+`trace_id` and `span_id` (lower-hex of 32 and 16 characters respectively),
+`source`, `confidence`, `first_seen_ns`, and `last_seen_ns`. The two nanosecond
 timestamps are carried as decimal strings, not JSON numbers, because a
 nanosecond count since the epoch exceeds the range JSON numbers represent
 exactly (2^53); the SQLite store holds them as 64-bit integers.
@@ -305,11 +299,10 @@ determines the permitted confidence, and the schema enforces the mapping:
 ## 10. Logical node key grammar _(normative)_
 
 A `nodeLogicalId` is a slash-separated path of lower-case segments. Each
-segment matches `[a-z0-9]` optionally followed by more of
-`[a-z0-9._-]` and ending in `[a-z0-9]`; there are at least two segments; there
-is no leading, trailing, or doubled slash; and dotted roadmap identifiers
-(for example `1.2.3`) appear as a single segment. The canonical regular
-expression is:
+segment matches `[a-z0-9]` optionally followed by more of `[a-z0-9._-]` and
+ending in `[a-z0-9]`; there are at least two segments; there is no leading,
+trailing, or doubled slash; and dotted roadmap identifiers (for example
+`1.2.3`) appear as a single segment. The canonical regular expression is:
 
     ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+$
 
@@ -320,10 +313,10 @@ Representative valid keys:
     task/1.2.3/normal/review/round/2/code-review
     task/1.2.3/normal/integrate
 
-Keys that must be rejected include an empty or doubled segment
-(`task//plan`), a leading or trailing slash (`/task/1.2.3` or
-`task/1.2.3/`), an upper-case segment (`Task/1.2.3`), a single segment
-(`task`), and a segment containing a space.
+Keys that must be rejected include an empty or doubled segment (`task//plan`),
+a leading or trailing slash (`/task/1.2.3` or `task/1.2.3/`), an upper-case
+segment (`Task/1.2.3`), a single segment (`task`), and a segment containing a
+space.
 
 ## 11. Metrics cardinality policy _(normative)_
 
@@ -365,9 +358,8 @@ logs and resources.
 ## 12. ODW agent-event extensions _(normative, provisional)_
 
 ODW (roadmap step 5.2) will extend its `agent_started`, `agent_finished`, and
-`agent_failed` JSONL events with the identity fields below. Their
-authoritative shape is
-`schemas/observability/agent-event-extensions.v1.json`. The fields use
+`agent_failed` JSONL events with the identity fields below. Their authoritative
+shape is `schemas/observability/agent-event-extensions.v1.json`. The fields use
 snake_case and are additive: existing event fields (`label`, `phase`,
 `adapter`, and so on) are unchanged. The extension fields are `run_id`,
 `node_attempt_id`, `agent_invocation_id`, `agent_process_id`, and
@@ -383,10 +375,10 @@ Version 1 ships three schema files under `schemas/observability/`:
     telemetry-binding.v1.json
 
 Each is a JSON Schema draft 2020-12 document whose `$id` ends in `.v1.json`,
-pinning the version in both the file name and the identifier. A breaking
-change ships a new `.v2.json` file beside the version-1 file rather than
-editing it in place, so a consumer can pin an exact version. The envelope
-instance additionally carries `schemaVersion: 1`, so a receiver can reject an
+pinning the version in both the file name and the identifier. A breaking change
+ships a new `.v2.json` file beside the version-1 file rather than editing it in
+place, so a consumer can pin an exact version. The envelope instance
+additionally carries `schemaVersion: 1`, so a receiver can reject an
 unsupported envelope version without consulting the file name.
 
 ## 14. References _(informative)_

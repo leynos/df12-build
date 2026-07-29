@@ -13,28 +13,28 @@ Proposed.
 A df12-build workshop run is a long-lived, multi-agent process: the Open
 Dynamic Workflows (ODW) control plane dispatches Codex and Claude Code
 processes across parallel tasks, retries, and recovery resumes. Today the
-observability surface is narrow: the workflow emits narrator lines through
-the ODW `log()` primitive, and the runtime records `events.jsonl`,
-`status.json`, `result.json`, and `worker.log` under the run directory.
+observability surface is narrow: the workflow emits narrator lines through the
+ODW `log()` primitive, and the runtime records `events.jsonl`, `status.json`,
+`result.json`, and `worker.log` under the run directory.
 
 Both provider command-line interfaces (CLIs) already emit rich native
 OpenTelemetry (OTel) signals. Claude Code, with beta tracing enabled, reads
 `TRACEPARENT` and `TRACESTATE` from its environment and parents its
-`claude_code.interaction` span (and the nested request, tool, permission,
-hook, and subagent spans) under the caller's span. Codex exports structured
-OTel logs, metrics, and traces over OTLP/HTTP with configurable static
-headers, but has no documented inbound trace-context handling.
+`claude_code.interaction` span (and the nested request, tool, permission, hook,
+and subagent spans) under the caller's span. Codex exports structured OTel
+logs, metrics, and traces over OTLP/HTTP with configurable static headers, but
+has no documented inbound trace-context handling.
 
-What is missing is correlation. ODW's agent events carry label, phase,
-adapter, and attempt count, but no durable invocation identifier or trace
-context, and the ODW workflow dialect bans runtime imports and temporal
-calls, so the OTel software development kit (SDK) cannot run inside the
-compiled workflow artefact. Under eight parallel tasks, review fan-out, and
-schema retries, labels and timestamps cannot safely join workflow nodes to
-agent telemetry. The decision is how to collect telemetry from all three
-producers — workflow host, Claude, and Codex — into one store that supports
-exact cross-referencing between workflow nodes and agent telemetry, and that
-can extend to sibling workflows such as `leynos/dakar`.
+What is missing is correlation. ODW's agent events carry label, phase, adapter,
+and attempt count, but no durable invocation identifier or trace context, and
+the ODW workflow dialect bans runtime imports and temporal calls, so the OTel
+software development kit (SDK) cannot run inside the compiled workflow
+artefact. Under eight parallel tasks, review fan-out, and schema retries,
+labels and timestamps cannot safely join workflow nodes to agent telemetry. The
+decision is how to collect telemetry from all three producers — workflow host,
+Claude, and Codex — into one store that supports exact cross-referencing
+between workflow nodes and agent telemetry, and that can extend to sibling
+workflows such as `leynos/dakar`.
 
 ## Decision drivers
 
@@ -48,8 +48,8 @@ can extend to sibling workflows such as `leynos/dakar`.
   per-invocation OTLP exporter headers. Native provider trace ids must be
   preserved, never rewritten.
 - Provider telemetry must be stored losslessly, with a small versioned
-  canonical projection for queries, because the Generative AI (GenAI)
-  semantic conventions are still in Development status.
+  canonical projection for queries, because the Generative AI (GenAI) semantic
+  conventions are still in Development status.
 - The store must be workflow-neutral so Dakar and future workflows join the
   same fabric through explicit invocation edges and a shared correlation id.
 - Telemetry failure must never alter workflow control flow, and identity
@@ -59,35 +59,35 @@ can extend to sibling workflows such as `leynos/dakar`.
 
 ### Option A: in-workflow instrumentation
 
-Bundle the OTel SDK into the compiled workflow artefact. Rejected: the
-dialect forbids runtime imports and the temporal calls the SDK requires,
+Bundle the OTel SDK into the compiled workflow artefact. Rejected: the dialect
+forbids runtime imports and the temporal calls the SDK requires,
 `scripts/build-workflow.mjs` fails closed on loader-contract hazards, and an
 in-process exporter would couple run success to collector availability.
 
 ### Option B: post-hoc bridge over `events.jsonl`
 
 Translate the run directory's `events.jsonl` into OTLP spans after the fact.
-Rejected as the primary mechanism: current events carry no invocation
-identity, so the bridge must correlate by label, adapter, and timing, and
-that binds telemetry to the wrong nodes under parallelism and retries.
-Retained only as a migration aid for historical runs, with its bindings
-explicitly marked `heuristic`.
+Rejected as the primary mechanism: current events carry no invocation identity,
+so the bridge must correlate by label, adapter, and timing, and that binds
+telemetry to the wrong nodes under parallelism and retries. Retained only as a
+migration aid for historical runs, with its bindings explicitly marked
+`heuristic`.
 
 ### Option C: correlation-first OTLP gateway backed by SQLite
 
-Extend ODW to mint identity at dispatch, collect native provider signals
-plus workflow lifecycle records in a local OTLP receiver, and store raw
-telemetry beside a versioned relational projection in SQLite. Chosen; the
-remainder of this record describes it.
+Extend ODW to mint identity at dispatch, collect native provider signals plus
+workflow lifecycle records in a local OTLP receiver, and store raw telemetry
+beside a versioned relational projection in SQLite. Chosen; the remainder of
+this record describes it.
 
-| Topic                          | Option A | Option B      | Option C |
-| ------------------------------ | -------- | ------------- | -------- |
-| Feasible under ODW rules       | No       | Yes           | Yes      |
-| Correlation quality            | n/a      | Heuristic     | Exact    |
-| Native provider telemetry kept | No       | No            | Yes      |
-| Risk to live runs              | High     | None          | Low      |
-| Upstream ODW changes needed    | Blocked  | None          | Yes      |
-| Cross-workflow extension       | No       | No            | Yes      |
+| Topic                          | Option A | Option B  | Option C |
+| ------------------------------ | -------- | --------- | -------- |
+| Feasible under ODW rules       | No       | Yes       | Yes      |
+| Correlation quality            | n/a      | Heuristic | Exact    |
+| Native provider telemetry kept | No       | No        | Yes      |
+| Risk to live runs              | High     | None      | Low      |
+| Upstream ODW changes needed    | Blocked  | None      | Yes      |
+| Cross-workflow extension       | No       | No        | Yes      |
 
 _Table 1: Comparison of collection architectures._
 
@@ -108,91 +108,88 @@ distinct and never conflated:
   Dakar, or another workflow;
 - a node attempt id names one execution of a node inside an invocation.
 
-Below the node attempt sit the agent invocation (one `agent()` call), the
-agent process (one spawned CLI execution), and the CLI attempt number. A
-logical node key such as `task/1.2.3/normal/plan/round/1` says what an
-operation is; the attempt id says when it ran. Work-item keys hash
-normalized checklist text rather than relying on index position.
+Below the node attempt sit the agent invocation (one `agent()` call), the agent
+process (one spawned CLI execution), and the CLI attempt number. A logical node
+key such as `task/1.2.3/normal/plan/round/1` says what an operation is; the
+attempt id says when it ran. Work-item keys hash normalized checklist text
+rather than relying on index position.
 
 ### Propagation
 
 For Claude, ODW starts the `invoke_agent` span, injects W3C context through
-`TRACEPARENT` and `TRACESTATE`, and directs OTLP logs, metrics, and traces
-to the local receiver with the invocation and node-attempt ids in
-`OTEL_EXPORTER_OTLP_HEADERS`, giving a true parent–child trace. For Codex,
-the same identifiers travel as per-invocation exporter request headers
-(workshop, run, node attempt, invocation, process, CLI attempt, and schema
-version), which the receiver validates against the registered invocation and
-binds to every record in the batch. Codex trace ids are preserved and
-connected to the ODW invocation as correlation edges. Metrics and logs stay
-joinable through the headers even where trace context is absent.
+`TRACEPARENT` and `TRACESTATE`, and directs OTLP logs, metrics, and traces to
+the local receiver with the invocation and node-attempt ids in
+`OTEL_EXPORTER_OTLP_HEADERS`, giving a true parent–child trace. For Codex, the
+same identifiers travel as per-invocation exporter request headers (workshop,
+run, node attempt, invocation, process, CLI attempt, and schema version), which
+the receiver validates against the registered invocation and binds to every
+record in the batch. Codex trace ids are preserved and connected to the ODW
+invocation as correlation edges. Metrics and logs stay joinable through the
+headers even where trace context is absent.
 
 ### Collector and store
 
-A local receiver, `workflow-telemetryd`, accepts OTLP/HTTP JSON on
-`/v1/traces`, `/v1/logs`, and `/v1/metrics`; both clients document that
-transport. It validates correlation headers, stores the raw OTLP records,
-derives canonical fields, and commits each batch in one SQLite transaction,
-spooling to JSON Lines (JSONL) when a write is rejected. The database lives
-at `${PROJECT}.workshop/observability/telemetry.sqlite3` — in the durable
+A local receiver, `workflow-telemetryd`, accepts OTLP/HTTP JSON on `/v1/traces`,
+`/v1/logs`, and `/v1/metrics`; both clients document that transport. It
+validates correlation headers, stores the raw OTLP records, derives canonical
+fields, and commits each batch in one SQLite transaction, spooling to JSON
+Lines (JSONL) when a write is rejected. The database lives at
+`${PROJECT}.workshop/observability/telemetry.sqlite3` — in the durable
 `.workshop` sidecar rather than one run directory — so observability spans
 recovered launches. SQLite runs in write-ahead-logging mode with a single
 writer queue.
 
-The store keeps two layers: raw `otel_*` tables (resources, spans, span
-events, span links, logs, metrics) with fixed-size binary trace and span
-ids, nanosecond timestamps, and canonical JSON attributes; and a
-workflow-neutral projection — `correlation`, `workflow_invocation`,
-`workflow_invocation_edge`, `workflow_node_attempt`, `agent_invocation`,
-`agent_process`, `telemetry_binding`, and `artifact`. Bindings carry a
-confidence level (`exact` for trace parenting and header joins, `derived`,
-or `heuristic` for imported historical runs). Workflow-specific projections
-(`df12_*`, `dakar_*`) reference these generic identities.
+The store keeps two layers: raw `otel_*` tables (resources, spans, span events,
+span links, logs, metrics) with fixed-size binary trace and span ids,
+nanosecond timestamps, and canonical JSON attributes; and a workflow-neutral
+projection — `correlation`, `workflow_invocation`, `workflow_invocation_edge`,
+`workflow_node_attempt`, `agent_invocation`, `agent_process`,
+`telemetry_binding`, and `artifact`. Bindings carry a confidence level (`exact`
+for trace parenting and header joins, `derived`, or `heuristic` for imported
+historical runs). Workflow-specific projections (`df12_*`, `dakar_*`) reference
+these generic identities.
 
 ### Attribute namespaces and span model
 
 Attributes form three layers: standard OTel conventions (`service.*`,
-`gen_ai.*`, `error.*`, `vcs.*`); workflow-neutral `leynos.*` identity
-attributes (`leynos.correlation.id`, `leynos.workflow.invocation.id`,
-`leynos.workflow.node.attempt_id`, `leynos.agent.invocation.id`, and
-friends); and workflow-specific `df12.*` and `dakar.*` extensions. Span
-names stay low-cardinality (`invoke_workflow`, `invoke_agent`, `plan`, and
-`df12.*` stage spans) with task detail in attributes. `gen_ai.agent.id` is
-not used for invocation ids (the convention reserves it for stable agent
-resources), Claude's `workflow.run_id` is not overloaded for ODW runs, and
-no fabricated `gen_ai.conversation.id` is invented — provider conversation
-ids are recorded as bindings. Because the GenAI agent conventions remain in
-Development status, queries target the schema-versioned projection, not raw
-convention field names.
+`gen_ai.*`, `error.*`, `vcs.*`); workflow-neutral `leynos.*` identity attributes
+(`leynos.correlation.id`, `leynos.workflow.invocation.id`,
+`leynos.workflow.node.attempt_id`, `leynos.agent.invocation.id`, and friends);
+and workflow-specific `df12.*` and `dakar.*` extensions. Span names stay
+low-cardinality (`invoke_workflow`, `invoke_agent`, `plan`, and `df12.*` stage
+spans) with task detail in attributes. `gen_ai.agent.id` is not used for
+invocation ids (the convention reserves it for stable agent resources), Claude's
+`workflow.run_id` is not overloaded for ODW runs, and no fabricated
+`gen_ai.conversation.id` is invented — provider conversation ids are recorded
+as bindings. Because the GenAI agent conventions remain in Development status,
+queries target the schema-versioned projection, not raw convention field names.
 
 ### Metrics cardinality
 
-Derived metrics (`df12.workflow.node.count`, durations, queue wait, token
-and cost usage, retry, gate, and dropped-record counters) use only bounded
-dimensions such as workflow name, node kind, adapter, provider, model,
-outcome, and error class. Run, task, attempt, invocation, session, prompt,
-request, tool-call, and commit identifiers stay on spans, logs, and
-relational rows. Claude's session and account metric attributes are switched
-off (`OTEL_METRICS_INCLUDE_SESSION_ID=false` and companions) while retained
-on logs and resources.
+Derived metrics (`df12.workflow.node.count`, durations, queue wait, token and
+cost usage, retry, gate, and dropped-record counters) use only bounded
+dimensions such as workflow name, node kind, adapter, provider, model, outcome,
+and error class. Run, task, attempt, invocation, session, prompt, request,
+tool-call, and commit identifiers stay on spans, logs, and relational rows.
+Claude's session and account metric attributes are switched off
+(`OTEL_METRICS_INCLUDE_SESSION_ID=false` and companions) while retained on logs
+and resources.
 
 ### Cross-workflow contract
 
-Every callable workflow accepts a versioned
-`WorkflowObservabilityContextV1` envelope carrying the correlation id, an
-optional pre-allocated invocation id, the parent invocation and node-attempt
-ids, W3C trace context, and the sink. The sink is a collector endpoint
-(`otlp+http://…`), never a database path: the collector owns decoding,
-validation, redaction, projection, backpressure, and migrations. Credentials
-travel only as environment-variable references, never inline, because child
-workflow arguments can end up in run artefacts. Dakar receives the envelope
-through `--observability-context` (or `--correlation-id` and
-`--telemetry-sink`, then `LEYNOS_*` environment variables, in that
-precedence), echoes the resolved identity in its result, records the
-identity in its review history, and each call is recorded as a
-`workflow_invocation_edge` (`call`, `retry`, `recovery`, or
-`continuation`). Telemetry completeness is reported as `complete`,
-`partial`, or `disabled` and is non-fatal by default.
+Every callable workflow accepts a versioned `WorkflowObservabilityContextV1`
+envelope carrying the correlation id, an optional pre-allocated invocation id,
+the parent invocation and node-attempt ids, W3C trace context, and the sink.
+The sink is a collector endpoint (`otlp+http://…`), never a database path: the
+collector owns decoding, validation, redaction, projection, backpressure, and
+migrations. Credentials travel only as environment-variable references, never
+inline, because child workflow arguments can end up in run artefacts. Dakar
+receives the envelope through `--observability-context` (or `--correlation-id`
+and `--telemetry-sink`, then `LEYNOS_*` environment variables, in that
+precedence), echoes the resolved identity in its result, records the identity
+in its review history, and each call is recorded as a `workflow_invocation_edge`
+(`call`, `retry`, `recovery`, or `continuation`). Telemetry completeness is
+reported as `complete`, `partial`, or `disabled` and is non-fatal by default.
 
 ### Cost
 
@@ -220,41 +217,39 @@ change never rewrites history.
 ## Migration plan
 
 1. Observability contract and collector: define the identity contract and
-   `leynos.*` attribute registry, then implement `workflow-telemetryd` with
-   raw storage and the canonical projection (roadmap step 5.1). The version-1
-   contract is now written up in
-   `docs/workflow-observability-contract.md`, with machine-readable schemas
-   under `schemas/observability/`.
+   `leynos.*` attribute registry, then implement `workflow-telemetryd` with raw
+   storage and the canonical projection (roadmap step 5.1). The version-1
+   contract is now written up in `docs/workflow-observability-contract.md`,
+   with machine-readable schemas under `schemas/observability/`.
 2. ODW correlation substrate: invocation and process ids, enriched JSONL
-   agent events, a per-invocation environment layer in the bridge, W3C
-   context injection, and a host-side span primitive using asynchronous
-   context propagation (`phase()` stays a presentation cursor) (step 5.2).
+   agent events, a per-invocation environment layer in the bridge, W3C context
+   injection, and a host-side span primitive using asynchronous context
+   propagation (`phase()` stays a presentation cursor) (step 5.2).
 3. df12-build node instrumentation and provider wiring: a `withNode` helper
-   around selection, recovery, planning and design rounds, work items,
-   gates, reviews, integration lock wait versus execution, audit, and
-   triage; a run manifest at launch; recovery expressed as span links to
-   prior attempts, not reopened traces (step 5.3).
+   around selection, recovery, planning and design rounds, work items, gates,
+   reviews, integration lock wait versus execution, audit, and triage; a run
+   manifest at launch; recovery expressed as span links to prior attempts, not
+   reopened traces (step 5.3).
 4. Operator query surfaces: task timeline, agent usage, failure chain, and
    recovery lineage views with a small CLI over them (step 5.4).
 5. Cross-workflow correlation: the context envelope through Dakar, invocation
-   edges, and candidate-to-finding provenance (`sourceCandidateIds`)
-   (step 5.5).
+   edges, and candidate-to-finding provenance (`sourceCandidateIds`) (step 5.5).
 
 ## Known risks and limitations
 
 - The design needs upstream ODW changes (dispatch identity, environment
-  layering, a span primitive); df12-build alone cannot implement it
-  robustly. Sequencing places that dependency early (step 5.2).
+  layering, a span primitive); df12-build alone cannot implement it robustly.
+  Sequencing places that dependency early (step 5.2).
 - Codex inbound trace propagation is inferred absent from its documented
-  configuration surface, not confirmed impossible; if it appears, the
-  header binding simply gains a parent edge.
+  configuration surface, not confirmed impossible; if it appears, the header
+  binding simply gains a parent edge.
 - Claude trace propagation is a beta capability and may change shape.
 - The GenAI semantic conventions are in Development status; the versioned
   projection isolates queries from renames.
 - Claude standard telemetry can include organization, account, user, and
-  email attributes; ingestion applies an allow-list, hashes or drops
-  identity fields unless an operator opts in, and keeps store files at
-  restrictive permissions.
+  email attributes; ingestion applies an allow-list, hashes or drops identity
+  fields unless an operator opts in, and keeps store files at restrictive
+  permissions.
 - SQLite's single-writer model is accepted for local scale; analytical
   workloads move to exported snapshots rather than growing the collector.
 
