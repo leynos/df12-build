@@ -42,6 +42,14 @@ describe('expandStepRange', () => {
       expect(expandStepRange('1.1', value)).toEqual([])
     }
   })
+
+  test('accepts the maximum range length and rejects the first oversized range', () => {
+    const maximum = expandStepRange('1.1', '1.1000')
+    expect(maximum).toHaveLength(1_000)
+    expect(maximum[0]).toBe('1.1')
+    expect(maximum[999]).toBe('1.1000')
+    expect(expandStepRange('1.1', '1.1001')).toEqual([])
+  })
 })
 
 describe('extractRoadmapIds', () => {

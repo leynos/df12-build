@@ -10,6 +10,7 @@ import {
   stepOf,
   triageNeedsEscalation,
 } from '../../src/workflows/df12-build-odw/remediation.ts'
+import type { RemediationProposal } from '../../src/workflows/df12-build-odw/remediation.ts'
 
 const globals = globalThis as Record<string, unknown>
 globals.log = () => {}
@@ -30,6 +31,10 @@ function subject() {
     triageAgentOptions: (options) => ({ adapter: 'codex', ...options }),
     triageEscalationModel: 'gpt-5.5@high',
   })
+}
+
+function proposal(overrides: Partial<RemediationProposal> = {}): RemediationProposal {
+  return { title: 'Fix flaky teardown', rationale: 'audit:1.2.3', ...overrides }
 }
 
 describe('stepOf', () => {
@@ -54,17 +59,21 @@ describe('dedupeProposals', () => {
   })
 
   test('rejects titleless proposals explicitly', () => {
-    expect(() => dedupeProposals([{ title: '', rationale: 'audit:1.1.1' }])).toThrow(/non-blank string/)
+    expect(() => dedupeProposals([proposal({ title: '' })])).toThrow(/non-blank string/)
   })
 
   test('preserves aggregated sources across repeated deduplication', () => {
     const first = dedupeProposals([
-      { title: 'Fix flaky teardown', source: 'audit:1.2.3' },
-      { title: 'fix flaky teardown', source: 'review:1.2.4' },
+      proposal({ source: 'audit:1.2.3' }),
+      proposal({ title: 'fix flaky teardown', source: 'review:1.2.4' }),
     ])
     const second = dedupeProposals([
       ...first,
-      { title: ' FIX FLAKY TEARDOWN ', sources: ['audit:1.2.3', 'expert:1.2.5'], source: 'review:1.2.4' },
+      proposal({
+        title: ' FIX FLAKY TEARDOWN ',
+        sources: ['audit:1.2.3', 'expert:1.2.5'],
+        source: 'review:1.2.4',
+      }),
     ])
     expect(second).toHaveLength(1)
     expect(second[0].sources).toEqual(['audit:1.2.3', 'review:1.2.4', 'expert:1.2.5'])

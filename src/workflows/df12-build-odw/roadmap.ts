@@ -69,12 +69,13 @@ export function extractRoadmapIds(text: string): string[] {
 }
 
 /**
- * Expand a `steps X.Y-X.Z` range into its constituent ids. Returns `[]` for a
- * malformed or cross-phase range (differing phase numbers, non-integer
- * steps, or a start after the end) rather than throwing, so a caller parsing
- * free text can simply skip the phrase.
+ * Expand a `steps X.Y-X.Z` range into at most 1,000 constituent ids. Returns
+ * `[]` for a malformed, cross-phase, reversed, or oversized range rather than
+ * throwing, so a caller parsing free text can simply skip the phrase. The
+ * 1,000-id maximum is inclusive.
  */
 export function expandStepRange(start: string, end: string): string[] {
+  const MAX_STEP_RANGE_LENGTH = 1_000
   if (!/^\d+\.\d+$/.test(start) || !/^\d+\.\d+$/.test(end)) return []
   const startParts = start.split('.').map(Number)
   const endParts = end.split('.').map(Number)
@@ -82,7 +83,9 @@ export function expandStepRange(start: string, end: string): string[] {
   const [phaseId, firstStep] = startParts
   const lastStep = endParts[1]
   if (!Number.isInteger(phaseId) || !Number.isInteger(firstStep) || !Number.isInteger(lastStep) || firstStep > lastStep) return []
-  return Array.from({ length: lastStep - firstStep + 1 }, (_, index) => `${phaseId}.${firstStep + index}`)
+  const rangeLength = lastStep - firstStep + 1
+  if (rangeLength > MAX_STEP_RANGE_LENGTH) return []
+  return Array.from({ length: rangeLength }, (_, index) => `${phaseId}.${firstStep + index}`)
 }
 
 /**

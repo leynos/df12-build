@@ -59,18 +59,18 @@ export function isTaskArtefactPath(candidate: unknown): boolean {
 }
 
 /**
- * Contain an agent-supplied ExecPlan path within the task worktree. Plan
- * paths come back from planner agents — untrusted, prompt-injectable data
- * under the documented threat model — so an absolute path outside the
- * worktree or a ../ escape must fail closed BEFORE any filesystem or git
- * access.
+ * Normalize an agent-supplied ExecPlan path within the task worktree and
+ * require the task-scoped `docs/execplans/*.md` convention. Plan paths come
+ * back from planner agents — untrusted, prompt-injectable data under the
+ * documented threat model — so a path outside that normalized scope must fail
+ * closed BEFORE any filesystem or git access.
  *
  * @param worktree The task worktree's absolute path.
  * @param planPath The agent-supplied plan path (untrusted).
- * @returns `{ ok, relPath, detail }`; `ok` is false when the path escapes the worktree.
+ * @returns `{ ok, relPath, detail }`; `ok` is true only for a normalized task-scoped ExecPlan path.
  */
 export function execplanRelPath(worktree: string, planPath: unknown): {
-  /** True when the path resolves inside the worktree. */
+  /** True when the normalized path is a task-scoped `docs/execplans/*.md` path inside the worktree. */
   ok: boolean
   /** The path relative to the worktree; empty when `ok` is false. */
   relPath: string
@@ -82,6 +82,9 @@ export function execplanRelPath(worktree: string, planPath: unknown): {
   const rel = path.isAbsolute(raw) ? path.relative(worktree, raw) : path.normalize(raw)
   if (!raw || !rel || rel === '.' || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
     return { ok: false, relPath: '', detail: `ExecPlan path escapes the assigned worktree: ${raw || '<empty>'}` }
+  }
+  if (!isTaskArtefactPath(rel)) {
+    return { ok: false, relPath: '', detail: `ExecPlan path escapes the assigned worktree: ${raw}` }
   }
   return { ok: true, relPath: rel, detail: '' }
 }
