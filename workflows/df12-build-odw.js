@@ -362,6 +362,7 @@ function extractRoadmapIds(text) {
   return [...ids];
 }
 function expandStepRange(start, end) {
+  const MAX_STEP_RANGE_LENGTH = 1e3;
   if (!/^\d+\.\d+$/.test(start) || !/^\d+\.\d+$/.test(end)) return [];
   const startParts = start.split(".").map(Number);
   const endParts = end.split(".").map(Number);
@@ -369,7 +370,9 @@ function expandStepRange(start, end) {
   const [phaseId, firstStep] = startParts;
   const lastStep = endParts[1];
   if (!Number.isInteger(phaseId) || !Number.isInteger(firstStep) || !Number.isInteger(lastStep) || firstStep > lastStep) return [];
-  return Array.from({ length: lastStep - firstStep + 1 }, (_, index) => `${phaseId}.${firstStep + index}`);
+  const rangeLength = lastStep - firstStep + 1;
+  if (rangeLength > MAX_STEP_RANGE_LENGTH) return [];
+  return Array.from({ length: rangeLength }, (_, index) => `${phaseId}.${firstStep + index}`);
 }
 function parseRoadmap(text) {
   const tasks = [];
@@ -1587,6 +1590,9 @@ function execplanRelPath(worktree, planPath) {
   const rel = path.isAbsolute(raw) ? path.relative(worktree, raw) : path.normalize(raw);
   if (!raw || !rel || rel === "." || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
     return { ok: false, relPath: "", detail: `ExecPlan path escapes the assigned worktree: ${raw || "<empty>"}` };
+  }
+  if (!isTaskArtefactPath(rel)) {
+    return { ok: false, relPath: "", detail: `ExecPlan path escapes the assigned worktree: ${raw}` };
   }
   return { ok: true, relPath: rel, detail: "" };
 }

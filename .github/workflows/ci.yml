@@ -27,6 +27,8 @@ jobs:
           # origin/main, so the full history is required.
           fetch-depth: 0
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: '1.3.14'
       - uses: astral-sh/setup-uv@c5680ec91f7b9b91406fab4ded5d45245abf7b67
       - name: Install JavaScript dependencies
         run: bun install --frozen-lockfile
@@ -37,7 +39,12 @@ jobs:
             "nixie-cli==${NIXIE_CLI_VERSION}"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Install Dafny
-        run: dotnet tool install --global dafny --version "${DAFNY_VERSION}"
+        run: |
+          set -euo pipefail
+          dotnet tool install --global dafny --version "${DAFNY_VERSION}"
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          export PATH="$HOME/.dotnet/tools:$PATH"
+          dafny --version
       - name: Run commit gates
         run: make all
       # make all uses the lenient verify-modules (it skips without Dafny so
