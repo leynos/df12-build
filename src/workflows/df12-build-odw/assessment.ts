@@ -301,11 +301,11 @@ function isInfraFaultResult(result: AssessableResult | null | undefined): boolea
 }
 
 /**
- * Whether an open issue text describes a deferred/rate-limited CodeRabbit
- * review rather than a substantive product defect.
+ * Whether an open issue text describes a deferred/rate-limited host review
+ * rather than a substantive product defect.
  *
  * @param issue A single open-issue string (or any value, coerced to text).
- * @returns True when the text mentions CodeRabbit alongside a deferred/rate-limit marker.
+ * @returns True when the text names a host reviewer alongside a specific deferral marker.
  */
 export function isDeferredReviewIssue(issue: unknown): boolean {
   const text = String(issue || '').toLowerCase()
@@ -318,14 +318,13 @@ export function isDeferredReviewIssue(issue: unknown): boolean {
     'retry after',
     'waittime',
     'wait time',
-    'deferred',
-    'deferred review',
+    'dakar review deferred',
     'deferred coderabbit review',
     'coderabbit review deferred',
     'unavailable',
   ]
-  // Recognize both host reviewers' deferral markers: CodeRabbit rate limits and
-  // Dakar budget/quota deferrals (whose detail carries 'dakar' plus 'deferred').
+  // Recognize CodeRabbit rate-limit markers and Dakar's exact deferred-review
+  // prefix without treating unrelated deferred work as a recoverable review.
   const namesHostReviewer = text.includes('coderabbit') || text.includes('dakar')
   return namesHostReviewer && deferredReviewMarkers.some((marker) => text.includes(marker))
 }

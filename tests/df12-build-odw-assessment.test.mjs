@@ -604,6 +604,8 @@ test('recoverable review faults classify as deferred review issues', async () =>
     ['coderabbit review returned HTTP 429; retry later', true],
     ['CodeRabbit rate-limit backoff in progress', true],
     ['CodeRabbit temporarily unavailable', true],
+    ['Dakar migration deferred pending approval', false],
+    ['CodeRabbit rollout deferred pending approval', false],
     ['coderabbit found 3 blocking issues', false],
     ['make test failed: rate_limit spec regression', false],
   ]
@@ -812,6 +814,18 @@ test('the Dakar preflight requires a non-empty OPENAI_API_KEY and skips CodeRabb
     assert.ok(
       !missing.calls().some((line) => line.startsWith('coderabbit ')),
       'coderabbit auth must not be consulted in Dakar mode',
+    )
+
+    // An explicitly empty key fails identically and still avoids CodeRabbit.
+    process.env.OPENAI_API_KEY = ''
+    const empty = makeAuthBin()
+    const emptyFailures = await runPreflightWithFakes({}, empty)
+    assert.equal(emptyFailures.length, 1)
+    assert.equal(emptyFailures[0].tool, 'dakar')
+    assert.match(emptyFailures[0].detail, /OPENAI_API_KEY/)
+    assert.ok(
+      !empty.calls().some((line) => line.startsWith('coderabbit ')),
+      'coderabbit auth must not be consulted for an empty Dakar key',
     )
 
     // A non-empty key clears the Dakar preflight.
