@@ -5,7 +5,10 @@
   "description": "The envelope one workflow passes to another so the child's telemetry joins the parent's correlation. See docs/workflow-observability-contract.md section 6.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "correlationId"],
+  "required": [
+    "schemaVersion",
+    "correlationId"
+  ],
   "properties": {
     "schemaVersion": {
       "const": 1
@@ -19,7 +22,10 @@
     "parent": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["workflowInvocationId", "nodeAttemptId"],
+      "required": [
+        "workflowInvocationId",
+        "nodeAttemptId"
+      ],
       "properties": {
         "workflowInvocationId": {
           "$ref": "#/$defs/uuidv7"
@@ -32,7 +38,9 @@
     "trace": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["traceparent"],
+      "required": [
+        "traceparent"
+      ],
       "properties": {
         "traceparent": {
           "$ref": "#/$defs/traceparent"
@@ -48,7 +56,11 @@
     "attributes": {
       "type": "object",
       "additionalProperties": {
-        "type": ["string", "number", "boolean"]
+        "type": [
+          "string",
+          "number",
+          "boolean"
+        ]
       }
     }
   },
@@ -67,26 +79,50 @@
       "description": "A W3C traceparent header value. Rejects the reserved ff version, an all-zero trace id, and an all-zero parent id.",
       "type": "string",
       "allOf": [
-        { "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$" },
-        { "not": { "pattern": "^ff-" } },
-        { "not": { "pattern": "^[0-9a-f]{2}-0{32}-" } },
-        { "not": { "pattern": "-0{16}-[0-9a-f]{2}$" } }
+        {
+          "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+        },
+        {
+          "not": {
+            "pattern": "^ff-"
+          }
+        },
+        {
+          "not": {
+            "pattern": "^[0-9a-f]{2}-0{32}-"
+          }
+        },
+        {
+          "not": {
+            "pattern": "-0{16}-[0-9a-f]{2}$"
+          }
+        }
       ]
     },
     "sink": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "endpoint", "protocol"],
+      "required": [
+        "kind",
+        "endpoint",
+        "protocol"
+      ],
       "properties": {
         "kind": {
           "const": "otlp-http"
         },
         "endpoint": {
-          "description": "An OTLP collector endpoint. The second clause rejects URI userinfo, so credentials cannot ride inline in the authority component.",
+          "description": "An OTLP collector endpoint. The first clause requires the otlp+http(s) scheme followed by a non-empty, well-formed authority, so an empty or whitespace authority is rejected. The second clause independently rejects URI userinfo, so credentials cannot ride inline in the authority component.",
           "type": "string",
           "allOf": [
-            { "pattern": "^otlp\\+https?://" },
-            { "not": { "pattern": "^otlp\\+https?://[^/?#]*@" } }
+            {
+              "pattern": "^otlp\\+https?://(?:\\[[0-9a-fA-F:]+\\]|[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?)(?::[0-9]{1,5})?(?:/[^\\s]*)?$"
+            },
+            {
+              "not": {
+                "pattern": "^otlp\\+https?://[^/?#]*@"
+              }
+            }
           ]
         },
         "protocol": {
@@ -100,7 +136,10 @@
     "authRef": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "variable"],
+      "required": [
+        "kind",
+        "variable"
+      ],
       "properties": {
         "kind": {
           "const": "environment"

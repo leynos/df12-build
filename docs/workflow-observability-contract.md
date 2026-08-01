@@ -238,7 +238,10 @@ migrations; a workflow must not open the SQLite store directly.
   scheme is reserved for a future transport (ADR 003 outstanding decision) and
   is not valid in version 1. The endpoint must not carry URI userinfo: a value
   such as `otlp+http://user:password@host:4318` is rejected, because it would
-  otherwise smuggle a credential past the rule below.
+  otherwise smuggle a credential past the rule below. The endpoint must also
+  carry a non-empty, well-formed authority (a host, with an optional port and
+  path): a value such as `otlp+http://` with an empty authority, or one
+  containing whitespace, is rejected.
 - `sink.protocol` is the constant `http/json`.
 - `sink.authRef` (optional) references a credential by environment variable,
   as `authRef.kind` (constant `environment`) and `authRef.variable` (an
@@ -264,10 +267,14 @@ The collector must, on every received batch:
 
 1. Read the headers and reject a batch whose `x-df12-schema-version` it does
    not support.
-2. Validate `x-df12-agent-invocation-id` against a registered invocation;
-   an unregistered invocation is recorded as a diagnostic, not silently dropped.
+2. Resolve the full correlation tuple — workshop id, run id, node attempt id,
+   agent invocation id, agent process id, and CLI attempt — against the
+   registered invocation, and check that the headers are mutually consistent;
+   an unregistered invocation, or a tuple whose headers disagree with the
+   registered invocation, is recorded as a diagnostic, not silently dropped.
 3. Attach the resolved binding to every record in the batch at `exact`
-   confidence (section 9).
+   confidence (section 9) only when the full tuple matches; a mismatch or an
+   unregistered invocation must not receive an `exact` binding.
 4. Preserve native provider trace identifiers unchanged; a Codex trace is
    linked to the ODW invocation as a correlation edge, never rewritten.
 
@@ -286,7 +293,10 @@ Binding rows use snake_case (section 3). The fields are `binding_type`,
 `source`, `confidence`, `first_seen_ns`, and `last_seen_ns`. The two nanosecond
 timestamps are carried as decimal strings, not JSON numbers, because a
 nanosecond count since the epoch exceeds the range JSON numbers represent
-exactly (2^53); the SQLite store holds them as 64-bit integers.
+exactly (2^53); the SQLite store holds them as 64-bit integers. The strings are
+canonical decimal with no leading zeros, and are bounded above by the signed
+64-bit maximum `9223372036854775807`, the width of the SQLite column that holds
+them; a value above that maximum, or a zero-padded value, is rejected.
 
 The `binding_type` is a dotted, namespaced key. The registry for version 1
 includes:

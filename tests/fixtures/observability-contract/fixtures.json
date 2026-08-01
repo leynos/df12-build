@@ -60,6 +60,18 @@
             "protocol": "http/json"
           }
         }
+      },
+      {
+        "name": "ipv6 sink authority",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000005",
+          "sink": {
+            "kind": "otlp-http",
+            "endpoint": "otlp+http://[::1]:4318",
+            "protocol": "http/json"
+          }
+        }
       }
     ],
     "invalid": [
@@ -264,6 +276,54 @@
             "nodeAttemptId": "attempt-1"
           }
         }
+      },
+      {
+        "name": "endpoint with an empty authority",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000030",
+          "sink": {
+            "kind": "otlp-http",
+            "endpoint": "otlp+http://",
+            "protocol": "http/json"
+          }
+        }
+      },
+      {
+        "name": "endpoint with a whitespace authority",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000031",
+          "sink": {
+            "kind": "otlp-http",
+            "endpoint": "otlp+http:// ",
+            "protocol": "http/json"
+          }
+        }
+      },
+      {
+        "name": "endpoint with a space inside the authority",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000032",
+          "sink": {
+            "kind": "otlp-http",
+            "endpoint": "otlp+http://host name",
+            "protocol": "http/json"
+          }
+        }
+      },
+      {
+        "name": "endpoint with a trailing newline",
+        "value": {
+          "schemaVersion": 1,
+          "correlationId": "0198e5a1-0000-7000-8000-000000000033",
+          "sink": {
+            "kind": "otlp-http",
+            "endpoint": "otlp+http://127.0.0.1:4318\n",
+            "protocol": "http/json"
+          }
+        }
       }
     ]
   },
@@ -306,6 +366,18 @@
           "confidence": "heuristic",
           "first_seen_ns": "1721000000000000000",
           "last_seen_ns": "1721000000000000000"
+        }
+      },
+      {
+        "name": "timestamps at the signed 64-bit maximum",
+        "value": {
+          "binding_type": "claude.session.id",
+          "binding_value": "sess_abcdef",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a1",
+          "source": "otlp-header",
+          "confidence": "exact",
+          "first_seen_ns": "9223372036854775807",
+          "last_seen_ns": "9223372036854775807"
         }
       }
     ],
@@ -404,6 +476,54 @@
           "source": "otlp-header",
           "confidence": "exact",
           "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "1721000000000000000"
+        }
+      },
+      {
+        "name": "first_seen_ns one past the signed 64-bit maximum",
+        "value": {
+          "binding_type": "claude.session.id",
+          "binding_value": "sess_abcdef",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a1",
+          "source": "otlp-header",
+          "confidence": "exact",
+          "first_seen_ns": "9223372036854775808",
+          "last_seen_ns": "1721000000000000000"
+        }
+      },
+      {
+        "name": "last_seen_ns one past the signed 64-bit maximum",
+        "value": {
+          "binding_type": "claude.session.id",
+          "binding_value": "sess_abcdef",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a1",
+          "source": "otlp-header",
+          "confidence": "exact",
+          "first_seen_ns": "1721000000000000000",
+          "last_seen_ns": "9223372036854775808"
+        }
+      },
+      {
+        "name": "first_seen_ns far beyond the signed 64-bit maximum",
+        "value": {
+          "binding_type": "claude.session.id",
+          "binding_value": "sess_abcdef",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a1",
+          "source": "otlp-header",
+          "confidence": "exact",
+          "first_seen_ns": "99999999999999999999999999",
+          "last_seen_ns": "1721000000000000000"
+        }
+      },
+      {
+        "name": "zero-padded first_seen_ns is not canonical",
+        "value": {
+          "binding_type": "claude.session.id",
+          "binding_value": "sess_abcdef",
+          "agent_invocation_id": "0198e5a1-0000-7000-8000-0000000000a1",
+          "source": "otlp-header",
+          "confidence": "exact",
+          "first_seen_ns": "0001721000000000000000",
           "last_seen_ns": "1721000000000000000"
         }
       }

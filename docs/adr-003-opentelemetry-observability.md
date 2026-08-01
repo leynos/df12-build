@@ -2,7 +2,11 @@
 
 ## Status
 
-Proposed.
+Accepted. The chosen direction is a correlation-first OTLP gateway (Option C):
+ODW mints an opaque agent invocation id at dispatch, Claude Code inherits
+identity through W3C trace context, Codex is bound through per-invocation OTLP
+exporter headers, and a local `workflow-telemetryd` collector stores raw
+telemetry beside a versioned relational projection in SQLite.
 
 ## Date
 
@@ -254,6 +258,9 @@ change never rewrites history.
   workloads move to exported snapshots rather than growing the collector.
 
 ## Outstanding decisions
+
+These are open refinements within the accepted direction; none of them reopens
+the decision above.
 
 - Final naming for the neutral namespace and header prefix (`leynos.*` and
   `x-df12-*` as drafted, or a single shared prefix).

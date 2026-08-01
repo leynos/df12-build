@@ -101,6 +101,15 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
   they reject credentialed endpoints, W3C-invalid traceparent values, and
   malformed UUIDv7 identifiers. Suite now 44 tests; each new negative fixture
   was checked to fail on its intended rule rather than incidentally.
+- [x] (2026-08-01) Second review round: bounded the nanosecond timestamps to
+  the signed 64-bit maximum in canonical decimal form, required a non-empty
+  well-formed authority on the sink endpoint, and tightened the collector's
+  batch validation to the whole correlation tuple. ADR 003 moved from Proposed
+  to Accepted, matching how ADR 001 and ADR 002 were accepted in the pull
+  request that implemented them. Suite now 54 tests.
+
+The two counts above are the totals at those dates; the current total is in
+`Outcomes & retrospective`.
 
 ## Surprises & discoveries
 
@@ -127,6 +136,15 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
   clauses, the identifier fields carry a real UUIDv7 shape, and the fixtures
   cover each case. The wider lesson for step 5.1.2 is to write the negative
   fixture first and confirm it fails on the intended rule.
+- Observation: a JSON Schema `pattern` can express a numeric upper bound on a
+  decimal string, but only as a digit-position alternation, which is too
+  error-prone to hand-author. Evidence: bounding at 9223372036854775807 needs
+  19 alternatives. Impact: the pattern is generated programmatically and
+  verified against 300,000 randomized values plus every boundary case, and
+  checked for catastrophic backtracking (worst case under 1 ms on a 5,000-digit
+  input). A bare `maxLength: 19` was rejected as under-inclusive: it would
+  still admit the 19-digit values between the signed 64-bit maximum and
+  9999999999999999999.
 - Observation: ajv strict mode rejects a scalar union type
   (`["string","number","boolean"]`) unless `allowUnionTypes` is set. Evidence:
   `strictTypes` error at the envelope `attributes` value schema. Impact: the
@@ -153,6 +171,11 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
   so the file is typechecked there. The plan of work, concrete steps, and
   acceptance text were corrected to the gated path so no stale reference
   remains. Date/Author: 2026-07-19, implementation.
+- Decision: nanosecond timestamps are canonical decimal with no leading
+  zeros, so a zero-padded value is rejected. Rationale: two spellings of one
+  instant serve no purpose, and forbidding padding keeps the bound expressible
+  as a single pattern. No producer exists yet, so the constraint costs nothing
+  to adopt now. Date/Author: 2026-08-01, review follow-up.
 - Decision: the contract uses three naming domains rather than one, and
   documents the split normatively — camelCase for the cross-process envelope (a
   TypeScript/JSON interface), snake_case for ODW JSON Lines event extensions
@@ -174,7 +197,7 @@ The task delivered the version-1 workflow observability contract as a normative
 document (`docs/workflow-observability-contract.md`, 14 numbered sections),
 three JSON Schema draft 2020-12 files under `schemas/observability/`, a
 consolidated fixture set, and a validation suite
-(`tests/modules/observability-contract.test.ts`, 31 tests) that exercises every
+(`tests/modules/observability-contract.test.ts`, 54 tests) that exercises every
 documented rule — including the sink credential rule, the source-to-confidence
 binding conditional, and the logical node key grammar. ADR 003, the roadmap,
 the contents index, and the developers' guide now link the contract, and
