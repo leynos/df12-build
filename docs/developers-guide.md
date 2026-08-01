@@ -47,7 +47,7 @@ Relevant paths:
   `config.ts`, `schemas.ts`, `types.ts`, `roadmap.ts`, `exec.ts`, `faults.ts`,
   `git-evidence.ts`, `recovery-decision.ts`, `recovery-discovery.ts`,
   `prompts.ts`, `write-preflight.ts`, `execplan-durability.ts`, `assessment.ts`,
-  `remediation.ts`, `host-review.ts` (host-run CodeRabbit NDJSON
+  `remediation.ts`, `host-review.ts` (host-run Dakar/CodeRabbit
   parsing/classification and the host commit gates), `shell-command.ts` (a
   non-evaluating parser for configured shell-command words and assignment
   spans), and `run-task.ts`, with
@@ -88,6 +88,12 @@ Relevant paths:
 
 Tick the matching roadmap task and update the relevant ExecPlan whenever a
 branch lands planned work.
+
+The JavaScript files under `workflows/` are runtime/deployment artefacts. Treat
+them as object code, not as source modules subject to the module-level
+docstring rule. In particular, `workflows/df12-build.js` is the baseline Claude
+Code workflow artefact, while `workflows/df12-build-odw.js` is generated from
+the documented TypeScript source tree and must never be edited by hand.
 
 ## ODW workflow contract
 

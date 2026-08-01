@@ -50,7 +50,7 @@ return {
     // OFF: runTask tests drive the pipeline against fixture repos, where the
     // host review would exec the REAL coderabbit CLI, host gates would run
     // real gate commands, and the build loop expects ticked Progress items.
-    { coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...args },
+    { reviewTool: 'coderabbit', coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...args },
     () => {},
     () => {},
     agentImpl,
