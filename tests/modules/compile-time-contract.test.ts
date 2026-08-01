@@ -102,6 +102,10 @@ function typecheckFaultMetrics(body: string): { ok: boolean; output: string } {
   return typecheckWithPrelude(FAULT_METRICS_PRELUDE, body, 'cs-fault-metrics-')
 }
 
+// These probes import the full workflow graph; leave headroom for shared-host
+// contention without weakening the compiler flags or contract assertions.
+const HOST_REVIEW_TYPECHECK_TIMEOUT_MS = 60_000
+
 describe('compile-time contract', () => {
   test('tsconfig.json keeps the erasable-syntax restriction flags on', async () => {
     const tsconfig = JSON.parse(await Bun.file(path.join(REPO, 'tsconfig.json')).text())
@@ -226,7 +230,7 @@ describe('host-review public type contract', () => {
       `void workflow; void host`,
     ].join('\n'))
     expect(result.ok).toBe(true)
-  }, 30_000)
+  }, HOST_REVIEW_TYPECHECK_TIMEOUT_MS)
 
   test('reviewTool rejects values outside the Dakar and CodeRabbit union', () => {
     const result = typecheckHostReview(
@@ -234,7 +238,7 @@ describe('host-review public type contract', () => {
     )
     expect(result.ok).toBe(false)
     expect(result.output).toMatch(/TS2322|not assignable/)
-  }, 30_000)
+  }, HOST_REVIEW_TYPECHECK_TIMEOUT_MS)
 
   test('Dakar timeout and budget fields reject non-numeric values', () => {
     const result = typecheckHostReview(
@@ -242,5 +246,5 @@ describe('host-review public type contract', () => {
     )
     expect(result.ok).toBe(false)
     expect(result.output).toMatch(/TS2322|not assignable/)
-  }, 30_000)
+  }, HOST_REVIEW_TYPECHECK_TIMEOUT_MS)
 })

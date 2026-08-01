@@ -86,6 +86,8 @@ describe('deferred-review classification', () => {
     // Dakar deferrals carry 'dakar' plus a 'deferred' marker and must classify
     // as recoverable review faults, just like CodeRabbit rate limits.
     ['Dakar review deferred (stage: deferred) — budget exhausted', true],
+    ['Dakar migration deferred pending approval', false],
+    ['CodeRabbit rollout deferred pending approval', false],
     ['dakar review changes-requested: 2 blocking findings', false],
     ['', false],
   ]

@@ -13,6 +13,7 @@ import {
   hostGateLogPath,
   makeHostReview,
   parseCoderabbitAgentOutput,
+  parseDakarDocument,
 } from '../../src/workflows/df12-build-odw/host-review.ts'
 import type { CoderabbitOutcome } from '../../src/workflows/df12-build-odw/host-review.ts'
 import type { ExecOptions } from '../../src/workflows/df12-build-odw/exec.ts'
@@ -40,6 +41,20 @@ describe('classifyCoderabbitOutcome terminal completion', () => {
   test('a rate_limit error still classifies as rate-limited', () => {
     const parsed = parseCoderabbitAgentOutput('{"type":"error","errorType":"rate_limit","message":"Rate limit exceeded"}')
     expect(classifyCoderabbitOutcome({ ok: true, stderr: '', message: '' }, parsed)).toBe('rate-limited')
+  })
+})
+
+describe('parseDakarDocument', () => {
+  test('locates the terminal verdict after noise containing stray braces', () => {
+    expect(
+      parseDakarDocument('finder {warming cache}\n{"ok":true,"verdict":"pass","findings":[]}\n'),
+    ).toEqual({ ok: true, verdict: 'pass', findings: [] })
+  })
+
+  test('returns null when no valid terminal object exists', () => {
+    expect(parseDakarDocument('no document')).toBeNull()
+    expect(parseDakarDocument('{not json}')).toBeNull()
+    expect(parseDakarDocument('[{"ok":true}]')).toBeNull()
   })
 })
 

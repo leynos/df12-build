@@ -158,16 +158,24 @@ function boundedTail(text: unknown, limit = 2000): string {
   return value.length > limit ? value.slice(-limit) : value
 }
 
+// Search candidate roots from the end so stray braces in leading progress
+// noise cannot hide the terminal JSON document. Returns null when no candidate
+// is a valid object, which the classifier reads as 'error'.
 export function parseDakarDocument(stdout: unknown): DakarDocument | null {
   const text = String(stdout || '')
-  const start = text.indexOf('{')
-  if (start === -1) return null
-  try {
-    const doc = JSON.parse(text.slice(start))
-    return doc && typeof doc === 'object' ? (doc as DakarDocument) : null
-  } catch {
-    return null
+  for (
+    let start = text.lastIndexOf('{');
+    start !== -1;
+    start = start === 0 ? -1 : text.lastIndexOf('{', start - 1)
+  ) {
+    try {
+      const doc = JSON.parse(text.slice(start))
+      if (doc && typeof doc === 'object' && !Array.isArray(doc)) return doc as DakarDocument
+    } catch {
+      // A brace in progress noise or a nested object is not the terminal document root.
+    }
   }
+  return null
 }
 
 export function mapDakarFinding(finding: DakarFinding): CoderabbitFinding {

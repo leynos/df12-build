@@ -163,7 +163,7 @@ The key argument groups are:
   the commit gates and before host review), `reviewTool` (default `dakar`;
   `coderabbit` selects the retained NDJSON reviewer; other values throw) with
   `dakarCommand` (default `dakar-review`), `dakarTimeoutSeconds` (default 3600,
-  clamped 60..7200), and `dakarBudgetGbp` (default 0, clamped 0..10),
+  clamped 60–7200), and `dakarBudgetGbp` (default 0, clamped 0–10),
   `coderabbitHostReview`/
   `coderabbitBetweenWorkItems`/`coderabbitAttempts`/`coderabbitBackoffMinutes`/
   `coderabbitFindingsFile` (host-review enablement, between-work-item gating,

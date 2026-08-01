@@ -1870,8 +1870,7 @@ function isDeferredReviewIssue(issue) {
     "retry after",
     "waittime",
     "wait time",
-    "deferred",
-    "deferred review",
+    "dakar review deferred",
     "deferred coderabbit review",
     "coderabbit review deferred",
     "unavailable"
@@ -2200,14 +2199,14 @@ function boundedTail(text, limit = 2e3) {
 }
 function parseDakarDocument(stdout) {
   const text = String(stdout || "");
-  const start = text.indexOf("{");
-  if (start === -1) return null;
-  try {
-    const doc = JSON.parse(text.slice(start));
-    return doc && typeof doc === "object" ? doc : null;
-  } catch {
-    return null;
+  for (let start = text.lastIndexOf("{"); start !== -1; start = start === 0 ? -1 : text.lastIndexOf("{", start - 1)) {
+    try {
+      const doc = JSON.parse(text.slice(start));
+      if (doc && typeof doc === "object" && !Array.isArray(doc)) return doc;
+    } catch {
+    }
   }
+  return null;
 }
 function mapDakarFinding(finding) {
   const severity = DAKAR_SEVERITY_MAP[String(finding.severity || "").toLowerCase()] || "info";

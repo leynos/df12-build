@@ -221,7 +221,7 @@ they never enter a diff, trip `workflow-freshness`, or affect a gate:
   finding (timestamp, task label, severity, file, comment, codegen
   instructions, suggestion count) is appended best-effort: a bad path or full
   disk degrades logging with a warning and never fails a task. In the default
-  Dakar mode the sink carries Dakar findings with severities mapped onto the
+  Dakar mode, the sink carries Dakar findings with severities mapped onto the
   CodeRabbit scale (`critical`/`high` become `critical`/`major`); the field name
   keeps its historical spelling.
 
@@ -438,6 +438,10 @@ Common arguments:
 - `reviewTool`: host reviewer for committed work: `dakar` (the default;
   requires `OPENAI_API_KEY`) or `coderabbit` (the retained NDJSON CLI path).
   Other values fail at launch.
+
+  **Migration:** The default is now `dakar`. Existing operators must put
+  `dakar-review` and `pi` on `PATH` and provide `OPENAI_API_KEY`. Set
+  `reviewTool` to `coderabbit` to retain the previous NDJSON CLI path.
 - `dakarCommand`: Dakar CLI invoked in `dakar` mode. Defaults to
   `dakar-review`.
 - `dakarTimeoutSeconds`: host-side timeout for each Dakar or CodeRabbit review
