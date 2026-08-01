@@ -84,7 +84,7 @@ export function execplanRelPath(worktree: string, planPath: unknown): {
     return { ok: false, relPath: '', detail: `ExecPlan path escapes the assigned worktree: ${raw || '<empty>'}` }
   }
   if (!isTaskArtefactPath(rel)) {
-    return { ok: false, relPath: '', detail: `ExecPlan path escapes the assigned worktree: ${raw}` }
+    return { ok: false, relPath: '', detail: `ExecPlan path is outside the task-scoped docs/execplans/*.md scope: ${raw}` }
   }
   return { ok: true, relPath: rel, detail: '' }
 }
@@ -256,15 +256,6 @@ export async function salvageTaskArtefacts(worktree: string, candidatePaths: rea
     const contained = execplanRelPath(worktree, raw)
     if (!contained.ok) {
       skipped.push({ path: raw, reason: contained.detail })
-      continue
-    }
-    // Re-check the artefact convention on the NORMALIZED path: the raw pattern
-    // accepts `docs/execplans/../../README.md`, which normalizes to `README.md`
-    // — still inside the worktree, so containment passes, but outside the
-    // task-artefact scope. Without this second gate an untrusted candidate
-    // source could make the host commit arbitrary in-worktree Markdown.
-    if (!isTaskArtefactPath(contained.relPath)) {
-      skipped.push({ path: raw, reason: `normalizes outside the docs/execplans/*.md artefact scope (${contained.relPath})` })
       continue
     }
     // fileState lstat-probes and requires a REGULAR file, so a committed or

@@ -202,10 +202,10 @@ rules:
 - **Module docstrings.** Begin each module with a `/** … @module */` block (a
   top JSDoc comment ending with TypeDoc's bare `@module` tag) describing its
   purpose and responsibilities. `make docs-check` (TypeDoc's `notDocumented`
-  validation, zero tolerance) enforces this and a JSDoc block on every
-  exported declaration across the tree; JSON Schema constants are tagged
-  `@internal` so their `description` fields remain the per-field
-  documentation.
+  validation, zero tolerance) enforces this and a JSDoc block on included
+  reflections of the kinds listed in `requiredToBeDocumented`; JSON Schema
+  constants are tagged `@internal` so their `description` fields remain the
+  per-field documentation.
 
 ## Testing
 

@@ -199,7 +199,9 @@ export async function collectAssessmentEvidence(
 /**
  * Read a worktree file while rejecting final-component symlinks and parent
  * paths that resolve outside the checkout when checked (see write-preflight.ts).
- * `O_NOFOLLOW` protects the final component, while optional realpath containment
+ * `O_NOFOLLOW` protects the final component, while `O_NONBLOCK` prevents a
+ * special file from blocking the open; the opened handle is then validated
+ * with `fstat` as a regular file before reading. Optional realpath containment
  * checks the parent ancestry. These checks do not prevent concurrent
  * replacement of a parent directory, so callers must not rely on this helper
  * against an attacker who can mutate that ancestry during the read. Callers
@@ -219,8 +221,10 @@ export async function readFileText(filePath: string, rootDir?: string): Promise<
       throw new Error(`ExecPlan path escapes the worktree via a parent symlink: ${filePath}`)
     }
   }
-  const handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW)
+  const handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
+    const stat = await handle.stat()
+    if (!stat.isFile()) throw new Error(`Worktree path is not a regular file: ${filePath}`)
     return await handle.readFile({ encoding: 'utf8' })
   } finally {
     await handle.close()
