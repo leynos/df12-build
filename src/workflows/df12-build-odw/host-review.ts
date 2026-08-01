@@ -498,8 +498,12 @@ export function makeHostReview(config: HostReviewConfig) {
       '--timeout', String(dakarTimeoutSeconds),
       ...(dakarBudgetGbp > 0 ? ['--budget-gbp', String(dakarBudgetGbp)] : []),
     ]
-    const result = await exec(dakarCommand, commandArgs, { cwd: worktree })
-    return classifyDakarReview(result)
+    try {
+      const result = await exec(dakarCommand, commandArgs, { cwd: worktree })
+      return classifyDakarReview(result)
+    } finally {
+      fs.rmSync(stateRoot, { recursive: true, force: true })
+    }
   }
 
   // Run one host review against the worktree's COMMITTED changes, absorbing

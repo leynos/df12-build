@@ -60,6 +60,7 @@ async function runSmoke(resumeMode) {
       // Host review would exec the REAL coderabbit CLI (it does not route
       // through the mock adapters) and burn review quota; host gates would
       // run `make all` in the Makefile-less fixture repo.
+      reviewTool: 'coderabbit',
       coderabbitHostReview: false,
       hostCommitGates: false,
       // The mock implement adapter does not tick ExecPlan Progress items.

@@ -91,6 +91,19 @@ describe('makeConfig defaults', () => {
 })
 
 describe('makeConfig review-tool selection', () => {
+  test('Dakar ignores the legacy agent-run CodeRabbit switch', () => {
+    const config = makeConfig({ coderabbitHostReview: false })
+    expect(config.REVIEW_TOOL).toBe('dakar')
+    expect(config.CODERABBIT_HOST_REVIEW).toBe(true)
+    expect(config.CODERABBIT_REVIEW_GUIDANCE).toContain('Do NOT run coderabbit yourself')
+  })
+
+  test('CodeRabbit still permits its legacy agent-run review flow', () => {
+    const config = makeConfig({ reviewTool: 'coderabbit', coderabbitHostReview: false })
+    expect(config.CODERABBIT_HOST_REVIEW).toBe(false)
+    expect(config.CODERABBIT_REVIEW_GUIDANCE).toStartWith('Use `coderabbit review --agent`')
+  })
+
   test('coderabbit is a valid explicit choice', () => {
     expect(makeConfig({ reviewTool: 'coderabbit' }).REVIEW_TOOL).toBe('coderabbit')
     expect(makeConfig({ reviewTool: 'CodeRabbit' }).REVIEW_TOOL).toBe('coderabbit')

@@ -433,11 +433,10 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   // (`coderabbit review --agent --type committed --base <base>`, see
   // host-review.ts) that this knob does NOT override.
   const CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || 'coderabbit review --agent'
-  // Host-run CodeRabbit review: the control loop invokes the CLI against
-  // committed work, absorbs rate-limit backoff in host wall-clock instead of
-  // agent tokens, and feeds actionable findings back into the fix rounds.
-  // coderabbitHostReview=false restores the legacy agent-run flow.
-  const CODERABBIT_HOST_REVIEW = cfg.coderabbitHostReview !== false
+  // Despite its historical name, this is the effective host-review switch.
+  // Dakar has no agent-run mode, so the legacy false value only restores the
+  // agent-run flow when CodeRabbit is explicitly selected.
+  const CODERABBIT_HOST_REVIEW = REVIEW_TOOL === 'dakar' || cfg.coderabbitHostReview !== false
   // Run the host CodeRabbit review BETWEEN per-work-item build turns (a
   // deterministic gate on each committed work item) rather than only once at
   // the end of the implementation stage. Only meaningful when both host

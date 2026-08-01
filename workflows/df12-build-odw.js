@@ -1006,7 +1006,7 @@ function makeConfig(rawArgs) {
   const DAKAR_BUDGET_GBP_RAW = Number(cfg.dakarBudgetGbp);
   const DAKAR_BUDGET_GBP2 = Number.isFinite(DAKAR_BUDGET_GBP_RAW) ? Math.min(10, Math.max(0, DAKAR_BUDGET_GBP_RAW)) : 0;
   const CODERABBIT_REVIEW_COMMAND2 = cfg.coderabbitReviewCommand || "coderabbit review --agent";
-  const CODERABBIT_HOST_REVIEW2 = cfg.coderabbitHostReview !== false;
+  const CODERABBIT_HOST_REVIEW2 = REVIEW_TOOL2 === "dakar" || cfg.coderabbitHostReview !== false;
   const CODERABBIT_BETWEEN_WORK_ITEMS2 = cfg.coderabbitBetweenWorkItems !== false;
   const CODERABBIT_ATTEMPTS2 = Math.max(1, Math.trunc(Number(cfg.coderabbitAttempts) || 3));
   const CODERABBIT_BACKOFF_MINUTES2 = (() => {
@@ -2416,8 +2416,12 @@ function makeHostReview(config) {
       String(dakarTimeoutSeconds),
       ...dakarBudgetGbp > 0 ? ["--budget-gbp", String(dakarBudgetGbp)] : []
     ];
-    const result = await exec(dakarCommand, commandArgs, { cwd: worktree });
-    return classifyDakarReview(result);
+    try {
+      const result = await exec(dakarCommand, commandArgs, { cwd: worktree });
+      return classifyDakarReview(result);
+    } finally {
+      fs.rmSync(stateRoot, { recursive: true, force: true });
+    }
   }
   async function runCoderabbitHostReview2(worktree, label, deps = {}) {
     const exec = deps.exec || execFileStatus;

@@ -523,7 +523,10 @@ test('host review flips the prompts from agent-run CodeRabbit to host-run', asyn
   assert.match(hostedAddendum, /Do NOT run coderabbit yourself/)
   assert.match(hostedAddendum, /open sub-tasks: 1\.2\.3\.1\./, 'subtasks are id strings, joined into the prompt')
 
-  const legacy = await loadAssessmentSurface({ coderabbitHostReview: false })
+  const legacy = await loadAssessmentSurface({
+    reviewTool: 'coderabbit',
+    coderabbitHostReview: false,
+  })
   assert.equal(legacy.CODERABBIT_HOST_REVIEW, false)
   const legacyImplement = legacy.implementPrompt(task, '/tmp/wt', plan)
   assert.match(legacyImplement, /coderabbit review --agent/)

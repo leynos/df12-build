@@ -2,7 +2,7 @@
 // classifier's terminal-completion guard, and the spawn-streamed host commit
 // gates (secure per-run log directory).
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -85,7 +85,14 @@ describe('runDakarHostReview', () => {
   const dakarJson = (doc: Record<string, unknown>) => `noise before json\n${JSON.stringify(doc)}\n`
 
   test('the argv names the state root under tmpdir and omits the budget flag by default', async () => {
-    const { calls, exec } = recordingExec({ stdout: dakarJson({ ok: true, verdict: 'pass', findings: [] }) })
+    const calls: Array<{ command: string; args: string[] }> = []
+    let stateRoot = ''
+    const exec = async (command: string, args: readonly string[]) => {
+      calls.push({ command, args: [...args] })
+      stateRoot = args[args.indexOf('--state-root') + 1]
+      expect(existsSync(stateRoot)).toBe(true)
+      return { ok: true, stdout: dakarJson({ ok: true, verdict: 'pass', findings: [] }), stderr: '' }
+    }
     const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar' })
     const review = await runCoderabbitHostReview('/work/tree', 'label', { exec })
     expect(review.outcome).toBe('clean')
@@ -94,10 +101,21 @@ describe('runDakarHostReview', () => {
     expect(args[args.indexOf('--repo-root') + 1]).toBe('/work/tree')
     expect(args[args.indexOf('--base') + 1]).toBe('main')
     expect(args[args.indexOf('--timeout') + 1]).toBe('3600')
-    const stateRoot = args[args.indexOf('--state-root') + 1]
     expect(stateRoot.startsWith(path.join(tmpdir(), 'df12-dakar-state-'))).toBe(true)
-    junk.push(stateRoot)
+    expect(existsSync(stateRoot)).toBe(false)
     expect(args).not.toContain('--budget-gbp')
+  })
+
+  test('the state root is removed when reviewer execution throws', async () => {
+    let stateRoot = ''
+    const exec = async (_command: string, args: readonly string[]) => {
+      stateRoot = args[args.indexOf('--state-root') + 1]
+      expect(existsSync(stateRoot)).toBe(true)
+      throw new Error('Dakar execution failed')
+    }
+    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar' })
+    await expect(runCoderabbitHostReview('/work/tree', 'label', { exec })).rejects.toThrow('Dakar execution failed')
+    expect(existsSync(stateRoot)).toBe(false)
   })
 
   test('a configured budget adds the --budget-gbp flag', async () => {

@@ -116,7 +116,7 @@ return {
     // the host review would exec the REAL coderabbit CLI on PATH (burning
     // review quota), host gates would run `make all` in Makefile-less
     // fixtures, and the build loop expects agents to tick Progress items.
-    { coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...args },
+    { reviewTool: 'coderabbit', coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...args },
     () => {},
     () => {},
     agentImpl,
