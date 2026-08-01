@@ -195,12 +195,13 @@ export function classifyDakarReview(execResult: ExecStatus): { outcome: Coderabb
     return { outcome: 'error', findings: [], detail }
   }
   if (doc.ok === false) {
+    const stage = boundedTail(doc.stage ?? 'unknown', 200)
     if (String(doc.stage) === 'deferred') {
       // 'dakar' + 'deferred' markers let assessment.ts recognize this as a
       // recoverable review deferral, mirroring the CodeRabbit rate-limit path.
-      return { outcome: 'rate-limited', findings: [], detail: `Dakar review deferred (stage: deferred) — ${boundedTail(doc.error || 'no detail')}` }
+      return { outcome: 'rate-limited', findings: [], detail: `Dakar review deferred (stage: ${stage}) — ${boundedTail(doc.error || 'no detail')}` }
     }
-    return { outcome: 'error', findings: [], detail: `stage: ${doc.stage ?? 'unknown'} — ${boundedTail(doc.error || 'no detail')}` }
+    return { outcome: 'error', findings: [], detail: `stage: ${stage} — ${boundedTail(doc.error || 'no detail')}` }
   }
   if (doc.ok === true) {
     if (doc.skipped === true || doc.verdict === 'pass') return { outcome: 'clean', findings: [], detail: '' }
@@ -214,6 +215,16 @@ export function classifyDakarReview(execResult: ExecStatus): { outcome: Coderabb
           outcome: 'error',
           findings: [],
           detail: 'Dakar returned changes-requested without any findings; refusing to treat a reviewer rejection as non-blocking',
+        }
+      }
+      const malformedIndex = raw.findIndex(
+        (finding) => finding === null || typeof finding !== 'object' || Array.isArray(finding),
+      )
+      if (malformedIndex !== -1) {
+        return {
+          outcome: 'error',
+          findings: [],
+          detail: boundedTail(`Dakar returned a malformed finding at index ${malformedIndex}; expected an object`, 2000),
         }
       }
       return { outcome: 'findings', findings: raw.map(mapDakarFinding), detail: '' }
@@ -457,6 +468,9 @@ export function makeHostReview(config: HostReviewConfig) {
     csCheck,
     csCheckCommand,
   } = config
+  const dakarInvocation = dakarCommand.trim().split(/\s+/).filter(Boolean)
+  const dakarExecutable = dakarInvocation[0] || 'dakar-review'
+  const dakarPrefixArgs = dakarInvocation.slice(1)
 
   // Deterministic jitter in [low, high] minutes: Math.random() is banned for
   // Claude Code workflow dual-compatibility (ODW scanDualCompat), and a seeded
@@ -472,7 +486,10 @@ export function makeHostReview(config: HostReviewConfig) {
   // event stream (never the exit code). Detail is empty on a clean/findings
   // outcome; otherwise it carries the first parsable error text.
   async function runCoderabbitAttempt(worktree: string, exec: NonNullable<HostReviewDeps['exec']>): Promise<{ outcome: CoderabbitOutcome; findings: CoderabbitFinding[]; detail: string }> {
-    const result = await exec('coderabbit', ['review', '--agent', '--type', 'committed', '--base', base], { cwd: worktree })
+    const result = await exec('coderabbit', ['review', '--agent', '--type', 'committed', '--base', base], {
+      cwd: worktree,
+      timeoutMs: dakarTimeoutSeconds * 1000,
+    })
     const parsed = parseCoderabbitAgentOutput(result.stdout)
     const outcome = classifyCoderabbitOutcome(result, parsed)
     const detail = outcome === 'clean' || outcome === 'findings'
@@ -499,7 +516,10 @@ export function makeHostReview(config: HostReviewConfig) {
       ...(dakarBudgetGbp > 0 ? ['--budget-gbp', String(dakarBudgetGbp)] : []),
     ]
     try {
-      const result = await exec(dakarCommand, commandArgs, { cwd: worktree })
+      const result = await exec(dakarExecutable, [...dakarPrefixArgs, ...commandArgs], {
+        cwd: worktree,
+        timeoutMs: dakarTimeoutSeconds * 1000,
+      })
       return classifyDakarReview(result)
     } finally {
       fs.rmSync(stateRoot, { recursive: true, force: true })

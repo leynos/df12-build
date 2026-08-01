@@ -15,6 +15,7 @@ import {
   parseCoderabbitAgentOutput,
 } from '../../src/workflows/df12-build-odw/host-review.ts'
 import type { CoderabbitOutcome } from '../../src/workflows/df12-build-odw/host-review.ts'
+import type { ExecOptions } from '../../src/workflows/df12-build-odw/exec.ts'
 
 describe('classifyCoderabbitOutcome terminal completion', () => {
   test('both observed success statuses (review_completed, reviewed) are clean', () => {
@@ -65,9 +66,9 @@ function hostReview(overrides: Partial<Parameters<typeof makeHostReview>[0]> = {
 }
 
 function recordingExec(result: Partial<import('../../src/workflows/df12-build-odw/exec.ts').ExecStatus>) {
-  const calls: Array<{ command: string; args: string[] }> = []
-  const exec = async (command: string, args: readonly string[]) => {
-    calls.push({ command, args: [...args] })
+  const calls: Array<{ command: string; args: string[]; options: ExecOptions }> = []
+  const exec = async (command: string, args: readonly string[], options: ExecOptions = {}) => {
+    calls.push({ command, args: [...args], options })
     return { ok: true, stdout: '', stderr: '', ...result }
   }
   return { calls, exec }
@@ -85,10 +86,10 @@ describe('runDakarHostReview', () => {
   const dakarJson = (doc: Record<string, unknown>) => `noise before json\n${JSON.stringify(doc)}\n`
 
   test('the argv names the state root under tmpdir and omits the budget flag by default', async () => {
-    const calls: Array<{ command: string; args: string[] }> = []
+    const calls: Array<{ command: string; args: string[]; options: ExecOptions }> = []
     let stateRoot = ''
-    const exec = async (command: string, args: readonly string[]) => {
-      calls.push({ command, args: [...args] })
+    const exec = async (command: string, args: readonly string[], options: ExecOptions = {}) => {
+      calls.push({ command, args: [...args], options })
       stateRoot = args[args.indexOf('--state-root') + 1]
       expect(existsSync(stateRoot)).toBe(true)
       return { ok: true, stdout: dakarJson({ ok: true, verdict: 'pass', findings: [] }), stderr: '' }
@@ -96,14 +97,30 @@ describe('runDakarHostReview', () => {
     const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar' })
     const review = await runCoderabbitHostReview('/work/tree', 'label', { exec })
     expect(review.outcome).toBe('clean')
-    const { command, args } = calls[0]
+    const { command, args, options } = calls[0]
     expect(command).toBe('dakar-review')
     expect(args[args.indexOf('--repo-root') + 1]).toBe('/work/tree')
     expect(args[args.indexOf('--base') + 1]).toBe('main')
     expect(args[args.indexOf('--timeout') + 1]).toBe('3600')
+    expect(options).toEqual({ cwd: '/work/tree', timeoutMs: 3_600_000 })
     expect(stateRoot.startsWith(path.join(tmpdir(), 'df12-dakar-state-'))).toBe(true)
     expect(existsSync(stateRoot)).toBe(false)
     expect(args).not.toContain('--budget-gbp')
+  })
+
+  test('a multi-word command separates its executable and prefix arguments', async () => {
+    const { calls, exec } = recordingExec({
+      stdout: dakarJson({ ok: true, verdict: 'pass', findings: [] }),
+    })
+    const { runCoderabbitHostReview } = hostReview({
+      reviewTool: 'dakar',
+      dakarCommand: 'uv run dakar-review',
+      dakarTimeoutSeconds: 120,
+    })
+    await runCoderabbitHostReview('/work/tree', 'label', { exec })
+    expect(calls[0].command).toBe('uv')
+    expect(calls[0].args.slice(0, 2)).toEqual(['run', 'dakar-review'])
+    expect(calls[0].options.timeoutMs).toBe(120_000)
   })
 
   test('the state root is removed when reviewer execution throws', async () => {
@@ -167,6 +184,49 @@ describe('runDakarHostReview', () => {
     expect(review.detail).toContain('changes-requested')
   })
 
+  for (const [name, malformed] of [
+    ['null', null],
+    ['a scalar', 42],
+    ['a string', 'finding'],
+    ['an array', []],
+  ] as const) {
+    test(`changes-requested rejects ${name} finding entry`, async () => {
+      const { exec } = recordingExec({
+        stdout: dakarJson({
+          ok: true,
+          verdict: 'changes-requested',
+          findings: [{ severity: 'high', title: 'valid' }, malformed],
+        }),
+      })
+      const { runCoderabbitHostReview } = hostReview({
+        reviewTool: 'dakar',
+        coderabbitAttempts: 1,
+      })
+      const review = await runCoderabbitHostReview('/w', 'l', { exec })
+      expect(review.outcome).toBe('error')
+      expect(review.findings).toEqual([])
+      expect(review.detail).toContain('malformed finding at index 1')
+      expect(review.detail.length).toBeLessThanOrEqual(2000)
+    })
+  }
+
+  test('an oversized failure stage is bounded before entering the detail', async () => {
+    const stage = `discarded-prefix-${'x'.repeat(50_000)}-kept-tail`
+    const { exec } = recordingExec({
+      stdout: dakarJson({ ok: false, stage, error: 'review failed' }),
+    })
+    const { runCoderabbitHostReview } = hostReview({
+      reviewTool: 'dakar',
+      coderabbitAttempts: 1,
+    })
+    const review = await runCoderabbitHostReview('/w', 'l', { exec })
+    expect(review.outcome).toBe('error')
+    expect(review.findings).toEqual([])
+    expect(review.detail).not.toContain('discarded-prefix')
+    expect(review.detail).toContain('kept-tail')
+    expect(review.detail.length).toBeLessThanOrEqual(2000)
+  })
+
   test('a deferred stage backs off and retries like a CodeRabbit rate limit', async () => {
     let attempts = 0
     const exec = async (_command: string, args: readonly string[]) => {
@@ -220,15 +280,18 @@ describe('reviewTool dispatch', () => {
       '{"type":"status","message":"reviewing"}',
       '{"type":"complete","status":"review_completed","findings":0}',
     ].join('\n')
-    const calls: string[] = []
-    const exec = async (command: string) => {
-      calls.push(command)
+    const calls: Array<{ command: string; options: ExecOptions }> = []
+    const exec = async (command: string, _args: readonly string[], options: ExecOptions = {}) => {
+      calls.push({ command, options })
       return { ok: true, stdout: ndjson, stderr: '' }
     }
     const { runCoderabbitHostReview } = hostReview({ reviewTool: 'coderabbit' })
     const review = await runCoderabbitHostReview('/w', 'l', { exec })
     expect(review.outcome).toBe('clean')
-    expect(calls[0]).toBe('coderabbit')
+    expect(calls[0]).toEqual({
+      command: 'coderabbit',
+      options: { cwd: '/w', timeoutMs: 3_600_000 },
+    })
   })
 })
 

@@ -2234,10 +2234,11 @@ function classifyDakarReview(execResult) {
     return { outcome: "error", findings: [], detail };
   }
   if (doc.ok === false) {
+    const stage = boundedTail(doc.stage ?? "unknown", 200);
     if (String(doc.stage) === "deferred") {
-      return { outcome: "rate-limited", findings: [], detail: `Dakar review deferred (stage: deferred) \u2014 ${boundedTail(doc.error || "no detail")}` };
+      return { outcome: "rate-limited", findings: [], detail: `Dakar review deferred (stage: ${stage}) \u2014 ${boundedTail(doc.error || "no detail")}` };
     }
-    return { outcome: "error", findings: [], detail: `stage: ${doc.stage ?? "unknown"} \u2014 ${boundedTail(doc.error || "no detail")}` };
+    return { outcome: "error", findings: [], detail: `stage: ${stage} \u2014 ${boundedTail(doc.error || "no detail")}` };
   }
   if (doc.ok === true) {
     if (doc.skipped === true || doc.verdict === "pass") return { outcome: "clean", findings: [], detail: "" };
@@ -2248,6 +2249,16 @@ function classifyDakarReview(execResult) {
           outcome: "error",
           findings: [],
           detail: "Dakar returned changes-requested without any findings; refusing to treat a reviewer rejection as non-blocking"
+        };
+      }
+      const malformedIndex = raw.findIndex(
+        (finding) => finding === null || typeof finding !== "object" || Array.isArray(finding)
+      );
+      if (malformedIndex !== -1) {
+        return {
+          outcome: "error",
+          findings: [],
+          detail: boundedTail(`Dakar returned a malformed finding at index ${malformedIndex}; expected an object`, 2e3)
         };
       }
       return { outcome: "findings", findings: raw.map(mapDakarFinding), detail: "" };
@@ -2387,6 +2398,9 @@ function makeHostReview(config) {
     csCheck,
     csCheckCommand
   } = config;
+  const dakarInvocation = dakarCommand.trim().split(/\s+/).filter(Boolean);
+  const dakarExecutable = dakarInvocation[0] || "dakar-review";
+  const dakarPrefixArgs = dakarInvocation.slice(1);
   function coderabbitBackoffMinutes2(seed) {
     let hash = 5381;
     for (const ch of String(seed)) hash = (hash * 33 ^ ch.codePointAt(0)) >>> 0;
@@ -2394,7 +2408,10 @@ function makeHostReview(config) {
     return low + hash % (high - low + 1);
   }
   async function runCoderabbitAttempt(worktree, exec) {
-    const result = await exec("coderabbit", ["review", "--agent", "--type", "committed", "--base", base], { cwd: worktree });
+    const result = await exec("coderabbit", ["review", "--agent", "--type", "committed", "--base", base], {
+      cwd: worktree,
+      timeoutMs: dakarTimeoutSeconds * 1e3
+    });
     const parsed = parseCoderabbitAgentOutput(result.stdout);
     const outcome = classifyCoderabbitOutcome(result, parsed);
     const detail = outcome === "clean" || outcome === "findings" ? "" : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join("; ") || "coderabbit produced no parsable outcome").trim();
@@ -2417,7 +2434,10 @@ function makeHostReview(config) {
       ...dakarBudgetGbp > 0 ? ["--budget-gbp", String(dakarBudgetGbp)] : []
     ];
     try {
-      const result = await exec(dakarCommand, commandArgs, { cwd: worktree });
+      const result = await exec(dakarExecutable, [...dakarPrefixArgs, ...commandArgs], {
+        cwd: worktree,
+        timeoutMs: dakarTimeoutSeconds * 1e3
+      });
       return classifyDakarReview(result);
     } finally {
       fs.rmSync(stateRoot, { recursive: true, force: true });

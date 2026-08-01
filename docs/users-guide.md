@@ -435,15 +435,17 @@ Common arguments:
   `searchBackend` to `memtrace`, when GrepAI is unavailable on the host.
 - `coderabbitReviewCommand`: CodeRabbit command used in implementation prompts.
   Defaults to `coderabbit review --agent`.
-- `reviewTool`: host reviewer for committed work: `dakar` (the default,
-  requiring `dakar-review` and `pi` on `PATH` plus `OPENAI_API_KEY`) or
-  `coderabbit` (the retained NDJSON CLI path). Other values fail at launch.
+- `reviewTool`: host reviewer for committed work: `dakar` (the default;
+  requires `OPENAI_API_KEY`) or `coderabbit` (the retained NDJSON CLI path).
+  Other values fail at launch.
 - `dakarCommand`: Dakar CLI invoked in `dakar` mode. Defaults to
   `dakar-review`.
-- `dakarTimeoutSeconds`: `--timeout` passed to Dakar. Defaults to `3600` and is
-  clamped to 60–7200 seconds.
-- `dakarBudgetGbp`: optional Dakar admission budget. Values above `0` are
-  forwarded as `--budget-gbp`; `0` defers to Dakar's own hard budget.
+- `dakarTimeoutSeconds`: host-side timeout for each Dakar or CodeRabbit review
+  process and, in Dakar mode, the value passed as Dakar's `--timeout`. Defaults
+  to `3600` and is clamped to 60–7200 seconds.
+- `dakarBudgetGbp`: optional Dakar admission budget, clamped to 0–10. Values
+  above `0` are forwarded as `--budget-gbp`; `0` defers to Dakar's own hard
+  budget.
 - `maxParallel`: task worker-pool width. Defaults to `8` unless `taskId` is
   set.
 - `maxPlanningParallel`: concurrent planning-stage agents. Defaults to `4`.
@@ -510,10 +512,11 @@ Common arguments:
   Blocking findings drive a bounded fix loop; terminal deferral or errors halt
   the task for assessment instead of continuing unreviewed. Set `false` to
   review only once at the end of the implementation stage.
-- `coderabbitAttempts`: total host review attempts when CodeRabbit rate
-  limits. Defaults to `3`.
+- `coderabbitAttempts`: total host-review attempts when Dakar defers or
+  CodeRabbit rate limits the review. Defaults to `3`.
 - `coderabbitBackoffMinutes`: `[low, high]` range for the deterministic
-  backoff wait between rate-limited attempts. Defaults to `[45, 90]`.
+  backoff wait after a Dakar deferral or CodeRabbit rate limit. Defaults to
+  `[45, 90]`.
 - `coderabbitFindingsFile`: optional absolute path to an append-only JSONL file
   recording every host-review finding (timestamp, task, severity, file,
   comment). The historical field name is shared by Dakar and CodeRabbit.
@@ -631,7 +634,12 @@ Example `args.json`:
 
 ## Host-run CodeRabbit review
 
-By default the workflow host — not the task agents — runs
+> **Applies to `reviewTool: 'coderabbit'` only.** The host review tool defaults
+> to `reviewTool: 'dakar'`; this section describes the retained CodeRabbit
+> mode.
+
+With `coderabbitHostReview` enabled (the default within CodeRabbit mode), the
+workflow host — not the task agents — runs
 `coderabbit review --agent --type committed` against each task branch: once per
 dual-review round (alongside the code and expert reviewers) and once per
 addendum implementation. Because only committed changes are reviewed, the
