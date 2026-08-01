@@ -544,10 +544,11 @@ the zero-tolerance documentation gate: TypeDoc's `notDocumented` validation
 expands the configured `src/workflows/df12-build-odw/` entry point. The
 `typedoc.json` configuration excludes declaration files, `meta.js`, and
 internal, private and protected reflections. Every included module must open
-with a `/** … @module */` block and every included exported declaration must
-carry a JSDoc block; validation warnings are errors, the run emits no
-documentation artefacts, and a failure prints the qualified name and location
-of each undocumented declaration. JSON Schema constants are tagged `@internal`
+with a `/** … @module */` block, and included reflections of the kinds listed
+in `requiredToBeDocumented` must carry a JSDoc block; validation warnings are
+errors, the run emits no documentation artefacts, and a failure prints the
+qualified name and location of each undocumented declaration. JSON Schema
+constants are tagged `@internal`
 (their `description` fields are the per-field documentation), so TypeDoc does
 not recurse into the schema literals:
 

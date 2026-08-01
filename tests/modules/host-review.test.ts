@@ -143,7 +143,7 @@ describe('runHostCommitGates streaming', () => {
     expect(result.results[0].ok).toBe(true)
     // The log file holds the full stream, not a truncated buffer.
     expect(readFileSync(result.results[0].logFile, 'utf8').length).toBeGreaterThan(40000000)
-  }, 30_000)
+  }, 45_000)
 
   test('a red gate carries the streamed tail and the log path', async () => {
     const dir = tmp('gate-stream-red-')

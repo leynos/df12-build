@@ -771,8 +771,10 @@ async function readFileText(filePath, rootDir) {
       throw new Error(`ExecPlan path escapes the worktree via a parent symlink: ${filePath}`);
     }
   }
-  const handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error(`Worktree path is not a regular file: ${filePath}`);
     return await handle.readFile({ encoding: "utf8" });
   } finally {
     await handle.close();
@@ -907,7 +909,10 @@ async function syntheticRecoveryImpl(candidate, evidence, residualRisk = []) {
     workItemsCompleted: 0,
     /** Zero: no work-item plan is materialized for a recovered branch. */
     workItemsTotal: 0,
-    /** Commit ids already on the branch, carried through as the delivered work. */
+    /**
+     * One-line summaries of commits already on the branch, carried through
+     * as the delivered work.
+     */
     commits: evidence?.recentCommits || [],
     /** Zero: no CodeRabbit runs were performed by the bridge. */
     coderabbitRuns: 0,
@@ -1592,7 +1597,7 @@ function execplanRelPath(worktree, planPath) {
     return { ok: false, relPath: "", detail: `ExecPlan path escapes the assigned worktree: ${raw || "<empty>"}` };
   }
   if (!isTaskArtefactPath(rel)) {
-    return { ok: false, relPath: "", detail: `ExecPlan path escapes the assigned worktree: ${raw}` };
+    return { ok: false, relPath: "", detail: `ExecPlan path is outside the task-scoped docs/execplans/*.md scope: ${raw}` };
   }
   return { ok: true, relPath: rel, detail: "" };
 }
@@ -1706,10 +1711,6 @@ async function salvageTaskArtefacts(worktree, candidatePaths, tag) {
     const contained = execplanRelPath(worktree, raw);
     if (!contained.ok) {
       skipped.push({ path: raw, reason: contained.detail });
-      continue;
-    }
-    if (!isTaskArtefactPath(contained.relPath)) {
-      skipped.push({ path: raw, reason: `normalizes outside the docs/execplans/*.md artefact scope (${contained.relPath})` });
       continue;
     }
     const probe = await fileState(contained.relPath, worktree);

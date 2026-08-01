@@ -41,7 +41,10 @@ export interface RecoveryEvidence {
   collectionErrors?: readonly string[]
   /** Worktree cleanliness marker; anything other than `'clean'` blocks resume. */
   dirtyState?: string
-  /** Commit ids unique to the branch; an empty list means there is no committed work to adopt. */
+  /**
+   * One-line summaries of commits unique to the branch; an empty list means
+   * there is no committed work to adopt.
+   */
   recentCommits?: readonly string[]
 }
 

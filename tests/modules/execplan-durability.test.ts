@@ -54,7 +54,7 @@ describe('execplanRelPath containment', () => {
     expect(execplanRelPath('/wt', `docs/../${PLAN}`).relPath).toBe(PLAN)
   })
 
-  test('fails closed on every escape or out-of-scope shape before any I/O', () => {
+  test('fails closed on every escape shape before any I/O', () => {
     const cases = [
       '',
       '.',
@@ -63,16 +63,22 @@ describe('execplanRelPath containment', () => {
       'docs/../../outside.md',
       '/etc/passwd',
       '/wt-evil/plan.md',
-      'README.md',
-      'docs/plan.md',
-      'docs/execplans/plan.txt',
-      'docs/execplans/../../README.md',
     ]
     for (const planPath of cases) {
       const contained = execplanRelPath('/wt', planPath)
       expect(contained.ok, planPath).toBe(false)
       expect(contained.relPath, planPath).toBe('')
       expect(contained.detail, planPath).toMatch(/escapes the assigned worktree/)
+    }
+  })
+
+  test('fails closed on every path outside the task-scoped artefact convention', () => {
+    const cases = ['README.md', 'docs/plan.md', 'docs/execplans/plan.txt', 'docs/execplans/../../README.md']
+    for (const planPath of cases) {
+      const contained = execplanRelPath('/wt', planPath)
+      expect(contained.ok, planPath).toBe(false)
+      expect(contained.relPath, planPath).toBe('')
+      expect(contained.detail, planPath).toMatch(/outside the task-scoped docs\/execplans\/\*\.md scope/)
     }
   })
 
@@ -101,7 +107,7 @@ describe('execplanRelPath containment', () => {
           expect(isTaskArtefactPath(contained.relPath)).toBe(true)
         } else {
           expect(contained.relPath).toBe('')
-          expect(contained.detail).toMatch(/escapes the assigned worktree/)
+          expect(contained.detail).toMatch(/escapes the assigned worktree|outside the task-scoped/)
         }
       }),
     )
@@ -269,13 +275,13 @@ describe('salvageTaskArtefacts', () => {
     const dir = makeWorktree()
     // `docs/execplans/../../README.md` passes the RAW artefact pattern but
     // normalizes to `README.md`, outside the task-artefact scope. Leave
-    // README.md dirty so a missing re-check would sweep it into the salvage
-    // commit.
+    // README.md dirty so a missing task-scope check would sweep it into the
+    // salvage commit.
     writeFileSync(path.join(dir, 'README.md'), '# top-level readme\n')
     const outcome = await salvageTaskArtefacts(dir, ['docs/execplans/../../README.md'], '1.2.3')
     expect(outcome.committed).toEqual([])
     expect(outcome.detail).toMatch(/nothing to salvage/)
-    expect(outcome.skipped[0].reason).toMatch(/escapes the assigned worktree/)
+    expect(outcome.skipped[0].reason).toMatch(/outside the task-scoped docs\/execplans\/\*\.md scope/)
     // README.md is left dirty — the normalized path was never committed.
     expect(git(dir, 'status', '--porcelain=v1')).toBe('?? README.md')
     expect(git(dir, 'log', '-1', '--format=%s')).toBe('Commit plan')

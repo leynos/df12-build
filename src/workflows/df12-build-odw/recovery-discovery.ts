@@ -296,7 +296,10 @@ export async function syntheticRecoveryImpl(
     workItemsCompleted: 0,
     /** Zero: no work-item plan is materialized for a recovered branch. */
     workItemsTotal: 0,
-    /** Commit ids already on the branch, carried through as the delivered work. */
+    /**
+     * One-line summaries of commits already on the branch, carried through
+     * as the delivered work.
+     */
     commits: evidence?.recentCommits || [],
     /** Zero: no CodeRabbit runs were performed by the bridge. */
     coderabbitRuns: 0,

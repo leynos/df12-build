@@ -299,9 +299,6 @@ test('ExecPlan paths are task-scoped within the worktree before any filesystem a
     'docs/../../outside.md',
     '/etc/passwd',
     '/work/tree/../tree-b/plan.md',
-    'docs/plan.md',
-    'docs/execplans/../../README.md',
-    '..plan.md',
     '..',
     '.',
     '',
@@ -311,6 +308,14 @@ test('ExecPlan paths are task-scoped within the worktree before any filesystem a
     assert.equal(contained.ok, false, JSON.stringify(escape))
     assert.equal(contained.relPath, '')
     assert.match(contained.detail, /escapes the assigned worktree/)
+  }
+
+  const outsideTaskScope = ['docs/plan.md', 'docs/execplans/../../README.md', '..plan.md']
+  for (const planPath of outsideTaskScope) {
+    const contained = surface.execplanRelPath(worktree, planPath)
+    assert.equal(contained.ok, false, JSON.stringify(planPath))
+    assert.equal(contained.relPath, '')
+    assert.match(contained.detail, /outside the task-scoped docs\/execplans\/\*\.md scope/)
   }
 })
 
