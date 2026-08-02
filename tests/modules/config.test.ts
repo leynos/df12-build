@@ -71,7 +71,7 @@ describe('makeConfig defaults', () => {
   test('commit gates and guidance derivation', () => {
     expect(config.COMMIT_GATES).toEqual(['make all'])
     expect(config.COMMIT_GATE_TEXT).toBe('`make all`')
-    expect(config.SCRUTINEER_DELEGATION_GUIDANCE).toContain('coderabbit review --agent')
+    expect(config.SCRUTINEER_DELEGATION_GUIDANCE).toContain('workflow host runs Dakar')
   })
 
   test('search backend defaults to grepai', () => {
@@ -95,7 +95,7 @@ describe('makeConfig review-tool selection', () => {
     const config = makeConfig({ coderabbitHostReview: false })
     expect(config.REVIEW_TOOL).toBe('dakar')
     expect(config.CODERABBIT_HOST_REVIEW).toBe(true)
-    expect(config.CODERABBIT_REVIEW_GUIDANCE).toContain('Do NOT run coderabbit yourself')
+    expect(config.CODERABBIT_REVIEW_GUIDANCE).toContain('Do NOT run Dakar yourself')
   })
 
   test('CodeRabbit still permits its legacy agent-run review flow', () => {
@@ -105,7 +105,9 @@ describe('makeConfig review-tool selection', () => {
   })
 
   test('coderabbit is a valid explicit choice', () => {
-    expect(makeConfig({ reviewTool: 'coderabbit' }).REVIEW_TOOL).toBe('coderabbit')
+    const coderabbit = makeConfig({ reviewTool: 'coderabbit' })
+    expect(coderabbit.REVIEW_TOOL).toBe('coderabbit')
+    expect(coderabbit.CODERABBIT_REVIEW_GUIDANCE).toContain('Do NOT run coderabbit yourself')
     expect(makeConfig({ reviewTool: 'CodeRabbit' }).REVIEW_TOOL).toBe('coderabbit')
   })
 

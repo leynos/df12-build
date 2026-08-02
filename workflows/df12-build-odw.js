@@ -1031,7 +1031,8 @@ function makeConfig(rawArgs) {
     "Function smells \u2014 Brain Method (God Function): one complex function concentrates the module's behaviour and becomes a local hotspot. DRY violations: duplicated logic that is actually changed together in predictable patterns. Complex Method: high cyclomatic complexity from many conditionals (if/for/while). Primitive Obsession: heavy use of raw primitives (integers, strings, floats) where a domain type would encapsulate the validation and meaning of the values. Large Method: a function with too many lines to comprehend easily.",
     "Implementation smells \u2014 Nested Complexity: if-statements nested inside other ifs and/or loops, which sharply raises defect risk. Bumpy Road: a function that fails to encapsulate its responsibilities and instead holds several separate chunks of logic \u2014 extract each chunk into its own function. Complex Conditional: a single branch condition (in an if/for/while) combining multiple logical operators such as AND/OR. Large Assertion Blocks (test smell): a long run of consecutive assert statements that signals a missing abstraction. Duplicated Assertion Blocks (test smell): the same assertion block copy-pasted across the suite \u2014 a DRY violation."
   ].join("\n") : "";
-  const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? "Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work \u2014 only committed changes reach the host review." : `Use \`coderabbit review --agent\` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the \`vsleep\` command) for \`$(shuf -i ${CODERABBIT_BACKOFF_MINUTES2[0]}-${CODERABBIT_BACKOFF_MINUTES2[1]} -n 1)\` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.`;
+  const HOST_REVIEW_GUIDANCE = REVIEW_TOOL2 === "dakar" ? "Do NOT run Dakar yourself: the workflow host runs Dakar against your COMMITTED work after the stage returns, absorbs any deferral backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work \u2014 only committed changes reach the host review." : "Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work \u2014 only committed changes reach the host review.";
+  const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? HOST_REVIEW_GUIDANCE : `Use \`coderabbit review --agent\` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the \`vsleep\` command) for \`$(shuf -i ${CODERABBIT_BACKOFF_MINUTES2[0]}-${CODERABBIT_BACKOFF_MINUTES2[1]} -n 1)\` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.`;
   const SPARK_DELEGATION_GUIDANCE = "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks.";
   const SCRUTINEER_DELEGATION_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? `Delegate deterministic gate execution to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until the gates are green. ${CODERABBIT_REVIEW_GUIDANCE}` : `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND2}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`;
   return {
@@ -1861,7 +1862,7 @@ function isInfraFaultResult(result) {
 }
 function isDeferredReviewIssue(issue) {
   const text = String(issue || "").toLowerCase();
-  const deferredReviewMarkers = [
+  const coderabbitDeferredMarkers = [
     "rate limit",
     "rate_limit",
     "rate-limit",
@@ -1870,13 +1871,13 @@ function isDeferredReviewIssue(issue) {
     "retry after",
     "waittime",
     "wait time",
-    "dakar review deferred",
     "deferred coderabbit review",
     "coderabbit review deferred",
     "unavailable"
   ];
-  const namesHostReviewer = text.includes("coderabbit") || text.includes("dakar");
-  return namesHostReviewer && deferredReviewMarkers.some((marker) => text.includes(marker));
+  const isDakarDeferral = text.startsWith("dakar review deferred");
+  const isCoderabbitDeferral = text.includes("coderabbit") && coderabbitDeferredMarkers.some((marker) => text.includes(marker));
+  return isDakarDeferral || isCoderabbitDeferral;
 }
 function hasOnlyDeferredReviewIssues(openIssues) {
   const issues = openIssues || [];
@@ -2226,6 +2227,26 @@ Evidence: ${evidence}`.slice(0, 2e3),
     suggestions: []
   };
 }
+
+function validateChangesRequestedFindings(raw) {
+  const findings = Array.isArray(raw) ? raw : null;
+  if (!findings || findings.length === 0) {
+    return {
+      ok: false,
+      detail: "Dakar returned changes-requested without any findings; refusing to treat a reviewer rejection as non-blocking"
+    };
+  }
+  const malformedIndex = findings.findIndex(
+    (finding) => finding === null || typeof finding !== "object" || Array.isArray(finding)
+  );
+  if (malformedIndex !== -1) {
+    return {
+      ok: false,
+      detail: boundedTail(`Dakar returned a malformed finding at index ${malformedIndex}; expected an object`, 2e3)
+    };
+  }
+  return { ok: true, findings };
+}
 function classifyDakarReview(execResult) {
   const doc = parseDakarDocument(execResult.stdout);
   if (!doc) {
@@ -2242,25 +2263,9 @@ function classifyDakarReview(execResult) {
   if (doc.ok === true) {
     if (doc.skipped === true || doc.verdict === "pass") return { outcome: "clean", findings: [], detail: "" };
     if (doc.verdict === "changes-requested") {
-      const raw = Array.isArray(doc.findings) ? doc.findings : null;
-      if (!raw || raw.length === 0) {
-        return {
-          outcome: "error",
-          findings: [],
-          detail: "Dakar returned changes-requested without any findings; refusing to treat a reviewer rejection as non-blocking"
-        };
-      }
-      const malformedIndex = raw.findIndex(
-        (finding) => finding === null || typeof finding !== "object" || Array.isArray(finding)
-      );
-      if (malformedIndex !== -1) {
-        return {
-          outcome: "error",
-          findings: [],
-          detail: boundedTail(`Dakar returned a malformed finding at index ${malformedIndex}; expected an object`, 2e3)
-        };
-      }
-      return { outcome: "findings", findings: raw.map(mapDakarFinding), detail: "" };
+      const validation = validateChangesRequestedFindings(doc.findings);
+      if (!validation.ok) return { outcome: "error", findings: [], detail: validation.detail };
+      return { outcome: "findings", findings: validation.findings.map(mapDakarFinding), detail: "" };
     }
   }
   return { outcome: "error", findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail(doc.verdict ?? "none", 200)})` };
@@ -2387,7 +2392,7 @@ function makeHostReview(config) {
     base,
     reviewTool,
     dakarCommand,
-    dakarTimeoutSeconds,
+    reviewTimeoutSeconds,
     dakarBudgetGbp,
     coderabbitAttempts,
     coderabbitBackoffMinutes: backoffRange,
@@ -2409,7 +2414,7 @@ function makeHostReview(config) {
   async function runCoderabbitAttempt(worktree, exec) {
     const result = await exec("coderabbit", ["review", "--agent", "--type", "committed", "--base", base], {
       cwd: worktree,
-      timeoutMs: dakarTimeoutSeconds * 1e3
+      timeoutMs: reviewTimeoutSeconds * 1e3
     });
     const parsed = parseCoderabbitAgentOutput(result.stdout);
     const outcome = classifyCoderabbitOutcome(result, parsed);
@@ -2429,13 +2434,13 @@ function makeHostReview(config) {
       "--state-root",
       stateRoot,
       "--timeout",
-      String(dakarTimeoutSeconds),
+      String(reviewTimeoutSeconds),
       ...dakarBudgetGbp > 0 ? ["--budget-gbp", String(dakarBudgetGbp)] : []
     ];
     try {
       const result = await exec(dakarExecutable, [...dakarPrefixArgs, ...commandArgs], {
         cwd: worktree,
-        timeoutMs: dakarTimeoutSeconds * 1e3
+        timeoutMs: reviewTimeoutSeconds * 1e3
       });
       return classifyDakarReview(result);
     } finally {
@@ -3527,7 +3532,7 @@ var {
   base: BASE,
   reviewTool: REVIEW_TOOL,
   dakarCommand: DAKAR_COMMAND,
-  dakarTimeoutSeconds: DAKAR_TIMEOUT_SECONDS,
+  reviewTimeoutSeconds: DAKAR_TIMEOUT_SECONDS,
   dakarBudgetGbp: DAKAR_BUDGET_GBP,
   coderabbitAttempts: CODERABBIT_ATTEMPTS,
   coderabbitBackoffMinutes: CODERABBIT_BACKOFF_MINUTES,

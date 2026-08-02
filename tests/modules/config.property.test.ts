@@ -1,5 +1,5 @@
-// Property tests for review-tool configuration clamps. Generated inputs pin
-// the full numeric mapping rather than a handful of boundary examples.
+/** @file Property tests for review-tool configuration clamps. Generated inputs
+ * pin the full numeric mapping rather than a handful of boundary examples. */
 import { describe, expect, test } from 'bun:test'
 import fc from 'fast-check'
 

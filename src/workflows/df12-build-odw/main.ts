@@ -318,7 +318,7 @@ const {
   base: BASE,
   reviewTool: REVIEW_TOOL,
   dakarCommand: DAKAR_COMMAND,
-  dakarTimeoutSeconds: DAKAR_TIMEOUT_SECONDS,
+  reviewTimeoutSeconds: DAKAR_TIMEOUT_SECONDS,
   dakarBudgetGbp: DAKAR_BUDGET_GBP,
   coderabbitAttempts: CODERABBIT_ATTEMPTS,
   coderabbitBackoffMinutes: CODERABBIT_BACKOFF_MINUTES,
