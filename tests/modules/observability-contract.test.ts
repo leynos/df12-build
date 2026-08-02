@@ -1,10 +1,21 @@
-// Contract tests for the workflow observability fabric (roadmap task 5.1.1).
-// These validate the fixtures in tests/fixtures/observability-contract against
-// the JSON Schemas under schemas/observability, and check the logical node key
-// grammar. They are the machine-readable half of
-// docs/workflow-observability-contract.md: every rule the prose states
-// normatively is exercised here so a schema regression fails a gate rather
-// than silently loosening the contract.
+/**
+ * @file Fixture-driven contract tests for the workflow observability fabric
+ * (roadmap task 5.1.1).
+ *
+ * Responsibilities: validate every case in
+ * `tests/fixtures/observability-contract/fixtures.json` against the three JSON
+ * Schemas under `schemas/observability/`, check the logical node key grammar,
+ * and assert the schema files stay pinned to version 1 with one shared UUIDv7
+ * shape.
+ *
+ * Relationship to the rest of the contract: the schemas are the authoritative
+ * shape and `docs/workflow-observability-contract.md` is the normative prose;
+ * this module is the machine-readable half that keeps them honest, so a schema
+ * regression fails a gate rather than silently loosening the contract. Each
+ * fixture pins one named rule of that document. The companion
+ * `observability-contract.property.test.ts` covers the same rules over
+ * generated input rather than fixed examples.
+ */
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'

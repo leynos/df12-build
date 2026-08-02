@@ -17,7 +17,7 @@ Read these before changing launch or workflow behaviour:
   decision.
 - `docs/adr-002-assess-partial-task-branches.md` for the accepted partial
   branch assessment and adoption model.
-- `docs/adr-003-opentelemetry-observability.md` for the proposed
+- `docs/adr-003-opentelemetry-observability.md` for the accepted
   correlation-first observability fabric, and
   `docs/workflow-observability-contract.md` for the version-1 identity model,
   attribute registry, envelope, and binding schemas that later steps build
@@ -79,6 +79,10 @@ Relevant paths:
 - `docs/adr-001-adopt-odw-sidecar-launches.md`: accepted launch decision.
 - `docs/adr-002-assess-partial-task-branches.md`: accepted recovery assessment
   decision.
+- `docs/adr-003-opentelemetry-observability.md`: accepted observability
+  decision, with `docs/workflow-observability-contract.md` and
+  `schemas/observability/` as its normative contract and machine-readable
+  schemas.
 
 Tick the matching roadmap task and update the relevant ExecPlan whenever a
 branch lands planned work.
@@ -433,6 +437,29 @@ Contributor rules:
   `docs/architecture.md`, this guide, and the supervisor skill as needed.
 - When changing adapter/model routing, update both the code defaults and the
   configuration examples and routing-contract prose that describe them.
+
+## Observability contract artefacts
+
+`docs/workflow-observability-contract.md` is normative prose; its
+machine-readable counterpart lives under `schemas/observability/` as three JSON
+Schema draft 2020-12 files: `workflow-observability-context.v1.json`,
+`agent-event-extensions.v1.json`, and `telemetry-binding.v1.json`. Each is
+standalone and pinned by version in both the file name and `$id`; a breaking
+change ships a new `.v2.json` file beside the v1 file rather than editing it in
+place. Each also carries its own copy of the shared `uuidv7` shape, so a
+consumer can pin one file without resolving the others.
+
+`tests/fixtures/observability-contract/fixtures.json` holds the fixture set;
+each case pins one named rule of the contract.
+`tests/modules/observability-contract.test.ts` runs fixture-driven validation
+against the schemas, and
+`tests/modules/observability-contract.property.test.ts` runs property tests
+over generated input using fast-check, deciding accept/reject with oracles
+computed independently of the schema patterns. Both suites use `ajv`, a pinned
+dev dependency, as the JSON Schema draft 2020-12 validator, configured with
+`strict: true` and `allowUnionTypes: true`. Both run under `make test-modules`
+(and therefore `make all`), because `bun test tests/modules` covers everything
+under `tests/modules/`.
 
 ## Documentation maintenance
 

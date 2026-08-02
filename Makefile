@@ -19,7 +19,9 @@ DOCSTRING_MODULES := \
 	src/workflows/df12-build-odw/recovery-decision.ts \
 	src/workflows/df12-build-odw/recovery-discovery.ts \
 	src/workflows/df12-build-odw/run-task.ts \
-	src/workflows/df12-build-odw/schemas.ts
+	src/workflows/df12-build-odw/schemas.ts \
+	tests/modules/observability-contract.test.ts \
+	tests/modules/observability-contract.property.test.ts
 DOCSTRING_MIN ?= 80
 
 .PHONY: all clean fmt check-fmt lint typecheck markdownlint nixie spelling test test-modules test-workflow verify-modules verify-modules-strict workflow-parse workflow-build workflow-freshness docstring-coverage

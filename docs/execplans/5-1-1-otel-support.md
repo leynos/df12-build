@@ -107,8 +107,15 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
   batch validation to the whole correlation tuple. ADR 003 moved from Proposed
   to Accepted, matching how ADR 001 and ADR 002 were accepted in the pull
   request that implemented them. Suite now 54 tests.
+- [x] (2026-08-03) Third review round: gave both test modules `/** @file … */`
+  docblocks and added them to the `DOCSTRING_MODULES` gate; added
+  `tests/modules/observability-contract.property.test.ts`, a fast-check suite
+  that decides accept/reject with oracles computed independently of the schema
+  patterns; refreshed the stale "proposed" references to ADR 003 and documented
+  the contract artefacts for contributors. Suite now 77 tests across the two
+  modules.
 
-The two counts above are the totals at those dates; the current total is in
+The counts above are the totals at those dates; the current total is in
 `Outcomes & retrospective`.
 
 ## Surprises & discoveries
@@ -136,6 +143,21 @@ The two counts above are the totals at those dates; the current total is in
   clauses, the identifier fields carry a real UUIDv7 shape, and the fixtures
   cover each case. The wider lesson for step 5.1.2 is to write the negative
   fixture first and confirm it fails on the intended rule.
+- Observation: fixture tests alone did not prove the schemas enforce anything.
+  Mutation testing found that relaxing the UUIDv7 version nibble in the binding
+  schema killed no property, because the identifier properties only validated
+  against the envelope's copy and only fed the binding schema well-formed ids.
+  Evidence: the mutation left the property suite at 20 pass, 0 fail. Impact:
+  each schema now has its own malformed-identifier property, and the five
+  remaining mutations (unbounded timestamps, an off-by-one timestamp bound, a
+  dropped endpoint authority check, dropped traceparent zero-checks, and a
+  dropped userinfo check) each kill between one and ten tests. The lesson for
+  step 5.1.2 is to mutate the artefact and confirm the suite notices.
+- Observation: fast-check 4 removed `fc.stringOf`. Evidence:
+  `TypeError: fc.stringOf is not a function` on first run. Impact: the
+  generators build strings from character primitives instead, which also keeps
+  them independent of the regular expressions under test rather than restating
+  them.
 - Observation: a JSON Schema `pattern` can express a numeric upper bound on a
   decimal string, but only as a digit-position alternation, which is too
   error-prone to hand-author. Evidence: bounding at 9223372036854775807 needs
@@ -197,7 +219,8 @@ The task delivered the version-1 workflow observability contract as a normative
 document (`docs/workflow-observability-contract.md`, 14 numbered sections),
 three JSON Schema draft 2020-12 files under `schemas/observability/`, a
 consolidated fixture set, and a validation suite
-(`tests/modules/observability-contract.test.ts`, 54 tests) that exercises every
+(`tests/modules/observability-contract.test.ts` and its fast-check companion
+`observability-contract.property.test.ts`, 77 tests) that exercises every
 documented rule — including the sink credential rule, the source-to-confidence
 binding conditional, and the logical node key grammar. ADR 003, the roadmap,
 the contents index, and the developers' guide now link the contract, and

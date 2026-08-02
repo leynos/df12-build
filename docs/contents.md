@@ -44,7 +44,7 @@ workflow assets, or understanding why the system is shaped the way it is.
 - [ADR 002: Assess partial task branches](adr-002-assess-partial-task-branches.md):
   records the decision to assess surviving task branches before a fresh restart.
 - [ADR 003: Correlation-first OpenTelemetry observability](adr-003-opentelemetry-observability.md):
-  records the proposed decision to correlate workflow nodes and agent telemetry
+  records the accepted decision to correlate workflow nodes and agent telemetry
   through dispatch-time identity, a local OTLP collector, and a SQLite store.
 
 ## Plans
