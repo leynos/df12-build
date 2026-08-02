@@ -98,23 +98,23 @@ describe('implementation and fix prompts', () => {
     expect(off.fixPrompt(task, worktree, plan, ['x'], 1)).not.toContain('@codescene(disable:')
   })
 
-  test('implementWorkItemPrompt orders the CodeScene check after the gates and before CodeRabbit', () => {
+  test('implementWorkItemPrompt orders the CodeScene check after the gates and before host review', () => {
     const item = { text: 'WI-1: add the parser' }
     const text = prompts.implementWorkItemPrompt(task, worktree, plan, item)
     // Anchor on the numbered STEP markers, not incidental word matches: the
-    // CODE HEALTH bullet itself mentions "before CodeRabbit", so matching the
-    // bare word 'CodeRabbit' would pass even if the real step 2 moved earlier.
+    // CODE HEALTH guidance names a later reviewer, so matching a bare tool name
+    // would pass even if the real step 2 moved earlier.
     const gateStepAt = text.indexOf('  1. DETERMINISTIC GATE')
     const codeHealthStepAt = text.indexOf('  1b. CODE HEALTH')
-    const coderabbitStepAt = text.indexOf('  2. ')
+    const reviewStepAt = text.indexOf('  2. ')
     const step3At = text.indexOf('  3. ')
     expect(gateStepAt).toBeGreaterThanOrEqual(0)
     expect(codeHealthStepAt).toBeGreaterThan(gateStepAt)
-    expect(coderabbitStepAt).toBeGreaterThan(codeHealthStepAt)
-    // Step 2 must actually BE the CodeRabbit step, not just the next numbered
+    expect(reviewStepAt).toBeGreaterThan(codeHealthStepAt)
+    // Step 2 must actually BE the host-review step, not just the next numbered
     // line — so the test fails if step 2 is renamed or replaced.
-    expect(step3At).toBeGreaterThan(coderabbitStepAt)
-    expect(text.slice(coderabbitStepAt, step3At)).toMatch(/coderabbit review --agent/i)
+    expect(step3At).toBeGreaterThan(reviewStepAt)
+    expect(text.slice(reviewStepAt, step3At)).toMatch(/workflow host runs Dakar/i)
     expect(text).toContain('CodeScene')
   })
 })

@@ -226,7 +226,7 @@ describe('host-review public type contract', () => {
   test('review-tool and Dakar fields accept their declared shapes', () => {
     const result = typecheckHostReview([
       `const workflow: Pick<WorkflowConfig, 'REVIEW_TOOL' | 'DAKAR_COMMAND' | 'DAKAR_TIMEOUT_SECONDS' | 'DAKAR_BUDGET_GBP'> = { REVIEW_TOOL: 'dakar', DAKAR_COMMAND: 'dakar-review', DAKAR_TIMEOUT_SECONDS: 3600, DAKAR_BUDGET_GBP: 0.3 }`,
-      `const host: Pick<HostReviewConfig, 'reviewTool' | 'dakarCommand' | 'dakarTimeoutSeconds' | 'dakarBudgetGbp'> = { reviewTool: 'coderabbit', dakarCommand: 'dakar-review', dakarTimeoutSeconds: 3600, dakarBudgetGbp: 0 }`,
+      `const host: Pick<HostReviewConfig, 'reviewTool' | 'dakarCommand' | 'reviewTimeoutSeconds' | 'dakarBudgetGbp'> = { reviewTool: 'coderabbit', dakarCommand: 'dakar-review', reviewTimeoutSeconds: 3600, dakarBudgetGbp: 0 }`,
       `void workflow; void host`,
     ].join('\n'))
     expect(result.ok).toBe(true)

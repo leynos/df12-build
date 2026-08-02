@@ -510,17 +510,17 @@ test('CodeRabbit findings are captured to the JSONL sink and the run aggregate',
   assert.match(lines[0].ts, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
 })
 
-test('host review flips the prompts from agent-run CodeRabbit to host-run', async () => {
+test('host review guidance follows the selected tool', async () => {
   const task = { id: '1.2.3', title: 'Parser' }
   const plan = { execplanPath: 'docs/execplans/roadmap-1-2-3.md' }
 
   const hosted = await loadAssessmentSurface()
   const hostedImplement = hosted.implementPrompt(task, '/tmp/wt', plan)
-  assert.match(hostedImplement, /Do NOT run coderabbit yourself/)
+  assert.match(hostedImplement, /Do NOT run Dakar yourself/)
   assert.doesNotMatch(hostedImplement, /summon `scrutineer` to run `coderabbit review --agent`/)
-  assert.match(hosted.fixPrompt(task, '/tmp/wt', plan, ['item'], 1), /Do NOT run coderabbit yourself/)
+  assert.match(hosted.fixPrompt(task, '/tmp/wt', plan, ['item'], 1), /Do NOT run Dakar yourself/)
   const hostedAddendum = hosted.implementAddendumPrompt({ id: '1.2.3', subtasks: ['1.2.3.1'] }, '/tmp/wt')
-  assert.match(hostedAddendum, /Do NOT run coderabbit yourself/)
+  assert.match(hostedAddendum, /Do NOT run Dakar yourself/)
   assert.match(hostedAddendum, /open sub-tasks: 1\.2\.3\.1\./, 'subtasks are id strings, joined into the prompt')
 
   const legacy = await loadAssessmentSurface({
@@ -604,6 +604,7 @@ test('recoverable review faults classify as deferred review issues', async () =>
     ['coderabbit review returned HTTP 429; retry later', true],
     ['CodeRabbit rate-limit backoff in progress', true],
     ['CodeRabbit temporarily unavailable', true],
+    ['Dakar unavailable', false],
     ['Dakar migration deferred pending approval', false],
     ['CodeRabbit rollout deferred pending approval', false],
     ['coderabbit found 3 blocking issues', false],

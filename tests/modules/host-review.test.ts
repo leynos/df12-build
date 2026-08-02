@@ -79,7 +79,7 @@ function hostReview(
     csCheckCommand: 'cs-check-changed',
     reviewTool: 'coderabbit',
     dakarCommand: 'dakar-review',
-    dakarTimeoutSeconds: 3600,
+    reviewTimeoutSeconds: 3600,
     dakarBudgetGbp: 0,
     ...overrides,
   }, deps)
@@ -135,7 +135,7 @@ describe('runDakarHostReview', () => {
     const { runCoderabbitHostReview } = hostReview({
       reviewTool: 'dakar',
       dakarCommand: 'uv run dakar-review',
-      dakarTimeoutSeconds: 120,
+      reviewTimeoutSeconds: 120,
     })
     await runCoderabbitHostReview('/work/tree', 'label', { exec })
     expect(calls[0].command).toBe('uv')

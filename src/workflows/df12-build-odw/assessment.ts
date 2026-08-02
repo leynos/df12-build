@@ -309,7 +309,7 @@ function isInfraFaultResult(result: AssessableResult | null | undefined): boolea
  */
 export function isDeferredReviewIssue(issue: unknown): boolean {
   const text = String(issue || '').toLowerCase()
-  const deferredReviewMarkers = [
+  const coderabbitDeferredMarkers = [
     'rate limit',
     'rate_limit',
     'rate-limit',
@@ -318,15 +318,16 @@ export function isDeferredReviewIssue(issue: unknown): boolean {
     'retry after',
     'waittime',
     'wait time',
-    'dakar review deferred',
     'deferred coderabbit review',
     'coderabbit review deferred',
     'unavailable',
   ]
-  // Recognize CodeRabbit rate-limit markers and Dakar's exact deferred-review
-  // prefix without treating unrelated deferred work as a recoverable review.
-  const namesHostReviewer = text.includes('coderabbit') || text.includes('dakar')
-  return namesHostReviewer && deferredReviewMarkers.some((marker) => text.includes(marker))
+  // Dakar emits one exact prefix for budget/quota deferrals. CodeRabbit has a
+  // wider historical marker set, including temporary unavailability.
+  const isDakarDeferral = text.startsWith('dakar review deferred')
+  const isCoderabbitDeferral = text.includes('coderabbit')
+    && coderabbitDeferredMarkers.some((marker) => text.includes(marker))
+  return isDakarDeferral || isCoderabbitDeferral
 }
 
 /**
