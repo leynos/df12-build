@@ -11,6 +11,9 @@ workflow assets, or understanding why the system is shaped the way it is.
 
 - [User guide](users-guide.md): for operators driving a target project through
   a workshop; covers launching, monitoring, and recovering a run.
+- [Migrate to Dakar host review](migrate-to-dakar-host-review.md): for existing
+  operators moving from the previous CodeRabbit default or retaining it
+  explicitly.
 - [Developers guide](developers-guide.md): for contributors changing the
   workflow assets or documentation; covers build, test, lint, and extension
   workflows.
