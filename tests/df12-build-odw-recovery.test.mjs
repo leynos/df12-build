@@ -5,7 +5,7 @@
 // from tests/fixtures/recovery-repo.mjs.
 
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -105,6 +105,7 @@ return {
   verifyWorktreeCommitted,
   runPlanDesignLoop,
   runImplementationStage,
+  runCoderabbitHostReview,
   runDualReviewAndIntegration,
   runRecovery,
 }
@@ -1488,6 +1489,63 @@ test('host-run CodeRabbit findings drive a fix round through the real CLI seam',
   assert.ok(labels.some((label) => label.startsWith('fix:1.2.3 r1')), 'the CodeRabbit finding forces a fix round')
   assert.match(fixPrompts[0], /CodeRabbit \(major\) src\/a\.rs: guard the index/, 'the fix agent sees the finding verbatim')
   assert.equal(outcome.openIssues, undefined, 'no deferred-review issue on a clean pass')
+})
+
+test('default Dakar review retries through a fake CLI with isolated state roots', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'COMPLETE' })
+  const worktree = repo.parserWorktree
+  const bin = mkdtempSync(path.join(tmpdir(), 'df12-dakar-bin-'))
+  const countFile = path.join(bin, 'count')
+  const callsFile = path.join(bin, 'calls')
+  writeFileSync(path.join(bin, 'dakar-review'), [
+    '#!/bin/sh',
+    'all_args="$*"',
+    'state_root=""',
+    'while [ "$#" -gt 0 ]; do',
+    '  if [ "$1" = "--state-root" ]; then shift; state_root="$1"; fi',
+    '  shift',
+    'done',
+    'exists=no; if [ -d "$state_root" ]; then exists=yes; fi',
+    `printf '%s\\t%s\\t%s\\n' "$all_args" "$state_root" "$exists" >> "${callsFile}"`,
+    `n=$(cat "${countFile}" 2>/dev/null || echo 0)`,
+    `n=$((n+1)); echo "$n" > "${countFile}"`,
+    'if [ "$n" -eq 1 ]; then',
+    `  echo '{"ok":false,"stage":"deferred","error":"test budget deferral"}'`,
+    'else',
+    `  echo '{"ok":true,"verdict":"pass","findings":[]}'`,
+    'fi',
+    '',
+  ].join('\n'))
+  chmodSync(path.join(bin, 'dakar-review'), 0o755)
+
+  const surface = await loadRecoverySurface({
+    reviewTool: 'dakar',
+    coderabbitAttempts: 2,
+  })
+  const previousPath = process.env.PATH
+  process.env.PATH = `${bin}:${previousPath}`
+  try {
+    const outcome = await surface.runCoderabbitHostReview(
+      worktree,
+      'dakar:1.2.3 e2e',
+      { sleep: async () => {} },
+    )
+    assert.equal(outcome.outcome, 'clean', JSON.stringify(outcome))
+    assert.equal(outcome.attempts, 2)
+    assert.equal(readFileSync(countFile, 'utf8').trim(), '2')
+    const calls = readFileSync(callsFile, 'utf8').trim().split('\n').map((line) => line.split('\t'))
+    assert.equal(calls.length, 2)
+    assert.equal(new Set(calls.map(([, stateRoot]) => stateRoot)).size, 2)
+    for (const [argv, stateRoot, existed] of calls) {
+      assert.ok(argv.includes(`--repo-root ${worktree}`))
+      assert.match(argv, /--base main/)
+      assert.equal(existed, 'yes', 'state root exists while fake Dakar runs')
+      assert.equal(existsSync(stateRoot), false, 'state root is removed after its attempt')
+    }
+  } finally {
+    process.env.PATH = previousPath
+    rmSync(bin, { recursive: true, force: true })
+  }
 })
 
 test('a red host gate drives a fix round before any reviewer agent spends tokens', async () => {

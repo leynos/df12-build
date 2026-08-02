@@ -101,6 +101,9 @@ planning, implementation, review, and integration — serializing only the steps
 that advance `origin/<base>`. Failed or halted branches are assessed
 report-only rather than discarded.
 
+Committed work passes through host-run Dakar review by default. Operators can
+select the retained CodeRabbit path explicitly with `reviewTool: "coderabbit"`.
+
 ```mermaid
 flowchart TD
     start([Launch run]) --> auth[Auth preflight]
@@ -117,9 +120,9 @@ flowchart TD
     plan --> design[Design review]
     design -->|not satisfied| plan
     design -->|approved| build[Implement<br/>one work item per turn]
-    build --> between[CodeRabbit between<br/>each work item]
+    build --> between[Dakar between<br/>each work item]
     between -->|blocking| build
-    between --> review[Dual review +<br/>host gates + CodeRabbit]
+    between --> review[Dual review +<br/>host gates + Dakar]
     review -->|blocking| fix[Fix round]
     fix --> review
 

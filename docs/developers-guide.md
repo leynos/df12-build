@@ -307,6 +307,26 @@ so its preflight checks `OPENAI_API_KEY`. Set `reviewTool: 'coderabbit'` to
 restore the NDJSON CodeRabbit path documented in
 `docs/coderabbit-wire-contract.md`.
 
+The external `dakarTimeoutSeconds` setting is clamped to 60–7200 seconds and
+enters `HostReviewConfig` as the tool-neutral `reviewTimeoutSeconds`. It bounds
+the parent process for either reviewer and is also passed to Dakar as
+`--timeout`. `dakarBudgetGbp` is clamped to 0–10; positive values become
+`--budget-gbp`, while `0` lets Dakar apply its own hard admission budget. Each
+Dakar attempt creates a fresh `--state-root` below the host temporary directory
+and removes it in a `finally` block after execution and classification settle.
+Retries therefore share no Dakar state and leave no persistent cache tree.
+
+`host-review.ts` exports `parseDakarDocument` and `classifyDakarReview` as the
+adapter boundary tested directly by the module suite. The parser searches
+backwards through stdout for the terminal JSON object and returns `null` when
+no valid object exists. The classifier validates the complete document before
+mapping it: unknown shapes, malformed findings, findings-free rejections, and
+clean verdicts carrying findings fail closed as review errors. Valid
+`changes-requested` findings map onto the established blocking severity
+contract. `HostReviewConfig`, `CoderabbitReview`, and
+`runCoderabbitHostReview` retain their historical public names deliberately;
+renaming those compatibility surfaces is outside the Dakar adapter change.
+
 Host-run CodeRabbit review (`coderabbitHostReview`, default on) moves the CLI
 invocation from agent prompts to the control loop:
 `coderabbit review --agent --type committed --base <base>` (a FIXED host

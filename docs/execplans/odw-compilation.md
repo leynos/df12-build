@@ -867,3 +867,13 @@ host gates and host review in the review rounds and addendum lane), and
 `main.ts` (`hostGateLock`, host-review factory binding, result aggregates). All
 114 artefact tests (18 new upstream suites included), 231 module tests, and
 `make all` green; the branch was then rebased onto `origin/main`.
+
+2026-08-03 (post-completion): the host-review subsystem gained Dakar as the
+default reviewer while retaining CodeRabbit behind `reviewTool: 'coderabbit'`.
+The Dakar adapter parses and validates the terminal verdict, maps findings onto
+the established blocking contract, and uses a fresh, finally-cleaned state root
+for every bounded attempt. The external timeout and budget remain Dakar-named
+configuration for operator compatibility, while the shared internal timeout is
+tool-neutral. Historical public names such as `CoderabbitReview` and
+`runCoderabbitHostReview` remain deliberately unchanged; a broad contract
+rename is a separate refactor, not part of adopting the new default.

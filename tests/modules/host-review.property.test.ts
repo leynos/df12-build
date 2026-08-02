@@ -23,7 +23,6 @@ const dakarSeverity = fc.constantFrom(
   ['high', 'major'],
   ['medium', 'minor'],
   ['low', 'trivial'],
-  ['unknown', 'info'],
 ) as fc.Arbitrary<readonly [string, string]>
 
 const findingText = fc.string({ maxLength: 80 })
@@ -53,6 +52,7 @@ describe('Dakar outcome properties', () => {
             path: `src/file-${index}.ts`,
             title: `Finding ${index}`,
             detail: `Detail ${index}`,
+            evidence: `Evidence ${index}`,
           }))
           const review = classifyDakarReview(dakarResult({
             ok: true,

@@ -9,6 +9,7 @@ import path from 'node:path'
 import {
   classifyCoderabbitOutcome,
   coderabbitBlockingItems,
+  coderabbitCapture,
   csCheckMetrics,
   hostGateLogPath,
   makeHostReview,
@@ -164,7 +165,7 @@ describe('runDakarHostReview', () => {
   const cases: Array<{ name: string; doc?: Record<string, unknown>; stdout?: string; outcome: CoderabbitOutcome }> = [
     { name: 'a passing verdict is clean', doc: { ok: true, verdict: 'pass', findings: [] }, outcome: 'clean' },
     { name: 'a skipped run (nothing unreviewed) is clean', doc: { ok: true, skipped: true }, outcome: 'clean' },
-    { name: 'changes-requested is findings', doc: { ok: true, verdict: 'changes-requested', findings: [{ severity: 'high', path: 'a.ts', title: 't', detail: 'd' }] }, outcome: 'findings' },
+    { name: 'changes-requested is findings', doc: { ok: true, verdict: 'changes-requested', findings: [{ severity: 'high', path: 'a.ts', title: 't', detail: 'd', evidence: 'e' }] }, outcome: 'findings' },
     { name: 'a deferred stage is rate-limited', doc: { ok: false, stage: 'deferred', error: 'budget exhausted' }, outcome: 'rate-limited' },
     { name: 'a non-deferred failure is an error', doc: { ok: false, stage: 'plan', error: 'pi crashed' }, outcome: 'error' },
   ]
@@ -210,7 +211,7 @@ describe('runDakarHostReview', () => {
         stdout: dakarJson({
           ok: true,
           verdict: 'changes-requested',
-          findings: [{ severity: 'high', title: 'valid' }, malformed],
+          findings: [{ severity: 'high', path: 'a.ts', title: 'valid', detail: 'd', evidence: 'e' }, malformed],
         }),
       })
       const { runCoderabbitHostReview } = hostReview({
@@ -244,9 +245,13 @@ describe('runDakarHostReview', () => {
 
   test('a deferred stage backs off and retries like a CodeRabbit rate limit', async () => {
     let attempts = 0
+    const stateRoots: string[] = []
     const exec = async (_command: string, args: readonly string[]) => {
       attempts += 1
-      junk.push(args[args.indexOf('--state-root') + 1])
+      const stateRoot = args[args.indexOf('--state-root') + 1]
+      stateRoots.push(stateRoot)
+      junk.push(stateRoot)
+      expect(existsSync(stateRoot)).toBe(true)
       return { ok: false, stdout: `{"ok":false,"stage":"deferred","error":"quota"}`, stderr: '' }
     }
     const sleeps: number[] = []
@@ -255,7 +260,40 @@ describe('runDakarHostReview', () => {
     expect(review.outcome).toBe('rate-limited')
     expect(attempts).toBe(3)
     expect(sleeps.length).toBe(2)
+    expect(new Set(stateRoots).size).toBe(3)
+    for (const stateRoot of stateRoots) expect(existsSync(stateRoot)).toBe(false)
   })
+
+  for (const [name, doc] of [
+    ['pass', { ok: true, verdict: 'pass', findings: [{ severity: 'critical', path: 'a.ts', title: 'hidden', detail: 'issue', evidence: 'proof' }] }],
+    ['skipped', { ok: true, skipped: true, findings: [{ severity: 'high', path: 'a.ts', title: 'hidden', detail: 'issue', evidence: 'proof' }] }],
+  ] as const) {
+    test(`${name} fails closed when Dakar also returns findings`, async () => {
+      const { exec } = recordingExec({ stdout: dakarJson(doc) })
+      const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+      const review = await runCoderabbitHostReview('/w', 'l', { exec })
+      expect(review.outcome).toBe('error')
+      expect(review.findings).toEqual([])
+      expect(review.detail).toContain('findings')
+    })
+  }
+
+  for (const [name, finding] of [
+    ['unknown severity', { severity: 'nebulous', path: 'a.ts', title: 't', detail: 'd', evidence: 'e' }],
+    ['missing path', { severity: 'high', title: 't', detail: 'd', evidence: 'e' }],
+    ['non-string detail', { severity: 'high', path: 'a.ts', title: 't', detail: 42, evidence: 'e' }],
+  ] as const) {
+    test(`changes-requested rejects a finding with ${name}`, async () => {
+      const { exec } = recordingExec({
+        stdout: dakarJson({ ok: true, verdict: 'changes-requested', findings: [finding] }),
+      })
+      const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+      const review = await runCoderabbitHostReview('/w', 'l', { exec })
+      expect(review.outcome).toBe('error')
+      expect(review.findings).toEqual([])
+      expect(review.detail).toContain('finding at index 0')
+    })
+  }
 
   test('findings map Dakar severities onto the CodeRabbit blocking set and sink', async () => {
     const findingsFile = path.join(mkdtempSync(path.join(tmpdir(), 'dakar-sink-')), 'findings.jsonl')
@@ -268,7 +306,6 @@ describe('runDakarHostReview', () => {
         { severity: 'high', path: 'high.ts', title: 'High', detail: 'risky', evidence: 'e2' },
         { severity: 'medium', path: 'med.ts', title: 'Med', detail: 'meh', evidence: 'e3' },
         { severity: 'low', path: 'low.ts', title: 'Low', detail: 'minor', evidence: 'e4' },
-        { severity: 'nebulous', path: 'unk.ts', title: 'Unk', detail: 'huh', evidence: 'e5' },
       ],
     }
     const { exec } = recordingExec({ stdout: dakarJson(doc) })
@@ -285,7 +322,33 @@ describe('runDakarHostReview', () => {
     expect(String(crit?.comment)).toContain('crit.ts:3')
     await recordCoderabbitReview('l', review)
     const sunk = readFileSync(findingsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
-    expect(sunk.map((entry) => entry.severity).sort()).toEqual(['critical', 'info', 'major', 'minor', 'trivial'])
+    expect(sunk.map((entry) => entry.severity).sort()).toEqual(['critical', 'major', 'minor', 'trivial'])
+  })
+
+  test('concurrent findings records keep exact counters and complete JSONL', async () => {
+    const findingsFile = path.join(mkdtempSync(path.join(tmpdir(), 'dakar-concurrent-sink-')), 'findings.jsonl')
+    junk.push(path.dirname(findingsFile))
+    const before = {
+      reviews: coderabbitCapture.reviews,
+      findings: coderabbitCapture.findings,
+      major: coderabbitCapture.bySeverity.major || 0,
+    }
+    const { recordCoderabbitReview } = hostReview({ coderabbitFindingsFile: findingsFile })
+    const records = Array.from({ length: 12 }, (_, index) => recordCoderabbitReview(`parallel-${index}`, {
+      outcome: 'findings',
+      attempts: 1,
+      findings: [{ severity: 'major', fileName: `src/${index}.ts`, comment: `finding ${index}` }],
+      detail: '',
+    }))
+
+    await Promise.all(records)
+
+    expect(coderabbitCapture.reviews - before.reviews).toBe(12)
+    expect(coderabbitCapture.findings - before.findings).toBe(12)
+    expect((coderabbitCapture.bySeverity.major || 0) - before.major).toBe(12)
+    const lines = readFileSync(findingsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    expect(lines).toHaveLength(12)
+    expect(new Set(lines.map((entry) => entry.label)).size).toBe(12)
   })
 })
 

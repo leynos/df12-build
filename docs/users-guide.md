@@ -441,7 +441,9 @@ Common arguments:
 
   **Migration:** The default is now `dakar`. Existing operators must put
   `dakar-review` and `pi` on `PATH` and provide `OPENAI_API_KEY`. Set
-  `reviewTool` to `coderabbit` to retain the previous NDJSON CLI path.
+  `reviewTool` to `coderabbit` to retain the previous NDJSON CLI path. See
+  [Migrate to Dakar host review](migrate-to-dakar-host-review.md) for the
+  operator checklist.
 - `dakarCommand`: Dakar CLI invoked in `dakar` mode. Defaults to
   `dakar-review`.
 - `dakarTimeoutSeconds`: host-side timeout for each Dakar or CodeRabbit review

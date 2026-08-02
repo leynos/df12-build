@@ -152,6 +152,8 @@ export const DAKAR_SEVERITY_MAP: Record<string, string> = {
   medium: 'minor',
   low: 'trivial',
 }
+const DAKAR_SEVERITIES = new Set(Object.keys(DAKAR_SEVERITY_MAP))
+const DAKAR_REQUIRED_FINDING_FIELDS = ['path', 'title', 'detail', 'evidence'] as const
 
 function boundedTail(text: unknown, limit = 2000): string {
   const value = String(text || '')
@@ -206,16 +208,30 @@ function validateChangesRequestedFindings(raw: unknown):
       detail: 'Dakar returned changes-requested without any findings; refusing to treat a reviewer rejection as non-blocking',
     }
   }
-  const malformedIndex = findings.findIndex(
-    (finding) => finding === null || typeof finding !== 'object' || Array.isArray(finding),
-  )
-  if (malformedIndex !== -1) {
-    return {
-      ok: false,
-      detail: boundedTail(`Dakar returned a malformed finding at index ${malformedIndex}; expected an object`, 2000),
+  for (const [index, finding] of findings.entries()) {
+    if (finding === null || typeof finding !== 'object' || Array.isArray(finding)) {
+      return { ok: false, detail: boundedTail(`Dakar returned a malformed finding at index ${index}; expected an object`, 2000) }
+    }
+    const item = finding as Record<string, unknown>
+    if (typeof item.severity !== 'string' || !DAKAR_SEVERITIES.has(item.severity)) {
+      return { ok: false, detail: boundedTail(`Dakar returned an invalid finding at index ${index}; unsupported severity`, 2000) }
+    }
+    const invalidField = DAKAR_REQUIRED_FINDING_FIELDS.find((field) => typeof item[field] !== 'string')
+    if (invalidField) {
+      return { ok: false, detail: boundedTail(`Dakar returned an invalid finding at index ${index}; ${invalidField} must be a string`, 2000) }
+    }
+    if (item.line !== undefined && (!Number.isInteger(item.line) || Number(item.line) < 1)) {
+      return { ok: false, detail: boundedTail(`Dakar returned an invalid finding at index ${index}; line must be a positive integer`, 2000) }
     }
   }
   return { ok: true, findings: findings as DakarFinding[] }
+}
+
+function validateCleanDakarFindings(raw: unknown): string {
+  if (raw === undefined) return ''
+  if (!Array.isArray(raw)) return 'Dakar returned a clean verdict with a malformed findings field'
+  if (raw.length > 0) return 'Dakar returned a clean verdict with findings; refusing to discard reviewer findings'
+  return ''
 }
 export function classifyDakarReview(execResult: ExecStatus): { outcome: CoderabbitOutcome; findings: CoderabbitFinding[]; detail: string } {
   const doc = parseDakarDocument(execResult.stdout)
@@ -233,7 +249,11 @@ export function classifyDakarReview(execResult: ExecStatus): { outcome: Coderabb
     return { outcome: 'error', findings: [], detail: `stage: ${stage} — ${boundedTail(doc.error || 'no detail')}` }
   }
   if (doc.ok === true) {
-    if (doc.skipped === true || doc.verdict === 'pass') return { outcome: 'clean', findings: [], detail: '' }
+    if (doc.skipped === true || doc.verdict === 'pass') {
+      const invalidFindings = validateCleanDakarFindings(doc.findings)
+      if (invalidFindings) return { outcome: 'error', findings: [], detail: invalidFindings }
+      return { outcome: 'clean', findings: [], detail: '' }
+    }
     if (doc.verdict === 'changes-requested') {
       const validation = validateChangesRequestedFindings(doc.findings)
       if (!validation.ok) return { outcome: 'error', findings: [], detail: validation.detail }
@@ -481,6 +501,7 @@ export function makeHostReview(config: HostReviewConfig) {
   const dakarInvocation = dakarCommand.trim().split(/\s+/).filter(Boolean)
   const dakarExecutable = dakarInvocation[0] || 'dakar-review'
   const dakarPrefixArgs = dakarInvocation.slice(1)
+  let findingsSinkTail = Promise.resolve()
 
   // Deterministic jitter in [low, high] minutes: Math.random() is banned for
   // Claude Code workflow dual-compatibility (ODW scanDualCompat), and a seeded
@@ -572,26 +593,31 @@ export function makeHostReview(config: HostReviewConfig) {
       coderabbitCapture.bySeverity[severity] = (coderabbitCapture.bySeverity[severity] || 0) + 1
     }
     if (!coderabbitFindingsFile || !review.findings.length) return
-    // Wall-clock stamp shelled out to `date`: Date.now()/new Date() are banned
-    // for Claude Code workflow dual-compatibility (ODW scanDualCompat).
-    const stamp = await execFileStatus('date', ['-u', '+%Y-%m-%dT%H:%M:%SZ'])
-    const ts = stamp.ok ? stamp.stdout.trim() : ''
-    const lines = review.findings.map((finding) => JSON.stringify({
-      ts,
-      label,
-      severity: String(finding.severity || ''),
-      file: String(finding.fileName || ''),
-      comment: String(finding.comment || '').slice(0, 2000),
-      codegenInstructions: String(finding.codegenInstructions || '').slice(0, 2000),
-      suggestions: Array.isArray(finding.suggestions) ? finding.suggestions.length : 0,
-    }))
-    try {
-      const fs = process.getBuiltinModule('node:fs/promises')
-      await fs.appendFile(coderabbitFindingsFile, `${lines.join('\n')}\n`, 'utf8')
-    } catch (error) {
-      coderabbitCapture.sinkError = ((error as Error | null) && (error as Error).message) || String(error)
-      log(`[${label}] could not append CodeRabbit findings to ${coderabbitFindingsFile}: ${coderabbitCapture.sinkError}`)
+    const append = async () => {
+      // Wall-clock stamp shelled out to `date`: Date.now()/new Date() are banned
+      // for Claude Code workflow dual-compatibility (ODW scanDualCompat).
+      const stamp = await execFileStatus('date', ['-u', '+%Y-%m-%dT%H:%M:%SZ'])
+      const ts = stamp.ok ? stamp.stdout.trim() : ''
+      const lines = review.findings.map((finding) => JSON.stringify({
+        ts,
+        label,
+        severity: String(finding.severity || ''),
+        file: String(finding.fileName || ''),
+        comment: String(finding.comment || '').slice(0, 2000),
+        codegenInstructions: String(finding.codegenInstructions || '').slice(0, 2000),
+        suggestions: Array.isArray(finding.suggestions) ? finding.suggestions.length : 0,
+      }))
+      try {
+        const fs = process.getBuiltinModule('node:fs/promises')
+        await fs.appendFile(coderabbitFindingsFile, `${lines.join('\n')}\n`, 'utf8')
+      } catch (error) {
+        coderabbitCapture.sinkError = ((error as Error | null) && (error as Error).message) || String(error)
+        log(`[${label}] could not append CodeRabbit findings to ${coderabbitFindingsFile}: ${coderabbitCapture.sinkError}`)
+      }
     }
+    const pending = findingsSinkTail.then(append, append)
+    findingsSinkTail = pending.then(() => undefined, () => undefined)
+    await pending
   }
 
   // The control loop executes the configured gate commands itself against the
@@ -635,12 +661,17 @@ export function makeHostReview(config: HostReviewConfig) {
       // Exclusive, no-follow open (mode 0600): O_EXCL fails if anything already
       // exists at the path (a planted symlink/file cannot be clobbered), and
       // O_NOFOLLOW refuses to traverse a symlink. Any such fault surfaces on the
-      // stream 'error' listener below and settles the gate as failed.
+      // synchronous open below and settles the gate before a child is spawned.
       const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants
-      // createWriteStream accepts numeric open flags at runtime; the ambient
-      // type only allows a string, so cast the OR-ed constants.
-      const openFlags = (O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW) as unknown as string
-      const stream = fs.createWriteStream(logFile, { flags: openFlags, mode: 0o600 })
+      const openFlags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW
+      let fd: number
+      try {
+        fd = fs.openSync(logFile, openFlags, 0o600)
+      } catch (error) {
+        resolve({ ok: false, killed: false, tail: `gate log write failed: ${(error as Error).message}` })
+        return
+      }
+      const stream = fs.createWriteStream(logFile, { fd, autoClose: true })
       const tail: string[] = []
       let carry = ''
       let killed = false

@@ -2194,6 +2194,8 @@ var DAKAR_SEVERITY_MAP = {
   medium: "minor",
   low: "trivial"
 };
+var DAKAR_SEVERITIES = new Set(Object.keys(DAKAR_SEVERITY_MAP));
+var DAKAR_REQUIRED_FINDING_FIELDS = ["path", "title", "detail", "evidence"];
 function boundedTail(text, limit = 2e3) {
   const value = String(text || "");
   return value.length > limit ? value.slice(-limit) : value;
@@ -2236,16 +2238,42 @@ function validateChangesRequestedFindings(raw) {
       detail: "Dakar returned changes-requested without any findings; refusing to treat a reviewer rejection as non-blocking"
     };
   }
-  const malformedIndex = findings.findIndex(
-    (finding) => finding === null || typeof finding !== "object" || Array.isArray(finding)
-  );
-  if (malformedIndex !== -1) {
-    return {
-      ok: false,
-      detail: boundedTail(`Dakar returned a malformed finding at index ${malformedIndex}; expected an object`, 2e3)
-    };
+  for (const [index, finding] of findings.entries()) {
+    if (finding === null || typeof finding !== "object" || Array.isArray(finding)) {
+      return {
+        ok: false,
+        detail: boundedTail(`Dakar returned a malformed finding at index ${index}; expected an object`, 2e3)
+      };
+    }
+    const item = finding;
+    if (typeof item.severity !== "string" || !DAKAR_SEVERITIES.has(item.severity)) {
+      return {
+        ok: false,
+        detail: boundedTail(`Dakar returned an invalid finding at index ${index}; unsupported severity`, 2e3)
+      };
+    }
+    const invalidField = DAKAR_REQUIRED_FINDING_FIELDS.find((field) => typeof item[field] !== "string");
+    if (invalidField) {
+      return {
+        ok: false,
+        detail: boundedTail(`Dakar returned an invalid finding at index ${index}; ${invalidField} must be a string`, 2e3)
+      };
+    }
+    if (item.line !== void 0 && (!Number.isInteger(item.line) || Number(item.line) < 1)) {
+      return {
+        ok: false,
+        detail: boundedTail(`Dakar returned an invalid finding at index ${index}; line must be a positive integer`, 2e3)
+      };
+    }
   }
   return { ok: true, findings };
+}
+
+function validateCleanDakarFindings(raw) {
+  if (raw === void 0) return "";
+  if (!Array.isArray(raw)) return "Dakar returned a clean verdict with a malformed findings field";
+  if (raw.length > 0) return "Dakar returned a clean verdict with findings; refusing to discard reviewer findings";
+  return "";
 }
 function classifyDakarReview(execResult) {
   const doc = parseDakarDocument(execResult.stdout);
@@ -2261,7 +2289,11 @@ function classifyDakarReview(execResult) {
     return { outcome: "error", findings: [], detail: `stage: ${stage} \u2014 ${boundedTail(doc.error || "no detail")}` };
   }
   if (doc.ok === true) {
-    if (doc.skipped === true || doc.verdict === "pass") return { outcome: "clean", findings: [], detail: "" };
+    if (doc.skipped === true || doc.verdict === "pass") {
+      const invalidFindings = validateCleanDakarFindings(doc.findings);
+      if (invalidFindings) return { outcome: "error", findings: [], detail: invalidFindings };
+      return { outcome: "clean", findings: [], detail: "" };
+    }
     if (doc.verdict === "changes-requested") {
       const validation = validateChangesRequestedFindings(doc.findings);
       if (!validation.ok) return { outcome: "error", findings: [], detail: validation.detail };
@@ -2405,6 +2437,7 @@ function makeHostReview(config) {
   const dakarInvocation = dakarCommand.trim().split(/\s+/).filter(Boolean);
   const dakarExecutable = dakarInvocation[0] || "dakar-review";
   const dakarPrefixArgs = dakarInvocation.slice(1);
+  let findingsSinkTail = Promise.resolve();
   function coderabbitBackoffMinutes2(seed) {
     let hash = 5381;
     for (const ch of String(seed)) hash = (hash * 33 ^ ch.codePointAt(0)) >>> 0;
@@ -2472,25 +2505,30 @@ function makeHostReview(config) {
       coderabbitCapture.bySeverity[severity] = (coderabbitCapture.bySeverity[severity] || 0) + 1;
     }
     if (!coderabbitFindingsFile || !review.findings.length) return;
-    const stamp = await execFileStatus("date", ["-u", "+%Y-%m-%dT%H:%M:%SZ"]);
-    const ts = stamp.ok ? stamp.stdout.trim() : "";
-    const lines = review.findings.map((finding) => JSON.stringify({
-      ts,
-      label,
-      severity: String(finding.severity || ""),
-      file: String(finding.fileName || ""),
-      comment: String(finding.comment || "").slice(0, 2e3),
-      codegenInstructions: String(finding.codegenInstructions || "").slice(0, 2e3),
-      suggestions: Array.isArray(finding.suggestions) ? finding.suggestions.length : 0
-    }));
-    try {
-      const fs = process.getBuiltinModule("node:fs/promises");
-      await fs.appendFile(coderabbitFindingsFile, `${lines.join("\n")}
+    const append = async () => {
+      const stamp = await execFileStatus("date", ["-u", "+%Y-%m-%dT%H:%M:%SZ"]);
+      const ts = stamp.ok ? stamp.stdout.trim() : "";
+      const lines = review.findings.map((finding) => JSON.stringify({
+        ts,
+        label,
+        severity: String(finding.severity || ""),
+        file: String(finding.fileName || ""),
+        comment: String(finding.comment || "").slice(0, 2e3),
+        codegenInstructions: String(finding.codegenInstructions || "").slice(0, 2e3),
+        suggestions: Array.isArray(finding.suggestions) ? finding.suggestions.length : 0
+      }));
+      try {
+        const fs = process.getBuiltinModule("node:fs/promises");
+        await fs.appendFile(coderabbitFindingsFile, `${lines.join("\n")}
 `, "utf8");
-    } catch (error) {
-      coderabbitCapture.sinkError = error && error.message || String(error);
-      log(`[${label}] could not append CodeRabbit findings to ${coderabbitFindingsFile}: ${coderabbitCapture.sinkError}`);
-    }
+      } catch (error) {
+        coderabbitCapture.sinkError = error && error.message || String(error);
+        log(`[${label}] could not append CodeRabbit findings to ${coderabbitFindingsFile}: ${coderabbitCapture.sinkError}`);
+      }
+    };
+    const pending = findingsSinkTail.then(append, append);
+    findingsSinkTail = pending.then(() => void 0, () => void 0);
+    await pending;
   }
   async function runHostCommitGates2(worktree, tag, roundLabel) {
     const results2 = [];
@@ -2521,7 +2559,14 @@ ${outcome.tail}`
     return new Promise((resolve) => {
       const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
       const openFlags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
-      const stream = fs.createWriteStream(logFile, { flags: openFlags, mode: 384 });
+      let fd;
+      try {
+        fd = fs.openSync(logFile, openFlags, 384);
+      } catch (error) {
+        resolve({ ok: false, killed: false, tail: `gate log write failed: ${error.message}` });
+        return;
+      }
+      const stream = fs.createWriteStream(logFile, { fd, autoClose: true });
       const tail = [];
       let carry = "";
       let killed = false;
