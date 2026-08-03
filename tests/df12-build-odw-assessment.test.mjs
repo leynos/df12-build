@@ -514,7 +514,10 @@ test('host review guidance follows the selected tool', async () => {
   const task = { id: '1.2.3', title: 'Parser' }
   const plan = { execplanPath: 'docs/execplans/roadmap-1-2-3.md' }
 
-  const hosted = await loadAssessmentSurface()
+  const hosted = await loadAssessmentSurface({
+    reviewTool: 'dakar',
+    coderabbitHostReview: false,
+  })
   const hostedImplement = hosted.implementPrompt(task, '/tmp/wt', plan)
   assert.match(hostedImplement, /Do NOT run Dakar yourself/)
   assert.doesNotMatch(hostedImplement, /summon `scrutineer` to run `coderabbit review --agent`/)
@@ -531,6 +534,28 @@ test('host review guidance follows the selected tool', async () => {
   const legacyImplement = legacy.implementPrompt(task, '/tmp/wt', plan)
   assert.match(legacyImplement, /coderabbit review --agent/)
   assert.doesNotMatch(legacyImplement, /Do NOT run coderabbit yourself/)
+})
+
+test('Dakar dispatch ignores the legacy host-review disable flag', async () => {
+  const surface = await loadAssessmentSurface({
+    reviewTool: 'dakar',
+    coderabbitHostReview: false,
+    coderabbitAttempts: 1,
+  })
+  const calls = []
+  const review = await surface.runCoderabbitHostReview('/tmp/wt', 'dakar:1.2.3 r1', {
+    exec: async (command, commandArgs, options) => {
+      calls.push({ command, commandArgs, options })
+      return { ok: true, stdout: '{"ok":true,"verdict":"pass","findings":[]}', stderr: '' }
+    },
+  })
+
+  assert.equal(surface.CODERABBIT_HOST_REVIEW, true)
+  assert.equal(review.outcome, 'clean')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].command, 'dakar-review')
+  assert.ok(calls[0].commandArgs.includes('--state-root'))
+  assert.ok(!calls[0].commandArgs.includes('review'))
 })
 
 test('host gates run the configured commands sequentially and tee logs to /tmp', async () => {
@@ -790,6 +815,17 @@ test('auth preflight consults Claude only when a stage routes to the claude adap
     !codexOnly.calls().some((line) => line.startsWith('claude ')),
     'claude must not be consulted when no stage routes to it',
   )
+
+  const legacy = makeAuthBin()
+  const legacyFailures = await runPreflightWithFakes({
+    reviewTool: 'coderabbit',
+    coderabbitHostReview: false,
+  }, legacy)
+  assert.deepEqual(legacyFailures, [])
+  assert.ok(
+    legacy.calls().some((line) => line === 'coderabbit auth status'),
+    'legacy agent-run CodeRabbit still requires CodeRabbit credentials',
+  )
 })
 
 test('auth preflight reports a signed-out Claude as a failure', async () => {
@@ -808,7 +844,8 @@ test('the Dakar preflight requires a non-empty OPENAI_API_KEY and skips CodeRabb
     // CodeRabbit CLI auth-status probe is never consulted.
     delete process.env.OPENAI_API_KEY
     const missing = makeAuthBin()
-    const missingFailures = await runPreflightWithFakes({}, missing)
+    const dakarWithLegacyFlagOff = { reviewTool: 'dakar', coderabbitHostReview: false }
+    const missingFailures = await runPreflightWithFakes(dakarWithLegacyFlagOff, missing)
     assert.equal(missingFailures.length, 1)
     assert.equal(missingFailures[0].tool, 'dakar')
     assert.match(missingFailures[0].detail, /OPENAI_API_KEY/)
@@ -820,7 +857,7 @@ test('the Dakar preflight requires a non-empty OPENAI_API_KEY and skips CodeRabb
     // An explicitly empty key fails identically and still avoids CodeRabbit.
     process.env.OPENAI_API_KEY = ''
     const empty = makeAuthBin()
-    const emptyFailures = await runPreflightWithFakes({}, empty)
+    const emptyFailures = await runPreflightWithFakes(dakarWithLegacyFlagOff, empty)
     assert.equal(emptyFailures.length, 1)
     assert.equal(emptyFailures[0].tool, 'dakar')
     assert.match(emptyFailures[0].detail, /OPENAI_API_KEY/)
@@ -832,7 +869,7 @@ test('the Dakar preflight requires a non-empty OPENAI_API_KEY and skips CodeRabb
     // A non-empty key clears the Dakar preflight.
     process.env.OPENAI_API_KEY = 'sk-test-key'
     const present = makeAuthBin()
-    const presentFailures = await runPreflightWithFakes({}, present)
+    const presentFailures = await runPreflightWithFakes(dakarWithLegacyFlagOff, present)
     assert.deepEqual(presentFailures, [])
   } finally {
     if (previousKey === undefined) delete process.env.OPENAI_API_KEY

@@ -92,7 +92,7 @@ describe('makeConfig defaults', () => {
 
 describe('makeConfig review-tool selection', () => {
   test('Dakar ignores the legacy agent-run CodeRabbit switch', () => {
-    const config = makeConfig({ coderabbitHostReview: false })
+    const config = makeConfig({ reviewTool: 'dakar', coderabbitHostReview: false })
     expect(config.REVIEW_TOOL).toBe('dakar')
     expect(config.CODERABBIT_HOST_REVIEW).toBe(true)
     expect(config.CODERABBIT_REVIEW_GUIDANCE).toContain('Do NOT run Dakar yourself')
