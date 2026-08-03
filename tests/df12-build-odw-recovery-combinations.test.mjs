@@ -65,19 +65,44 @@ function makeFakeAuthBin() {
   return bin
 }
 
-test('combination: resumePartialBranches=false leaves recovery disabled and spawns no agents', async () => {
+test('combination: resumePartialBranches=false holds stale survivor branches without spawning agents', async () => {
   const repo = makeRecoveryRepo()
   const before = repoStateSnapshot(repo)
 
   const { result, calls } = await runSimulation({ repo })
 
+  // Recovery stays disabled: no resume machinery runs and no agent spawns.
   assert.equal(result.recovery.enabled, false)
   assert.equal(result.recovery.candidates, 0)
   assert.deepEqual(result.recovery.results, [])
   assert.deepEqual(result.processed, [])
   assert.deepEqual(result.results, [])
-  assert.equal(result.halted, null)
   assert.deepEqual(calls, [], 'no agent may run when recovery is off and no task is selectable')
+  // The always-on stale-branch guard (issue #33) still runs read-only git
+  // discovery and holds the surviving roadmap-* branches out of selection so
+  // `git worktree add -b` cannot collide. Unintegrated survivors block the
+  // frontier, so the run ends needs-operator-recovery (issue #25 semantics),
+  // not as a clean stop indistinguishable from a dry frontier.
+  assert.match(result.halted, /needs-operator-recovery: 2 recovery survivor branch\(es\)/)
+  assert.deepEqual(
+    result.recovery.unresolved.map((entry) => [entry.id, entry.action]),
+    [
+      ['1.2.3', 'held'],
+      ['1.2.4', 'held'],
+    ],
+  )
+  // Guard-held survivors never produce a recovery result, so their unresolved
+  // entries must still carry branch provenance (branch name and recovery-disabled
+  // hold reason) for the operator to act on (issue #33).
+  assert.deepEqual(
+    result.recovery.unresolved.map((entry) => [entry.id, entry.branchName, entry.reason]),
+    [
+      ['1.2.3', 'roadmap-1-2-3', 'recovery-disabled: live-worktree'],
+      ['1.2.4', 'roadmap-1-2-4', 'recovery-disabled: missing-worktree'],
+    ],
+  )
+  // The guard is pure read-only git evidence: the fixture repository is
+  // untouched.
   assert.deepEqual(repoStateSnapshot(repo), before)
 })
 
