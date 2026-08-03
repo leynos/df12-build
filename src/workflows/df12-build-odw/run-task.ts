@@ -16,7 +16,9 @@ import {
   execplanRelPath,
   verifyExecplanCommitted,
   verifyWorktreeCommitted,
+  commitReviewArtefacts,
 } from './execplan-durability.ts'
+import type { DurabilityVerdict } from './execplan-durability.ts'
 import {
   faultMetrics,
   infrastructureFailureDetail,
@@ -302,6 +304,46 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     recordCoderabbitReview,
   } = deps
 
+  const MAX_REVIEW_ARTEFACT_COMMIT_FAILURES = 9999
+  let reviewArtefactCommitFailures = 0
+
+  /**
+   * Emit bounded, structured evidence for host-owned review-artefact commit
+   * boundaries without copying arbitrary git stderr into the operator log.
+   * The saturating failure counter makes repeated approval-boundary failures
+   * visible while remaining deterministic and bounded for long-lived runs.
+   */
+  function logReviewArtefactBoundary(boundary: string, tag: string, round: number, outcome: DurabilityVerdict) {
+    if (boundary === 'approval-review' && !outcome.ok) {
+      reviewArtefactCommitFailures = Math.min(reviewArtefactCommitFailures + 1, MAX_REVIEW_ARTEFACT_COMMIT_FAILURES)
+    }
+    const committed = outcome.committedPathCount || 0
+    const skipped = outcome.skippedPathCount || 0
+    const status = outcome.ok ? (committed ? 'committed' : 'no-op') : 'failed'
+    log(`[review-artefact] boundary=${boundary} task=${tag} round=${round} status=${status} committed_paths=${committed} skipped_paths=${skipped} error_class=${outcome.errorClass || 'none'} failure_count=${reviewArtefactCommitFailures}`)
+  }
+
+  /**
+   * Record the APPROVED transition, then commit the reviewer's workflow-owned
+   * notes so neither artefact remains dirty before implementation. Emit one
+   * structured record per host boundary and return the existing stage failure
+   * shape when either commit fails.
+   */
+  async function commitDesignApproval(task: SelectedTask, worktree: string, plan: StagePlan, round: number, extra: Record<string, unknown>): Promise<StageResult | null> {
+    const tag = task.id
+    const approved = await commitExecplanApproval({ worktree, planPath: plan.execplanPath, tag })
+    logReviewArtefactBoundary('approval-plan', tag, round, approved)
+    if (!approved.ok) {
+      return { id: tag, status: 'failed', stage: 'design-review', detail: `failed to record the committed ExecPlan approval: ${approved.detail}`, plan, worktree, proposals: [], ...extra }
+    }
+    const reviewCommitted = await commitReviewArtefacts({ worktree, planPath: plan.execplanPath, tag })
+    logReviewArtefactBoundary('approval-review', tag, round, reviewCommitted)
+    if (!reviewCommitted.ok) {
+      return { id: tag, status: 'failed', stage: 'design-review', detail: `failed to commit the design-review notes: ${reviewCommitted.detail}`, plan, worktree, proposals: [], ...extra }
+    }
+    return null
+  }
+
   async function runPlanDesignLoop(task: SelectedTask, worktree: string, opts: Record<string, unknown> = {}): Promise<{ plan?: StagePlan; fail?: StageResult }> {
     const tag = task.id
     const extra = (opts.extra as Record<string, unknown>) || {}
@@ -348,7 +390,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       let durability = await verifyExecplanCommitted(worktree, plan.execplanPath)
       let salvageNote = ''
       if (!durability.ok) {
-        const salvage = await commitExecplanDraft(worktree, contained.relPath, tag)
+        const salvage = await commitExecplanDraft({ worktree, planPath: plan.execplanPath, tag })
+        logReviewArtefactBoundary('draft-salvage', tag, round, salvage)
         if (salvage.ok) {
           log(`[task ${tag}] plan round ${round}: ${durability.detail}; host committed the drafted plan`)
           durability = await verifyExecplanCommitted(worktree, plan.execplanPath)
@@ -375,23 +418,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       })), `design-review:${tag} r${round}`))) as DesignVerdict | null
       if (designVerdict?.satisfied) {
         log(`[task ${tag}] design approved in round ${round}`)
-        // Deterministic bookkeeping owned by the control loop: record the
-        // committed APPROVED transition the moment the reviewer is satisfied.
-        const approved = await commitExecplanApproval(worktree, plan.execplanPath, tag)
-        if (!approved.ok) {
-          return {
-            fail: {
-              id: tag,
-              status: 'failed',
-              stage: 'design-review',
-              detail: `failed to record the committed ExecPlan approval: ${approved.detail}`,
-              plan,
-              worktree,
-              proposals: [],
-              ...extra,
-            },
-          }
-        }
+        const approvalFail = await commitDesignApproval(task, worktree, plan as StagePlan, round, extra)
+        if (approvalFail) return { fail: approvalFail }
         return { plan }
       }
       log(`[task ${tag}] design round ${round}: ${(designVerdict?.blocking || []).length} blocking point(s)`)

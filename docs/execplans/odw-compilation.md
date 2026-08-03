@@ -207,14 +207,17 @@ Planned work:
   review returned zero findings first.
 - [x] (2026-07-06 01:15Z) Milestone 7: `execplan-durability.ts` —
   `execplanRelPath` containment, `verifyExecplanCommitted`,
-  `commitExecplanApproval`, `commitExecplanDraft`, and
-  `verifyWorktreeCommitted`, all direct exports (no config coupling). The red
-  suite covered the escape shapes first (`../` variants, absolute paths outside
-  the worktree, empty/`.`/`..`), plus durability verdicts against real repos:
-  committed-clean, dirty, missing-at-HEAD, the idempotent APPROVED flip
-  (including the append-when-absent path), plan-only draft salvage vs
-  foreign-dirty bounce, and the bounded dirty sample. Milestone 6's CodeRabbit
-  review returned zero findings first.
+  `commitExecplanApproval`, `commitExecplanDraft`, `commitReviewArtefacts`, and
+  `verifyWorktreeCommitted`, all direct exports (no config coupling), with
+  porcelain parsing, review-sibling filtering, and path-scoped commits in
+  `git-worktree.ts`. The red suite covered the escape shapes first (`../`
+  variants, absolute paths outside the worktree, empty/`.`/`..`), plus
+  durability verdicts against real repos: committed-clean, dirty,
+  missing-at-HEAD, the idempotent APPROVED flip (including the
+  append-when-absent path), plan/review-sibling draft salvage vs foreign-dirty
+  bounce, approval-boundary review commits, property-based dirty-path
+  partitioning, structured boundary logs, and the bounded dirty sample.
+  Milestone 6's CodeRabbit review returned zero findings first.
 - [x] (2026-07-06 02:05Z) Milestone 8: `assessment.ts` (deferred-review
   classifiers, `implementationAuthFailureDetail`, the manual-merge handoff
   guard as direct exports;
@@ -517,10 +520,12 @@ line ranges by grep at execution time, since earlier milestones shift them.
    writable-root gate helpers.
 7. Milestone 7 — `execplan-durability.ts`: `execplanRelPath` containment
    and the host-enforced durability helpers (`verifyExecplanCommitted`,
-   `verifyWorktreeCommitted`, `commitExecplanDraft`, `commitExecplanApproval`).
-   Security-sensitive: the containment tests move to direct import in the same
-   milestone and must cover the escape cases (`../`, absolute paths) before the
-   move (red includes them).
+   `verifyWorktreeCommitted`, `commitExecplanDraft`, `commitExecplanApproval`,
+   `commitReviewArtefacts`), composed with the porcelain/review-sibling helpers
+   in `git-worktree.ts`. Security-sensitive: the containment and dirty-path
+   partition properties move to direct import in the same milestone and must
+   cover the escape cases (`../`, absolute paths) before the move (red includes
+   them).
 8. Milestone 8 — `assessment.ts` and `remediation.ts`: assessment prompt
    builders, `shouldAssessFailure`, evidence shaping, and the remediation
    triage helpers.

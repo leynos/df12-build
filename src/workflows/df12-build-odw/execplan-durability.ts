@@ -6,14 +6,24 @@
  * write-probe: prompts request, the host verifies.
  */
 import { execFileStatus, fileState } from './exec.ts'
+import { addAndCommit, isReviewSibling, partitionExecplanDirtyPaths, porcelainLines, porcelainPath } from './git-worktree.ts'
 import { parseExecplanState } from './recovery-decision.ts'
 
 /** The pass/fail outcome of a durability check: whether the target is durable, and why not when it is not. */
 export interface DurabilityVerdict {
   ok: boolean
   detail: string
+  committedPathCount?: number
+  skippedPathCount?: number
+  errorClass?: string
 }
 
+/** Task worktree, untrusted plan path, and task tag for a host-owned commit. */
+export interface ExecplanCommit {
+  worktree: string
+  planPath: unknown
+  tag: string
+}
 /**
  * The result of a salvage-commit attempt: `committed` paths, `skipped`
  * `{path,reason}` entries, the commit `sha` (empty when nothing was committed
@@ -96,16 +106,14 @@ export async function verifyExecplanCommitted(worktree: string, planPath: unknow
  * Side effect: rewrites the plan's Status line in place and, when that leaves
  * it dirty, `git add` + `git commit`s it under the `df12-build` machine identity.
  *
- * @param worktree The task worktree's absolute path.
- * @param planPath The agent-supplied plan path (untrusted; contained via {@link execplanRelPath}).
- * @param tag A label for the commit message (typically the task id).
+ * @param commit The task worktree, untrusted plan path, and task tag.
  * @returns `{ ok, detail }`.
  */
-export async function commitExecplanApproval(worktree: string, planPath: unknown, tag: string): Promise<DurabilityVerdict> {
+export async function commitExecplanApproval({ worktree, planPath, tag }: ExecplanCommit): Promise<DurabilityVerdict> {
   const fs = process.getBuiltinModule('node:fs/promises')
   const path = process.getBuiltinModule('node:path')
   const contained = execplanRelPath(worktree, planPath)
-  if (!contained.ok) return { ok: false, detail: contained.detail }
+  if (!contained.ok) return { ok: false, detail: contained.detail, errorClass: 'path-containment' }
   const relPath = contained.relPath
   const absPath = path.join(worktree, relPath)
   try {
@@ -133,64 +141,72 @@ export async function commitExecplanApproval(worktree: string, planPath: unknown
       }
     }
   } catch (error) {
-    return { ok: false, detail: `could not update the plan status: ${((error as Error | null) && (error as Error).message) || String(error)}` }
+    return { ok: false, detail: `could not update the plan status: ${((error as Error | null) && (error as Error).message) || String(error)}`, errorClass: 'plan-status-update' }
   }
   const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1', '--', relPath])
   if (!status.ok) {
-    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || '').trim()}` }
+    return { ok: false, detail: `git status failed for ${relPath}: ${(status.message || status.stderr || '').trim()}`, errorClass: 'git-status' }
   }
-  if (!String(status.stdout).trim()) return { ok: true, detail: 'already committed as APPROVED' }
-  const add = await execFileStatus('git', ['-C', worktree, 'add', '--', relPath])
-  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || '').trim()}` }
-  // Deterministic identity: this is a machine commit by the control loop, and
-  // it must succeed even on hosts with no global git identity configured.
-  const commit = await execFileStatus('git', [
-    '-C', worktree,
-    '-c', 'user.name=df12-build',
-    '-c', 'user.email=df12-build@workflow.invalid',
-    'commit', '-m', `Approve ExecPlan for task ${tag}`, '--', relPath,
-  ])
-  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || '').trim()}` }
-  return { ok: true, detail: '' }
+  if (!String(status.stdout).trim()) return { ok: true, detail: 'already committed as APPROVED', committedPathCount: 0, skippedPathCount: 0 }
+  const outcome = await addAndCommit(worktree, [relPath], `Approve ExecPlan for task ${tag}`)
+  return { ...outcome, committedPathCount: outcome.ok ? 1 : 0, skippedPathCount: 0 }
 }
 
 /**
  * Live runs showed planners repeatedly returning with the drafted plan dirty
  * — each bounce burnt a 30–90 minute planner round on pure git bookkeeping.
  * Making the drafted plan durable is deterministic bookkeeping (the same
- * philosophy as the APPROVED flip), so when the plan file is the ONLY
- * uncommitted path the host commits it, path-scoped, and proceeds. Any other
- * dirty path still bounces to the planner: the plan may depend on work the
- * host must not guess at. A failed host commit surfaces the underlying git
- * error — the strongest evidence when the environment, not the agent, is
- * what blocks committing. Side effect: `git add` + `git commit`s the plan
- * path under the `df12-build` machine identity.
+ * philosophy as the APPROVED flip), so when the only uncommitted paths are the
+ * plan and its workflow-owned review siblings the host commits them,
+ * path-scoped, and proceeds. Any other dirty path still bounces to the
+ * planner: the plan may depend on work the host must not guess at. A failed
+ * host commit surfaces the underlying git error — the strongest evidence when
+ * the environment, not the agent, is what blocks committing. Side effect:
+ * `git add` + `git commit`s the plan and review-sibling paths under the
+ * `df12-build` machine identity.
  *
- * @param worktree The task worktree's absolute path.
- * @param relPath The plan's path relative to the worktree.
- * @param tag A label for the commit message (typically the task id).
+ * @param commit The task worktree, untrusted plan path, and task tag.
  * @returns `{ ok, detail }`.
  */
-export async function commitExecplanDraft(worktree: string, relPath: string, tag: string): Promise<DurabilityVerdict> {
-  const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1'])
-  if (!status.ok) return { ok: false, detail: `git status failed: ${(status.message || status.stderr || '').trim()}` }
-  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean)
-  if (!lines.length) return { ok: false, detail: 'nothing to commit: the worktree is already clean' }
-  const foreign = lines.filter((line) => line.slice(3).replace(/^"(.*)"$/, '$1') !== relPath)
+export async function commitExecplanDraft({ worktree, planPath, tag }: ExecplanCommit): Promise<DurabilityVerdict> {
+  const contained = execplanRelPath(worktree, planPath)
+  if (!contained.ok) return { ok: false, detail: contained.detail, committedPathCount: 0, skippedPathCount: 0, errorClass: 'path-containment' }
+  const relPath = contained.relPath
+  const status = await porcelainLines(worktree)
+  if (!status.ok) return { ok: false, detail: status.detail, committedPathCount: 0, skippedPathCount: 0, errorClass: 'git-status' }
+  const lines = status.lines
+  if (!lines.length) return { ok: false, detail: 'nothing to commit: the worktree is already clean', committedPathCount: 0, skippedPathCount: 0, errorClass: 'already-clean' }
+  const { allowed, foreign } = partitionExecplanDirtyPaths(lines, relPath)
   if (foreign.length) {
     const sample = foreign.slice(0, 8).map((line) => line.trim()).join('; ')
-    return { ok: false, detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? '; …' : ''})` }
+    return {
+      ok: false,
+      detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? '; …' : ''})`,
+      committedPathCount: 0,
+      skippedPathCount: foreign.length,
+      errorClass: 'foreign-dirt',
+    }
   }
-  const add = await execFileStatus('git', ['-C', worktree, 'add', '--', relPath])
-  if (!add.ok) return { ok: false, detail: `git add failed: ${(add.message || add.stderr || '').trim()}` }
-  const commit = await execFileStatus('git', [
-    '-C', worktree,
-    '-c', 'user.name=df12-build',
-    '-c', 'user.email=df12-build@workflow.invalid',
-    'commit', '-m', `Draft ExecPlan for task ${tag}`, '--', relPath,
-  ])
-  if (!commit.ok) return { ok: false, detail: `git commit failed: ${(commit.message || commit.stderr || '').trim()}` }
-  return { ok: true, detail: '' }
+  const outcome = await addAndCommit(worktree, allowed, `Draft ExecPlan for task ${tag}`)
+  return { ...outcome, committedPathCount: outcome.ok ? allowed.length : 0, skippedPathCount: 0 }
+}
+
+/**
+ * Commit any dirty deterministic review siblings at the approval boundary.
+ *
+ * @param commit The task worktree, untrusted plan path, and task tag.
+ * @returns `{ ok, detail }`; a no-op succeeds when no review sibling is dirty.
+ */
+export async function commitReviewArtefacts({ worktree, planPath, tag }: ExecplanCommit): Promise<DurabilityVerdict> {
+  const contained = execplanRelPath(worktree, planPath)
+  if (!contained.ok) return { ok: false, detail: contained.detail, committedPathCount: 0, skippedPathCount: 0, errorClass: 'path-containment' }
+  const relPath = contained.relPath
+  const status = await porcelainLines(worktree)
+  if (!status.ok) return { ok: false, detail: status.detail, committedPathCount: 0, skippedPathCount: 0, errorClass: 'git-status' }
+  const siblings = status.lines.map(porcelainPath).filter((dirty) => isReviewSibling(dirty, relPath))
+  if (!siblings.length) return { ok: true, detail: '', committedPathCount: 0, skippedPathCount: 0 }
+  const outcome = await addAndCommit(worktree, siblings, `Commit design-review notes for task ${tag}`)
+  return { ...outcome, committedPathCount: outcome.ok ? siblings.length : 0, skippedPathCount: 0 }
 }
 
 /**
@@ -292,11 +308,9 @@ export async function salvageTaskArtefacts(worktree: string, candidatePaths: rea
  * @returns `{ ok, detail }`, with `detail` carrying a bounded path sample on failure.
  */
 export async function verifyWorktreeCommitted(worktree: string): Promise<DurabilityVerdict> {
-  const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1'])
-  if (!status.ok) {
-    return { ok: false, detail: `git status failed: ${(status.message || status.stderr || '').trim()}` }
-  }
-  const lines = String(status.stdout).split(/\r?\n/).filter(Boolean)
+  const status = await porcelainLines(worktree)
+  if (!status.ok) return { ok: false, detail: status.detail }
+  const lines = status.lines
   if (!lines.length) return { ok: true, detail: '' }
   const sample = lines.slice(0, 8).map((line) => line.trim()).join('; ')
   return { ok: false, detail: `${lines.length} uncommitted path(s): ${sample}${lines.length > 8 ? '; …' : ''}` }

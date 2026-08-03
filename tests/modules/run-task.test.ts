@@ -2,7 +2,7 @@
 // with scripted primitives keyed on stable agent labels — mirroring the
 // artefact-level simulation suites, but by direct import. Real git fixtures
 // back the durability gates the pipeline consults.
-import { beforeEach, describe, expect, test } from 'bun:test'
+import { beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -13,6 +13,7 @@ import {
   summarizeFixReport,
   summarizeReviewVerdict,
 } from '../../src/workflows/df12-build-odw/run-task.ts'
+import * as exec from '../../src/workflows/df12-build-odw/exec.ts'
 
 const globals = globalThis as Record<string, unknown>
 
@@ -46,6 +47,7 @@ const task = { id: '1.2.3', title: 'Implement the parser', requires: [], rationa
 
 type Script = (label: string, prompt: string) => unknown
 let labels: string[] = []
+let logs: string[] = []
 
 function scriptAgent(script: Script) {
   globals.agent = async (prompt: string, opts: Record<string, unknown> = {}) => {
@@ -104,10 +106,61 @@ function subject(worktree: string, overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   labels = []
-  globals.log = () => {}
+  logs = []
+  globals.log = (message: unknown) => logs.push(String(message))
   globals.phase = () => {}
   globals.parallel = async (thunks: Array<() => Promise<unknown>>) =>
     Promise.all(thunks.map((thunk) => Promise.resolve().then(thunk).catch(() => null)))
+})
+
+describe('review-artefact boundary observability', () => {
+  test('records salvage and approval counts without unbounded git detail', async () => {
+    const worktree = makeWorktree()
+    const reviewPath = 'docs/execplans/roadmap-1-2-3.review-r1.md'
+    writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: DRAFT\n\nRevised.\n')
+    writeFileSync(path.join(worktree, reviewPath), '# Stale review notes\n')
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('design-review:')) {
+        writeFileSync(path.join(worktree, reviewPath), '# Current review notes\n')
+        return { satisfied: true, blocking: [] }
+      }
+      return happyScript()(label, prompt)
+    })
+
+    const outcome = await subject(worktree).runPlanDesignLoop(task, worktree)
+
+    expect(outcome.fail).toBeUndefined()
+    expect(logs).toContain('[review-artefact] boundary=draft-salvage task=1.2.3 round=1 status=committed committed_paths=2 skipped_paths=0 error_class=none failure_count=0')
+    expect(logs).toContain('[review-artefact] boundary=approval-plan task=1.2.3 round=1 status=committed committed_paths=1 skipped_paths=0 error_class=none failure_count=0')
+    expect(logs).toContain('[review-artefact] boundary=approval-review task=1.2.3 round=1 status=committed committed_paths=1 skipped_paths=0 error_class=none failure_count=0')
+  })
+
+  test('classifies and counts review-artefact commit failures', async () => {
+    const worktree = makeWorktree()
+    const reviewPath = 'docs/execplans/roadmap-1-2-3.review-r1.md'
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('design-review:')) {
+        writeFileSync(path.join(worktree, reviewPath), '# Review notes\n')
+        return { satisfied: true, blocking: [] }
+      }
+      return happyScript()(label, prompt)
+    })
+    const real = exec.execFileStatus
+    const spy = spyOn(exec, 'execFileStatus').mockImplementation(async (command, commandArgs, options) => {
+      if (Array.isArray(commandArgs) && commandArgs.includes('Commit design-review notes for task 1.2.3')) {
+        return { ok: false, stdout: '', stderr: 'simulated commit failure', message: 'simulated commit failure' }
+      }
+      return real(command, commandArgs, options)
+    })
+    try {
+      const outcome = await subject(worktree).runPlanDesignLoop(task, worktree)
+      expect(outcome.fail?.detail).toMatch(/failed to commit the design-review notes/)
+      expect(logs).toContain('[review-artefact] boundary=approval-review task=1.2.3 round=1 status=failed committed_paths=0 skipped_paths=0 error_class=git-commit failure_count=1')
+      expect(logs.some((entry) => entry.includes('simulated commit failure'))).toBe(false)
+    } finally {
+      spy.mockRestore()
+    }
+  })
 })
 
 const passReview = { verdict: 'pass', blocking: [] }

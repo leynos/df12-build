@@ -234,10 +234,18 @@ ExecPlan `Status:` line (`DRAFT`/missing to plan, `APPROVED`/`IN PROGRESS` to
 implement, `COMPLETE` to review, `BLOCKED` and every hygiene failure to a
 report). The committed ExecPlan is the durable source of truth, and the host
 enforces that durability at stage boundaries (`verifyExecplanCommitted`,
-`verifyWorktreeCommitted`, `commitExecplanApproval`). A plan-only dirty
-worktree after a planner round is salvaged host-side (`commitExecplanDraft`
-commits just the plan path) instead of bouncing; any other dirty path still
-bounces to the planner with the salvage-refusal evidence.
+`verifyWorktreeCommitted`, `commitExecplanApproval`). A dirty plan accompanied
+only by deterministic review siblings is salvaged host-side after a planner
+round. `commitExecplanDraft` commits the plan plus review siblings matching
+`<plan-stem>.review-r<N>.md`; `partitionExecplanDirtyPaths` keeps any other
+dirty path foreign, so it still bounces to the planner with the salvage-refusal
+evidence. At a satisfied design-review boundary, `commitExecplanApproval`
+commits the `APPROVED` transition and `commitReviewArtefacts` then commits any
+dirty review siblings before implementation. `runPlanDesignLoop` emits bounded
+`[review-artefact]` records for draft salvage, plan approval, and review-note
+commit outcomes. Each record carries task id, round, committed/skipped counts,
+an error class, and a saturating approval-review failure count; arbitrary git
+stderr remains only in the returned failure detail.
 
 Artefact salvage for failing branches is handled by two layers.
 `salvageTaskArtefacts` (`execplan-durability.ts`) is the primitive: it accepts
