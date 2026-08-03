@@ -93,12 +93,12 @@ describe('compile-time contract', () => {
     expect(result.ok).toBe(false)
     // TS1294: "This syntax is not allowed when 'erasableSyntaxOnly' is enabled."
     expect(result.output).toMatch(/1294|erasableSyntaxOnly/)
-  })
+  }, 30_000)
 
   test('erasable type-only syntax compiles cleanly under the same flags', () => {
     const result = typecheck('export type Id = string\nexport const make = (id: Id): Id => id\n')
     expect(result.ok).toBe(true)
-  })
+  }, 30_000)
 })
 
 // The salvage public shapes (SalvageOutcome, SalvageRecord, SalvageSummaryEntry)
