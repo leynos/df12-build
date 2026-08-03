@@ -105,7 +105,7 @@ return {
   verifyWorktreeCommitted,
   runPlanDesignLoop,
   runImplementationStage,
-  runCoderabbitHostReview,
+  runHostReview,
   runDualReviewAndIntegration,
   runRecovery,
 }
@@ -665,7 +665,7 @@ test('synthetic recovery implementation bridges into review without faking evide
   assert.equal(missingPlan.workItemsCompleted, 0)
   assert.equal(missingPlan.workItemsTotal, 0)
   assert.deepEqual(missingPlan.commits, ['abc1234 Work on roadmap-1-2-3'])
-  assert.equal(missingPlan.coderabbitRuns, 0)
+  assert.equal(missingPlan.hostReviewRuns, 0)
   assert.deepEqual(missingPlan.openIssues, ['recovered branch requires fresh review'])
   assert.deepEqual(missingPlan.residualRisk, [], 'residualRisk defaults to an empty carry-forward channel')
   assert.match(missingPlan.summary, /Recovered adopt-complete branch from durable git state/)
@@ -768,7 +768,7 @@ function reviewModeAgent(calls, overrides = {}) {
         workItemsCompleted: 1,
         workItemsTotal: 1,
         commits: ['Finish remaining work items'],
-        coderabbitRuns: 1,
+        hostReviewRuns: 1,
         openIssues: [],
         summary: 'resumed and completed the remaining work items',
       })))(prompt, opts)
@@ -1202,7 +1202,7 @@ test('continue mode resumes an approved-plan branch at the implement stage', asy
           workItemsCompleted: 2,
           workItemsTotal: 2,
           commits: ['Finish remaining work items'],
-          coderabbitRuns: 1,
+          hostReviewRuns: 1,
           openIssues: [],
           summary: 'resumed and completed the remaining work items',
         }
@@ -1458,7 +1458,7 @@ test('host-run CodeRabbit findings drive a fix round through the real CLI seam',
     }
     if (opts.label?.startsWith('fix:')) {
       fixPrompts.push(prompt)
-      return { gatesGreen: true, commits: ['Guard the index'], coderabbitRuns: 0, resolved: ['guard'], openIssues: [], summary: 'fixed' }
+      return { gatesGreen: true, commits: ['Guard the index'], hostReviewRuns: 0, resolved: ['guard'], openIssues: [], summary: 'fixed' }
     }
     if (opts.label?.startsWith('integrate:')) {
       return { ok: true, roadmapMarkedDone: true, rebased: true, squashMerged: true, mergeSha: 'feed', pushed: true, conflicts: '', summary: 'merged' }
@@ -1487,7 +1487,7 @@ test('host-run CodeRabbit findings drive a fix round through the real CLI seam',
   assert.equal(outcome.status, 'done', JSON.stringify(outcome))
   assert.equal(readFileSync(countFile, 'utf8').trim(), '2', 'the committed diff is re-reviewed after the fix round')
   assert.ok(labels.some((label) => label.startsWith('fix:1.2.3 r1')), 'the CodeRabbit finding forces a fix round')
-  assert.match(fixPrompts[0], /CodeRabbit \(major\) src\/a\.rs: guard the index/, 'the fix agent sees the finding verbatim')
+  assert.match(fixPrompts[0], /coderabbit \(major\) src\/a\.rs: guard the index/, 'the fix agent sees the neutral finding label')
   assert.equal(outcome.openIssues, undefined, 'no deferred-review issue on a clean pass')
 })
 
@@ -1525,7 +1525,7 @@ test('default Dakar review retries through a fake CLI with isolated state roots'
   const previousPath = process.env.PATH
   process.env.PATH = `${bin}:${previousPath}`
   try {
-    const outcome = await surface.runCoderabbitHostReview(
+    const outcome = await surface.runHostReview(
       worktree,
       'dakar:1.2.3 e2e',
       { sleep: async () => {} },
@@ -1579,7 +1579,7 @@ test('a red host gate drives a fix round before any reviewer agent spends tokens
     }
     if (opts.label?.startsWith('fix:')) {
       fixPrompts.push(prompt)
-      return { gatesGreen: true, commits: ['Fix the range check'], coderabbitRuns: 0, resolved: [], openIssues: [], summary: 'fixed' }
+      return { gatesGreen: true, commits: ['Fix the range check'], hostReviewRuns: 0, resolved: [], openIssues: [], summary: 'fixed' }
     }
     if (opts.label?.startsWith('integrate:')) {
       return { ok: true, roadmapMarkedDone: true, rebased: true, squashMerged: true, mergeSha: 'feed', pushed: true, conflicts: '', summary: 'merged' }
@@ -1628,7 +1628,7 @@ test('the work-item build loop dispatches one builder turn per unticked item', a
     prompts.push(prompt)
     if (!opts.label?.startsWith('implement:')) throw new Error(`unexpected label: ${opts.label}`)
     tickFirstProgressItem(worktree)
-    return { ok: true, gatesGreen: true, execplanPath: PARSER_PLAN, workItemsCompleted: 1, workItemsTotal: 2, commits: [`Complete ${opts.label}`], coderabbitRuns: 0, openIssues: [], summary: 'work item done' }
+    return { ok: true, gatesGreen: true, execplanPath: PARSER_PLAN, workItemsCompleted: 1, workItemsTotal: 2, commits: [`Complete ${opts.label}`], hostReviewRuns: 0, openIssues: [], summary: 'work item done' }
   }
   const surface = await loadRecoverySurface({ perWorkItemBuild: true }, agentImpl)
 

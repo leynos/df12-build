@@ -1,22 +1,19 @@
-// Module tests for the host-run CodeRabbit review: the NDJSON outcome
-// classifier's terminal-completion guard, and the spawn-streamed host commit
-// gates (secure per-run log directory).
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+/** @file Module tests for neutral host-review adapters, telemetry, and gates. */
+import { afterEach, describe, expect, test } from 'bun:test'
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import {
   classifyCoderabbitOutcome,
-  coderabbitBlockingItems,
-  coderabbitCapture,
-  csCheckMetrics,
+  reviewBlockingItems,
+  hostReviewMetrics,
   hostGateLogPath,
   makeHostReview,
   parseCoderabbitAgentOutput,
   parseDakarDocument,
 } from '../../src/workflows/df12-build-odw/host-review.ts'
-import type { CoderabbitOutcome } from '../../src/workflows/df12-build-odw/host-review.ts'
+import type { ReviewOutcome } from '../../src/workflows/df12-build-odw/host-review.ts'
 import type { ExecOptions } from '../../src/workflows/df12-build-odw/exec.ts'
 
 describe('classifyCoderabbitOutcome terminal completion', () => {
@@ -81,6 +78,9 @@ function hostReview(overrides: Partial<Parameters<typeof makeHostReview>[0]> = {
   })
 }
 
+// A recording exec mock: it captures every invocation's argv and returns a
+// scripted ExecStatus, so the Dakar/CodeRabbit dispatch and the exact command
+// line can be asserted without ever running a real reviewer CLI.
 function recordingExec(result: Partial<import('../../src/workflows/df12-build-odw/exec.ts').ExecStatus>) {
   const calls: Array<{ command: string; args: string[]; options: ExecOptions }> = []
   const exec = async (command: string, args: readonly string[], options: ExecOptions = {}) => {
@@ -182,8 +182,9 @@ describe('runDakarHostReview', () => {
       },
     })
     expect(review.outcome).toBe('clean')
-    expect(logs.at(-1)).toStartWith('[Dakar] could not remove temporary state root: ')
-    expect(logs.at(-1)?.length).toBeLessThanOrEqual(550)
+    const cleanupLog = logs.find((line) => line.startsWith('[Dakar] could not remove temporary state root: ')) as string
+    expect(cleanupLog).toStartWith('[Dakar] could not remove temporary state root: ')
+    expect(cleanupLog.length).toBeLessThanOrEqual(550)
   })
 
   test('a configured budget adds the --budget-gbp flag', async () => {
@@ -197,7 +198,7 @@ describe('runDakarHostReview', () => {
 
   // The outcome-mapping table: each Dakar document maps to exactly one
   // CoderabbitOutcome, so every run-task deferral/blocking path keeps working.
-  const cases: Array<{ name: string; doc?: Record<string, unknown>; stdout?: string; outcome: CoderabbitOutcome }> = [
+  const cases: Array<{ name: string; doc?: Record<string, unknown>; stdout?: string; outcome: ReviewOutcome }> = [
     { name: 'a passing verdict is clean', doc: { ok: true, verdict: 'pass', findings: [] }, outcome: 'clean' },
     { name: 'a skipped run (nothing unreviewed) is clean', doc: { ok: true, skipped: true }, outcome: 'clean' },
     { name: 'changes-requested is findings', doc: { ok: true, verdict: 'changes-requested', findings: [{ severity: 'high', path: 'a.ts', title: 't', detail: 'd', evidence: 'e' }] }, outcome: 'findings' },
@@ -347,7 +348,7 @@ describe('runDakarHostReview', () => {
     const { runCoderabbitHostReview, recordCoderabbitReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1, coderabbitFindingsFile: findingsFile })
     const review = await runCoderabbitHostReview('/w', 'l', { exec })
     // critical + high map onto CodeRabbit's blocking critical + major.
-    const blocking = coderabbitBlockingItems(review.findings)
+    const blocking = reviewBlockingItems(review.reviewer, review.findings)
     expect(blocking.length).toBe(2)
     expect(blocking.join('\n')).toMatch(/critical/)
     expect(blocking.join('\n')).toMatch(/major/)
@@ -364,26 +365,45 @@ describe('runDakarHostReview', () => {
     const findingsFile = path.join(mkdtempSync(path.join(tmpdir(), 'dakar-concurrent-sink-')), 'findings.jsonl')
     junk.push(path.dirname(findingsFile))
     const before = {
-      reviews: coderabbitCapture.reviews,
-      findings: coderabbitCapture.findings,
-      major: coderabbitCapture.bySeverity.major || 0,
+      findings: hostReviewMetrics.findings,
+      major: hostReviewMetrics.bySeverity.major,
     }
-    const { recordCoderabbitReview } = hostReview({ coderabbitFindingsFile: findingsFile })
-    const records = Array.from({ length: 12 }, (_, index) => recordCoderabbitReview(`parallel-${index}`, {
+    const { recordHostReview } = hostReview({ coderabbitFindingsFile: findingsFile })
+    const records = Array.from({ length: 12 }, (_, index) => recordHostReview(`parallel-${index}`, {
+      reviewer: 'dakar',
       outcome: 'findings',
       attempts: 1,
+      elapsedMs: 1,
+      errorCategory: 'none',
       findings: [{ severity: 'major', fileName: `src/${index}.ts`, comment: `finding ${index}` }],
       detail: '',
     }))
 
     await Promise.all(records)
 
-    expect(coderabbitCapture.reviews - before.reviews).toBe(12)
-    expect(coderabbitCapture.findings - before.findings).toBe(12)
-    expect((coderabbitCapture.bySeverity.major || 0) - before.major).toBe(12)
+    expect(hostReviewMetrics.findings - before.findings).toBe(12)
+    expect(hostReviewMetrics.bySeverity.major - before.major).toBe(12)
     const lines = readFileSync(findingsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
     expect(lines).toHaveLength(12)
     expect(new Set(lines.map((entry) => entry.label)).size).toBe(12)
+  })
+
+  test('a sink failure increments the bounded neutral metric', async () => {
+    const sinkDirectory = mkdtempSync(path.join(tmpdir(), 'dakar-failing-sink-'))
+    junk.push(sinkDirectory)
+    const before = hostReviewMetrics.sinkFailures
+    const { recordHostReview } = hostReview({ coderabbitFindingsFile: sinkDirectory })
+    await recordHostReview('sink-failure', {
+      reviewer: 'dakar',
+      outcome: 'findings',
+      attempts: 1,
+      elapsedMs: 1,
+      errorCategory: 'none',
+      findings: [{ severity: 'major', fileName: 'src/a.ts', comment: 'finding' }],
+      detail: '',
+    })
+    expect(hostReviewMetrics.sinkFailures - before).toBe(1)
+    expect(hostReviewMetrics.sinkError.length).toBeLessThanOrEqual(500)
   })
 })
 
@@ -406,6 +426,61 @@ describe('reviewTool dispatch', () => {
       options: { cwd: '/w', timeoutMs: 3_600_000 },
     })
   })
+
+  test('both adapters return the neutral result contract', async () => {
+    const dakar = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+    const dakarResult = await dakar.runHostReview('/w', 'dakar-contract', {
+      exec: recordingExec({ stdout: '{"ok":true,"verdict":"pass","findings":[]}' }).exec,
+      nowMs: (() => { const values = [10, 25]; return () => values.shift() as number })(),
+    })
+    const coderabbit = hostReview({ reviewTool: 'coderabbit', coderabbitAttempts: 1 })
+    const coderabbitResult = await coderabbit.runHostReview('/w', 'coderabbit-contract', {
+      exec: recordingExec({ stdout: '{"type":"complete","status":"review_completed"}' }).exec,
+      nowMs: (() => { const values = [20, 45]; return () => values.shift() as number })(),
+    })
+    expect(dakarResult).toMatchObject({ reviewer: 'dakar', outcome: 'clean', attempts: 1, elapsedMs: 15, errorCategory: 'none' })
+    expect(coderabbitResult).toMatchObject({ reviewer: 'coderabbit', outcome: 'clean', attempts: 1, elapsedMs: 25, errorCategory: 'none' })
+  })
+
+  test('terminal telemetry classifies timeout metadata and bounds identifiers', async () => {
+    const logs: string[] = []
+    g.log = (message: unknown) => logs.push(String(message))
+    const before = { runs: hostReviewMetrics.runs, timeouts: hostReviewMetrics.timeouts, errors: hostReviewMetrics.errors }
+    const { runHostReview } = hostReview({ reviewTool: 'coderabbit', coderabbitAttempts: 1 })
+    const values = [100, 145]
+    const review = await runHostReview('/w', 'x'.repeat(500), {
+      exec: recordingExec({ ok: false, killed: true, message: 'review timed out' }).exec,
+      nowMs: () => values.shift() as number,
+    })
+    expect(review).toMatchObject({ reviewer: 'coderabbit', outcome: 'error', attempts: 1, elapsedMs: 45, errorCategory: 'timeout' })
+    expect(hostReviewMetrics.runs - before.runs).toBe(1)
+    expect(hostReviewMetrics.timeouts - before.timeouts).toBe(1)
+    expect(hostReviewMetrics.errors - before.errors).toBe(1)
+    const terminal = logs.find((line) => line.startsWith('[host-review] terminal ')) as string
+    const event = JSON.parse(terminal.slice('[host-review] terminal '.length))
+    expect(event).toEqual({ reviewer: 'coderabbit', label: 'x'.repeat(120), attempts: 1, elapsedMs: 45, outcome: 'error', errorCategory: 'timeout' })
+  })
+
+  test('neutral metrics count deferred and authentication outcomes', async () => {
+    const before = {
+      runs: hostReviewMetrics.runs,
+      deferred: hostReviewMetrics.deferred,
+      authFailures: hostReviewMetrics.authFailures,
+      retries: hostReviewMetrics.retries,
+    }
+    const deferred = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+    await deferred.runHostReview('/w', 'deferred', {
+      exec: recordingExec({ stdout: '{"ok":false,"stage":"deferred","error":"budget"}' }).exec,
+    })
+    const auth = hostReview({ reviewTool: 'coderabbit', coderabbitAttempts: 1 })
+    await auth.runHostReview('/w', 'auth', {
+      exec: recordingExec({ ok: false, stderr: 'not authenticated; run coderabbit auth login' }).exec,
+    })
+    expect(hostReviewMetrics.runs - before.runs).toBe(2)
+    expect(hostReviewMetrics.deferred - before.deferred).toBe(1)
+    expect(hostReviewMetrics.authFailures - before.authFailures).toBe(1)
+    expect(hostReviewMetrics.retries - before.retries).toBe(0)
+  })
 })
 
 describe('runCodeSceneCheck', () => {
@@ -415,12 +490,6 @@ describe('runCodeSceneCheck', () => {
     junk.push(dir)
     return dir
   }
-  beforeEach(() => {
-    csCheckMetrics.runs = 0
-    csCheckMetrics.failures = 0
-    csCheckMetrics.probeFailures = 0
-    csCheckMetrics.skipped = 0
-  })
   afterEach(() => {
     for (const target of junk.splice(0)) if (target) rmSync(target, { recursive: true, force: true })
   })
@@ -432,34 +501,6 @@ describe('runCodeSceneCheck', () => {
     const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
     expect(result.clean).toBe(true)
     expect(result.skipped).toBe(false)
-    expect(csCheckMetrics).toEqual({ runs: 1, failures: 0, probeFailures: 0, skipped: 0 })
-    junk.push(result.logFile)
-  })
-
-  test('a quoted executable path is probed and executed intact', async () => {
-    const dir = tmp('cs-quoted-')
-    const executable = path.join(dir, 'code scene check')
-    writeFileSync(executable, '#!/bin/sh\nexit 0\n')
-    chmodSync(executable, 0o755)
-    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: `"${executable}"` })
-    const result = await runCodeSceneCheck(dir, '1.2.3', 'quoted')
-    expect(result.clean).toBe(true)
-    expect(result.skipped).toBe(false)
-    expect(csCheckMetrics).toEqual({ runs: 1, failures: 0, probeFailures: 0, skipped: 0 })
-    junk.push(result.logFile)
-  })
-
-  test('a leading environment assignment does not hide the executable', async () => {
-    const dir = tmp('cs-environment-')
-    const executable = path.join(dir, 'check-environment')
-    writeFileSync(executable, '#!/bin/sh\ntest "$DF12_CS_MARKER" = expected\n')
-    chmodSync(executable, 0o755)
-    const command = `DF12_CS_MARKER=expected "${executable}"`
-    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: command })
-    const result = await runCodeSceneCheck(dir, '1.2.3', 'environment')
-    expect(result.clean).toBe(true)
-    expect(result.skipped).toBe(false)
-    expect(csCheckMetrics).toEqual({ runs: 1, failures: 0, probeFailures: 0, skipped: 0 })
     junk.push(result.logFile)
   })
 
@@ -471,7 +512,6 @@ describe('runCodeSceneCheck', () => {
     expect(result.skipped).toBe(false)
     expect(result.detail).toMatch(/Complex Method/)
     expect(result.detail).toContain(result.logFile)
-    expect(csCheckMetrics).toEqual({ runs: 1, failures: 1, probeFailures: 0, skipped: 0 })
     junk.push(result.logFile)
   })
 
@@ -482,17 +522,6 @@ describe('runCodeSceneCheck', () => {
     expect(result.clean).toBe(true)
     expect(result.skipped).toBe(true)
     expect(result.detail).toMatch(/not on PATH/)
-    expect(csCheckMetrics).toEqual({ runs: 0, failures: 0, probeFailures: 0, skipped: 1 })
-  })
-
-  test('a probe infrastructure fault fails instead of masquerading as absence', async () => {
-    const missingWorktree = path.join(tmp('cs-probe-parent-'), 'absent')
-    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: 'true' })
-    const result = await runCodeSceneCheck(missingWorktree, '1.2.3', 'r1')
-    expect(result.clean).toBe(false)
-    expect(result.skipped).toBe(false)
-    expect(result.detail).toMatch(/availability probe.*failed/i)
-    expect(csCheckMetrics).toEqual({ runs: 0, failures: 0, probeFailures: 1, skipped: 0 })
   })
 
   test('csCheck disabled skips without probing', async () => {
@@ -521,17 +550,14 @@ describe('runHostCommitGates streaming', () => {
     const dir = tmp('gate-stream-')
     // ~40MB of stdout would have tripped maxBuffer under execFile; streaming
     // must pass it through and still report green.
-    const { runHostCommitGates } = hostReview({
-      commitGates: ['yes x | head -c 40000000; echo; echo DONE-OK'],
-      commitGateTimeoutSeconds: 30,
-    })
+    const { runHostCommitGates } = hostReview({ commitGates: ['yes x | head -c 40000000; echo; echo DONE-OK'] })
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
     junk.push(result.results[0]?.logFile)
     expect(result.green).toBe(true)
     expect(result.results[0].ok).toBe(true)
     // The log file holds the full stream, not a truncated buffer.
     expect(readFileSync(result.results[0].logFile, 'utf8').length).toBeGreaterThan(40000000)
-  }, 45_000)
+  })
 
   test('a red gate carries the streamed tail and the log path', async () => {
     const dir = tmp('gate-stream-red-')

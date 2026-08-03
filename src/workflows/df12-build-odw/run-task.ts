@@ -1,5 +1,5 @@
 /**
- * Shared pipeline stages and the per-task pipeline — used by the
+ * @file Shared pipeline stages and the per-task pipeline — used by the
  * normal task lane and by continue-mode recovery resume, so a resumed
  * branch runs through exactly the same planning loop, design review,
  * implementation contract, reviewers, and integration path as ordinary
@@ -8,8 +8,6 @@
  * The run wiring (config caps, prompt builders, adapter options, stage
  * locks, retry, assessment, write gate, worktree creation) binds once via
  * makeTaskPipeline.
- *
- * @module
  */
 import { fileState } from './exec.ts'
 import {
@@ -29,8 +27,8 @@ import {
   hasOnlyDeferredReviewIssues,
   implementationAuthFailureDetail,
 } from './assessment.ts'
-import { coderabbitBlockingItems, coderabbitCapture } from './host-review.ts'
-import type { CoderabbitReview, HostGateRun } from './host-review.ts'
+import { reviewBlockingItems } from './host-review.ts'
+import type { HostReviewResult, HostGateRun } from './host-review.ts'
 import { readExecplanState } from './recovery-discovery.ts'
 import {
   DESIGN_VERDICT_SCHEMA,
@@ -49,12 +47,9 @@ import type { SelectedTask } from './types.ts'
  * may carry additional fields the pipeline does not consume directly.
  */
 export interface StagePlan extends Record<string, unknown> {
-  /**
-   * Worktree-relative path to the committed ExecPlan. Treated as untrusted
-   * data: the host containment-checks and durability-verifies it before use.
-   */
   execplanPath?: string
 }
+
 /**
  * The implementation stage's product: the build agent's (or work-item build
  * loop's) report on the committed work. Carries the advisory, non-blocking
@@ -65,19 +60,14 @@ export interface StagePlan extends Record<string, unknown> {
  * consume directly.
  */
 export interface StageImpl extends Record<string, unknown> {
-  /** Agent's claim that the implementation reached a complete, green state. */
   ok?: boolean
-  /** Agent's claim that its commit gates passed; the host re-runs them. */
   gatesGreen?: boolean
-  /** Human-readable summary carried into logs and assessment evidence. */
   summary?: string
-  /** Issues the agent left open, deduplicated and bounded by the caller. */
   openIssues?: string[]
-  /** Advisory caveats carried into review and integration without blocking resume. */
+  // Advisory, non-blocking residual risk carried forward from an ADR 002
+  // recovery assessment; rendered as review/integration context only (#23).
   residualRisk?: string[]
-  /** Count of ExecPlan Progress items ticked, for the aggregate build report. */
   workItemsCompleted?: unknown
-  /** Total Progress items in the committed ExecPlan checklist. */
   workItemsTotal?: unknown
 }
 
@@ -112,16 +102,7 @@ interface DesignVerdict extends Record<string, unknown> {
  * callers can attach further context (proposals, review rounds, an
  * assessment, and so on) without a separate type per stage.
  */
-export type StageResult = Record<string, unknown> & {
-  /** Roadmap task id this result belongs to. */
-  id: string
-  /** Machine-readable outcome used by the control loop. */
-  status: string
-  /** Pipeline stage that produced the outcome, for resume routing. */
-  stage?: string
-  /** Human-readable failure or halt reason. */
-  detail?: string
-}
+export type StageResult = Record<string, unknown> & { id: string; status: string; stage?: string; detail?: string }
 
 type Lock = <T>(fn: () => Promise<T>) => Promise<T>
 type MergeLock = (<T>(fn: () => Promise<T>) => Promise<T>) | null
@@ -136,108 +117,43 @@ type AgentOptions = (options: Record<string, unknown>) => Record<string, unknown
  * per-task functions free of ambient configuration lookups.
  */
 export interface TaskPipelineDeps {
-  /** Cap on plan <-> design-review rounds before the task halts unsatisfied. */
   MAX_DESIGN_ROUNDS: number
-  /** Cap on dual-review and fix-loop rounds shared across every gate. */
   MAX_REVIEW_ROUNDS: number
-  /** Cap on per-work-item build turns before the itemized build fails. */
   MAX_WORK_ITEM_ROUNDS: number
-  /** Build one turn per ExecPlan Progress item instead of one whole-task turn. */
   PER_WORK_ITEM_BUILD: boolean
-  /** Master switch for the host re-running the commit gates at all. */
   HOST_COMMIT_GATES: boolean
-  /** Also run the commit gates between work items, not just at dual review. */
   HOST_GATES_BETWEEN_WORK_ITEMS: boolean
-  /** Run the CodeScene code-health check (skips gracefully if absent). */
   CS_CHECK: boolean
-  /** Master switch for the host-run CodeRabbit review. */
   CODERABBIT_HOST_REVIEW: boolean
-  /** Also run CodeRabbit between work items, not just at dual review. */
   CODERABBIT_BETWEEN_WORK_ITEMS: boolean
-  /** Stop early after the relevant stage without merging, for dry runs. */
+  HOST_REVIEWER: 'dakar' | 'coderabbit'
   DRY_RUN: boolean
-  /** Rebase, squash-merge and push on success; otherwise leave for manual merge. */
   AUTO_MERGE: boolean
-  /** Integration target branch; named in fault detail because pushes to it are not idempotent. */
   BASE: string
-  /** Builds the planner prompt, threading the prior design verdict and round. */
   planPrompt: (task: SelectedTask, worktree: string, priorVerdict: DesignVerdict | null, round: number, opts?: Record<string, unknown>) => string
-  /** Builds the adversarial design-review prompt for a committed plan. */
   designReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, round: number) => string
-  /** Builds the single-turn whole-task implementation prompt. */
   implementPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, opts?: Record<string, unknown>) => string
-  /** Builds the prompt for one ExecPlan Progress item in the work-item loop. */
   implementWorkItemPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, item: { text: string }, opts?: Record<string, unknown>) => string
-  /** Builds the fix prompt for a set of blocking items at the live round. */
   fixPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, blocking: string[], round: number) => string
-  /** Builds the code-review prompt, including advisory implementation context. */
   codeReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, impl?: StageImpl | null) => string
-  /** Builds the expert-review prompt, including advisory implementation context. */
   expertReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, impl?: StageImpl | null) => string
-  /** Builds the fallback review prompt for an addendum implementation. */
   addendumReviewPrompt: (task: SelectedTask, worktree: string, impl: StageImpl | null) => string
-  /** Builds the addendum-lane implementation prompt. */
   implementAddendumPrompt: (task: SelectedTask, worktree: string) => string
-  /** Builds the rebase, squash-merge, and push prompt for integration. */
   integratePrompt: (task: SelectedTask, worktree: string, impl?: StageImpl | null) => string
-  /** Shapes adapter options for planner turns. */
   planAgentOptions: AgentOptions
-  /** Shapes adapter options for reviewer turns. */
   reviewAgentOptions: AgentOptions
-  /** Shapes adapter options for builder, fix and integration turns. */
   buildAgentOptions: AgentOptions
-  /** Serializes planner/design work so plan lanes do not contend. */
   planningLock: Lock
-  /** Serializes builder/fix/integration work against the build concurrency cap. */
   buildLock: Lock
-  /** Serializes the deterministic host gate checks against each other. */
   hostGateLock: Lock
-  /** Retries a thunk on infrastructure faults, tagging attempts with `label`. */
   withInfraRetry: <T>(run: () => Promise<T>, label: string) => Promise<T>
-  /** Attaches fresh assessment evidence to a failed/halted result before return. */
   attachAssessment: (task: SelectedTask, wt: { branch?: string; worktreePath?: string; baseSha?: string }, result: StageResult) => Promise<StageResult>
-  /** Host preflight that the task agent can write every adapter's root. */
-  ensureTaskAgentWriteAccess: (worktree: string, tag: string) => Promise<{
-    /** True only when every adapter write probe succeeded. */
-    ok: boolean
-    /** Per-adapter probe failures, empty when `ok` is true. */
-    failures: Array<{
-      /** Adapter whose writable-root probe failed. */
-      adapter: string
-      /** Reason the probe failed, surfaced in the preflight failure detail. */
-      detail: string
-    }>
-  }>
-  /** Re-runs the commit gates on the committed worktree, independent of agent claims. */
+  ensureTaskAgentWriteAccess: (worktree: string, tag: string) => Promise<{ ok: boolean; failures: Array<{ adapter: string; detail: string }> }>
   runHostCommitGates: (worktree: string, tag: string, roundLabel: string) => Promise<HostGateRun>
-  /** Runs the CodeScene code-health check on the committed changed files. */
-  runCodeSceneCheck: (worktree: string, tag: string, label: string) => Promise<{
-    /** True when no unresolved code-health regressions were found. */
-    clean: boolean
-    /** True when the check was skipped (e.g. the binary is absent). */
-    skipped: boolean
-    /** Human-readable finding or skip reason. */
-    detail: string
-    /** Path to the captured check log for evidence. */
-    logFile: string
-  }>
-  /** Runs the host CodeRabbit review; outcome distinguishes deferral from findings. */
-  runCoderabbitHostReview: (worktree: string, label: string) => Promise<CoderabbitReview>
-  /** Persists a CodeRabbit review for durable evidence across resumes. */
-  recordCoderabbitReview: (label: string, review: CoderabbitReview) => Promise<void>
-  /** Creates the task worktree and branch; null or !ok means creation failed. */
-  createWorktree: (task: SelectedTask) => Promise<{
-    /** True when the worktree and branch were created. */
-    ok?: boolean
-    /** Absolute path to the created worktree. */
-    worktreePath?: string
-    /** Name of the created task branch. */
-    branch?: string
-    /** SHA the branch was cut from, for rebase and evidence. */
-    baseSha?: string
-    /** Diagnostic notes surfaced as the failure detail when creation fails. */
-    notes?: string
-  } | null>
+  runCodeSceneCheck: (worktree: string, tag: string, label: string) => Promise<{ clean: boolean; skipped: boolean; detail: string; logFile: string }>
+  runHostReview: (worktree: string, label: string) => Promise<HostReviewResult>
+  recordHostReview: (label: string, review: HostReviewResult) => Promise<void>
+  createWorktree: (task: SelectedTask) => Promise<{ ok?: boolean; worktreePath?: string; branch?: string; baseSha?: string; notes?: string } | null>
 }
 
 /**
@@ -254,11 +170,8 @@ export interface TaskPipelineDeps {
 export function summarizeReviewVerdict(review: StageReview | null | undefined) {
   if (!review) return null
   return {
-    /** The reviewer's verdict string (e.g. `pass`), empty when unset. */
     verdict: review.verdict || '',
-    /** Blocking items the reviewer raised; empty means nothing blocked. */
     blocking: review.blocking || [],
-    /** The reviewer's summary line, empty when unset. */
     summary: review.summary || '',
   }
 }
@@ -275,22 +188,13 @@ export function summarizeReviewVerdict(review: StageReview | null | undefined) {
  */
 export function summarizeFixReport(fix: Record<string, unknown> | string | null | undefined) {
   if (!fix) return null
-  if (typeof fix === 'string') return {
-    /** Summary carried when the fix report was a bare string. */
-    summary: fix,
-  }
+  if (typeof fix === 'string') return { summary: fix }
   return {
-    /** Commit subjects the fix produced, defaulted to an empty list. */
     commits: fix.commits || [],
-    /** True only when the fix reported the literal boolean `true`. */
     gatesGreen: fix.gatesGreen === true,
-    /** Count of CodeRabbit runs the fix performed, coerced to a number. */
-    coderabbitRuns: Number(fix.coderabbitRuns) || 0,
-    /** Blocking items the fix claims to have resolved. */
+    hostReviewRuns: Number(fix.hostReviewRuns ?? fix.coderabbitRuns) || 0,
     resolved: fix.resolved || [],
-    /** Blocking items the fix left open. */
     openIssues: fix.openIssues || [],
-    /** The fix agent's summary line, empty when unset. */
     summary: fix.summary || '',
   }
 }
@@ -395,16 +299,12 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     createWorktree,
     runHostCommitGates,
     runCodeSceneCheck,
-    runCoderabbitHostReview,
-    recordCoderabbitReview,
+    HOST_REVIEWER,
+    runHostReview,
+    recordHostReview,
   } = deps
 
-  async function runPlanDesignLoop(task: SelectedTask, worktree: string, opts: Record<string, unknown> = {}): Promise<{
-    /** Approved plan on success. */
-    plan?: StagePlan
-    /** Unassessed failure/halt result the caller must assess. */
-    fail?: StageResult
-  }> {
+  async function runPlanDesignLoop(task: SelectedTask, worktree: string, opts: Record<string, unknown> = {}): Promise<{ plan?: StagePlan; fail?: StageResult }> {
     const tag = task.id
     const extra = (opts.extra as Record<string, unknown>) || {}
     let plan: StagePlan | null = null
@@ -594,7 +494,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     return { ok: true }
   }
 
-  // Deterministic host CodeRabbit gate on ONE committed work item, run between
+  // Deterministic host-review gate on ONE committed work item, run between
   // build turns. Blocking findings (critical/major) drive a bounded fix loop;
   // an unresolved set fails the item, and a terminal deferral (rate limit or
   // CLI fault after the configured retries) HALTS the task for assessment
@@ -606,41 +506,34 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     plan: StagePlan,
     itemLabel: string,
     extra: Record<string, unknown>,
-  ): Promise<{ ok: true; coderabbitRuns: number } | { fail: StageResult }> {
+  ): Promise<{ ok: true; hostReviewRuns: number } | { fail: StageResult }> {
     const tag = task.id
     let runs = 0
     for (let attempt = 1; attempt <= MAX_REVIEW_ROUNDS; attempt++) {
-      const review = await runCoderabbitHostReview(worktree, `coderabbit:${tag} ${itemLabel} a${attempt}`)
-      await recordCoderabbitReview(`${tag} ${itemLabel} a${attempt}`, review)
+      const review = await runHostReview(worktree, `host-review:${HOST_REVIEWER}:${tag} ${itemLabel} a${attempt}`)
+      await recordHostReview(`${tag} ${itemLabel} a${attempt}`, review)
       runs += 1
       if (review.outcome === 'auth') {
-        faultMetrics.authFaults += 1
-        return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: `CodeRabbit host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } }
+        return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: `${HOST_REVIEWER} host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } }
       }
       if (review.outcome === 'rate-limited' || review.outcome === 'error') {
-        coderabbitCapture.deferred += 1
-        return { fail: { id: tag, status: 'halted', stage: 'code-review', detail: `CodeRabbit between-item review could not complete for ${itemLabel} (${review.outcome} after ${review.attempts} attempt(s)): ${review.detail}; the work is committed but unreviewed — resolve the CodeRabbit quota/CLI fault and relaunch with resumeMode: "continue"`, worktree, proposals: [], ...extra } }
+        return { fail: { id: tag, status: 'halted', stage: 'code-review', detail: `${HOST_REVIEWER} between-item review could not complete for ${itemLabel} (${review.outcome} after ${review.attempts} attempt(s), ${review.errorCategory}): ${review.detail}; the work is committed but unreviewed — resolve the host-review fault and relaunch with resumeMode: "continue"`, worktree, proposals: [], ...extra } }
       }
-      const blocking = coderabbitBlockingItems(review.findings)
-      log(`[task ${tag}] between-item CodeRabbit ${itemLabel} attempt ${attempt}: ${review.findings.length} finding(s), ${blocking.length} blocking`)
-      if (!blocking.length) return { ok: true, coderabbitRuns: runs }
+      const blocking = reviewBlockingItems(HOST_REVIEWER, review.findings)
+      log(`[task ${tag}] between-item ${HOST_REVIEWER} ${itemLabel} attempt ${attempt}: ${review.findings.length} finding(s), ${blocking.length} blocking`)
+      if (!blocking.length) return { ok: true, hostReviewRuns: runs }
       if (attempt === MAX_REVIEW_ROUNDS) {
-        return { fail: { id: tag, status: 'failed', stage: 'code-review', detail: `CodeRabbit between-item review left blocking finding(s) unresolved after ${MAX_REVIEW_ROUNDS} fix attempt(s) on ${itemLabel}: ${blocking.join('; ')}`, worktree, proposals: [], ...extra } }
+        return { fail: { id: tag, status: 'failed', stage: 'code-review', detail: `${HOST_REVIEWER} between-item review left blocking finding(s) unresolved after ${MAX_REVIEW_ROUNDS} fix attempt(s) on ${itemLabel}: ${blocking.join('; ')}`, worktree, proposals: [], ...extra } }
       }
       const { dirtyDetail } = await dispatchFixAndVerify(task, worktree, plan, blocking, `fix:${tag} ${itemLabel} a${attempt}`, attempt)
       if (dirtyDetail) {
-        return { fail: { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the CodeRabbit fix for ${itemLabel} left uncommitted state (${dirtyDetail}); every fix must be committed before re-review`, worktree, proposals: [], ...extra } }
+        return { fail: { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the ${HOST_REVIEWER} host-review fix for ${itemLabel} left uncommitted state (${dirtyDetail}); every fix must be committed before re-review`, worktree, proposals: [], ...extra } }
       }
     }
-    return { ok: true, coderabbitRuns: runs }
+    return { ok: true, hostReviewRuns: runs }
   }
 
-  async function runWorkItemBuildLoop(task: SelectedTask, worktree: string, plan: StagePlan, opts: Record<string, unknown> = {}): Promise<{
-    /** Aggregate implementation report on success. */
-    impl?: StageImpl
-    /** Unassessed failure result the caller must assess. */
-    fail?: StageResult
-  } | null> {
+  async function runWorkItemBuildLoop(task: SelectedTask, worktree: string, plan: StagePlan, opts: Record<string, unknown> = {}): Promise<{ impl?: StageImpl; fail?: StageResult } | null> {
     const tag = task.id
     const extra = (opts.extra as Record<string, unknown>) || {}
     const fail = (detail: string, openIssues: string[] = []) => ({ fail: { id: tag, status: 'failed', stage: 'implement', detail, openIssues, worktree, proposals: [], ...extra } })
@@ -653,7 +546,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     if (!(initial.items || []).length) return null
     const commits: string[] = []
     const openIssues: string[] = []
-    let coderabbitRuns = 0
+    let hostReviewRuns = 0
     let lastImpl: StageImpl | null = null
     let noProgressNote = ''
     let strikes = 0
@@ -672,7 +565,6 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       lastImpl = impl
       const authDetail = implementationAuthFailureDetail(impl)
       if (authDetail) {
-        faultMetrics.authFaults += 1
         return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
       }
       if (!impl || !impl.ok || !impl.gatesGreen) {
@@ -680,7 +572,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       }
       if (Array.isArray(impl.commits)) commits.push(...(impl.commits as string[]))
       openIssues.push(...(impl.openIssues || []))
-      coderabbitRuns += Number(impl.coderabbitRuns) || 0
+      hostReviewRuns += Number(impl.hostReviewRuns ?? impl.coderabbitRuns) || 0
       // Host-verified durability per turn: a dirty worktree or an uncommitted
       // tick would silently stall the loop, so both are checked here.
       const committed = await verifyWorktreeCommitted(worktree)
@@ -715,7 +607,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         if (CODERABBIT_HOST_REVIEW && CODERABBIT_BETWEEN_WORK_ITEMS) {
           const gate = await runBetweenItemReview(task, worktree, plan, `wi${round}`, extra)
           if ('fail' in gate) return gate
-          coderabbitRuns += gate.coderabbitRuns
+          hostReviewRuns += gate.hostReviewRuns
         }
       }
     }
@@ -734,19 +626,14 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         workItemsCompleted: final.ticked,
         workItemsTotal: final.ticked + final.unticked,
         commits: commits.slice(0, 50),
-        coderabbitRuns,
+        hostReviewRuns,
         openIssues: [...new Set(openIssues)].slice(0, 20),
         summary: lastImpl?.summary || 'work-item build completed from the committed ExecPlan checklist',
       },
     }
   }
 
-  async function runImplementationStage(task: SelectedTask, worktree: string, plan: StagePlan, opts: Record<string, unknown> = {}): Promise<{
-    /** Green implementation report on success. */
-    impl?: StageImpl
-    /** Unassessed failure result the caller must assess. */
-    fail?: StageResult
-  }> {
+  async function runImplementationStage(task: SelectedTask, worktree: string, plan: StagePlan, opts: Record<string, unknown> = {}): Promise<{ impl?: StageImpl; fail?: StageResult }> {
     const tag = task.id
     const extra = (opts.extra as Record<string, unknown>) || {}
     phase('Implement')
@@ -767,7 +654,6 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     })), `implement:${tag}`))) as StageImpl | null
     const authDetail = implementationAuthFailureDetail(impl)
     if (authDetail) {
-      faultMetrics.authFaults += 1
       return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
     }
     if (!impl || !impl.ok || !impl.gatesGreen) {
@@ -879,7 +765,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     const proposals: Array<Record<string, unknown>> = []
     const reviewRounds: Array<Record<string, unknown>> = []
     let reviewsPass = false
-    const coderabbitDeferred: string[] = []
+    const deferredHostReviews: string[] = []
     for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
       // Host-verified gates FIRST: deterministic, zero tokens, and a red
       // branch must not spend reviewer agents. A red gate goes straight to a
@@ -924,35 +810,32 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         }
       }
       // Cost hierarchy: the deterministic gates (free) already ran above. Run
-      // the host CodeRabbit review (a fixed weekly quota — cheaper than agent
-      // tokens) BEFORE the reviewer agents, so a CodeRabbit-blocking round
-      // never spends reviewer-agent tokens. We trade wall-clock (CodeRabbit
-      // and its backoff) for tokens, which do not replenish.
+      // the selected host reviewer BEFORE the reviewer agents, so a blocking
+      // host-review round never spends reviewer-agent tokens. We trade
+      // reviewer wall-clock and backoff for tokens, which do not replenish.
       if (CODERABBIT_HOST_REVIEW) {
-        const coderabbit = await runCoderabbitHostReview(worktree, `coderabbit:${tag} r${round}`)
-        await recordCoderabbitReview(`${tag} r${round}`, coderabbit)
-        if (coderabbit.outcome === 'auth') {
-          faultMetrics.authFaults += 1
-          return { id: tag, status: 'fatal-auth', stage: 'review', detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, reviewRounds, worktree, proposals, ...kindExtra }
+        const hostReview = await runHostReview(worktree, `host-review:${HOST_REVIEWER}:${tag} r${round}`)
+        await recordHostReview(`${tag} r${round}`, hostReview)
+        if (hostReview.outcome === 'auth') {
+          return { id: tag, status: 'fatal-auth', stage: 'review', detail: `${HOST_REVIEWER} host review is not authenticated: ${hostReview.detail}`, reviewRounds, worktree, proposals, ...kindExtra }
         }
-        if (coderabbit.outcome === 'rate-limited' || coderabbit.outcome === 'error') {
-          // Deferred: CodeRabbit could not complete, so fall through to the
+        if (hostReview.outcome === 'rate-limited' || hostReview.outcome === 'error') {
+          // Deferred: the host reviewer could not complete, so fall through to the
           // reviewer agents — they remain the decisive review.
-          coderabbitCapture.deferred += 1
-          coderabbitDeferred.push(`CodeRabbit review deferred in round ${round} (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`)
-          log(`[task ${tag}] CodeRabbit host review deferred in round ${round}: ${coderabbit.outcome} (${coderabbit.detail})`)
+          deferredHostReviews.push(`${HOST_REVIEWER} review deferred in round ${round} (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`)
+          log(`[task ${tag}] ${HOST_REVIEWER} host review deferred in round ${round}: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`)
         } else {
-          const coderabbitBlocking = coderabbitBlockingItems(coderabbit.findings)
-          log(`[task ${tag}] CodeRabbit host review round ${round}: ${coderabbit.findings.length} finding(s), ${coderabbitBlocking.length} blocking`)
-          if (coderabbitBlocking.length) {
-            // Short-circuit before the reviewer agents: fix the CodeRabbit
+          const hostReviewBlocking = reviewBlockingItems(HOST_REVIEWER, hostReview.findings)
+          log(`[task ${tag}] ${HOST_REVIEWER} host review round ${round}: ${hostReview.findings.length} finding(s), ${hostReviewBlocking.length} blocking`)
+          if (hostReviewBlocking.length) {
+            // Short-circuit before the reviewer agents: fix the host-review
             // blockers first, spending zero agent tokens this round.
-            reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: coderabbitBlocking, ...(hostGates ? { hostGates: hostGates.results } : {}), fix: null })
+            reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: hostReviewBlocking, ...(hostGates ? { hostGates: hostGates.results } : {}), fix: null })
             if (round === MAX_REVIEW_ROUNDS) break
-            const crFix = await dispatchFixAndVerify(task, worktree, plan, coderabbitBlocking, `fix:${tag} r${round}`, round)
-            reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(crFix.report)
-            if (crFix.dirtyDetail) {
-              return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the CodeRabbit-fix round left uncommitted state (${crFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
+            const hostReviewFix = await dispatchFixAndVerify(task, worktree, plan, hostReviewBlocking, `fix:${tag} r${round}`, round)
+            reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(hostReviewFix.report)
+            if (hostReviewFix.dirtyDetail) {
+              return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the ${HOST_REVIEWER} host-review fix round left uncommitted state (${hostReviewFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
             }
             continue
           }
@@ -1060,10 +943,10 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         return { id: tag, status: 'halted', stage: 'integrate', detail: integrationHaltDetail(integration), worktree, proposals, ...kindExtra }
       }
     } else {
-      return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals, ...(coderabbitDeferred.length ? { openIssues: coderabbitDeferred } : {}), ...kindExtra }
+      return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals, ...(deferredHostReviews.length ? { openIssues: deferredHostReviews } : {}), ...kindExtra }
     }
 
-    return { id: tag, status: 'done', plan, impl, integration, worktree, proposals, ...(coderabbitDeferred.length ? { openIssues: coderabbitDeferred } : {}), ...kindExtra }
+    return { id: tag, status: 'done', plan, impl, integration, worktree, proposals, ...(deferredHostReviews.length ? { openIssues: deferredHostReviews } : {}), ...kindExtra }
   }
 
   async function runTask(task: SelectedTask, mergeLock: MergeLock): Promise<StageResult> {
@@ -1123,7 +1006,6 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       const impl = (await buildLock(() => withInfraRetry(() => agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: 'Implement', label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`))) as StageImpl | null
       const authDetail = implementationAuthFailureDetail(impl)
       if (authDetail) {
-        faultMetrics.authFaults += 1
         return {
           id: tag,
           status: 'fatal-auth',
@@ -1184,26 +1066,24 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
           return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: `addendum committed work with unresolved CodeScene code-health issues: ${cs.detail}`, openIssues, worktree, proposals, kind: 'addendum' })
         }
       }
-      // Host-run CodeRabbit review of the committed addendum work. Blocking
+      // Host review of the committed addendum work. Blocking
       // severities halt the addendum for assessment (addenda have no fix loop);
       // a persistent rate limit or CLI fault defers with a documented open
       // issue, mirroring the dual-review contract.
       if (CODERABBIT_HOST_REVIEW) {
         phase('Code Review')
-        const coderabbit = await runCoderabbitHostReview(worktree, `coderabbit:${tag} addendum`)
-        await recordCoderabbitReview(`${tag} addendum`, coderabbit)
-        if (coderabbit.outcome === 'auth') {
-          faultMetrics.authFaults += 1
-          return { id: tag, status: 'fatal-auth', stage: 'auth', detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, worktree, proposals, kind: 'addendum' }
+        const hostReview = await runHostReview(worktree, `host-review:${HOST_REVIEWER}:${tag} addendum`)
+        await recordHostReview(`${tag} addendum`, hostReview)
+        if (hostReview.outcome === 'auth') {
+          return { id: tag, status: 'fatal-auth', stage: 'auth', detail: `${HOST_REVIEWER} host review is not authenticated: ${hostReview.detail}`, worktree, proposals, kind: 'addendum' }
         }
-        const blockingFindings = coderabbitBlockingItems(coderabbit.findings)
+        const blockingFindings = reviewBlockingItems(HOST_REVIEWER, hostReview.findings)
         if (blockingFindings.length) {
-          return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: `CodeRabbit host review found blocking issue(s): ${blockingFindings.join('; ')}`, impl, worktree, proposals, kind: 'addendum' })
+          return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: `${HOST_REVIEWER} host review found blocking issue(s): ${blockingFindings.join('; ')}`, impl, worktree, proposals, kind: 'addendum' })
         }
-        if (coderabbit.outcome === 'rate-limited' || coderabbit.outcome === 'error') {
-          coderabbitCapture.deferred += 1
-          addendumOpenIssues.push(`CodeRabbit review deferred (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`)
-          log(`[task ${tag}] CodeRabbit host review deferred for the addendum: ${coderabbit.outcome} (${coderabbit.detail})`)
+        if (hostReview.outcome === 'rate-limited' || hostReview.outcome === 'error') {
+          addendumOpenIssues.push(`${HOST_REVIEWER} review deferred (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`)
+          log(`[task ${tag}] ${HOST_REVIEWER} host review deferred for the addendum: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`)
         }
       }
       let addendumReview: StageReview | null = null
@@ -1217,7 +1097,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         if (!addendumReview || addendumReview.verdict !== 'pass' || blocking.length > 0) {
           return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: blocking.join('; ') || addendumReview?.summary || 'addendum fallback review did not pass', impl, addendumReview, worktree, proposals, kind: 'addendum' })
         }
-        log(`[task ${tag}] addendum fallback review passed after deferred CodeRabbit review`)
+        log(`[task ${tag}] addendum fallback review passed after deferred ${HOST_REVIEWER} review`)
       }
       let integration: StageIntegration | null = null
       if (AUTO_MERGE) {
@@ -1258,16 +1138,5 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     }
   }
 
-  return {
-    /** Adversarial plan <-> design-review loop; the entry point for continue-mode resume. */
-    runPlanDesignLoop,
-    /** Host-driven checklist build, one turn per unticked ExecPlan Progress item. */
-    runWorkItemBuildLoop,
-    /** Implementation stage: work-item loop or single-turn build, then the durability gate. */
-    runImplementationStage,
-    /** Dual review, fix rounds and integration; shared with review-mode recovery resume. */
-    runDualReviewAndIntegration,
-    /** Full per-task pipeline from worktree creation through integration. */
-    runTask,
-  }
+  return { runPlanDesignLoop, runWorkItemBuildLoop, runImplementationStage, runDualReviewAndIntegration, runTask }
 }

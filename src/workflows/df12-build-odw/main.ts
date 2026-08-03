@@ -72,8 +72,8 @@ import {
 } from './assessment.ts'
 import { TRIAGE_SCHEMA, makeRemediation, stepOf } from './remediation.ts'
 import {
-  coderabbitBlockingItems,
-  coderabbitCapture,
+  reviewBlockingItems,
+  hostReviewMetrics,
   classifyCoderabbitOutcome,
   csCheckMetrics,
   hostGateMetrics,
@@ -306,12 +306,12 @@ const { triagePrompt, runTriage } = makeRemediation({
   triageEscalationModel: TRIAGE_ESCALATION_MODEL,
 })
 
-// Host-run CodeRabbit review and host commit gates with the run wiring bound
+// Host review and host commit gates with the run wiring bound
 // once (see host-review.ts).
 const {
-  coderabbitBackoffMinutes,
-  runCoderabbitHostReview,
-  recordCoderabbitReview,
+  reviewBackoffMinutes,
+  runHostReview,
+  recordHostReview,
   runHostCommitGates,
   runCodeSceneCheck,
 } = makeHostReview({
@@ -328,6 +328,14 @@ const {
   csCheck: CS_CHECK,
   csCheckCommand: CS_CHECK_COMMAND,
 })
+
+// Compatibility names remain available to external artefact-surface probes;
+// the task pipeline and result policy below use only the neutral contract.
+const coderabbitBackoffMinutes = reviewBackoffMinutes
+const runCoderabbitHostReview = runHostReview
+const recordCoderabbitReview = recordHostReview
+const coderabbitCapture = hostReviewMetrics
+const coderabbitBlockingItems = (findings: Parameters<typeof reviewBlockingItems>[1]) => reviewBlockingItems('CodeRabbit', findings)
 
 // ---------------------------------------------------------------------------
 // Deterministic roadmap selection
@@ -368,6 +376,7 @@ async function runAuthPreflight() {
     if (REVIEW_TOOL === 'dakar') {
       const openaiKey = process.env.OPENAI_API_KEY
       if (typeof openaiKey !== 'string' || openaiKey.trim() === '') {
+        hostReviewMetrics.authFailures += 1
         failures.push({
           tool: 'dakar',
           command: 'OPENAI_API_KEY (env)',
@@ -378,6 +387,7 @@ async function runAuthPreflight() {
       const coderabbit = await execFileStatus('coderabbit', ['auth', 'status'])
       const coderabbitOutput = [coderabbit.stdout, coderabbit.stderr, coderabbit.message].filter(Boolean).join('\n')
       if (!coderabbit.ok || authFailureDetail(coderabbitOutput)) {
+        hostReviewMetrics.authFailures += 1
         failures.push({
           tool: 'coderabbit',
           command: 'coderabbit auth status',
@@ -850,6 +860,7 @@ const {
   HOST_GATES_BETWEEN_WORK_ITEMS,
   CODERABBIT_HOST_REVIEW,
   CODERABBIT_BETWEEN_WORK_ITEMS,
+  HOST_REVIEWER: REVIEW_TOOL,
   DRY_RUN,
   AUTO_MERGE,
   BASE,
@@ -874,8 +885,8 @@ const {
   ensureTaskAgentWriteAccess,
   createWorktree,
   runHostCommitGates,
-  runCoderabbitHostReview,
-  recordCoderabbitReview,
+  runHostReview,
+  recordHostReview,
 })
 
 let selectSeq = 0
@@ -1218,17 +1229,17 @@ return {
   // infrastructure faults plus terminal fault counts per class, so operators
   // can read retry pressure straight from the result instead of the logs.
   faultMetrics: { ...faultMetrics },
-  // Host-run CodeRabbit review aggregate: effective configuration plus
-  // bounded counters (reviews run, findings by severity, rate-limited runs,
-  // deferred reviews). Per-finding detail goes to the JSONL sink when
+  // Host-review aggregate: effective configuration plus bounded counters.
+  // Per-finding detail goes to the JSONL sink when
   // coderabbitFindingsFile is configured.
-  coderabbit: {
-    hostReview: CODERABBIT_HOST_REVIEW,
+  hostReview: {
+    enabled: CODERABBIT_HOST_REVIEW,
+    reviewer: REVIEW_TOOL,
     attempts: CODERABBIT_ATTEMPTS,
     backoffMinutes: CODERABBIT_BACKOFF_MINUTES,
     findingsFile: CODERABBIT_FINDINGS_FILE,
-    ...coderabbitCapture,
-    bySeverity: { ...coderabbitCapture.bySeverity },
+    ...hostReviewMetrics,
+    bySeverity: { ...hostReviewMetrics.bySeverity },
   },
   processed,
   results,

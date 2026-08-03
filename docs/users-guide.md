@@ -662,10 +662,14 @@ with a documented `openIssues` entry on the task result instead of blocking
 integration; the dual reviewers remain decisive. A CodeRabbit authentication
 failure halts the task as `fatal-auth`.
 
-The run result's `coderabbit` object reports the effective configuration and
-bounded counters (reviews run, findings by severity, rate-limited runs,
-deferred reviews). When `coderabbitFindingsFile` is set, every finding is also
-appended as JSONL for cross-run linter tuning.
+The run result's tool-neutral `hostReview` object reports the selected reviewer,
+effective configuration, and bounded counters for runs, findings, retries,
+deferred outcomes, timeouts, errors, authentication failures, and sink
+failures. Terminal logs record the bounded reviewer and review label, terminal
+attempt count, elapsed milliseconds, outcome, and error category; host-side
+timeouts are classified from process metadata. When `coderabbitFindingsFile`
+is set, every finding is appended through the serialized JSONL sink. The
+historical CodeRabbit type and runner names remain compatibility aliases only.
 
 ## Per-work-item builds
 

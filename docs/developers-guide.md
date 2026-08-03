@@ -317,15 +317,27 @@ and removes it in a `finally` block after execution and classification settle.
 Retries therefore share no Dakar state and leave no persistent cache tree.
 
 `host-review.ts` exports `parseDakarDocument` and `classifyDakarReview` as the
-adapter boundary tested directly by the module suite. The parser searches
+Dakar adapter boundary tested directly by the module suite. Both Dakar and
+CodeRabbit then produce the neutral `HostReviewResult` and `ReviewOutcome`
+contract consumed by `run-task.ts`. The parser searches
 backwards through stdout for the terminal JSON object and returns `null` when
 no valid object exists. The classifier validates the complete document before
 mapping it: unknown shapes, malformed findings, findings-free rejections, and
 clean verdicts carrying findings fail closed as review errors. Valid
 `changes-requested` findings map onto the established blocking severity
-contract. `HostReviewConfig`, `CoderabbitReview`, and
-`runCoderabbitHostReview` retain their historical public names deliberately;
-renaming those compatibility surfaces is outside the Dakar adapter change.
+contract. The historical `CoderabbitReview`, `CoderabbitOutcome`,
+`CoderabbitFinding`, `runCoderabbitHostReview`, and
+`recordCoderabbitReview` exports remain thin compatibility aliases; workflow
+policy uses only the neutral names.
+
+Every terminal host review emits one bounded structured log event containing
+the reviewer, review label, terminal attempt count, elapsed milliseconds,
+outcome, and error category. `ExecStatus.killed` classifies parent-process
+timeouts without inspecting error prose. The run result's `hostReview` object
+uses fixed metric keys for runs, findings, retries, deferrals, timeouts,
+errors, authentication failures, and JSONL sink failures. Finding severity
+counts also use a fixed vocabulary; task ids and error strings never become
+metric keys. JSONL writes remain serialized through a promise tail.
 
 Host-run CodeRabbit review (`coderabbitHostReview`, default on) moves the CLI
 invocation from agent prompts to the control loop:
