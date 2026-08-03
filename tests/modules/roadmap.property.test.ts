@@ -43,6 +43,13 @@ describe('expandStepRange', () => {
     }
   })
 
+  test('rejects unsafe integer components', () => {
+    const unsafeInteger = String(Number.MAX_SAFE_INTEGER + 1)
+
+    expect(expandStepRange(`${unsafeInteger}.1`, `${unsafeInteger}.2`)).toEqual([])
+    expect(expandStepRange(`1.${unsafeInteger}`, `1.${unsafeInteger}`)).toEqual([])
+  })
+
   test('accepts the maximum range length and rejects the first oversized range', () => {
     const maximum = expandStepRange('1.1', '1.1000')
     expect(maximum).toHaveLength(1_000)

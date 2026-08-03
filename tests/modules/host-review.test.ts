@@ -1,13 +1,14 @@
 // Module tests for the host-run CodeRabbit review: the NDJSON outcome
 // classifier's terminal-completion guard, and the spawn-streamed host commit
 // gates (secure per-run log directory).
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import {
   classifyCoderabbitOutcome,
+  csCheckMetrics,
   hostGateLogPath,
   makeHostReview,
   parseCoderabbitAgentOutput,
@@ -64,6 +65,12 @@ describe('runCodeSceneCheck', () => {
     junk.push(dir)
     return dir
   }
+  beforeEach(() => {
+    csCheckMetrics.runs = 0
+    csCheckMetrics.failures = 0
+    csCheckMetrics.probeFailures = 0
+    csCheckMetrics.skipped = 0
+  })
   afterEach(() => {
     for (const target of junk.splice(0)) if (target) rmSync(target, { recursive: true, force: true })
   })
@@ -75,6 +82,7 @@ describe('runCodeSceneCheck', () => {
     const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
     expect(result.clean).toBe(true)
     expect(result.skipped).toBe(false)
+    expect(csCheckMetrics).toEqual({ runs: 1, failures: 0, probeFailures: 0, skipped: 0 })
     junk.push(result.logFile)
   })
 
@@ -86,6 +94,7 @@ describe('runCodeSceneCheck', () => {
     expect(result.skipped).toBe(false)
     expect(result.detail).toMatch(/Complex Method/)
     expect(result.detail).toContain(result.logFile)
+    expect(csCheckMetrics).toEqual({ runs: 1, failures: 1, probeFailures: 0, skipped: 0 })
     junk.push(result.logFile)
   })
 
@@ -96,6 +105,7 @@ describe('runCodeSceneCheck', () => {
     expect(result.clean).toBe(true)
     expect(result.skipped).toBe(true)
     expect(result.detail).toMatch(/not on PATH/)
+    expect(csCheckMetrics).toEqual({ runs: 0, failures: 0, probeFailures: 0, skipped: 1 })
   })
 
   test('a probe infrastructure fault fails instead of masquerading as absence', async () => {
@@ -105,6 +115,7 @@ describe('runCodeSceneCheck', () => {
     expect(result.clean).toBe(false)
     expect(result.skipped).toBe(false)
     expect(result.detail).toMatch(/availability probe.*failed/i)
+    expect(csCheckMetrics).toEqual({ runs: 0, failures: 0, probeFailures: 1, skipped: 0 })
   })
 
   test('csCheck disabled skips without probing', async () => {
