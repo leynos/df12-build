@@ -65,6 +65,26 @@ function makeFakeAuthBin() {
   return bin
 }
 
+function makeFakeCommand(name, body) {
+  const bin = mkdtempSync(path.join(tmpdir(), 'df12-fake-command-'))
+  const file = path.join(bin, name)
+  writeFileSync(file, `#!/bin/sh\n${body}\n`)
+  chmodSync(file, 0o755)
+  return bin
+}
+
+function expectedCodeScene(overrides = {}) {
+  return {
+    enabled: false,
+    command: 'cs-check-changed',
+    runs: 0,
+    failures: 0,
+    probeFailures: 0,
+    skipped: 0,
+    ...overrides,
+  }
+}
+
 test('combination: resumePartialBranches=false leaves recovery disabled and spawns no agents', async () => {
   const repo = makeRecoveryRepo()
   const before = repoStateSnapshot(repo)
@@ -79,6 +99,78 @@ test('combination: resumePartialBranches=false leaves recovery disabled and spaw
   assert.equal(result.halted, null)
   assert.deepEqual(calls, [], 'no agent may run when recovery is off and no task is selectable')
   assert.deepEqual(repoStateSnapshot(repo), before)
+})
+
+test('result reports disabled CodeScene configuration without counters', async () => {
+  const repo = makeRecoveryRepo()
+  const { result } = await runSimulation({ repo, args: { csCheck: false } })
+
+  assert.deepEqual(result.codeScene, expectedCodeScene())
+})
+
+test('result reports a missing CodeScene binary as skipped', async () => {
+  const repo = makeRecoveryRepo()
+  const command = 'df12-cs-result-test-not-installed'
+  const { result } = await runSimulation({
+    repo,
+    args: {
+      resumePartialBranches: true,
+      resumeMode: 'review',
+      worktreeWritePreflight: false,
+      maxReviewRounds: 1,
+      csCheck: true,
+      csCheckCommand: command,
+    },
+  })
+
+  assert.deepEqual(
+    result.codeScene,
+    expectedCodeScene({ enabled: true, command, skipped: 1 }),
+  )
+})
+
+test('result distinguishes a CodeScene availability-probe failure', async () => {
+  const repo = makeRecoveryRepo()
+  const command = 'true'
+  const { result } = await runSimulation({
+    repo,
+    pathPrefix: makeFakeCommand('sh', 'exit 2'),
+    args: {
+      resumePartialBranches: true,
+      resumeMode: 'review',
+      worktreeWritePreflight: false,
+      maxReviewRounds: 1,
+      csCheck: true,
+      csCheckCommand: command,
+    },
+  })
+
+  assert.deepEqual(
+    result.codeScene,
+    expectedCodeScene({ enabled: true, command, probeFailures: 1 }),
+  )
+})
+
+test('result reports an executed CodeScene failure separately from probe failures', async () => {
+  const repo = makeRecoveryRepo()
+  const command = 'df12-cs-result-test-failure'
+  const { result } = await runSimulation({
+    repo,
+    pathPrefix: makeFakeCommand(command, 'echo "Complex Method"; exit 1'),
+    args: {
+      resumePartialBranches: true,
+      resumeMode: 'review',
+      worktreeWritePreflight: false,
+      maxReviewRounds: 1,
+      csCheck: true,
+      csCheckCommand: command,
+    },
+  })
+
+  assert.deepEqual(
+    result.codeScene,
+    expectedCodeScene({ enabled: true, command, runs: 1, failures: 1 }),
+  )
 })
 
 test('combination: assess-only recovery reports candidates and mutates nothing', async () => {

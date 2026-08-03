@@ -490,13 +490,13 @@ export function makeHostReview(config: HostReviewConfig) {
   // configured binary is not on PATH, so environments without CodeScene are
   // not blocked. Returns { clean, skipped, detail, logFile }.
   async function runCodeSceneCheck(worktree: string, tag: string, label: string): Promise<{
-    /** True when the check passed or was skipped; false only on reported issues. */
+    /** True when disabled, unavailable, or executed cleanly; false on probe faults or reported issues. */
     clean: boolean
-    /** True when skipped because the CodeScene binary was not on PATH. */
+    /** True when disabled or when the CodeScene binary was not on PATH; false for every attempted check or failed probe. */
     skipped: boolean
-    /** Operator-facing detail with a bounded log tail; empty when clean and not skipped. */
+    /** Operator-facing detail for unavailable binaries, probe faults, and reported issues; empty when disabled or executed cleanly. */
     detail: string
-    /** Path to the secure per-run log, or '' when skipped. */
+    /** Path to the secure per-run log for executed checks; empty when disabled, unavailable, or the availability probe failed. */
     logFile: string
   }> {
     if (!csCheck) return { clean: true, skipped: true, detail: '', logFile: '' }
