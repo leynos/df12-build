@@ -156,14 +156,18 @@ Planned work:
 - [x] (2026-07-05 22:00Z) Milestone 3: `exec.ts` (execFile wrappers,
   `shellQuote`, `fileState`) and `faults.ts` (classifiers, `faultMetrics`,
   `resultFromUnhandledAgentError`, retry). `withInfraRetry` became a factory —
-  `makeWithInfraRetry(attempts)` in the module, bound once in `main.js` as
-  `const withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS)` — so all nine
-  multiline call sites and the source-invariant regexes stayed untouched, and
-  no top-level name collides with a module export (which the build's rename
-  assertion would reject). Red-then-green suites: sixteen-row classifier table
-  with negatives, retry-budget and never-retry-product behaviour, error-routing,
-  `shellQuote` reverse property, and `fileState` absent-vs-fault cases.
-  Milestone 2's CodeRabbit review returned zero findings first.
+  `makeWithInfraRetry(attempts, backoffRange, sleep)` in the module (the later
+  provider-backoff work added the `backoffRange`/`sleep` args), bound once in
+  `main.ts` as
+  `const withInfraRetry =
+  makeWithInfraRetry(STAGE_ATTEMPTS, INFRA_RETRY_BACKOFF_SECONDS)` —
+  so all nine multiline call sites and the source-invariant regexes stayed
+  untouched, and no top-level name collides with a module export (which the
+  build's rename assertion would reject). Red-then-green suites: sixteen-row
+  classifier table with negatives, retry-budget and never-retry-product
+  behaviour, error-routing, `shellQuote` reverse property, and `fileState`
+  absent-vs-fault cases. Milestone 2's CodeRabbit review returned zero findings
+  first.
 - [x] (2026-07-05 23:00Z) Milestone 4: `git-evidence.ts` (name-status and
   porcelain parsers, `gitEvidence`, `collectAssessmentEvidence`, `readFileText`,
   `directoryExists`) and `recovery-discovery.ts` (`makeRecoveryDiscovery`,
@@ -310,12 +314,12 @@ Planned work:
   second, independent line of defence. Date/Author: 2026-07-05, Claude with
   pmcintosh.
 - Decision: when a helper closes over a run-configuration constant, prefer
-  exporting a factory (`makeWithInfraRetry(attempts)`) bound once in the entry
-  over threading the constant through every call site. Rationale: call sites
-  keep their shape (no source-invariant regex churn, no multiline edits), and a
-  same-named local binding in the entry plus a same-named module export would
-  collide in the flat bundle and trip the rename assertion; the factory avoids
-  both. Date/Author: 2026-07-05, Claude.
+  exporting a factory (`makeWithInfraRetry(attempts, backoffRange, sleep)`)
+  bound once in the entry over threading the constant through every call site.
+  Rationale: call sites keep their shape (no source-invariant regex churn, no
+  multiline edits), and a same-named local binding in the entry plus a
+  same-named module export would collide in the flat bundle and trip the rename
+  assertion; the factory avoids both. Date/Author: 2026-07-05, Claude.
 - Decision: the build-script rename assertion requires every src module to
   be imported by the bundle, so new modules must be wired into `main.js` in the
   same change that creates them (a module authored ahead of its import fails

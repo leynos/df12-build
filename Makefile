@@ -14,6 +14,7 @@ TYPOS := uv tool run typos@$(TYPOS_VERSION)
 DOCSTRING_MODULES := \
 	src/workflows/df12-build-odw/assessment.ts \
 	src/workflows/df12-build-odw/execplan-durability.ts \
+	src/workflows/df12-build-odw/faults.ts \
 	src/workflows/df12-build-odw/main.ts \
 	src/workflows/df12-build-odw/prompts.ts \
 	src/workflows/df12-build-odw/recovery-decision.ts \
