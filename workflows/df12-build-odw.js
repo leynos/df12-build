@@ -2454,7 +2454,7 @@ function makeHostReview(config) {
     const detail = outcome === "clean" || outcome === "findings" ? "" : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join("; ") || "coderabbit produced no parsable outcome").trim();
     return { outcome, findings: parsed.findings, detail };
   }
-  async function runDakarAttempt(worktree, exec) {
+  async function runDakarAttempt(worktree, exec, removeStateRoot) {
     const fs = process.getBuiltinModule("node:fs");
     const os = process.getBuiltinModule("node:os");
     const path = process.getBuiltinModule("node:path");
@@ -2477,7 +2477,13 @@ function makeHostReview(config) {
       });
       return classifyDakarReview(result);
     } finally {
-      fs.rmSync(stateRoot, { recursive: true, force: true });
+      try {
+        const cleanup = removeStateRoot || fs.rmSync;
+        cleanup(stateRoot, { recursive: true, force: true });
+      } catch (error) {
+        const detail = boundedTail(error?.message || String(error), 500);
+        log(`[Dakar] could not remove temporary state root: ${detail}`);
+      }
     }
   }
   async function runCoderabbitHostReview2(worktree, label, deps = {}) {
@@ -2486,7 +2492,7 @@ function makeHostReview(config) {
     const toolName = reviewTool === "dakar" ? "Dakar" : "CodeRabbit";
     for (let attempt = 1; ; attempt++) {
       log(`[${label}] ${toolName} host review attempt ${attempt} of ${coderabbitAttempts}`);
-      const single = reviewTool === "dakar" ? await runDakarAttempt(worktree, exec) : await runCoderabbitAttempt(worktree, exec);
+      const single = reviewTool === "dakar" ? await runDakarAttempt(worktree, exec, deps.removeDakarStateRoot) : await runCoderabbitAttempt(worktree, exec);
       if (single.outcome === "rate-limited" && attempt < coderabbitAttempts) {
         const minutes = coderabbitBackoffMinutes2(`${label}#${attempt}`);
         log(`[${label}] ${toolName} rate limited/deferred; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${coderabbitAttempts} (wall-clock only, no agent tokens)`);

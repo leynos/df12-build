@@ -93,6 +93,7 @@ function recordingExec(result: Partial<import('../../src/workflows/df12-build-od
 describe('runDakarHostReview', () => {
   const junk: string[] = []
   afterEach(() => {
+    g.log = () => {}
     for (const target of junk.splice(0)) if (target) rmSync(target, { recursive: true, force: true })
   })
 
@@ -103,6 +104,7 @@ describe('runDakarHostReview', () => {
 
   test('the argv names the state root under tmpdir and omits the budget flag by default', async () => {
     const calls: Array<{ command: string; args: string[]; options: ExecOptions }> = []
+    const cleanupCalls: Array<{ stateRoot: string; options: { recursive: true; force: true } }> = []
     let stateRoot = ''
     const exec = async (command: string, args: readonly string[], options: ExecOptions = {}) => {
       calls.push({ command, args: [...args], options })
@@ -111,7 +113,13 @@ describe('runDakarHostReview', () => {
       return { ok: true, stdout: dakarJson({ ok: true, verdict: 'pass', findings: [] }), stderr: '' }
     }
     const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar' })
-    const review = await runCoderabbitHostReview('/work/tree', 'label', { exec })
+    const review = await runCoderabbitHostReview('/work/tree', 'label', {
+      exec,
+      removeDakarStateRoot: (target, options) => {
+        cleanupCalls.push({ stateRoot: target, options })
+        rmSync(target, options)
+      },
+    })
     expect(review.outcome).toBe('clean')
     const { command, args, options } = calls[0]
     expect(command).toBe('dakar-review')
@@ -121,6 +129,7 @@ describe('runDakarHostReview', () => {
     expect(options).toEqual({ cwd: '/work/tree', timeoutMs: 3_600_000 })
     expect(stateRoot.startsWith(path.join(tmpdir(), 'df12-dakar-state-'))).toBe(true)
     expect(existsSync(stateRoot)).toBe(false)
+    expect(cleanupCalls).toEqual([{ stateRoot, options: { recursive: true, force: true } }])
     expect(args).not.toContain('--budget-gbp')
   })
 
@@ -140,6 +149,7 @@ describe('runDakarHostReview', () => {
   })
 
   test('the state root is removed when reviewer execution throws', async () => {
+    const cleanupCalls: Array<{ stateRoot: string; options: { recursive: true; force: true } }> = []
     let stateRoot = ''
     const exec = async (_command: string, args: readonly string[]) => {
       stateRoot = args[args.indexOf('--state-root') + 1]
@@ -147,8 +157,33 @@ describe('runDakarHostReview', () => {
       throw new Error('Dakar execution failed')
     }
     const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar' })
-    await expect(runCoderabbitHostReview('/work/tree', 'label', { exec })).rejects.toThrow('Dakar execution failed')
+    await expect(runCoderabbitHostReview('/work/tree', 'label', {
+      exec,
+      removeDakarStateRoot: (target, options) => {
+        cleanupCalls.push({ stateRoot: target, options })
+        rmSync(target, options)
+        throw new Error('cleanup failed')
+      },
+    })).rejects.toThrow('Dakar execution failed')
     expect(existsSync(stateRoot)).toBe(false)
+    expect(cleanupCalls).toEqual([{ stateRoot, options: { recursive: true, force: true } }])
+  })
+
+  test('a cleanup failure does not replace a successful review result', async () => {
+    const logs: string[] = []
+    g.log = (message: unknown) => logs.push(String(message))
+    const { exec } = recordingExec({ stdout: dakarJson({ ok: true, verdict: 'pass', findings: [] }) })
+    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar' })
+    const review = await runCoderabbitHostReview('/work/tree', 'label', {
+      exec,
+      removeDakarStateRoot: (stateRoot, options) => {
+        rmSync(stateRoot, options)
+        throw new Error(`cleanup failed ${'x'.repeat(1000)}`)
+      },
+    })
+    expect(review.outcome).toBe('clean')
+    expect(logs.at(-1)).toStartWith('[Dakar] could not remove temporary state root: ')
+    expect(logs.at(-1)?.length).toBeLessThanOrEqual(550)
   })
 
   test('a configured budget adds the --budget-gbp flag', async () => {

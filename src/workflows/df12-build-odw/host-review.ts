@@ -89,12 +89,14 @@ export interface HostGateRun {
   detail: string
 }
 
-/** Injectable seams so host review can be unit-tested without real subprocesses or waits. */
+/** Injectable execution, sleep, and Dakar cleanup seams for deterministic tests. */
 export interface HostReviewDeps {
   /** Process runner; defaults to execFileStatus. */
   exec?: (command: string, commandArgs: readonly string[], options?: ExecOptions) => Promise<ExecStatus>
   /** Backoff sleep in minutes; defaults to the real wall-clock hostSleepMinutes. */
   sleep?: (minutes: number) => Promise<void>
+  /** Optional state-root remover used to assert cleanup without replacing review errors. */
+  removeDakarStateRoot?: (stateRoot: string, options: { recursive: true; force: true }) => void
 }
 
 /** The run wiring makeHostReview binds once: review target, retry/backoff, findings sink, and the gate set. */
@@ -534,7 +536,7 @@ export function makeHostReview(config: HostReviewConfig) {
   // ephemeral state root per attempt keeps the gate stateless — Dakar otherwise
   // records reviewed heads and would skip already-seen commits across runs, so a
   // shared state root would silently turn re-reviews into no-ops.
-  async function runDakarAttempt(worktree: string, exec: NonNullable<HostReviewDeps['exec']>): Promise<{ outcome: CoderabbitOutcome; findings: CoderabbitFinding[]; detail: string }> {
+  async function runDakarAttempt(worktree: string, exec: NonNullable<HostReviewDeps['exec']>, removeStateRoot?: HostReviewDeps['removeDakarStateRoot']): Promise<{ outcome: CoderabbitOutcome; findings: CoderabbitFinding[]; detail: string }> {
     const fs = process.getBuiltinModule('node:fs')
     const os = process.getBuiltinModule('node:os')
     const path = process.getBuiltinModule('node:path')
@@ -553,7 +555,13 @@ export function makeHostReview(config: HostReviewConfig) {
       })
       return classifyDakarReview(result)
     } finally {
-      fs.rmSync(stateRoot, { recursive: true, force: true })
+      try {
+        const cleanup = removeStateRoot || fs.rmSync
+        cleanup(stateRoot, { recursive: true, force: true })
+      } catch (error) {
+        const detail = boundedTail((error as Error | null)?.message || String(error), 500)
+        log(`[Dakar] could not remove temporary state root: ${detail}`)
+      }
     }
   }
 
@@ -572,7 +580,7 @@ export function makeHostReview(config: HostReviewConfig) {
     for (let attempt = 1; ; attempt++) {
       log(`[${label}] ${toolName} host review attempt ${attempt} of ${coderabbitAttempts}`)
       const single = reviewTool === 'dakar'
-        ? await runDakarAttempt(worktree, exec)
+        ? await runDakarAttempt(worktree, exec, deps.removeDakarStateRoot)
         : await runCoderabbitAttempt(worktree, exec)
       if (single.outcome === 'rate-limited' && attempt < coderabbitAttempts) {
         const minutes = coderabbitBackoffMinutes(`${label}#${attempt}`)
