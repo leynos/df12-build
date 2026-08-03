@@ -486,19 +486,33 @@ test('CodeRabbit findings are captured to the JSONL sink and the run aggregate',
   const surface = await loadAssessmentSurface({ coderabbitFindingsFile: sink })
 
   await surface.recordCoderabbitReview('1.2.3 r1', {
+    reviewer: 'coderabbit',
     outcome: 'findings',
     attempts: 1,
+    elapsedMs: 1,
+    errorCategory: 'none',
     findings: [
       { severity: 'major', fileName: 'src/a.rs', comment: 'boom', suggestions: [{ x: 1 }] },
       { severity: 'info', fileName: 'docs/b.md', comment: 'nit' },
     ],
     detail: '',
   })
-  await surface.recordCoderabbitReview('1.2.3 r2', { outcome: 'rate-limited', attempts: 3, findings: [], detail: 'Review limit reached' })
+  await surface.recordCoderabbitReview('1.2.3 r2', { reviewer: 'coderabbit', outcome: 'rate-limited', attempts: 3, elapsedMs: 1, errorCategory: 'deferred', findings: [], detail: 'Review limit reached' })
 
   assert.deepEqual(
     { ...surface.coderabbitCapture, bySeverity: { ...surface.coderabbitCapture.bySeverity } },
-    { reviews: 2, findings: 2, rateLimitedRuns: 1, deferred: 0, bySeverity: { major: 1, info: 1 }, sinkError: '' },
+    {
+      runs: 0,
+      findings: 2,
+      retries: 0,
+      deferred: 0,
+      timeouts: 0,
+      errors: 0,
+      authFailures: 0,
+      sinkFailures: 0,
+      bySeverity: { critical: 0, major: 1, minor: 0, trivial: 0, info: 1, unknown: 0 },
+      sinkError: '',
+    },
   )
   const lines = readFileSync(sink, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
   assert.equal(lines.length, 2)
@@ -612,7 +626,7 @@ test('gate guidance warns about host verification only when it is enabled', asyn
 test('the addendum lane host-verifies gates before spending any review', async () => {
   const source = await readFile(WORKFLOW_PATH, 'utf8')
   const gateCheck = source.indexOf('addendum reported green gates but the host could not reproduce them')
-  const hostReview = source.indexOf("coderabbit:${tag} addendum")
+  const hostReview = source.indexOf("host-review:${HOST_REVIEWER}:${tag} addendum")
   const fallbackReview = source.indexOf('addendum-review:${tag}')
   assert.ok(gateCheck !== -1 && hostReview !== -1 && fallbackReview !== -1)
   assert.ok(gateCheck < hostReview, 'host gates run before the host CodeRabbit review')
@@ -730,8 +744,8 @@ test('fix rounds carry a structured, mock-satisfiable evidence contract', async 
   assert.equal(surface.summarizeFixReport(null), null)
   assert.deepEqual(surface.summarizeFixReport('applied fixes'), { summary: 'applied fixes' })
   assert.deepEqual(
-    surface.summarizeFixReport({ gatesGreen: true, commits: ['Fix lint'], coderabbitRuns: 2, summary: 'green' }),
-    { commits: ['Fix lint'], gatesGreen: true, coderabbitRuns: 2, resolved: [], openIssues: [], summary: 'green' },
+    surface.summarizeFixReport({ gatesGreen: true, commits: ['Fix lint'], hostReviewRuns: 2, summary: 'green' }),
+    { commits: ['Fix lint'], gatesGreen: true, hostReviewRuns: 2, resolved: [], openIssues: [], summary: 'green' },
   )
 })
 

@@ -151,6 +151,7 @@ test('result redacts CodeScene environment-assignment values', async () => {
     }
   }
 })
+
 test('result reports a missing CodeScene binary as skipped', async () => {
   const repo = makeRecoveryRepo()
   const command = 'df12-cs-result-test-not-installed'
@@ -304,7 +305,7 @@ test('combination: a failed review-mode resume halts the run with the blocking e
     fix: {
       gatesGreen: true,
       commits: ['Fix review blockers'],
-      coderabbitRuns: 1,
+      hostReviewRuns: 1,
       resolved: ['tightened the success criterion coverage'],
       openIssues: [],
       summary: 'gates green at HEAD after fixes',
@@ -328,7 +329,7 @@ test('combination: a failed review-mode resume halts the run with the blocking e
   assert.deepEqual(haltedResult.reviewRounds[0].fix, {
     commits: ['Fix review blockers'],
     gatesGreen: true,
-    coderabbitRuns: 1,
+    hostReviewRuns: 1,
     resolved: ['tightened the success criterion coverage'],
     openIssues: [],
     summary: 'gates green at HEAD after fixes',
