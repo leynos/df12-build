@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://df12.dev/schemas/observability/workflow-observability-context.v1.json",
+  "title": "WorkflowObservabilityContextV1",
+  "description": "The envelope one workflow passes to another so the child's telemetry joins the parent's correlation. See docs/workflow-observability-contract.md section 6.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "correlationId"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "correlationId": {
+      "$ref": "#/$defs/identifier"
+    },
+    "workflowInvocationId": {
+      "$ref": "#/$defs/uuidv7"
+    },
+    "parent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflowInvocationId",
+        "nodeAttemptId"
+      ],
+      "properties": {
+        "workflowInvocationId": {
+          "$ref": "#/$defs/uuidv7"
+        },
+        "nodeAttemptId": {
+          "$ref": "#/$defs/uuidv7"
+        }
+      }
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "traceparent"
+      ],
+      "properties": {
+        "traceparent": {
+          "$ref": "#/$defs/traceparent"
+        },
+        "tracestate": {
+          "type": "string"
+        }
+      }
+    },
+    "sink": {
+      "$ref": "#/$defs/sink"
+    },
+    "attributes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": [
+          "string",
+          "number",
+          "boolean"
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "description": "A free-form identifier. Used for correlationId, which the contract allows to be a UUIDv7 or a stable readable key.",
+      "type": "string",
+      "minLength": 1
+    },
+    "uuidv7": {
+      "description": "Lower-case canonical UUIDv7. Concrete executions use this shape; the casing is fixed because these values are exact string join keys.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "traceparent": {
+      "description": "A W3C traceparent header value. Rejects the reserved ff version, an all-zero trace id, and an all-zero parent id.",
+      "type": "string",
+      "allOf": [
+        {
+          "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+        },
+        {
+          "not": {
+            "pattern": "^ff-"
+          }
+        },
+        {
+          "not": {
+            "pattern": "^[0-9a-f]{2}-0{32}-"
+          }
+        },
+        {
+          "not": {
+            "pattern": "-0{16}-[0-9a-f]{2}$"
+          }
+        }
+      ]
+    },
+    "sink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "endpoint",
+        "protocol"
+      ],
+      "properties": {
+        "kind": {
+          "const": "otlp-http"
+        },
+        "endpoint": {
+          "description": "An OTLP collector endpoint. The first clause requires the otlp+http(s) scheme followed by a non-empty, well-formed authority, so an empty or whitespace authority is rejected. The second clause independently rejects URI userinfo, so credentials cannot ride inline in the authority component.",
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^otlp\\+https?://(?:\\[[0-9a-fA-F:]+\\]|[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?)(?::[0-9]{1,5})?(?:/[^\\s]*)?$"
+            },
+            {
+              "not": {
+                "pattern": "^otlp\\+https?://[^/?#]*@"
+              }
+            }
+          ]
+        },
+        "protocol": {
+          "const": "http/json"
+        },
+        "authRef": {
+          "$ref": "#/$defs/authRef"
+        }
+      }
+    },
+    "authRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "variable"
+      ],
+      "properties": {
+        "kind": {
+          "const": "environment"
+        },
+        "variable": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://df12.dev/schemas/observability/telemetry-binding.v1.json",
+  "title": "TelemetryBindingV1",
+  "description": "A record associating a provider identifier with an ODW agent invocation at a stated confidence. Snake_case mirrors the SQLite columns. See docs/workflow-observability-contract.md section 9.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "binding_type",
+    "binding_value",
+    "agent_invocation_id",
+    "source",
+    "confidence",
+    "first_seen_ns",
+    "last_seen_ns"
+  ],
+  "properties": {
+    "binding_type": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)+$"
+    },
+    "binding_value": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agent_invocation_id": {
+      "$ref": "#/$defs/uuidv7"
+    },
+    "agent_process_id": {
+      "$ref": "#/$defs/uuidv7"
+    },
+    "trace_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "span_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "trace-context",
+        "otlp-header",
+        "provider-event",
+        "events-jsonl"
+      ]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": [
+        "exact",
+        "derived",
+        "heuristic"
+      ]
+    },
+    "first_seen_ns": {
+      "$ref": "#/$defs/nanosecondTimestamp"
+    },
+    "last_seen_ns": {
+      "$ref": "#/$defs/nanosecondTimestamp"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "enum": [
+              "trace-context",
+              "otlp-header"
+            ]
+          }
+        },
+        "required": [
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "confidence": {
+            "const": "exact"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "const": "events-jsonl"
+          }
+        },
+        "required": [
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "confidence": {
+            "const": "heuristic"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "uuidv7": {
+      "description": "Lower-case canonical UUIDv7. Concrete executions use this shape; the casing is fixed because these values are exact string join keys.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "nanosecondTimestamp": {
+      "description": "Nanoseconds since the Unix epoch, as a canonical decimal string with no leading zeros. Carried as a string because the value exceeds the range JSON numbers represent exactly (2^53), and bounded by the signed 64-bit maximum 9223372036854775807 that the SQLite store column holds.",
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6]|9223372036854775807)$"
+    }
+  }
+}

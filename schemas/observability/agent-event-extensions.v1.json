@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://df12.dev/schemas/observability/agent-event-extensions.v1.json",
+  "title": "AgentEventExtensionsV1",
+  "description": "Identity fields ODW adds to its agent_started, agent_finished, and agent_failed JSONL events. Additive and snake_case; existing event fields are unchanged. Provisional until ODW implements them (roadmap step 5.2). See docs/workflow-observability-contract.md section 12.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "run_id",
+    "node_attempt_id",
+    "agent_invocation_id",
+    "agent_process_id",
+    "cli_attempt"
+  ],
+  "properties": {
+    "run_id": {
+      "$ref": "#/$defs/uuidv7"
+    },
+    "node_attempt_id": {
+      "$ref": "#/$defs/uuidv7"
+    },
+    "agent_invocation_id": {
+      "$ref": "#/$defs/uuidv7"
+    },
+    "agent_process_id": {
+      "$ref": "#/$defs/uuidv7"
+    },
+    "cli_attempt": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "$defs": {
+    "uuidv7": {
+      "description": "Lower-case canonical UUIDv7. Concrete executions use this shape; the casing is fixed because these values are exact string join keys.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}
