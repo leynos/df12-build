@@ -151,7 +151,6 @@ test('result redacts CodeScene environment-assignment values', async () => {
     }
   }
 })
-
 test('result reports a missing CodeScene binary as skipped', async () => {
   const repo = makeRecoveryRepo()
   const command = 'df12-cs-result-test-not-installed'
