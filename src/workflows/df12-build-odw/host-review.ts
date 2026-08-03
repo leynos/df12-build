@@ -244,6 +244,8 @@ export const csCheckMetrics = {
   runs: 0,
   /** Check executions that reported code-health issues. */
   failures: 0,
+  /** Availability probes that failed for infrastructure reasons. */
+  probeFailures: 0,
   /** Checks skipped because the configured binary was not on PATH. */
   skipped: 0,
 }
@@ -514,7 +516,7 @@ export function makeHostReview(config: HostReviewConfig) {
         log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`)
         return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: '' }
       }
-      csCheckMetrics.failures += 1
+      csCheckMetrics.probeFailures += 1
       const fault = [probe.message, probe.stderr, probe.signal ? `signal ${probe.signal}` : '', probe.killed ? 'probe killed' : '']
         .map((part) => String(part || '').trim())
         .filter(Boolean)

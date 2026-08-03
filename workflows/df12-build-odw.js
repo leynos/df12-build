@@ -369,7 +369,7 @@ function expandStepRange(start, end) {
   if (startParts.length !== 2 || endParts.length !== 2 || startParts[0] !== endParts[0]) return [];
   const [phaseId, firstStep] = startParts;
   const lastStep = endParts[1];
-  if (!Number.isInteger(phaseId) || !Number.isInteger(firstStep) || !Number.isInteger(lastStep) || firstStep > lastStep) return [];
+  if (!Number.isSafeInteger(phaseId) || !Number.isSafeInteger(firstStep) || !Number.isSafeInteger(lastStep) || firstStep > lastStep) return [];
   const rangeLength = lastStep - firstStep + 1;
   if (rangeLength > MAX_STEP_RANGE_LENGTH) return [];
   return Array.from({ length: rangeLength }, (_, index) => `${phaseId}.${firstStep + index}`);
@@ -2227,6 +2227,8 @@ var csCheckMetrics = {
   runs: 0,
   /** Check executions that reported code-health issues. */
   failures: 0,
+  /** Availability probes that failed for infrastructure reasons. */
+  probeFailures: 0,
   /** Checks skipped because the configured binary was not on PATH. */
   skipped: 0
 };
@@ -2407,7 +2409,7 @@ ${outcome.tail}`
         log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`);
         return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: "" };
       }
-      csCheckMetrics.failures += 1;
+      csCheckMetrics.probeFailures += 1;
       const fault = [probe.message, probe.stderr, probe.signal ? `signal ${probe.signal}` : "", probe.killed ? "probe killed" : ""].map((part) => String(part || "").trim()).filter(Boolean).join("; ");
       return {
         clean: false,
@@ -2459,9 +2461,9 @@ function summarizeFixReport(fix) {
     summary: fix
   };
   return {
-    /** Commit SHAs the fix produced, defaulted to an empty list. */
+    /** Commit subjects the fix produced, defaulted to an empty list. */
     commits: fix.commits || [],
-    /** Whether the fix reported green gates (strictly coerced to a boolean). */
+    /** True only when the fix reported the literal boolean `true`. */
     gatesGreen: fix.gatesGreen === true,
     /** Count of CodeRabbit runs the fix performed, coerced to a number. */
     coderabbitRuns: Number(fix.coderabbitRuns) || 0,
@@ -4018,6 +4020,11 @@ async function workflowMain() {
       enabled: HOST_COMMIT_GATES,
       timeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
       ...hostGateMetrics
+    },
+    codeScene: {
+      enabled: CS_CHECK,
+      command: CS_CHECK_COMMAND,
+      ...csCheckMetrics
     },
     stageAttempts: STAGE_ATTEMPTS,
     // Host-driven build loop configuration: one builder turn per unticked

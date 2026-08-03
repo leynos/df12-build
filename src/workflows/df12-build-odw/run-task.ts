@@ -280,9 +280,9 @@ export function summarizeFixReport(fix: Record<string, unknown> | string | null 
     summary: fix,
   }
   return {
-    /** Commit SHAs the fix produced, defaulted to an empty list. */
+    /** Commit subjects the fix produced, defaulted to an empty list. */
     commits: fix.commits || [],
-    /** Whether the fix reported green gates (strictly coerced to a boolean). */
+    /** True only when the fix reported the literal boolean `true`. */
     gatesGreen: fix.gatesGreen === true,
     /** Count of CodeRabbit runs the fix performed, coerced to a number. */
     coderabbitRuns: Number(fix.coderabbitRuns) || 0,

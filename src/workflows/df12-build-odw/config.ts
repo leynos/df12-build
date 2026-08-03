@@ -146,11 +146,11 @@ export interface RawWorkflowArgs {
 }
 
 /**
- * Fully resolved run configuration: every default applied, every value clamped
- * and validated, and every derived guidance string built. Consumed by
- * destructuring in the entry point, so property names mirror the entry's
- * historical constant names rather than the {@link RawWorkflowArgs} camelCase
- * keys.
+ * Fully resolved run configuration: documented fields normalised, defaults
+ * applied, explicitly coerced or bounded fields handled, and derived guidance
+ * strings built. Consumed by destructuring in the entry point, so property
+ * names mirror the entry's historical constant names rather than the
+ * {@link RawWorkflowArgs} camelCase keys.
  */
 export interface WorkflowConfig {
   /** Absolute project root; the caller performs the chdir, this value only records it. */
@@ -293,12 +293,12 @@ export interface WorkflowConfig {
 
 /**
  * Resolve raw workflow overrides into the fully resolved {@link WorkflowConfig}
- * used throughout the run: applies every default, clamps numeric bounds,
- * coerces string-typed args, and precomputes the derived guidance strings. Pure
- * and side-effect free — the `projectRoot` chdir is left to the caller — so it
- * is safe to build once and share. A null or missing argument yields the full
- * default configuration. Throws when `resumeMode` is not one of `assess`,
- * `review`, or `continue`.
+ * used throughout the run: normalises documented fields, applies defaults,
+ * handles fields that are explicitly coerced or bounded, and precomputes the
+ * derived guidance strings. Pure and side-effect free — the `projectRoot`
+ * chdir is left to the caller — so it is safe to build once and share. A null
+ * or missing argument yields the full default configuration. Throws when
+ * `resumeMode` is not one of `assess`, `review`, or `continue`.
  */
 export function makeConfig(rawArgs: Record<string, unknown> | null | undefined): WorkflowConfig {
   const cfg = (rawArgs || {}) as RawWorkflowArgs

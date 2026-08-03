@@ -82,7 +82,7 @@ export function expandStepRange(start: string, end: string): string[] {
   if (startParts.length !== 2 || endParts.length !== 2 || startParts[0] !== endParts[0]) return []
   const [phaseId, firstStep] = startParts
   const lastStep = endParts[1]
-  if (!Number.isInteger(phaseId) || !Number.isInteger(firstStep) || !Number.isInteger(lastStep) || firstStep > lastStep) return []
+  if (!Number.isSafeInteger(phaseId) || !Number.isSafeInteger(firstStep) || !Number.isSafeInteger(lastStep) || firstStep > lastStep) return []
   const rangeLength = lastStep - firstStep + 1
   if (rangeLength > MAX_STEP_RANGE_LENGTH) return []
   return Array.from({ length: rangeLength }, (_, index) => `${phaseId}.${firstStep + index}`)

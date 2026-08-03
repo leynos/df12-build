@@ -75,6 +75,7 @@ import {
   coderabbitBlockingItems,
   coderabbitCapture,
   classifyCoderabbitOutcome,
+  csCheckMetrics,
   hostGateMetrics,
   makeHostReview,
   parseCoderabbitAgentOutput,
@@ -1178,6 +1179,11 @@ return {
     enabled: HOST_COMMIT_GATES,
     timeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
     ...hostGateMetrics,
+  },
+  codeScene: {
+    enabled: CS_CHECK,
+    command: CS_CHECK_COMMAND,
+    ...csCheckMetrics,
   },
   stageAttempts: STAGE_ATTEMPTS,
   // Host-driven build loop configuration: one builder turn per unticked

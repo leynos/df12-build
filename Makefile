@@ -7,8 +7,6 @@ MARKDOWN_FILES := $(shell find . \
 WORKFLOW_FILES := workflows/df12-build-odw.js workflows/df12-build.js
 TYPOS_VERSION ?= 1.48.0
 TYPOS := uv tool run typos@$(TYPOS_VERSION)
-.PHONY: all clean check-fmt lint typecheck markdownlint nixie spelling test test-modules test-workflow verify-modules verify-modules-strict workflow-parse workflow-build workflow-freshness docs-check
-
 .PHONY: all clean fmt check-fmt lint typecheck markdownlint nixie spelling test test-modules test-workflow verify-modules verify-modules-strict workflow-parse workflow-build workflow-freshness docs-check
 
 all: check-fmt lint typecheck markdownlint nixie docs-check test workflow-freshness verify-modules
