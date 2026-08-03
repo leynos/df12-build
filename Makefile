@@ -50,7 +50,7 @@ spelling:
 		xargs -0 -r $(TYPOS) --config typos.toml --force-exclude
 
 nixie:
-	nixie $(MARKDOWN_FILES)
+	nixie --renderer merman $(MARKDOWN_FILES)
 
 test: test-modules test-workflow
 
