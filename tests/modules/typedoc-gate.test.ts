@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 const REPO = fileURLToPath(new URL('../../', import.meta.url))
 const TYPEDOC = path.join(REPO, 'node_modules', '.bin', 'typedoc')
 const TYPEDOC_OPTIONS = JSON.parse(readFileSync(path.join(REPO, 'typedoc.json'), 'utf8')) as Record<string, unknown>
+const TYPEDOC_TEST_TIMEOUT_MS = 15_000
 
 interface TypeDocRun {
   status: number
@@ -76,6 +77,16 @@ export function documentedFunction(): string {
 `
 
 describe('zero-tolerance TypeDoc gate', () => {
+  test('repository docs:check invokes the committed TypeDoc configuration', () => {
+    const result = Bun.spawnSync(['bun', 'run', 'docs:check'], {
+      cwd: REPO,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+
+    expect(result.exitCode, `${result.stdout.toString()}\n${result.stderr.toString()}`).toBe(0)
+  })
+
   test('the committed configuration requires module and declaration documentation', () => {
     expect(TYPEDOC_OPTIONS.treatValidationWarningsAsErrors).toBe(true)
     expect(TYPEDOC_OPTIONS.validation).toMatchObject({ notDocumented: true })
@@ -102,7 +113,7 @@ describe('zero-tolerance TypeDoc gate', () => {
       'tsconfig.json',
       'typedoc.json',
     ])
-  }, 20_000)
+  }, TYPEDOC_TEST_TIMEOUT_MS)
 
   test('an undocumented exported function promotes a TypeDoc warning to failure', () => {
     const source = DOCUMENTED_MODULE.replace(
@@ -113,7 +124,7 @@ describe('zero-tolerance TypeDoc gate', () => {
 
     expect(result.status).not.toBe(0)
     expect(result.output).toMatch(/undocumentedFunction.*does not have any documentation/i)
-  }, 20_000)
+  }, TYPEDOC_TEST_TIMEOUT_MS)
 
   test('an undocumented module fails with its entry-point diagnostic', () => {
     const source = DOCUMENTED_MODULE.replace(
@@ -124,5 +135,5 @@ describe('zero-tolerance TypeDoc gate', () => {
 
     expect(result.status).not.toBe(0)
     expect(result.output).toMatch(/fixture.*\(Module\).*does not have any documentation/i)
-  }, 20_000)
+  }, TYPEDOC_TEST_TIMEOUT_MS)
 })
