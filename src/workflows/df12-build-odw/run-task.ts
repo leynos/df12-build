@@ -1,5 +1,5 @@
 /**
- * @file Shared pipeline stages and the per-task pipeline — used by the
+ * Shared pipeline stages and the per-task pipeline — used by the
  * normal task lane and by continue-mode recovery resume, so a resumed
  * branch runs through exactly the same planning loop, design review,
  * implementation contract, reviewers, and integration path as ordinary
@@ -8,6 +8,8 @@
  * The run wiring (config caps, prompt builders, adapter options, stage
  * locks, retry, assessment, write gate, worktree creation) binds once via
  * makeTaskPipeline.
+ *
+ * @module
  */
 import { fileState } from './exec.ts'
 import {
@@ -47,6 +49,7 @@ import type { SelectedTask } from './types.ts'
  * may carry additional fields the pipeline does not consume directly.
  */
 export interface StagePlan extends Record<string, unknown> {
+  /** Task-scoped path to the committed ExecPlan. */
   execplanPath?: string
 }
 
@@ -60,14 +63,21 @@ export interface StagePlan extends Record<string, unknown> {
  * consume directly.
  */
 export interface StageImpl extends Record<string, unknown> {
+  /** Whether implementation completed without a product failure. */
   ok?: boolean
+  /** Agent claim that its configured gates passed. */
   gatesGreen?: boolean
+  /** Bounded implementation summary. */
   summary?: string
+  /** Issues the implementation left unresolved. */
   openIssues?: string[]
   // Advisory, non-blocking residual risk carried forward from an ADR 002
   // recovery assessment; rendered as review/integration context only (#23).
+  /** Advisory, non-blocking risks carried into review and integration. */
   residualRisk?: string[]
+  /** Number of granular work items completed. */
   workItemsCompleted?: unknown
+  /** Total granular work items reported by the implementation. */
   workItemsTotal?: unknown
 }
 
@@ -102,7 +112,16 @@ interface DesignVerdict extends Record<string, unknown> {
  * callers can attach further context (proposals, review rounds, an
  * assessment, and so on) without a separate type per stage.
  */
-export type StageResult = Record<string, unknown> & { id: string; status: string; stage?: string; detail?: string }
+export type StageResult = Record<string, unknown> & {
+  /** Roadmap task identifier. */
+  id: string
+  /** Terminal pipeline status. */
+  status: string
+  /** Pipeline stage that produced the result. */
+  stage?: string
+  /** Operator-facing result detail. */
+  detail?: string
+}
 
 type Lock = <T>(fn: () => Promise<T>) => Promise<T>
 type MergeLock = (<T>(fn: () => Promise<T>) => Promise<T>) | null
@@ -117,43 +136,160 @@ type AgentOptions = (options: Record<string, unknown>) => Record<string, unknown
  * per-task functions free of ambient configuration lookups.
  */
 export interface TaskPipelineDeps {
+  /** Maximum plan/design-review rounds. */
   MAX_DESIGN_ROUNDS: number
+  /** Maximum review/fix rounds. */
   MAX_REVIEW_ROUNDS: number
+  /** Maximum granular implementation rounds. */
   MAX_WORK_ITEM_ROUNDS: number
+  /** Whether implementations use the granular work-item loop. */
   PER_WORK_ITEM_BUILD: boolean
+  /** Whether deterministic host commit gates are enabled. */
   HOST_COMMIT_GATES: boolean
+  /** Whether host gates run between granular work items. */
   HOST_GATES_BETWEEN_WORK_ITEMS: boolean
+  /** Whether the CodeScene health check is enabled. */
   CS_CHECK: boolean
+  /** Effective tool-aware host-review enablement. */
   HOST_REVIEW_ENABLED: boolean
+  /** Whether host review runs between granular work items. */
   HOST_REVIEW_BETWEEN_WORK_ITEMS: boolean
+  /** Selected reviewer adapter identifier. */
   HOST_REVIEWER: 'dakar' | 'coderabbit'
+  /** Whether side-effecting integration is disabled. */
   DRY_RUN: boolean
+  /** Whether the integrator may complete merges automatically. */
   AUTO_MERGE: boolean
+  /** Base branch used by task worktrees and integration. */
   BASE: string
+  /** Build the planning prompt. */
   planPrompt: (task: SelectedTask, worktree: string, priorVerdict: DesignVerdict | null, round: number, opts?: Record<string, unknown>) => string
+  /** Build the design-review prompt. */
   designReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, round: number) => string
+  /** Build the full implementation prompt. */
   implementPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, opts?: Record<string, unknown>) => string
+  /** Build one granular work-item implementation prompt. */
   implementWorkItemPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, item: { text: string }, opts?: Record<string, unknown>) => string
+  /** Build a review-finding remediation prompt. */
   fixPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, blocking: string[], round: number) => string
+  /** Build the primary code-review prompt. */
   codeReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, impl?: StageImpl | null) => string
+  /** Build the independent expert-review prompt. */
   expertReviewPrompt: (task: SelectedTask, worktree: string, plan: StagePlan, impl?: StageImpl | null) => string
+  /** Build the lightweight addendum-review prompt. */
   addendumReviewPrompt: (task: SelectedTask, worktree: string, impl: StageImpl | null) => string
+  /** Build the addendum implementation prompt. */
   implementAddendumPrompt: (task: SelectedTask, worktree: string) => string
+  /** Build the integration prompt. */
   integratePrompt: (task: SelectedTask, worktree: string, impl?: StageImpl | null) => string
+  /** Apply planning-agent adapter options. */
   planAgentOptions: AgentOptions
+  /** Apply review-agent adapter options. */
   reviewAgentOptions: AgentOptions
+  /** Apply build-agent adapter options. */
   buildAgentOptions: AgentOptions
+  /** Serialize planning-stage agent calls. */
   planningLock: Lock
+  /** Bound concurrent build-stage agent calls. */
   buildLock: Lock
+  /** Serialize deterministic host gates. */
   hostGateLock: Lock
+  /** Retry infrastructure-classified agent failures. */
   withInfraRetry: <T>(run: () => Promise<T>, label: string) => Promise<T>
+  /** Attach an ADR 002 assessment to a task result. */
   attachAssessment: (task: SelectedTask, wt: { branch?: string; worktreePath?: string; baseSha?: string }, result: StageResult) => Promise<StageResult>
-  ensureTaskAgentWriteAccess: (worktree: string, tag: string) => Promise<{ ok: boolean; failures: Array<{ adapter: string; detail: string }> }>
+  /** Verify that configured task agents can write to the worktree. */
+  ensureTaskAgentWriteAccess: (worktree: string, tag: string) => Promise<{
+    /** Whether every configured adapter passed its write probe. */
+    ok: boolean
+    /** Bounded adapter failures. */
+    failures: Array<{
+      /** Adapter identifier. */
+      adapter: string
+      /** Bounded failure detail. */
+      detail: string
+    }>
+  }>
+  /** Run deterministic commit gates. */
   runHostCommitGates: (worktree: string, tag: string, roundLabel: string) => Promise<HostGateRun>
-  runCodeSceneCheck: (worktree: string, tag: string, label: string) => Promise<{ clean: boolean; skipped: boolean; detail: string; logFile: string }>
+  /** Run the optional CodeScene health check. */
+  runCodeSceneCheck: (worktree: string, tag: string, label: string) => Promise<{
+    /** Whether the check accepted the change. */
+    clean: boolean
+    /** Whether the check was skipped. */
+    skipped: boolean
+    /** Bounded result detail. */
+    detail: string
+    /** Secure complete-output log path. */
+    logFile: string
+  }>
+  /** Run the selected host reviewer through the neutral boundary. */
   runHostReview: (worktree: string, label: string) => Promise<HostReviewResult>
+  /** Serialize one neutral host-review result. */
   recordHostReview: (label: string, review: HostReviewResult) => Promise<void>
-  createWorktree: (task: SelectedTask) => Promise<{ ok?: boolean; worktreePath?: string; branch?: string; baseSha?: string; notes?: string } | null>
+  /** Create the isolated worktree for a selected task. */
+  createWorktree: (task: SelectedTask) => Promise<{
+    /** Whether creation succeeded. */
+    ok?: boolean
+    /** Absolute path to the worktree. */
+    worktreePath?: string
+    /** Task branch name. */
+    branch?: string
+    /** Base commit captured at creation. */
+    baseSha?: string
+    /** Bounded creation diagnostics. */
+    notes?: string
+  } | null>
+}
+
+/** Bounded projection of one reviewer-agent verdict. */
+export interface ReviewVerdictSummary {
+  /** Reviewer verdict string. */
+  verdict: string
+  /** Blocking items reported by the reviewer. */
+  blocking: string[]
+  /** Bounded reviewer summary. */
+  summary: string
+}
+
+/** Bounded projection of one fix-agent report. */
+export interface FixReportSummary {
+  /** Commits reported by the fix agent. */
+  commits?: unknown
+  /** Whether the fix agent reported green gates. */
+  gatesGreen?: boolean
+  /** Tool-neutral host-review run count. */
+  hostReviewRuns?: number
+  /** Issues the fix agent reports as resolved. */
+  resolved?: unknown
+  /** Issues the fix agent left open. */
+  openIssues?: unknown
+  /** Bounded fix summary. */
+  summary: unknown
+}
+
+/** Result from a pipeline stage that either yields a product or a failure. */
+export interface PipelineStageProduct<T> {
+  /** Successful stage product, absent on failure. */
+  plan?: T
+  /** Successful implementation product, absent on failure. */
+  impl?: T
+  /** Terminal failure, absent on success. */
+  fail?: StageResult
+}
+
+/** Stage helpers and full task entry point bound by `makeTaskPipeline`. */
+export interface TaskPipelineSurface {
+  /** Run the bounded plan/design-review loop. */
+  runPlanDesignLoop: (task: SelectedTask, worktree: string, opts?: Record<string, unknown>) => Promise<PipelineStageProduct<StagePlan>>
+  /** Run granular implementation work items when enabled. */
+  runWorkItemBuildLoop: (task: SelectedTask, worktree: string, plan: StagePlan, opts?: Record<string, unknown>) => Promise<PipelineStageProduct<StageImpl> | null>
+  /** Run the selected implementation strategy. */
+  runImplementationStage: (task: SelectedTask, worktree: string, plan: StagePlan, opts?: Record<string, unknown>) => Promise<PipelineStageProduct<StageImpl>>
+  /** Run host and agent review followed by integration. */
+  runDualReviewAndIntegration: (task: SelectedTask, worktree: string, plan: StagePlan, impl: StageImpl, mergeLock: MergeLock, options?: Record<string, unknown>) => Promise<StageResult>
+  /** Run the complete task pipeline. */
+  runTask: (task: SelectedTask, mergeLock: MergeLock) => Promise<StageResult>
 }
 
 /**
@@ -167,7 +303,7 @@ export interface TaskPipelineDeps {
  * @returns a trimmed `{ verdict, blocking, summary }` record, or `null`
  *   when `review` is absent.
  */
-export function summarizeReviewVerdict(review: StageReview | null | undefined) {
+export function summarizeReviewVerdict(review: StageReview | null | undefined): ReviewVerdictSummary | null {
   if (!review) return null
   return {
     verdict: review.verdict || '',
@@ -186,7 +322,7 @@ export function summarizeReviewVerdict(review: StageReview | null | undefined) {
  * @returns `{ summary }` when `fix` is a string, a trimmed structured
  *   record when `fix` is an object, or `null` when `fix` is absent.
  */
-export function summarizeFixReport(fix: Record<string, unknown> | string | null | undefined) {
+export function summarizeFixReport(fix: Record<string, unknown> | string | null | undefined): FixReportSummary | null {
   if (!fix) return null
   if (typeof fix === 'string') return { summary: fix }
   return {
@@ -263,7 +399,7 @@ export function integrationHaltDetail(integration: StageIntegration | null): str
  *   `runTask` — the individual stage helpers and the full per-task
  *   entry point, all closed over the same bound `deps`.
  */
-export function makeTaskPipeline(deps: TaskPipelineDeps) {
+export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
   const {
     MAX_DESIGN_ROUNDS,
     MAX_REVIEW_ROUNDS,
@@ -515,6 +651,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       await recordHostReview(`${tag} ${itemLabel} a${attempt}`, review)
       runs += 1
       if (review.outcome === 'auth') {
+        faultMetrics.authFaults += 1
         return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: `${reviewerDisplayName} host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } }
       }
       if (review.outcome === 'rate-limited' || review.outcome === 'error') {
@@ -566,6 +703,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       lastImpl = impl
       const authDetail = implementationAuthFailureDetail(impl)
       if (authDetail) {
+        faultMetrics.authFaults += 1
         return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
       }
       if (!impl || !impl.ok || !impl.gatesGreen) {
@@ -655,6 +793,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     })), `implement:${tag}`))) as StageImpl | null
     const authDetail = implementationAuthFailureDetail(impl)
     if (authDetail) {
+      faultMetrics.authFaults += 1
       return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
     }
     if (!impl || !impl.ok || !impl.gatesGreen) {
@@ -818,6 +957,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         const hostReview = await runHostReview(worktree, `host-review:${HOST_REVIEWER}:${tag} r${round}`)
         await recordHostReview(`${tag} r${round}`, hostReview)
         if (hostReview.outcome === 'auth') {
+          faultMetrics.authFaults += 1
           return { id: tag, status: 'fatal-auth', stage: 'review', detail: `${reviewerDisplayName} host review is not authenticated: ${hostReview.detail}`, reviewRounds, worktree, proposals, ...kindExtra }
         }
         if (hostReview.outcome === 'rate-limited' || hostReview.outcome === 'error') {
@@ -1007,6 +1147,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       const impl = (await buildLock(() => withInfraRetry(() => agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: 'Implement', label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`))) as StageImpl | null
       const authDetail = implementationAuthFailureDetail(impl)
       if (authDetail) {
+        faultMetrics.authFaults += 1
         return {
           id: tag,
           status: 'fatal-auth',
@@ -1076,6 +1217,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         const hostReview = await runHostReview(worktree, `host-review:${HOST_REVIEWER}:${tag} addendum`)
         await recordHostReview(`${tag} addendum`, hostReview)
         if (hostReview.outcome === 'auth') {
+          faultMetrics.authFaults += 1
           return { id: tag, status: 'fatal-auth', stage: 'auth', detail: `${reviewerDisplayName} host review is not authenticated: ${hostReview.detail}`, worktree, proposals, kind: 'addendum' }
         }
         const blockingFindings = reviewBlockingItems(reviewerDisplayName, hostReview.findings)

@@ -301,8 +301,8 @@ export async function syntheticRecoveryImpl(
      * as the delivered work.
      */
     commits: evidence?.recentCommits || [],
-    /** Zero: no CodeRabbit runs were performed by the bridge. */
-    coderabbitRuns: 0,
+    /** Zero: no host-review runs were performed by the bridge. */
+    hostReviewRuns: 0,
     /** Open issues forcing fresh review, plus any ExecPlan-verification fault. */
     openIssues: [
       'recovered branch requires fresh review',
