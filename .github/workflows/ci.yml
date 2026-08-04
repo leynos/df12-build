@@ -39,7 +39,10 @@ jobs:
           cargo install merman-cli --version "=${MERMAN_CLI_VERSION}" --locked
           uv tool install --python "${NIXIE_PYTHON_VERSION}" --managed-python \
             "nixie-cli==${NIXIE_CLI_VERSION}"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+          command -v merman-cli
       - name: Install Dafny
         run: |
           set -euo pipefail

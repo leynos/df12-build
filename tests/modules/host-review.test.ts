@@ -2,7 +2,7 @@
 // classifier's terminal-completion guard, and the spawn-streamed host commit
 // gates (secure per-run log directory).
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -80,6 +80,33 @@ describe('runCodeSceneCheck', () => {
     // A command that exists and exits 0 stands in for a clean cs-check-changed.
     const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: 'true' })
     const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
+    expect(result.clean).toBe(true)
+    expect(result.skipped).toBe(false)
+    expect(csCheckMetrics).toEqual({ runs: 1, failures: 0, probeFailures: 0, skipped: 0 })
+    junk.push(result.logFile)
+  })
+
+  test('a quoted executable path is probed and executed intact', async () => {
+    const dir = tmp('cs-quoted-')
+    const executable = path.join(dir, 'code scene check')
+    writeFileSync(executable, '#!/bin/sh\nexit 0\n')
+    chmodSync(executable, 0o755)
+    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: `"${executable}"` })
+    const result = await runCodeSceneCheck(dir, '1.2.3', 'quoted')
+    expect(result.clean).toBe(true)
+    expect(result.skipped).toBe(false)
+    expect(csCheckMetrics).toEqual({ runs: 1, failures: 0, probeFailures: 0, skipped: 0 })
+    junk.push(result.logFile)
+  })
+
+  test('a leading environment assignment does not hide the executable', async () => {
+    const dir = tmp('cs-environment-')
+    const executable = path.join(dir, 'check-environment')
+    writeFileSync(executable, '#!/bin/sh\ntest "$DF12_CS_MARKER" = expected\n')
+    chmodSync(executable, 0o755)
+    const command = `DF12_CS_MARKER=expected "${executable}"`
+    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: command })
+    const result = await runCodeSceneCheck(dir, '1.2.3', 'environment')
     expect(result.clean).toBe(true)
     expect(result.skipped).toBe(false)
     expect(csCheckMetrics).toEqual({ runs: 1, failures: 0, probeFailures: 0, skipped: 0 })

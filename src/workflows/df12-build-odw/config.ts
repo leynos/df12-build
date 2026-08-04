@@ -117,7 +117,10 @@ export interface RawWorkflowArgs {
   triageEscalationModel?: string
   /** Medium-tier model for the routine assessment pass. */
   assessmentModel?: string
-  /** Model assessment escalates to when the medium pass lands on an adopt verdict; defaults to the review model. */
+  /**
+   * Model selected before assessment when changed files include a
+   * `docs/execplans/*.md` path; defaults to the review model.
+   */
   assessmentEscalationModel?: string
   /** Legacy agent-run CodeRabbit command told to the agent when host review is off. */
   coderabbitReviewCommand?: string
@@ -249,7 +252,10 @@ export interface WorkflowConfig {
   TRIAGE_ESCALATION_MODEL: string
   /** Medium-tier model for the routine assessment pass. */
   ASSESSMENT_MODEL: string
-  /** Model assessment escalates to on an adopt verdict. */
+  /**
+   * Escalated-tier model selected before assessment when changed files include
+   * a `docs/execplans/*.md` path.
+   */
   ASSESSMENT_ESCALATION_MODEL: string
   /** De-duplicated, lower-cased set of adapters whose CLI auth must be verified. */
   AUTH_REQUIRED_ADAPTERS: Set<string>

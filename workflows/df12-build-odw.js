@@ -2232,6 +2232,50 @@ var csCheckMetrics = {
   /** Checks skipped because the configured binary was not on PATH. */
   skipped: 0
 };
+function shellCommandWords(command) {
+  const words = [];
+  let word = "";
+  let quote = "";
+  let hasWord = false;
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index];
+    if (!quote && /\s/.test(character)) {
+      if (hasWord) {
+        words.push(word);
+        word = "";
+        hasWord = false;
+      }
+      continue;
+    }
+    if (!quote && (character === "'" || character === '"')) {
+      quote = character;
+      hasWord = true;
+      continue;
+    }
+    if (quote && character === quote) {
+      quote = "";
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      index += 1;
+      if (index >= command.length) return null;
+      word += command[index];
+      hasWord = true;
+      continue;
+    }
+    word += character;
+    hasWord = true;
+  }
+  if (quote) return null;
+  if (hasWord) words.push(word);
+  return words;
+}
+function codeSceneExecutable(command) {
+  const words = shellCommandWords(command);
+  if (!words) return "";
+  const executable = words.find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
+  return executable || "";
+}
 var gateLogDirCache = null;
 function gateLogRoot() {
   if (!gateLogDirCache) {
@@ -2396,7 +2440,7 @@ ${outcome.tail}`
   }
   async function runCodeSceneCheck2(worktree, tag, label) {
     if (!csCheck) return { clean: true, skipped: true, detail: "", logFile: "" };
-    const bin = csCheckCommand.trim().split(/\s+/)[0] || "cs-check-changed";
+    const bin = codeSceneExecutable(csCheckCommand) || "cs-check-changed";
     const missingSentinel = "__DF12_CODESCENE_BINARY_MISSING__";
     const probe = await execFileStatus(
       "sh",
@@ -2664,6 +2708,7 @@ function makeTaskPipeline(deps) {
       await recordCoderabbitReview2(`${tag} ${itemLabel} a${attempt}`, review);
       runs += 1;
       if (review.outcome === "auth") {
+        faultMetrics.authFaults += 1;
         return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: `CodeRabbit host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } };
       }
       if (review.outcome === "rate-limited" || review.outcome === "error") {
@@ -2715,6 +2760,7 @@ function makeTaskPipeline(deps) {
       lastImpl = impl;
       const authDetail = implementationAuthFailureDetail(impl);
       if (authDetail) {
+        faultMetrics.authFaults += 1;
         return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
       }
       if (!impl || !impl.ok || !impl.gatesGreen) {
@@ -2792,6 +2838,7 @@ function makeTaskPipeline(deps) {
     })), `implement:${tag}`));
     const authDetail = implementationAuthFailureDetail(impl);
     if (authDetail) {
+      faultMetrics.authFaults += 1;
       return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
     }
     if (!impl || !impl.ok || !impl.gatesGreen) {
@@ -2909,6 +2956,7 @@ function makeTaskPipeline(deps) {
         const coderabbit = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} r${round}`);
         await recordCoderabbitReview2(`${tag} r${round}`, coderabbit);
         if (coderabbit.outcome === "auth") {
+          faultMetrics.authFaults += 1;
           return { id: tag, status: "fatal-auth", stage: "review", detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, reviewRounds, worktree, proposals, ...kindExtra };
         }
         if (coderabbit.outcome === "rate-limited" || coderabbit.outcome === "error") {
@@ -3057,6 +3105,7 @@ function makeTaskPipeline(deps) {
         const impl2 = await buildLock2(() => withInfraRetry2(() => agent(implementAddendumPrompt2(task, worktree), buildAgentOptions2({ phase: "Implement", label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`));
         const authDetail = implementationAuthFailureDetail(impl2);
         if (authDetail) {
+          faultMetrics.authFaults += 1;
           return {
             id: tag,
             status: "fatal-auth",
@@ -3110,6 +3159,7 @@ function makeTaskPipeline(deps) {
           const coderabbit = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} addendum`);
           await recordCoderabbitReview2(`${tag} addendum`, coderabbit);
           if (coderabbit.outcome === "auth") {
+            faultMetrics.authFaults += 1;
             return { id: tag, status: "fatal-auth", stage: "auth", detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, worktree, proposals, kind: "addendum" };
           }
           const blockingFindings = coderabbitBlockingItems(coderabbit.findings);

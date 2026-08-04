@@ -113,7 +113,10 @@ export interface HostReviewConfig {
   commitGateTimeoutSeconds: number
   /** Whether the CodeScene code-health check runs. */
   csCheck: boolean
-  /** The CodeScene check command line; its first token is the PATH probe. */
+  /**
+   * The CodeScene command line; its executable is resolved after leading
+   * environment assignments, preserving quoted paths, then probed on PATH.
+   */
   csCheckCommand: string
 }
 
@@ -248,6 +251,58 @@ export const csCheckMetrics = {
   probeFailures: 0,
   /** Checks skipped because the configured binary was not on PATH. */
   skipped: 0,
+}
+
+/**
+ * Split a configured shell command into words without evaluating expansions or
+ * substitutions. The limited POSIX-style quoting support is sufficient to
+ * identify the executable while keeping operator configuration inert.
+ */
+function shellCommandWords(command: string): string[] | null {
+  const words: string[] = []
+  let word = ''
+  let quote = ''
+  let hasWord = false
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]
+    if (!quote && /\s/.test(character)) {
+      if (hasWord) {
+        words.push(word)
+        word = ''
+        hasWord = false
+      }
+      continue
+    }
+    if (!quote && (character === "'" || character === '"')) {
+      quote = character
+      hasWord = true
+      continue
+    }
+    if (quote && character === quote) {
+      quote = ''
+      continue
+    }
+    if (character === '\\' && quote !== "'") {
+      index += 1
+      if (index >= command.length) return null
+      word += command[index]
+      hasWord = true
+      continue
+    }
+    word += character
+    hasWord = true
+  }
+  if (quote) return null
+  if (hasWord) words.push(word)
+  return words
+}
+
+/** Resolve the executable after any leading shell environment assignments. */
+function codeSceneExecutable(command: string): string {
+  const words = shellCommandWords(command)
+  if (!words) return ''
+  const executable = words.find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word))
+  return executable || ''
 }
 
 // Per-process gate-log directory, created lazily with mkdtempSync so its name
@@ -500,7 +555,7 @@ export function makeHostReview(config: HostReviewConfig) {
     logFile: string
   }> {
     if (!csCheck) return { clean: true, skipped: true, detail: '', logFile: '' }
-    const bin = csCheckCommand.trim().split(/\s+/)[0] || 'cs-check-changed'
+    const bin = codeSceneExecutable(csCheckCommand) || 'cs-check-changed'
     // Pass the probed name as a positional argument ($1), never interpolated
     // into the command string: csCheckCommand is operator config (a trust
     // boundary), so shell metacharacters in the name must not be interpreted.
