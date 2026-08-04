@@ -1,8 +1,10 @@
 /**
- * @file Host-run Dakar and CodeRabbit review adapters plus deterministic host
+ * Host-run Dakar and CodeRabbit review adapters plus deterministic host
  * commit gates. Review retries, backoff, findings capture, and gate execution
  * bind once through `makeHostReview`; parsers and bounded aggregates remain
  * directly testable exports.
+ *
+ * @module
  */
 import { execFileStatus } from './exec.ts'
 import type { ExecOptions, ExecStatus } from './exec.ts'
@@ -10,21 +12,37 @@ import { authFailureDetail } from './faults.ts'
 
 /** Normalized finding shape produced by every host-review adapter. */
 export interface ReviewFinding extends Record<string, unknown> {
+  /** Wire discriminator retained for compatibility with the findings sink. */
   type?: string
+  /** Normalized severity; critical and major findings block integration. */
   severity?: string
+  /** Repository-relative file associated with the finding. */
   fileName?: string
+  /** Bounded human-readable explanation of the finding. */
   comment?: string
+  /** Bounded machine-oriented remediation guidance. */
   codegenInstructions?: string
+  /** Suggested edits retained from the reviewer protocol. */
   suggestions?: unknown[]
 }
 
 /** Parsed CodeRabbit NDJSON events and terminal records. */
 export interface CoderabbitParsedOutput {
+  /** Parsed NDJSON events in emission order. */
   events: Array<Record<string, unknown>>
+  /** Non-JSON lines retained as bounded diagnostic evidence. */
   rawLines: string[]
+  /** Finding events narrowed to the neutral finding shape. */
   findings: ReviewFinding[]
+  /** Terminal completion event, or null when no completion was emitted. */
   complete: Record<string, unknown> | null
-  error: (Record<string, unknown> & { errorType?: string; message?: string }) | null
+  /** First terminal error event, or null when none was emitted. */
+  error: (Record<string, unknown> & {
+    /** CodeRabbit error discriminator such as `rate_limit`. */
+    errorType?: string
+    /** Reviewer-supplied error description. */
+    message?: string
+  }) | null
 }
 
 /** Tool-neutral terminal outcome vocabulary. */
@@ -35,72 +53,115 @@ export type ReviewErrorCategory = 'none' | 'deferred' | 'timeout' | 'auth' | 'in
 
 /** One completed host-review result after bounded retries. */
 export interface HostReviewResult {
+  /** Bounded machine identifier for the adapter that ran. */
   reviewer: 'dakar' | 'coderabbit'
+  /** Tool-neutral terminal classification consumed by workflow policy. */
   outcome: ReviewOutcome
+  /** Number of attempts made, including the terminal attempt. */
   attempts: number
+  /** Host-side elapsed duration across attempts and backoff. */
   elapsedMs: number
+  /** Bounded diagnostic category for metrics and terminal events. */
   errorCategory: ReviewErrorCategory
+  /** Normalized findings from the terminal attempt. */
   findings: ReviewFinding[]
+  /** Bounded operator-facing detail; empty for successful outcomes. */
   detail: string
 }
 
 /** Public compatibility aliases for integrations compiled against older names. */
 export type CoderabbitFinding = ReviewFinding
+/** Compatibility alias for the former CodeRabbit-specific outcome type. */
 export type CoderabbitOutcome = ReviewOutcome
+/** Compatibility alias for the former CodeRabbit-specific result type. */
 export type CoderabbitReview = HostReviewResult
 
 /** Aggregate result from the configured deterministic host gates. */
 export interface HostGateRun {
+  /** True only when every configured host gate passed. */
   green: boolean
-  results: Array<{ command: string; ok: boolean; logFile: string }>
+  /** Per-gate results in execution order. */
+  results: Array<{
+    /** Configured gate command. */
+    command: string
+    /** Whether the gate exited successfully. */
+    ok: boolean
+    /** Secure log file containing the complete gate output. */
+    logFile: string
+  }>
+  /** Bounded failure detail, empty when all gates pass. */
   detail: string
 }
 
 /** Injectable execution, sleep, and Dakar cleanup seams for deterministic tests. */
 export interface HostReviewDeps {
+  /** Process runner used by both reviewer adapters. */
   exec?: (command: string, commandArgs: readonly string[], options?: ExecOptions) => Promise<ExecStatus>
+  /** Host-side backoff seam measured in minutes. */
   sleep?: (minutes: number) => Promise<void>
+  /** Recursive Dakar state-root cleanup seam. */
   removeDakarStateRoot?: (stateRoot: string, options: { recursive: true; force: true }) => void
+  /** Monotonic-enough millisecond clock used only for bounded telemetry. */
   nowMs?: () => number
 }
 
 /** Bound configuration shared by reviewer adapters and host gates. */
 export interface HostReviewConfig {
+  /** Base branch used for committed-diff reviews. */
   base: string
-  // The host review tool. 'dakar' (the default) and 'coderabbit' adapt their
-  // respective protocols into HostReviewResult. Workflow policy consumes the
-  // neutral runHostReview, recordHostReview, and reviewBlockingItems contract.
+  /** Reviewer adapter; Dakar is the default and CodeRabbit is opt-in. */
   reviewTool: 'dakar' | 'coderabbit'
+  /** Dakar executable plus optional fixed prefix arguments. */
   dakarCommand: string
+  /** Parent execution timeout shared by both reviewer adapters. */
   reviewTimeoutSeconds: number
-  // 0 means "omit --budget-gbp and let Dakar apply its own default budget".
+  /** Dakar budget in GBP; zero omits the argument and uses Dakar's default. */
   dakarBudgetGbp: number
+  /** Maximum host-review attempts before a deferral becomes terminal. */
   coderabbitAttempts: number
+  /** Inclusive deterministic retry-backoff range in minutes. */
   coderabbitBackoffMinutes: [number, number]
+  /** Durable JSONL findings sink; an empty path disables recording. */
   coderabbitFindingsFile: string
+  /** Deterministic host gate commands run against committed work. */
   commitGates: readonly string[]
+  /** Per-command host-gate timeout in seconds. */
   commitGateTimeoutSeconds: number
+  /** Whether the CodeScene health gate is enabled. */
   csCheck: boolean
+  /** Configured CodeScene command line. */
   csCheckCommand: string
 }
 
 /** One untrusted finding from Dakar's compatibility projection. */
 export interface DakarFinding extends Record<string, unknown> {
+  /** Dakar severity before normalization. */
   severity?: string
+  /** Repository-relative path. */
   path?: string
+  /** Optional one-based source line. */
   line?: number
+  /** Short finding title. */
   title?: string
+  /** Finding explanation. */
   detail?: string
+  /** Evidence supporting the finding. */
   evidence?: string
 }
 
 /** Dakar's single-document stdout contract before boundary validation. */
 export interface DakarDocument extends Record<string, unknown> {
+  /** Whether Dakar completed its review protocol successfully. */
   ok?: boolean
+  /** Whether Dakar intentionally skipped review. */
   skipped?: boolean
+  /** Terminal verdict such as `pass` or `changes-requested`. */
   verdict?: string
+  /** Dakar execution stage, including the exact deferred stage. */
   stage?: string
+  /** Reviewer-supplied error detail. */
   error?: string
+  /** Untrusted findings projection validated at the host boundary. */
   findings?: DakarFinding[]
 }
 
@@ -210,7 +271,16 @@ function validateCleanDakarFindings(raw: unknown): string {
 }
 
 /** Classify and fail-closed validate one Dakar process result. */
-export function classifyDakarReview(execResult: ExecStatus): { outcome: ReviewOutcome; findings: ReviewFinding[]; detail: string; errorCategory: ReviewErrorCategory } {
+export function classifyDakarReview(execResult: ExecStatus): {
+  /** Tool-neutral terminal outcome. */
+  outcome: ReviewOutcome
+  /** Validated and normalized findings. */
+  findings: ReviewFinding[]
+  /** Bounded operator-facing diagnostic. */
+  detail: string
+  /** Bounded telemetry category. */
+  errorCategory: ReviewErrorCategory
+} {
   const category = (fallback: ReviewErrorCategory) => execResult.killed ? 'timeout' as const : fallback
   const doc = parseDakarDocument(execResult.stdout)
   if (!doc) {
@@ -324,15 +394,25 @@ export function reviewBlockingItems(reviewer: string, findings: readonly ReviewF
 
 /** Bounded process-local host-review metrics. */
 export const hostReviewMetrics: {
+  /** Terminal host-review runs. */
   runs: number
+  /** Findings recorded across terminal runs. */
   findings: number
+  /** Non-terminal retry attempts. */
   retries: number
+  /** Terminal deferred outcomes. */
   deferred: number
+  /** Terminal timeout outcomes. */
   timeouts: number
+  /** Terminal non-auth error outcomes. */
   errors: number
+  /** Authentication and preflight failures. */
   authFailures: number
+  /** Findings-sink write failures. */
   sinkFailures: number
+  /** Findings grouped by a fixed severity vocabulary. */
   bySeverity: Record<'critical' | 'major' | 'minor' | 'trivial' | 'info' | 'unknown', number>
+  /** Last bounded sink error, empty when healthy. */
   sinkError: string
 } = {
   runs: 0,
@@ -349,15 +429,78 @@ export const hostReviewMetrics: {
 
 /** Compatibility aliases retained for external module consumers. */
 export const coderabbitCapture = hostReviewMetrics
+/** Compatibility blocking helper that labels findings as CodeRabbit output. */
 export function coderabbitBlockingItems(findings: readonly ReviewFinding[] | null | undefined): string[] {
   return reviewBlockingItems('CodeRabbit', findings)
 }
 
 /** Process-local deterministic host-gate counters. */
-export const hostGateMetrics = { runs: 0, failures: 0 }
+export const hostGateMetrics: {
+  /** Host-gate executions attempted. */
+  runs: number
+  /** Host-gate executions that failed. */
+  failures: number
+} = { runs: 0, failures: 0 }
 
 /** Process-local CodeScene gate counters. */
-export const csCheckMetrics = { runs: 0, failures: 0, skipped: 0 }
+export const csCheckMetrics: {
+  /** CodeScene checks attempted. */
+  runs: number
+  /** CodeScene checks that reported unhealthy code. */
+  failures: number
+  /** Availability probes that failed for infrastructure reasons. */
+  probeFailures: number
+  /** Checks skipped because the executable was unavailable. */
+  skipped: number
+} = { runs: 0, failures: 0, probeFailures: 0, skipped: 0 }
+
+// Split configured commands without evaluating shell expansions. This keeps
+// executable probes inert while supporting the limited quoting operators use
+// for fixed command-prefix arguments.
+function shellCommandWords(command: string): string[] | null {
+  const words: string[] = []
+  let word = ''
+  let quote = ''
+  let hasWord = false
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]
+    if (!quote && /\s/.test(character)) {
+      if (hasWord) {
+        words.push(word)
+        word = ''
+        hasWord = false
+      }
+      continue
+    }
+    if (!quote && (character === "'" || character === '"')) {
+      quote = character
+      hasWord = true
+      continue
+    }
+    if (quote && character === quote) {
+      quote = ''
+      continue
+    }
+    if (character === '\\' && quote !== "'") {
+      index += 1
+      if (index >= command.length) return null
+      word += command[index]
+      hasWord = true
+      continue
+    }
+    word += character
+    hasWord = true
+  }
+  if (quote) return null
+  if (hasWord) words.push(word)
+  return words
+}
+
+function codeSceneExecutable(command: string): string {
+  const words = shellCommandWords(command)
+  if (!words) return ''
+  return words.find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) || ''
+}
 
 // Per-process gate-log directory, created lazily with mkdtempSync so its name
 // is unpredictable and its mode is 0700: a local attacker cannot pre-plant a
@@ -383,8 +526,40 @@ export function hostGateLogPath(tag: string, roundLabel: string, index: number):
   return path.join(gateLogRoot(), `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`)
 }
 
+/** Result of the optional CodeScene host check. */
+export interface CodeSceneCheckResult {
+  /** Whether CodeScene accepted the committed change. */
+  clean: boolean
+  /** Whether the check was skipped because its executable was unavailable. */
+  skipped: boolean
+  /** Bounded operator-facing result detail. */
+  detail: string
+  /** Secure log path containing the complete command output. */
+  logFile: string
+}
+
+/** Bound host-review operations and retained CodeRabbit compatibility aliases. */
+export interface HostReviewSurface {
+  /** Compute deterministic retry backoff for a label. */
+  reviewBackoffMinutes: (seed: unknown) => number
+  /** Run the selected reviewer through the neutral adapter boundary. */
+  runHostReview: (worktree: string, label: string, deps?: HostReviewDeps) => Promise<HostReviewResult>
+  /** Serialize one terminal review and its findings to the configured sink. */
+  recordHostReview: (label: string, review: HostReviewResult) => Promise<void>
+  /** Execute configured deterministic commit gates. */
+  runHostCommitGates: (worktree: string, tag: string, roundLabel: string) => Promise<HostGateRun>
+  /** Execute the optional CodeScene health check. */
+  runCodeSceneCheck: (worktree: string, tag: string, label: string) => Promise<CodeSceneCheckResult>
+  /** Compatibility alias for `reviewBackoffMinutes`. */
+  coderabbitBackoffMinutes: (seed: unknown) => number
+  /** Compatibility alias for `runHostReview`. */
+  runCoderabbitHostReview: (worktree: string, label: string, deps?: HostReviewDeps) => Promise<HostReviewResult>
+  /** Compatibility alias for `recordHostReview`. */
+  recordCoderabbitReview: (label: string, review: HostReviewResult) => Promise<void>
+}
+
 /** Bind reviewer dispatch, retry, findings recording, and host-gate execution. */
-export function makeHostReview(config: HostReviewConfig) {
+export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
   const {
     base,
     reviewTool,
@@ -399,7 +574,7 @@ export function makeHostReview(config: HostReviewConfig) {
     csCheck,
     csCheckCommand,
   } = config
-  const dakarInvocation = dakarCommand.trim().split(/\s+/).filter(Boolean)
+  const dakarInvocation = shellCommandWords(dakarCommand) || []
   const dakarExecutable = dakarInvocation[0] || 'dakar-review'
   const dakarPrefixArgs = dakarInvocation.slice(1)
   let findingsSinkTail = Promise.resolve()
@@ -698,15 +873,33 @@ export function makeHostReview(config: HostReviewConfig) {
   // not blocked. Returns { clean, skipped, detail, logFile }.
   async function runCodeSceneCheck(worktree: string, tag: string, label: string): Promise<{ clean: boolean; skipped: boolean; detail: string; logFile: string }> {
     if (!csCheck) return { clean: true, skipped: true, detail: '', logFile: '' }
-    const bin = csCheckCommand.trim().split(/\s+/)[0] || 'cs-check-changed'
+    const bin = codeSceneExecutable(csCheckCommand) || 'cs-check-changed'
     // Pass the probed name as a positional argument ($1), never interpolated
     // into the command string: csCheckCommand is operator config (a trust
     // boundary), so shell metacharacters in the name must not be interpreted.
-    const probe = await execFileStatus('sh', ['-c', 'command -v "$1"', 'sh', bin], { cwd: worktree })
+    const missingSentinel = '__DF12_CODESCENE_BINARY_MISSING__'
+    const probe = await execFileStatus(
+      'sh',
+      ['-c', 'command -v "$1" >/dev/null 2>&1 || { printf "%s\\n" "$2"; exit 127; }', 'sh', bin, missingSentinel],
+      { cwd: worktree },
+    )
     if (!probe.ok) {
-      csCheckMetrics.skipped += 1
-      log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`)
-      return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: '' }
+      if (probe.stdout.trim() === missingSentinel) {
+        csCheckMetrics.skipped += 1
+        log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`)
+        return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: '' }
+      }
+      csCheckMetrics.probeFailures += 1
+      const fault = [probe.message, probe.stderr, probe.signal ? `signal ${probe.signal}` : '', probe.killed ? 'probe killed' : '']
+        .map((part) => String(part || '').trim())
+        .filter(Boolean)
+        .join('; ')
+      return {
+        clean: false,
+        skipped: false,
+        detail: `CodeScene availability probe for \`${bin}\` failed: ${fault || 'unknown probe failure'}`,
+        logFile: '',
+      }
     }
     csCheckMetrics.runs += 1
     const logFile = hostGateLogPath(tag, `cs-${label}`, 0)
