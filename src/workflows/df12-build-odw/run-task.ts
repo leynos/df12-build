@@ -614,6 +614,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       await recordCoderabbitReview(`${tag} ${itemLabel} a${attempt}`, review)
       runs += 1
       if (review.outcome === 'auth') {
+        faultMetrics.authFaults += 1
         return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: `CodeRabbit host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } }
       }
       if (review.outcome === 'rate-limited' || review.outcome === 'error') {
@@ -671,6 +672,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       lastImpl = impl
       const authDetail = implementationAuthFailureDetail(impl)
       if (authDetail) {
+        faultMetrics.authFaults += 1
         return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
       }
       if (!impl || !impl.ok || !impl.gatesGreen) {
@@ -765,6 +767,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     })), `implement:${tag}`))) as StageImpl | null
     const authDetail = implementationAuthFailureDetail(impl)
     if (authDetail) {
+      faultMetrics.authFaults += 1
       return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
     }
     if (!impl || !impl.ok || !impl.gatesGreen) {
@@ -929,6 +932,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         const coderabbit = await runCoderabbitHostReview(worktree, `coderabbit:${tag} r${round}`)
         await recordCoderabbitReview(`${tag} r${round}`, coderabbit)
         if (coderabbit.outcome === 'auth') {
+          faultMetrics.authFaults += 1
           return { id: tag, status: 'fatal-auth', stage: 'review', detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, reviewRounds, worktree, proposals, ...kindExtra }
         }
         if (coderabbit.outcome === 'rate-limited' || coderabbit.outcome === 'error') {
@@ -1119,6 +1123,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       const impl = (await buildLock(() => withInfraRetry(() => agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: 'Implement', label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`))) as StageImpl | null
       const authDetail = implementationAuthFailureDetail(impl)
       if (authDetail) {
+        faultMetrics.authFaults += 1
         return {
           id: tag,
           status: 'fatal-auth',
@@ -1188,6 +1193,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         const coderabbit = await runCoderabbitHostReview(worktree, `coderabbit:${tag} addendum`)
         await recordCoderabbitReview(`${tag} addendum`, coderabbit)
         if (coderabbit.outcome === 'auth') {
+          faultMetrics.authFaults += 1
           return { id: tag, status: 'fatal-auth', stage: 'auth', detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, worktree, proposals, kind: 'addendum' }
         }
         const blockingFindings = coderabbitBlockingItems(coderabbit.findings)

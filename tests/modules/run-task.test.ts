@@ -13,6 +13,7 @@ import {
   summarizeFixReport,
   summarizeReviewVerdict,
 } from '../../src/workflows/df12-build-odw/run-task.ts'
+import { faultMetrics } from '../../src/workflows/df12-build-odw/faults.ts'
 
 const globals = globalThis as Record<string, unknown>
 
@@ -104,6 +105,10 @@ function subject(worktree: string, overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   labels = []
+  faultMetrics.infraRetries = 0
+  faultMetrics.infraFaults = 0
+  faultMetrics.providerFaults = 0
+  faultMetrics.authFaults = 0
   globals.log = () => {}
   globals.phase = () => {}
   globals.parallel = async (thunks: Array<() => Promise<unknown>>) =>
@@ -287,6 +292,7 @@ describe('runTask', () => {
     const outcome = await subject(worktree).runTask(task, null)
     expect(outcome.status).toBe('fatal-auth')
     expect(outcome.assessed).toBeUndefined()
+    expect(faultMetrics.authFaults).toBe(1)
   })
 
   test('green implementation with a dirty worktree fails the durability gate', async () => {

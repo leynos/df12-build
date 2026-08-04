@@ -15,7 +15,7 @@
 export interface RoadmapTask {
   /** Dotted roadmap id, e.g. `1.2.3`, as it appears in the checkbox line. */
   id: string
-  /** Raw checkbox mark (`x`, `X`, or a blank/other character); compare case-insensitively via `isComplete`. */
+  /** Raw checkbox mark (`x`, `X`, or a blank character); compare case-insensitively via `isComplete`. */
   checked: string
   /** Task title text following the checkbox and id. */
   title: string
