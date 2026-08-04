@@ -1,5 +1,5 @@
-// Property tests for the host-review protocol adapters. Generated terminal
-// documents pin classifier precedence and Dakar severity translation.
+/** @file Property tests for the host-review protocol adapters. Generated
+ * terminal documents pin classifier precedence and Dakar severity translation. */
 import { describe, expect, test } from 'bun:test'
 import fc from 'fast-check'
 

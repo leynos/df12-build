@@ -222,6 +222,7 @@ describe('runDakarHostReview', () => {
     const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
     const review = await runCoderabbitHostReview('/w', 'l', { exec })
     expect(review.outcome).toBe('error')
+    expect(review.errorCategory).toBe('invalid-output')
     expect(review.detail.length).toBeGreaterThan(0)
     expect(review.detail.length).toBeLessThanOrEqual(2_000)
   })

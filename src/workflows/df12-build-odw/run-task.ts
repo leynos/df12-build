@@ -112,7 +112,7 @@ type AgentOptions = (options: Record<string, unknown>) => Record<string, unknown
  * The dependency contract injected into {@link makeTaskPipeline}: the
  * config caps and feature flags, the prompt builders for every stage, the
  * agent-options factories, the stage locks and retry helper, the
- * assessment and write-gate callbacks, and the host-gate/CodeRabbit/
+ * assessment and write-gate callbacks, and the host-gate/host-review/
  * CodeScene runners. Binding these once at pipeline creation keeps the
  * per-task functions free of ambient configuration lookups.
  */
@@ -124,8 +124,8 @@ export interface TaskPipelineDeps {
   HOST_COMMIT_GATES: boolean
   HOST_GATES_BETWEEN_WORK_ITEMS: boolean
   CS_CHECK: boolean
-  CODERABBIT_HOST_REVIEW: boolean
-  CODERABBIT_BETWEEN_WORK_ITEMS: boolean
+  HOST_REVIEW_ENABLED: boolean
+  HOST_REVIEW_BETWEEN_WORK_ITEMS: boolean
   HOST_REVIEWER: 'dakar' | 'coderabbit'
   DRY_RUN: boolean
   AUTO_MERGE: boolean
@@ -272,8 +272,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     HOST_COMMIT_GATES,
     HOST_GATES_BETWEEN_WORK_ITEMS,
     CS_CHECK,
-    CODERABBIT_HOST_REVIEW,
-    CODERABBIT_BETWEEN_WORK_ITEMS,
+    HOST_REVIEW_ENABLED,
+    HOST_REVIEW_BETWEEN_WORK_ITEMS,
     DRY_RUN,
     AUTO_MERGE,
     BASE,
@@ -303,6 +303,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     runHostReview,
     recordHostReview,
   } = deps
+  const reviewerDisplayName = HOST_REVIEWER === 'dakar' ? 'Dakar' : 'CodeRabbit'
 
   async function runPlanDesignLoop(task: SelectedTask, worktree: string, opts: Record<string, unknown> = {}): Promise<{ plan?: StagePlan; fail?: StageResult }> {
     const tag = task.id
@@ -456,7 +457,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     // run FIRST but only when host-gate-between-work-items verification is on;
     // the CodeScene check runs whenever CS_CHECK is on, independent of that flag
     // (they are separate gates). Both are free, so they gate the item before the
-    // quota-limited between-item CodeRabbit review the caller runs next.
+    // quota-limited between-item host review the caller runs next.
     const runGates = HOST_COMMIT_GATES && HOST_GATES_BETWEEN_WORK_ITEMS
     const runFix = async (blocking: string[], fixLabel: string, attempt: number): Promise<{ fail: StageResult } | null> => {
       const { dirtyDetail } = await dispatchFixAndVerify(task, worktree, plan, blocking, fixLabel, attempt)
@@ -514,20 +515,20 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       await recordHostReview(`${tag} ${itemLabel} a${attempt}`, review)
       runs += 1
       if (review.outcome === 'auth') {
-        return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: `${HOST_REVIEWER} host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } }
+        return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: `${reviewerDisplayName} host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } }
       }
       if (review.outcome === 'rate-limited' || review.outcome === 'error') {
-        return { fail: { id: tag, status: 'halted', stage: 'code-review', detail: `${HOST_REVIEWER} between-item review could not complete for ${itemLabel} (${review.outcome} after ${review.attempts} attempt(s), ${review.errorCategory}): ${review.detail}; the work is committed but unreviewed — resolve the host-review fault and relaunch with resumeMode: "continue"`, worktree, proposals: [], ...extra } }
+        return { fail: { id: tag, status: 'halted', stage: 'code-review', detail: `${reviewerDisplayName} between-item review could not complete for ${itemLabel} (${review.outcome} after ${review.attempts} attempt(s), ${review.errorCategory}): ${review.detail}; the work is committed but unreviewed — resolve the host-review fault and relaunch with resumeMode: "continue"`, worktree, proposals: [], ...extra } }
       }
-      const blocking = reviewBlockingItems(HOST_REVIEWER, review.findings)
-      log(`[task ${tag}] between-item ${HOST_REVIEWER} ${itemLabel} attempt ${attempt}: ${review.findings.length} finding(s), ${blocking.length} blocking`)
+      const blocking = reviewBlockingItems(reviewerDisplayName, review.findings)
+      log(`[task ${tag}] between-item ${reviewerDisplayName} ${itemLabel} attempt ${attempt}: ${review.findings.length} finding(s), ${blocking.length} blocking`)
       if (!blocking.length) return { ok: true, hostReviewRuns: runs }
       if (attempt === MAX_REVIEW_ROUNDS) {
-        return { fail: { id: tag, status: 'failed', stage: 'code-review', detail: `${HOST_REVIEWER} between-item review left blocking finding(s) unresolved after ${MAX_REVIEW_ROUNDS} fix attempt(s) on ${itemLabel}: ${blocking.join('; ')}`, worktree, proposals: [], ...extra } }
+        return { fail: { id: tag, status: 'failed', stage: 'code-review', detail: `${reviewerDisplayName} between-item review left blocking finding(s) unresolved after ${MAX_REVIEW_ROUNDS} fix attempt(s) on ${itemLabel}: ${blocking.join('; ')}`, worktree, proposals: [], ...extra } }
       }
       const { dirtyDetail } = await dispatchFixAndVerify(task, worktree, plan, blocking, `fix:${tag} ${itemLabel} a${attempt}`, attempt)
       if (dirtyDetail) {
-        return { fail: { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the ${HOST_REVIEWER} host-review fix for ${itemLabel} left uncommitted state (${dirtyDetail}); every fix must be committed before re-review`, worktree, proposals: [], ...extra } }
+        return { fail: { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the ${reviewerDisplayName} host-review fix for ${itemLabel} left uncommitted state (${dirtyDetail}); every fix must be committed before re-review`, worktree, proposals: [], ...extra } }
       }
     }
     return { ok: true, hostReviewRuns: runs }
@@ -595,8 +596,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         log(`[task ${tag}] work-item round ${round}: ${after.ticked}/${after.ticked + after.unticked} Progress item(s) committed`)
         // Deterministic checks on this committed work item, before the next
         // item is dispatched. Host commit gates run FIRST (a red branch must
-        // not spend a CodeRabbit review), then the CodeScene check, then the
-        // between-item CodeRabbit review. Each gate is independently
+        // not spend a host review), then the CodeScene check, then the
+        // between-item host review. Each gate is independently
         // enable/disableable: the commit gates follow
         // hostGatesBetweenWorkItems and the CodeScene check follows csCheck,
         // so csCheck runs here even when the between-item commit gates are off.
@@ -604,7 +605,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
           const gate = await runBetweenItemGates(task, worktree, plan, `wi${round}`, extra)
           if ('fail' in gate) return gate
         }
-        if (CODERABBIT_HOST_REVIEW && CODERABBIT_BETWEEN_WORK_ITEMS) {
+        if (HOST_REVIEW_ENABLED && HOST_REVIEW_BETWEEN_WORK_ITEMS) {
           const gate = await runBetweenItemReview(task, worktree, plan, `wi${round}`, extra)
           if ('fail' in gate) return gate
           hostReviewRuns += gate.hostReviewRuns
@@ -813,20 +814,20 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       // the selected host reviewer BEFORE the reviewer agents, so a blocking
       // host-review round never spends reviewer-agent tokens. We trade
       // reviewer wall-clock and backoff for tokens, which do not replenish.
-      if (CODERABBIT_HOST_REVIEW) {
+      if (HOST_REVIEW_ENABLED) {
         const hostReview = await runHostReview(worktree, `host-review:${HOST_REVIEWER}:${tag} r${round}`)
         await recordHostReview(`${tag} r${round}`, hostReview)
         if (hostReview.outcome === 'auth') {
-          return { id: tag, status: 'fatal-auth', stage: 'review', detail: `${HOST_REVIEWER} host review is not authenticated: ${hostReview.detail}`, reviewRounds, worktree, proposals, ...kindExtra }
+          return { id: tag, status: 'fatal-auth', stage: 'review', detail: `${reviewerDisplayName} host review is not authenticated: ${hostReview.detail}`, reviewRounds, worktree, proposals, ...kindExtra }
         }
         if (hostReview.outcome === 'rate-limited' || hostReview.outcome === 'error') {
           // Deferred: the host reviewer could not complete, so fall through to the
           // reviewer agents — they remain the decisive review.
-          deferredHostReviews.push(`${HOST_REVIEWER} review deferred in round ${round} (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`)
-          log(`[task ${tag}] ${HOST_REVIEWER} host review deferred in round ${round}: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`)
+          deferredHostReviews.push(`${reviewerDisplayName} review deferred in round ${round} (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`)
+          log(`[task ${tag}] ${reviewerDisplayName} host review deferred in round ${round}: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`)
         } else {
-          const hostReviewBlocking = reviewBlockingItems(HOST_REVIEWER, hostReview.findings)
-          log(`[task ${tag}] ${HOST_REVIEWER} host review round ${round}: ${hostReview.findings.length} finding(s), ${hostReviewBlocking.length} blocking`)
+          const hostReviewBlocking = reviewBlockingItems(reviewerDisplayName, hostReview.findings)
+          log(`[task ${tag}] ${reviewerDisplayName} host review round ${round}: ${hostReview.findings.length} finding(s), ${hostReviewBlocking.length} blocking`)
           if (hostReviewBlocking.length) {
             // Short-circuit before the reviewer agents: fix the host-review
             // blockers first, spending zero agent tokens this round.
@@ -835,7 +836,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
             const hostReviewFix = await dispatchFixAndVerify(task, worktree, plan, hostReviewBlocking, `fix:${tag} r${round}`, round)
             reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(hostReviewFix.report)
             if (hostReviewFix.dirtyDetail) {
-              return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the ${HOST_REVIEWER} host-review fix round left uncommitted state (${hostReviewFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
+              return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the ${reviewerDisplayName} host-review fix round left uncommitted state (${hostReviewFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
             }
             continue
           }
@@ -1070,20 +1071,20 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
       // severities halt the addendum for assessment (addenda have no fix loop);
       // a persistent rate limit or CLI fault defers with a documented open
       // issue, mirroring the dual-review contract.
-      if (CODERABBIT_HOST_REVIEW) {
+      if (HOST_REVIEW_ENABLED) {
         phase('Code Review')
         const hostReview = await runHostReview(worktree, `host-review:${HOST_REVIEWER}:${tag} addendum`)
         await recordHostReview(`${tag} addendum`, hostReview)
         if (hostReview.outcome === 'auth') {
-          return { id: tag, status: 'fatal-auth', stage: 'auth', detail: `${HOST_REVIEWER} host review is not authenticated: ${hostReview.detail}`, worktree, proposals, kind: 'addendum' }
+          return { id: tag, status: 'fatal-auth', stage: 'auth', detail: `${reviewerDisplayName} host review is not authenticated: ${hostReview.detail}`, worktree, proposals, kind: 'addendum' }
         }
-        const blockingFindings = reviewBlockingItems(HOST_REVIEWER, hostReview.findings)
+        const blockingFindings = reviewBlockingItems(reviewerDisplayName, hostReview.findings)
         if (blockingFindings.length) {
-          return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: `${HOST_REVIEWER} host review found blocking issue(s): ${blockingFindings.join('; ')}`, impl, worktree, proposals, kind: 'addendum' })
+          return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: `${reviewerDisplayName} host review found blocking issue(s): ${blockingFindings.join('; ')}`, impl, worktree, proposals, kind: 'addendum' })
         }
         if (hostReview.outcome === 'rate-limited' || hostReview.outcome === 'error') {
-          addendumOpenIssues.push(`${HOST_REVIEWER} review deferred (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`)
-          log(`[task ${tag}] ${HOST_REVIEWER} host review deferred for the addendum: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`)
+          addendumOpenIssues.push(`${reviewerDisplayName} review deferred (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`)
+          log(`[task ${tag}] ${reviewerDisplayName} host review deferred for the addendum: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`)
         }
       }
       let addendumReview: StageReview | null = null
@@ -1097,7 +1098,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
         if (!addendumReview || addendumReview.verdict !== 'pass' || blocking.length > 0) {
           return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: blocking.join('; ') || addendumReview?.summary || 'addendum fallback review did not pass', impl, addendumReview, worktree, proposals, kind: 'addendum' })
         }
-        log(`[task ${tag}] addendum fallback review passed after deferred ${HOST_REVIEWER} review`)
+        log(`[task ${tag}] addendum fallback review passed after deferred ${reviewerDisplayName} review`)
       }
       let integration: StageIntegration | null = null
       if (AUTO_MERGE) {
