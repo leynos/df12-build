@@ -1,5 +1,5 @@
 /**
- * @file df12-build-odw entry: the ODW workflow's worker-pool control loop and
+ * df12-build-odw entry: the ODW workflow's worker-pool control loop and
  * fresh-run recovery entrypoint. This module unpacks the run configuration
  * (config.ts) once, binds each subsystem factory with that configuration
  * (prompts, write preflight, assessment, remediation, host review, and the
@@ -10,6 +10,8 @@
  * The build (scripts/build-workflow.mjs) bundles this file and its imports
  * flat and wraps the whole body for the ODW loader; workflowMain() below is
  * invoked by the generated footer.
+ *
+ * @module
  */
 import {
   branchToRoadmapId,
@@ -73,6 +75,7 @@ import {
   coderabbitBlockingItems,
   coderabbitCapture,
   classifyCoderabbitOutcome,
+  csCheckMetrics,
   hostGateMetrics,
   makeHostReview,
   parseCoderabbitAgentOutput,
@@ -1176,6 +1179,11 @@ return {
     enabled: HOST_COMMIT_GATES,
     timeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
     ...hostGateMetrics,
+  },
+  codeScene: {
+    enabled: CS_CHECK,
+    command: CS_CHECK_COMMAND,
+    ...csCheckMetrics,
   },
   stageAttempts: STAGE_ATTEMPTS,
   // Host-driven build loop configuration: one builder turn per unticked

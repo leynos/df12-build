@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NIXIE_CLI_VERSION: '1.1.0'
+      NIXIE_PYTHON_VERSION: '3.14'
+      MERMAN_CLI_VERSION: '0.7.0'
+      DAFNY_VERSION: '4.10.0'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+          # check-fmt diffs the range back to the merge-base with
+          # origin/main, so the full history is required.
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: '1.3.14'
+      - uses: astral-sh/setup-uv@c5680ec91f7b9b91406fab4ded5d45245abf7b67
+      - name: Install JavaScript dependencies
+        run: bun install --frozen-lockfile
+      - name: Install Mermaid validators
+        run: |
+          set -euo pipefail
+          cargo install merman-cli --version "=${MERMAN_CLI_VERSION}" --locked
+          uv tool install --python "${NIXIE_PYTHON_VERSION}" --managed-python \
+            "nixie-cli==${NIXIE_CLI_VERSION}"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+          command -v merman-cli
+      - name: Install Dafny
+        run: |
+          set -euo pipefail
+          dotnet tool install --global dafny --version "${DAFNY_VERSION}"
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          export PATH="$HOME/.dotnet/tools:$PATH"
+          dafny --version
+      - name: Run commit gates
+        run: make all
+      # make all uses the lenient verify-modules (it skips without Dafny so
+      # local runs stay friendly); CI must prove Dafny actually ran.
+      - name: Verify decision-table model (strict)
+        run: make verify-modules-strict

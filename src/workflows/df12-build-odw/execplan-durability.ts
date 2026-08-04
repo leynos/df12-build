@@ -1,16 +1,20 @@
 /**
- * @file Host-enforced ExecPlan durability — prose alone does not hold: live runs
+ * Host-enforced ExecPlan durability — prose alone does not hold: live runs
  * showed planners returning uncommitted drafts and reviewers approving
  * without committing the status flip. The control loop therefore verifies
  * durable state at every stage boundary, the same philosophy as the
  * write-probe: prompts request, the host verifies.
+ *
+ * @module
  */
 import { execFileStatus, fileState } from './exec.ts'
 import { parseExecplanState } from './recovery-decision.ts'
 
 /** The pass/fail outcome of a durability check: whether the target is durable, and why not when it is not. */
 export interface DurabilityVerdict {
+  /** True when the target is durable (committed, no uncommitted modifications). */
   ok: boolean
+  /** Empty on success; otherwise the reason the target failed the durability check. */
   detail: string
 }
 
@@ -21,9 +25,18 @@ export interface DurabilityVerdict {
  * `detail`. The full text lives here; log lines are separately bounded.
  */
 export interface SalvageOutcome {
+  /** Relative paths successfully committed onto the branch's own history. */
   committed: string[]
-  skipped: Array<{ path: string; reason: string }>
+  /** Candidate paths excluded from salvage, each paired with why it was excluded. */
+  skipped: Array<{
+    /** The candidate path (as observed by the host, before or after containment). */
+    path: string
+    /** Why the candidate was excluded from salvage (out of scope, escaped the worktree, or not a regular file). */
+    reason: string
+  }>
+  /** The salvage commit's HEAD sha; empty when nothing was committed OR the post-commit HEAD read failed (see `detail`). */
   sha: string
+  /** A human-readable summary of the outcome (e.g. "nothing to salvage" or a git failure). */
   detail: string
 }
 
@@ -46,22 +59,32 @@ export function isTaskArtefactPath(candidate: unknown): boolean {
 }
 
 /**
- * Contain an agent-supplied ExecPlan path within the task worktree. Plan
- * paths come back from planner agents — untrusted, prompt-injectable data
- * under the documented threat model — so an absolute path outside the
- * worktree or a ../ escape must fail closed BEFORE any filesystem or git
- * access.
+ * Normalize an agent-supplied ExecPlan path within the task worktree and
+ * require the task-scoped `docs/execplans/*.md` convention. Plan paths come
+ * back from planner agents — untrusted, prompt-injectable data under the
+ * documented threat model — so a path outside that normalized scope must fail
+ * closed BEFORE any filesystem or git access.
  *
  * @param worktree The task worktree's absolute path.
  * @param planPath The agent-supplied plan path (untrusted).
- * @returns `{ ok, relPath, detail }`; `ok` is false when the path escapes the worktree.
+ * @returns `{ ok, relPath, detail }`; `ok` is true only for a normalized task-scoped ExecPlan path.
  */
-export function execplanRelPath(worktree: string, planPath: unknown): { ok: boolean; relPath: string; detail: string } {
+export function execplanRelPath(worktree: string, planPath: unknown): {
+  /** True when the normalized path is a task-scoped `docs/execplans/*.md` path inside the worktree. */
+  ok: boolean
+  /** The path relative to the worktree; empty when `ok` is false. */
+  relPath: string
+  /** Empty when `ok`; otherwise why the path was rejected. */
+  detail: string
+} {
   const path = process.getBuiltinModule('node:path')
   const raw = String(planPath || '')
   const rel = path.isAbsolute(raw) ? path.relative(worktree, raw) : path.normalize(raw)
   if (!raw || !rel || rel === '.' || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
     return { ok: false, relPath: '', detail: `ExecPlan path escapes the assigned worktree: ${raw || '<empty>'}` }
+  }
+  if (!isTaskArtefactPath(rel)) {
+    return { ok: false, relPath: '', detail: `ExecPlan path is outside the task-scoped docs/execplans/*.md scope: ${raw}` }
   }
   return { ok: true, relPath: rel, detail: '' }
 }
@@ -233,15 +256,6 @@ export async function salvageTaskArtefacts(worktree: string, candidatePaths: rea
     const contained = execplanRelPath(worktree, raw)
     if (!contained.ok) {
       skipped.push({ path: raw, reason: contained.detail })
-      continue
-    }
-    // Re-check the artefact convention on the NORMALIZED path: the raw pattern
-    // accepts `docs/execplans/../../README.md`, which normalizes to `README.md`
-    // — still inside the worktree, so containment passes, but outside the
-    // task-artefact scope. Without this second gate an untrusted candidate
-    // source could make the host commit arbitrary in-worktree Markdown.
-    if (!isTaskArtefactPath(contained.relPath)) {
-      skipped.push({ path: raw, reason: `normalizes outside the docs/execplans/*.md artefact scope (${contained.relPath})` })
       continue
     }
     // fileState lstat-probes and requires a REGULAR file, so a committed or

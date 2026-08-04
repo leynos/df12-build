@@ -34,6 +34,29 @@ describe('expandStepRange', () => {
       }),
     )
   })
+
+  test('rejects malformed step ids before numeric conversion', () => {
+    const invalid = ['', '-1.2', '1.-2', '1', '1.', '.2', '1.2.3', ' 1.2', '1.2 ', '0x1.2', '1e2.3']
+    for (const value of invalid) {
+      expect(expandStepRange(value, '1.3')).toEqual([])
+      expect(expandStepRange('1.1', value)).toEqual([])
+    }
+  })
+
+  test('rejects unsafe integer components', () => {
+    const unsafeInteger = String(Number.MAX_SAFE_INTEGER + 1)
+
+    expect(expandStepRange(`${unsafeInteger}.1`, `${unsafeInteger}.2`)).toEqual([])
+    expect(expandStepRange(`1.${unsafeInteger}`, `1.${unsafeInteger}`)).toEqual([])
+  })
+
+  test('accepts the maximum range length and rejects the first oversized range', () => {
+    const maximum = expandStepRange('1.1', '1.1000')
+    expect(maximum).toHaveLength(1_000)
+    expect(maximum[0]).toBe('1.1')
+    expect(maximum[999]).toBe('1.1000')
+    expect(expandStepRange('1.1', '1.1001')).toEqual([])
+  })
 })
 
 describe('extractRoadmapIds', () => {

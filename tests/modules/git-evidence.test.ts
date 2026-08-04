@@ -139,6 +139,13 @@ describe('small readers', () => {
     await expect(readFileText(link)).rejects.toThrow()
   })
 
+  test('readFileText rejects a FIFO without blocking', async () => {
+    const { dir } = makeRepo()
+    const fifo = path.join(dir, 'plan.fifo')
+    execFileSync('mkfifo', [fifo])
+    await expect(readFileText(fifo)).rejects.toThrow(/not a regular file/)
+  })
+
   test('with a worktree root, a symlinked parent directory escape is rejected', async () => {
     const { dir } = makeRepo()
     // docs/ is a symlink to a sibling tree outside the worktree; the plan

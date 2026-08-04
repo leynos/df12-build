@@ -279,7 +279,7 @@ test('fault metrics count retries and terminal fault classes with fixed keys', a
   assert.deepEqual(surface.faultMetrics, { infraRetries: 1, infraFaults: 1, providerFaults: 1, authFaults: 1 })
 })
 
-test('ExecPlan paths are contained within the worktree before any filesystem access', async () => {
+test('ExecPlan paths are task-scoped within the worktree before any filesystem access', async () => {
   const surface = await loadAssessmentSurface()
   const worktree = '/work/tree'
 
@@ -288,13 +288,11 @@ test('ExecPlan paths are contained within the worktree before any filesystem acc
     relPath: 'docs/execplans/roadmap-1-2-3.md',
     detail: '',
   })
-  assert.deepEqual(surface.execplanRelPath(worktree, '/work/tree/docs/plan.md'), {
+  assert.deepEqual(surface.execplanRelPath(worktree, '/work/tree/docs/execplans/plan.md'), {
     ok: true,
-    relPath: 'docs/plan.md',
+    relPath: 'docs/execplans/plan.md',
     detail: '',
   })
-  // A leading-dots FILENAME is not an escape.
-  assert.equal(surface.execplanRelPath(worktree, '..plan.md').ok, true)
 
   const escapes = [
     '../outside.md',
@@ -310,6 +308,14 @@ test('ExecPlan paths are contained within the worktree before any filesystem acc
     assert.equal(contained.ok, false, JSON.stringify(escape))
     assert.equal(contained.relPath, '')
     assert.match(contained.detail, /escapes the assigned worktree/)
+  }
+
+  const outsideTaskScope = ['docs/plan.md', 'docs/execplans/../../README.md', '..plan.md']
+  for (const planPath of outsideTaskScope) {
+    const contained = surface.execplanRelPath(worktree, planPath)
+    assert.equal(contained.ok, false, JSON.stringify(planPath))
+    assert.equal(contained.relPath, '')
+    assert.match(contained.detail, /outside the task-scoped docs\/execplans\/\*\.md scope/)
   }
 })
 

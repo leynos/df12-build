@@ -1,13 +1,14 @@
 // Module tests for the host-run CodeRabbit review: the NDJSON outcome
 // classifier's terminal-completion guard, and the spawn-streamed host commit
 // gates (secure per-run log directory).
-import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import {
   classifyCoderabbitOutcome,
+  csCheckMetrics,
   hostGateLogPath,
   makeHostReview,
   parseCoderabbitAgentOutput,
@@ -64,6 +65,12 @@ describe('runCodeSceneCheck', () => {
     junk.push(dir)
     return dir
   }
+  beforeEach(() => {
+    csCheckMetrics.runs = 0
+    csCheckMetrics.failures = 0
+    csCheckMetrics.probeFailures = 0
+    csCheckMetrics.skipped = 0
+  })
   afterEach(() => {
     for (const target of junk.splice(0)) if (target) rmSync(target, { recursive: true, force: true })
   })
@@ -75,6 +82,34 @@ describe('runCodeSceneCheck', () => {
     const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
     expect(result.clean).toBe(true)
     expect(result.skipped).toBe(false)
+    expect(csCheckMetrics).toEqual({ runs: 1, failures: 0, probeFailures: 0, skipped: 0 })
+    junk.push(result.logFile)
+  })
+
+  test('a quoted executable path is probed and executed intact', async () => {
+    const dir = tmp('cs-quoted-')
+    const executable = path.join(dir, 'code scene check')
+    writeFileSync(executable, '#!/bin/sh\nexit 0\n')
+    chmodSync(executable, 0o755)
+    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: `"${executable}"` })
+    const result = await runCodeSceneCheck(dir, '1.2.3', 'quoted')
+    expect(result.clean).toBe(true)
+    expect(result.skipped).toBe(false)
+    expect(csCheckMetrics).toEqual({ runs: 1, failures: 0, probeFailures: 0, skipped: 0 })
+    junk.push(result.logFile)
+  })
+
+  test('a leading environment assignment does not hide the executable', async () => {
+    const dir = tmp('cs-environment-')
+    const executable = path.join(dir, 'check-environment')
+    writeFileSync(executable, '#!/bin/sh\ntest "$DF12_CS_MARKER" = expected\n')
+    chmodSync(executable, 0o755)
+    const command = `DF12_CS_MARKER=expected "${executable}"`
+    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: command })
+    const result = await runCodeSceneCheck(dir, '1.2.3', 'environment')
+    expect(result.clean).toBe(true)
+    expect(result.skipped).toBe(false)
+    expect(csCheckMetrics).toEqual({ runs: 1, failures: 0, probeFailures: 0, skipped: 0 })
     junk.push(result.logFile)
   })
 
@@ -86,6 +121,7 @@ describe('runCodeSceneCheck', () => {
     expect(result.skipped).toBe(false)
     expect(result.detail).toMatch(/Complex Method/)
     expect(result.detail).toContain(result.logFile)
+    expect(csCheckMetrics).toEqual({ runs: 1, failures: 1, probeFailures: 0, skipped: 0 })
     junk.push(result.logFile)
   })
 
@@ -96,6 +132,17 @@ describe('runCodeSceneCheck', () => {
     expect(result.clean).toBe(true)
     expect(result.skipped).toBe(true)
     expect(result.detail).toMatch(/not on PATH/)
+    expect(csCheckMetrics).toEqual({ runs: 0, failures: 0, probeFailures: 0, skipped: 1 })
+  })
+
+  test('a probe infrastructure fault fails instead of masquerading as absence', async () => {
+    const missingWorktree = path.join(tmp('cs-probe-parent-'), 'absent')
+    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: 'true' })
+    const result = await runCodeSceneCheck(missingWorktree, '1.2.3', 'r1')
+    expect(result.clean).toBe(false)
+    expect(result.skipped).toBe(false)
+    expect(result.detail).toMatch(/availability probe.*failed/i)
+    expect(csCheckMetrics).toEqual({ runs: 0, failures: 0, probeFailures: 1, skipped: 0 })
   })
 
   test('csCheck disabled skips without probing', async () => {
@@ -124,14 +171,17 @@ describe('runHostCommitGates streaming', () => {
     const dir = tmp('gate-stream-')
     // ~40MB of stdout would have tripped maxBuffer under execFile; streaming
     // must pass it through and still report green.
-    const { runHostCommitGates } = hostReview({ commitGates: ['yes x | head -c 40000000; echo; echo DONE-OK'] })
+    const { runHostCommitGates } = hostReview({
+      commitGates: ['yes x | head -c 40000000; echo; echo DONE-OK'],
+      commitGateTimeoutSeconds: 30,
+    })
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
     junk.push(result.results[0]?.logFile)
     expect(result.green).toBe(true)
     expect(result.results[0].ok).toBe(true)
     // The log file holds the full stream, not a truncated buffer.
     expect(readFileSync(result.results[0].logFile, 'utf8').length).toBeGreaterThan(40000000)
-  })
+  }, 45_000)
 
   test('a red gate carries the streamed tail and the log path', async () => {
     const dir = tmp('gate-stream-red-')
