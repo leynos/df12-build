@@ -1323,7 +1323,7 @@ function makePrompts(config) {
       ...CS_CHECK_GUIDANCE2 ? [CS_CHECK_GUIDANCE2, ""] : [],
       CODERABBIT_HOST_REVIEW2 ? `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT2}, plus markdownlint/nixie for markdown) first and green, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth \u2014 never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.` : `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT2}, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND2}\`, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth \u2014 never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
       "",
-      "Return the commit subjects you added, whether every deterministic gate is green at HEAD after your fixes, the number of CodeRabbit runs you completed, how each blocking item was resolved, any open issues with reasons, and a short summary. This structured report is durable validation evidence for the branch \u2014 be precise about which gates ran and at which commit."
+      `Return the commit subjects you added, whether every deterministic gate is green at HEAD after your fixes, the number of ${hostReviewer} runs you completed, how each blocking item was resolved, any open issues with reasons, and a short summary. This structured report is durable validation evidence for the branch \u2014 be precise about which gates ran and at which commit.`
     ].join("\n");
   }
   function codeReviewPrompt2(task, worktree, plan, impl) {
@@ -1400,7 +1400,7 @@ function makePrompts(config) {
       `  4. Tick the sub-task in the Addenda checklist of its execplan (\`- [ ] ${task.id}.<n>\` \u2192 \`- [x] \u2026\`).`,
       "  5. Commit the sub-task and Addenda tick together as one atomic commit (en-GB imperative subject).",
       "",
-      `Use leta for navigation, sem for history, and the language router skill for the languages you touch. Do NOT edit the roadmap \u2014 integration ticks the roadmap sub-tasks. When all listed sub-tasks are done, ensure the project commit gates (${COMMIT_GATE_TEXT2}) are green at HEAD. Return using the IMPL schema (execplanPath = the parent execplan): completion counts, commit subjects, gatesGreen, coderabbit run count, and any open issues.`
+      `Use leta for navigation, sem for history, and the language router skill for the languages you touch. Do NOT edit the roadmap \u2014 integration ticks the roadmap sub-tasks. When all listed sub-tasks are done, ensure the project commit gates (${COMMIT_GATE_TEXT2}) are green at HEAD. Return using the IMPL schema (execplanPath = the parent execplan): completion counts, commit subjects, gatesGreen, ${hostReviewer} run count, and any open issues.`
     ].join("\n");
   }
   function integratePrompt2(task, worktree, impl) {
@@ -1875,7 +1875,7 @@ function isDeferredReviewIssue(issue) {
     "coderabbit review deferred",
     "unavailable"
   ];
-  const isDakarDeferral = text.startsWith("dakar review deferred");
+  const isDakarDeferral = text.startsWith("dakar review deferred (stage: deferred)");
   const isCoderabbitDeferral = text.includes("coderabbit") && coderabbitDeferredMarkers.some((marker) => text.includes(marker));
   return isDakarDeferral || isCoderabbitDeferral;
 }
@@ -2276,31 +2276,32 @@ function validateCleanDakarFindings(raw) {
   return "";
 }
 function classifyDakarReview(execResult) {
+  const category = (fallback) => execResult.killed ? "timeout" : fallback;
   const doc = parseDakarDocument(execResult.stdout);
   if (!doc) {
     const detail = boundedTail([execResult.stderr, execResult.message].filter(Boolean).join("\n")) || "dakar-review produced no parsable JSON output";
-    return { outcome: "error", findings: [], detail };
+    return { outcome: "error", findings: [], detail, errorCategory: category("invalid-output") };
   }
   if (doc.ok === false) {
     const stage = boundedTail(doc.stage ?? "unknown", 200);
     if (String(doc.stage) === "deferred") {
-      return { outcome: "rate-limited", findings: [], detail: `Dakar review deferred (stage: ${stage}) \u2014 ${boundedTail(doc.error || "no detail")}` };
+      return { outcome: "rate-limited", findings: [], detail: `Dakar review deferred (stage: ${stage}) \u2014 ${boundedTail(doc.error || "no detail")}`, errorCategory: category("deferred") };
     }
-    return { outcome: "error", findings: [], detail: `stage: ${stage} \u2014 ${boundedTail(doc.error || "no detail")}` };
+    return { outcome: "error", findings: [], detail: `stage: ${stage} \u2014 ${boundedTail(doc.error || "no detail")}`, errorCategory: category("execution") };
   }
   if (doc.ok === true) {
     if (doc.skipped === true || doc.verdict === "pass") {
       const invalidFindings = validateCleanDakarFindings(doc.findings);
-      if (invalidFindings) return { outcome: "error", findings: [], detail: invalidFindings };
-      return { outcome: "clean", findings: [], detail: "" };
+      if (invalidFindings) return { outcome: "error", findings: [], detail: invalidFindings, errorCategory: category("invalid-output") };
+      return { outcome: "clean", findings: [], detail: "", errorCategory: category("none") };
     }
     if (doc.verdict === "changes-requested") {
       const validation = validateChangesRequestedFindings(doc.findings);
-      if (!validation.ok) return { outcome: "error", findings: [], detail: validation.detail };
-      return { outcome: "findings", findings: validation.findings.map(mapDakarFinding), detail: "" };
+      if (!validation.ok) return { outcome: "error", findings: [], detail: validation.detail, errorCategory: category("invalid-output") };
+      return { outcome: "findings", findings: validation.findings.map(mapDakarFinding), detail: "", errorCategory: category("none") };
     }
   }
-  return { outcome: "error", findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail(doc.verdict ?? "none", 200)})` };
+  return { outcome: "error", findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail(doc.verdict ?? "none", 200)})`, errorCategory: category("invalid-output") };
 }
 function parseCoderabbitAgentOutput(stdout) {
   const events = [];
@@ -2428,6 +2429,8 @@ function makeHostReview(config) {
     dakarBudgetGbp,
     coderabbitAttempts,
     coderabbitBackoffMinutes: backoffRange,
+<<<<<<< ours — function `makeHostReview` (F, confidence: medium)
+// hint: Logic changed on both sides. Requires understanding intent of each change.
     coderabbitFindingsFile,
     commitGates,
     commitGateTimeoutSeconds,
@@ -2670,6 +2673,266 @@ ${outcome.tail}`, logFile };
     runHostCommitGates: runHostCommitGates2,
     /** Run the CodeScene code-health check, skipping gracefully when its binary is absent. */
     runCodeSceneCheck: runCodeSceneCheck2
+=======
+    coderabbitFindingsFile: findingsFile,
+    commitGates,
+    commitGateTimeoutSeconds,
+    csCheck,
+    csCheckCommand
+  } = config;
+  const dakarInvocation = dakarCommand.trim().split(/\s+/).filter(Boolean);
+  const dakarExecutable = dakarInvocation[0] || "dakar-review";
+  const dakarPrefixArgs = dakarInvocation.slice(1);
+  let findingsSinkTail = Promise.resolve();
+  function reviewBackoffMinutes2(seed) {
+    let hash = 5381;
+    for (const ch of String(seed)) hash = (hash * 33 ^ ch.codePointAt(0)) >>> 0;
+    const [low, high] = backoffRange;
+    return low + hash % (high - low + 1);
+  }
+  async function runCoderabbitAttempt(worktree, exec) {
+    const result = await exec("coderabbit", ["review", "--agent", "--type", "committed", "--base", base], {
+      cwd: worktree,
+      timeoutMs: reviewTimeoutSeconds * 1e3
+    });
+    const parsed = parseCoderabbitAgentOutput(result.stdout);
+    const outcome = classifyCoderabbitOutcome(result, parsed);
+    const detail = outcome === "clean" || outcome === "findings" ? "" : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join("; ") || "coderabbit produced no parsable outcome").trim();
+    const errorCategory = result.killed ? "timeout" : outcome === "rate-limited" ? "deferred" : outcome === "auth" ? "auth" : outcome === "error" ? parsed.error || parsed.complete ? "execution" : "invalid-output" : "none";
+    return { outcome, findings: parsed.findings, detail: boundedTail(detail), errorCategory };
+  }
+  async function runDakarAttempt(worktree, exec, removeStateRoot) {
+    const fs = process.getBuiltinModule("node:fs");
+    const os = process.getBuiltinModule("node:os");
+    const path = process.getBuiltinModule("node:path");
+    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "df12-dakar-state-"));
+    const commandArgs = [
+      "--repo-root",
+      worktree,
+      "--base",
+      base,
+      "--state-root",
+      stateRoot,
+      "--timeout",
+      String(reviewTimeoutSeconds),
+      ...dakarBudgetGbp > 0 ? ["--budget-gbp", String(dakarBudgetGbp)] : []
+    ];
+    try {
+      const result = await exec(dakarExecutable, [...dakarPrefixArgs, ...commandArgs], {
+        cwd: worktree,
+        timeoutMs: reviewTimeoutSeconds * 1e3
+      });
+      return classifyDakarReview(result);
+    } finally {
+      try {
+        const cleanup = removeStateRoot || fs.rmSync;
+        cleanup(stateRoot, { recursive: true, force: true });
+      } catch (error) {
+        const detail = boundedTail(error?.message || String(error), 500);
+        log(`[Dakar] could not remove temporary state root: ${detail}`);
+      }
+    }
+  }
+  async function runHostReview2(worktree, label, deps = {}) {
+    const exec = deps.exec || execFileStatus;
+    const sleep = deps.sleep || hostSleepMinutes;
+    const nowMs = deps.nowMs || (() => Number(process.hrtime.bigint() / 1000000n));
+    const reviewer = reviewTool;
+    const reviewerName = reviewer === "dakar" ? "Dakar" : "CodeRabbit";
+    const boundedLabel = boundedTail(label, 120);
+    const startedMs = nowMs();
+    let terminalAttempt = 1;
+    try {
+      for (let attempt = 1; ; attempt++) {
+        terminalAttempt = attempt;
+        log(`[${boundedLabel}] ${reviewerName} host review attempt ${attempt} of ${coderabbitAttempts}`);
+        const single = reviewer === "dakar" ? await runDakarAttempt(worktree, exec, deps.removeDakarStateRoot) : await runCoderabbitAttempt(worktree, exec);
+        if (single.outcome === "rate-limited" && attempt < coderabbitAttempts) {
+          const minutes = reviewBackoffMinutes2(`${boundedLabel}#${attempt}`);
+          log(`[${boundedLabel}] ${reviewerName} rate limited/deferred; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${coderabbitAttempts} (wall-clock only, no agent tokens)`);
+          await sleep(minutes);
+          continue;
+        }
+        const review = {
+          reviewer,
+          outcome: single.outcome,
+          attempts: attempt,
+          elapsedMs: Math.max(0, Math.trunc(nowMs() - startedMs)),
+          errorCategory: single.errorCategory,
+          findings: single.findings,
+          detail: boundedTail(single.detail)
+        };
+        hostReviewMetrics.runs += 1;
+        hostReviewMetrics.retries += attempt - 1;
+        if (review.outcome === "rate-limited") hostReviewMetrics.deferred += 1;
+        if (review.outcome === "auth") hostReviewMetrics.authFailures += 1;
+        if (review.outcome === "error") hostReviewMetrics.errors += 1;
+        if (review.errorCategory === "timeout") hostReviewMetrics.timeouts += 1;
+        log(`[host-review] terminal ${JSON.stringify({ reviewer, label: boundedLabel, attempts: attempt, elapsedMs: review.elapsedMs, outcome: review.outcome, errorCategory: review.errorCategory })}`);
+        return review;
+      }
+    } catch (error) {
+      const elapsedMs = Math.max(0, Math.trunc(nowMs() - startedMs));
+      hostReviewMetrics.runs += 1;
+      hostReviewMetrics.retries += terminalAttempt - 1;
+      hostReviewMetrics.errors += 1;
+      log(`[host-review] terminal ${JSON.stringify({ reviewer, label: boundedLabel, attempts: terminalAttempt, elapsedMs, outcome: "error", errorCategory: "execution" })}`);
+      throw error;
+    }
+  }
+  async function recordHostReview2(label, review) {
+    for (const finding of review.findings) {
+      hostReviewMetrics.findings += 1;
+      const rawSeverity = String(finding.severity || "unknown").toLowerCase();
+      const severity = rawSeverity in hostReviewMetrics.bySeverity ? rawSeverity : "unknown";
+      hostReviewMetrics.bySeverity[severity] += 1;
+    }
+    if (!findingsFile || !review.findings.length) return;
+    const append = async () => {
+      const stamp = await execFileStatus("date", ["-u", "+%Y-%m-%dT%H:%M:%SZ"]);
+      const ts = stamp.ok ? stamp.stdout.trim() : "";
+      const lines = review.findings.map((finding) => JSON.stringify({
+        ts,
+        label,
+        severity: String(finding.severity || ""),
+        file: String(finding.fileName || ""),
+        comment: String(finding.comment || "").slice(0, 2e3),
+        codegenInstructions: String(finding.codegenInstructions || "").slice(0, 2e3),
+        suggestions: Array.isArray(finding.suggestions) ? finding.suggestions.length : 0
+      }));
+      try {
+        const fs = process.getBuiltinModule("node:fs/promises");
+        await fs.appendFile(findingsFile, `${lines.join("\n")}
+`, "utf8");
+      } catch (error) {
+        hostReviewMetrics.sinkFailures += 1;
+        hostReviewMetrics.sinkError = boundedTail(error?.message || String(error), 500);
+        log(`[${boundedTail(label, 120)}] could not append ${review.reviewer} host-review findings to ${findingsFile}: ${hostReviewMetrics.sinkError}`);
+      }
+    };
+    const pending = findingsSinkTail.then(append, append);
+    findingsSinkTail = pending.then(() => void 0, () => void 0);
+    await pending;
+  }
+  async function runHostCommitGates2(worktree, tag, roundLabel) {
+    const results2 = [];
+    for (const [index, command] of commitGates.entries()) {
+      hostGateMetrics.runs += 1;
+      log(`[task ${tag}] host gate ${index + 1}/${commitGates.length} (${roundLabel}): ${command}`);
+      const logFile = hostGateLogPath(tag, roundLabel, index);
+      const outcome = await streamGate(command, worktree, logFile);
+      if (!outcome.ok) {
+        hostGateMetrics.failures += 1;
+        const timedOut = outcome.killed ? ` (killed after the ${commitGateTimeoutSeconds}s gate timeout)` : "";
+        results2.push({ command, ok: false, logFile });
+        return {
+          green: false,
+          results: results2,
+          detail: `host gate \`${command}\` failed${timedOut}; full log: ${logFile}; output tail:
+${outcome.tail}`
+        };
+      }
+      results2.push({ command, ok: true, logFile });
+    }
+    return { green: true, results: results2, detail: "" };
+  }
+  function streamGate(command, cwd, logFile) {
+    const TAIL_LINES = 12;
+    const { spawn } = process.getBuiltinModule("node:child_process");
+    const fs = process.getBuiltinModule("node:fs");
+    return new Promise((resolve) => {
+      const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
+      const openFlags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
+      let fd;
+      try {
+        fd = fs.openSync(logFile, openFlags, 384);
+      } catch (error) {
+        resolve({ ok: false, killed: false, tail: `gate log write failed: ${error.message}` });
+        return;
+      }
+      const stream = fs.createWriteStream(logFile, { fd, autoClose: true });
+      const tail = [];
+      let carry = "";
+      let killed = false;
+      let settled = false;
+      const record = (chunk) => {
+        if (!stream.write(chunk) && !killed) {
+          child.stdout?.pause();
+          child.stderr?.pause();
+        }
+        carry += chunk.toString("utf8");
+        const lines = carry.split(/\r?\n/);
+        carry = lines.pop() || "";
+        for (const line of lines) {
+          tail.push(line);
+          if (tail.length > TAIL_LINES) tail.shift();
+        }
+      };
+      const finish = (ok, extraTail) => {
+        if (settled) return;
+        settled = true;
+        if (carry) {
+          tail.push(carry);
+          if (tail.length > TAIL_LINES) tail.shift();
+        }
+        if (extraTail) tail.push(extraTail);
+        stream.end(() => resolve({ ok, killed, tail: tail.slice(-TAIL_LINES).join("\n").trim() }));
+      };
+      stream.on("error", (error) => finish(false, `gate log write failed: ${error.message}`));
+      const child = spawn("sh", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+      stream.on("drain", () => {
+        child.stdout?.resume();
+        child.stderr?.resume();
+      });
+      child.stdout.on("data", record);
+      child.stderr.on("data", record);
+      const sigterm = setTimeout(() => {
+        killed = true;
+        child.stdout?.resume();
+        child.stderr?.resume();
+        child.kill("SIGTERM");
+        setTimeout(() => child.kill("SIGKILL"), 2e3).unref();
+      }, commitGateTimeoutSeconds * 1e3);
+      child.on("close", (code) => {
+        clearTimeout(sigterm);
+        finish(code === 0 && !killed);
+      });
+      child.on("error", (error) => {
+        clearTimeout(sigterm);
+        finish(false, `spawn failed: ${error.message}`);
+      });
+    });
+  }
+  async function runCodeSceneCheck2(worktree, tag, label) {
+    if (!csCheck) return { clean: true, skipped: true, detail: "", logFile: "" };
+    const bin = csCheckCommand.trim().split(/\s+/)[0] || "cs-check-changed";
+    const probe = await execFileStatus("sh", ["-c", 'command -v "$1"', "sh", bin], { cwd: worktree });
+    if (!probe.ok) {
+      csCheckMetrics.skipped += 1;
+      log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`);
+      return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: "" };
+    }
+    csCheckMetrics.runs += 1;
+    const logFile = hostGateLogPath(tag, `cs-${label}`, 0);
+    log(`[task ${tag}] CodeScene check (${label}): ${csCheckCommand}`);
+    const outcome = await streamGate(csCheckCommand, worktree, logFile);
+    if (outcome.ok) return { clean: true, skipped: false, detail: "", logFile };
+    csCheckMetrics.failures += 1;
+    const timedOut = outcome.killed ? ` (killed after the ${commitGateTimeoutSeconds}s timeout)` : "";
+    return { clean: false, skipped: false, detail: `CodeScene check \`${csCheckCommand}\` reported code-health issues${timedOut}; full log: ${logFile}; output tail:
+${outcome.tail}`, logFile };
+  }
+  return {
+    reviewBackoffMinutes: reviewBackoffMinutes2,
+    runHostReview: runHostReview2,
+    recordHostReview: recordHostReview2,
+    runHostCommitGates: runHostCommitGates2,
+    runCodeSceneCheck: runCodeSceneCheck2,
+    // Public compatibility aliases. Workflow policy uses only neutral names.
+    coderabbitBackoffMinutes: reviewBackoffMinutes2,
+    runCoderabbitHostReview: runHostReview2,
+    recordCoderabbitReview: recordHostReview2
+>>>>>>> theirs — function `makeHostReview` (F, confidence: medium)
   };
 }
 
@@ -2722,6 +2985,8 @@ function makeTaskPipeline(deps) {
     HOST_COMMIT_GATES: HOST_COMMIT_GATES2,
     HOST_GATES_BETWEEN_WORK_ITEMS: HOST_GATES_BETWEEN_WORK_ITEMS2,
     CS_CHECK: CS_CHECK2,
+<<<<<<< ours — function `makeTaskPipeline` (F, confidence: medium)
+// hint: Logic changed on both sides. Requires understanding intent of each change.
     CODERABBIT_HOST_REVIEW: CODERABBIT_HOST_REVIEW2,
     CODERABBIT_BETWEEN_WORK_ITEMS: CODERABBIT_BETWEEN_WORK_ITEMS2,
     DRY_RUN: DRY_RUN2,
@@ -3416,6 +3681,684 @@ function makeTaskPipeline(deps) {
     /** Full per-task pipeline from worktree creation through integration. */
     runTask: runTask2
   };
+=======
+    HOST_REVIEW_ENABLED: HOST_REVIEW_ENABLED2,
+    HOST_REVIEW_BETWEEN_WORK_ITEMS: HOST_REVIEW_BETWEEN_WORK_ITEMS2,
+    DRY_RUN: DRY_RUN2,
+    AUTO_MERGE: AUTO_MERGE2,
+    BASE: BASE2,
+    planPrompt: planPrompt2,
+    designReviewPrompt: designReviewPrompt2,
+    implementPrompt: implementPrompt2,
+    implementWorkItemPrompt: implementWorkItemPrompt2,
+    fixPrompt: fixPrompt2,
+    codeReviewPrompt: codeReviewPrompt2,
+    expertReviewPrompt: expertReviewPrompt2,
+    addendumReviewPrompt: addendumReviewPrompt2,
+    implementAddendumPrompt: implementAddendumPrompt2,
+    integratePrompt: integratePrompt2,
+    planAgentOptions: planAgentOptions2,
+    reviewAgentOptions: reviewAgentOptions2,
+    buildAgentOptions: buildAgentOptions2,
+    planningLock: planningLock2,
+    buildLock: buildLock2,
+    hostGateLock: hostGateLock2,
+    withInfraRetry: withInfraRetry2,
+    attachAssessment: attachAssessment2,
+    ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2,
+    createWorktree: createWorktree2,
+    runHostCommitGates: runHostCommitGates2,
+    runCodeSceneCheck: runCodeSceneCheck2,
+    HOST_REVIEWER,
+    runHostReview: runHostReview2,
+    recordHostReview: recordHostReview2
+  } = deps;
+  const reviewerDisplayName = HOST_REVIEWER === "dakar" ? "Dakar" : "CodeRabbit";
+  async function runPlanDesignLoop2(task, worktree, opts = {}) {
+    const tag = task.id;
+    const extra = opts.extra || {};
+    let plan = null;
+    let designVerdict = null;
+    for (let round = 1; round <= MAX_DESIGN_ROUNDS2; round++) {
+      phase("Plan");
+      plan = await planningLock2(() => withInfraRetry2(() => agent(planPrompt2(task, worktree, designVerdict, round, opts), planAgentOptions2({
+        phase: "Plan",
+        label: `plan:${tag} r${round}`,
+        schema: PLAN_SCHEMA
+      })), `plan:${tag} r${round}`));
+      if (!plan) return { fail: { id: tag, status: "failed", stage: "plan", detail: "planner returned nothing", worktree, proposals: [], ...extra } };
+      const contained = execplanRelPath(worktree, plan.execplanPath);
+      if (!contained.ok) {
+        return { fail: { id: tag, status: "failed", stage: "plan", detail: `planner returned an unusable ExecPlan path: ${contained.detail}`, plan, worktree, proposals: [], ...extra } };
+      }
+      const planFile = await fileState(contained.relPath, worktree);
+      if (!planFile.ok) {
+        return { fail: { id: tag, status: "failed", stage: "plan", detail: `could not verify the ExecPlan path: ${planFile.detail}`, plan, worktree, proposals: [], ...extra } };
+      }
+      if (!planFile.exists) {
+        return {
+          fail: {
+            id: tag,
+            status: "failed",
+            stage: "plan",
+            detail: `planner returned missing ExecPlan path: ${plan.execplanPath || "<empty>"}`,
+            plan,
+            worktree,
+            proposals: [],
+            ...extra
+          }
+        };
+      }
+      let durability = await verifyExecplanCommitted(worktree, plan.execplanPath);
+      let salvageNote = "";
+      if (!durability.ok) {
+        const salvage = await commitExecplanDraft(worktree, contained.relPath, tag);
+        if (salvage.ok) {
+          log(`[task ${tag}] plan round ${round}: ${durability.detail}; host committed the drafted plan`);
+          durability = await verifyExecplanCommitted(worktree, plan.execplanPath);
+        } else {
+          salvageNote = ` (host salvage declined: ${salvage.detail})`;
+        }
+      }
+      if (!durability.ok) {
+        log(`[task ${tag}] plan round ${round}: ExecPlan not durable (${durability.detail})${salvageNote}`);
+        designVerdict = {
+          satisfied: false,
+          blocking: [
+            `EXECPLAN DURABILITY: ${durability.detail}${salvageNote}. The committed ExecPlan is the durable source of truth \u2014 COMMIT the plan (and every file you changed) on the task branch with an en-GB imperative subject, then return the same plan.`
+          ]
+        };
+        continue;
+      }
+      phase("Design Review");
+      designVerdict = await planningLock2(() => withInfraRetry2(() => agent(designReviewPrompt2(task, worktree, plan, round), reviewAgentOptions2({
+        phase: "Design Review",
+        label: `design-review:${tag} r${round}`,
+        schema: DESIGN_VERDICT_SCHEMA
+      })), `design-review:${tag} r${round}`));
+      if (designVerdict?.satisfied) {
+        log(`[task ${tag}] design approved in round ${round}`);
+        const approved = await commitExecplanApproval(worktree, plan.execplanPath, tag);
+        if (!approved.ok) {
+          return {
+            fail: {
+              id: tag,
+              status: "failed",
+              stage: "design-review",
+              detail: `failed to record the committed ExecPlan approval: ${approved.detail}`,
+              plan,
+              worktree,
+              proposals: [],
+              ...extra
+            }
+          };
+        }
+        return { plan };
+      }
+      log(`[task ${tag}] design round ${round}: ${(designVerdict?.blocking || []).length} blocking point(s)`);
+    }
+    return {
+      fail: {
+        id: tag,
+        status: "halted",
+        stage: "design-review",
+        detail: `design review unsatisfied after ${MAX_DESIGN_ROUNDS2} rounds: ${(designVerdict?.blocking || []).join("; ")}`,
+        worktree,
+        proposals: [],
+        ...extra
+      }
+    };
+  }
+  async function dispatchFixAndVerify(task, worktree, plan, blocking, label, round) {
+    phase("Implement");
+    const report = await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, blocking, round), buildAgentOptions2({ phase: "Implement", label, schema: FIX_SCHEMA })), label));
+    const committed = await verifyWorktreeCommitted(worktree);
+    return { report, dirtyDetail: committed.ok ? null : committed.detail };
+  }
+  async function runBetweenItemGates(task, worktree, plan, itemLabel, extra) {
+    const tag = task.id;
+    const runGates = HOST_COMMIT_GATES2 && HOST_GATES_BETWEEN_WORK_ITEMS2;
+    const runFix = async (blocking, fixLabel, attempt) => {
+      const { dirtyDetail } = await dispatchFixAndVerify(task, worktree, plan, blocking, fixLabel, attempt);
+      if (dirtyDetail) {
+        return { fail: { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the fix for ${itemLabel} left uncommitted state (${dirtyDetail}); every fix must be committed before the checks re-run`, worktree, proposals: [], ...extra } };
+      }
+      return null;
+    };
+    for (let attempt = 1; attempt <= MAX_REVIEW_ROUNDS2; attempt++) {
+      if (runGates) {
+        const gates = await hostGateLock2(() => runHostCommitGates2(worktree, tag, `${itemLabel} a${attempt}`));
+        if (!gates.green) {
+          log(`[task ${tag}] host commit gates red after ${itemLabel} (attempt ${attempt} of ${MAX_REVIEW_ROUNDS2})`);
+          if (attempt === MAX_REVIEW_ROUNDS2) {
+            return { fail: { id: tag, status: "failed", stage: "implement", detail: `HOST GATES RED after ${itemLabel}: ${gates.detail} The committed work item's gatesGreen claim could not be reproduced after ${MAX_REVIEW_ROUNDS2} fix attempt(s).`, worktree, proposals: [], ...extra } };
+          }
+          const durability2 = await runFix([`HOST GATES RED: ${gates.detail} The agent-reported gate status for ${itemLabel} was wrong or is stale \u2014 reproduce the failure from the log, fix it, re-run the gates to green, and commit.`], `fix:${tag} ${itemLabel} gate a${attempt}`, attempt);
+          if (durability2) return durability2;
+          continue;
+        }
+      }
+      const cs = CS_CHECK2 ? await hostGateLock2(() => runCodeSceneCheck2(worktree, tag, `${itemLabel} a${attempt}`)) : { clean: true, skipped: true, detail: "", logFile: "" };
+      if (cs.clean) return { ok: true };
+      log(`[task ${tag}] CodeScene check red after ${itemLabel} (attempt ${attempt} of ${MAX_REVIEW_ROUNDS2})`);
+      if (attempt === MAX_REVIEW_ROUNDS2) {
+        return { fail: { id: tag, status: "failed", stage: "implement", detail: `CODESCENE RED after ${itemLabel}: ${cs.detail} The committed work item's code health could not be cleared after ${MAX_REVIEW_ROUNDS2} fix attempt(s).`, worktree, proposals: [], ...extra } };
+      }
+      const durability = await runFix([`CODESCENE RED: ${cs.detail} Clear these code-health regressions by refactoring, or \u2014 only where further refinement would be deleterious \u2014 suppress the specific smell with a justified @codescene(disable:"...") comment, then re-run the check to green and commit.`], `fix:${tag} ${itemLabel} cs a${attempt}`, attempt);
+      if (durability) return durability;
+    }
+    return { ok: true };
+  }
+  async function runBetweenItemReview(task, worktree, plan, itemLabel, extra) {
+    const tag = task.id;
+    let runs = 0;
+    for (let attempt = 1; attempt <= MAX_REVIEW_ROUNDS2; attempt++) {
+      const review = await runHostReview2(worktree, `host-review:${HOST_REVIEWER}:${tag} ${itemLabel} a${attempt}`);
+      await recordHostReview2(`${tag} ${itemLabel} a${attempt}`, review);
+      runs += 1;
+      if (review.outcome === "auth") {
+        return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: `${reviewerDisplayName} host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } };
+      }
+      if (review.outcome === "rate-limited" || review.outcome === "error") {
+        return { fail: { id: tag, status: "halted", stage: "code-review", detail: `${reviewerDisplayName} between-item review could not complete for ${itemLabel} (${review.outcome} after ${review.attempts} attempt(s), ${review.errorCategory}): ${review.detail}; the work is committed but unreviewed \u2014 resolve the host-review fault and relaunch with resumeMode: "continue"`, worktree, proposals: [], ...extra } };
+      }
+      const blocking = reviewBlockingItems(reviewerDisplayName, review.findings);
+      log(`[task ${tag}] between-item ${reviewerDisplayName} ${itemLabel} attempt ${attempt}: ${review.findings.length} finding(s), ${blocking.length} blocking`);
+      if (!blocking.length) return { ok: true, hostReviewRuns: runs };
+      if (attempt === MAX_REVIEW_ROUNDS2) {
+        return { fail: { id: tag, status: "failed", stage: "code-review", detail: `${reviewerDisplayName} between-item review left blocking finding(s) unresolved after ${MAX_REVIEW_ROUNDS2} fix attempt(s) on ${itemLabel}: ${blocking.join("; ")}`, worktree, proposals: [], ...extra } };
+      }
+      const { dirtyDetail } = await dispatchFixAndVerify(task, worktree, plan, blocking, `fix:${tag} ${itemLabel} a${attempt}`, attempt);
+      if (dirtyDetail) {
+        return { fail: { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the ${reviewerDisplayName} host-review fix for ${itemLabel} left uncommitted state (${dirtyDetail}); every fix must be committed before re-review`, worktree, proposals: [], ...extra } };
+      }
+    }
+    return { ok: true, hostReviewRuns: runs };
+  }
+  async function runWorkItemBuildLoop2(task, worktree, plan, opts = {}) {
+    const tag = task.id;
+    const extra = opts.extra || {};
+    const fail = (detail, openIssues2 = []) => ({ fail: { id: tag, status: "failed", stage: "implement", detail, openIssues: openIssues2, worktree, proposals: [], ...extra } });
+    const contained = execplanRelPath(worktree, plan.execplanPath);
+    if (!contained.ok) return fail(contained.detail);
+    const planRef = { worktreePath: worktree, execplanPath: contained.relPath };
+    const initial = await readExecplanState(planRef);
+    if (initial.status === "unreadable") return fail(`could not read the committed ExecPlan: ${initial.error}`);
+    if (initial.status === "missing") return fail(`the ExecPlan disappeared before the build: ${contained.relPath}`);
+    if (!(initial.items || []).length) return null;
+    const commits = [];
+    const openIssues = [];
+    let hostReviewRuns = 0;
+    let lastImpl = null;
+    let noProgressNote = "";
+    let strikes = 0;
+    for (let round = 1; round <= MAX_WORK_ITEM_ROUNDS2; round++) {
+      const before = await readExecplanState(planRef);
+      if (before.status === "unreadable") return fail(`could not read the committed ExecPlan: ${before.error}`, openIssues);
+      if (before.status === "missing") return fail(`the committed ExecPlan disappeared mid-build: ${contained.relPath}`, openIssues);
+      const item = (before.items || []).find((entry) => !entry.ticked);
+      if (!item) break;
+      const label = `implement:${tag} wi${round}`;
+      const impl = await buildLock2(() => withInfraRetry2(() => agent(implementWorkItemPrompt2(task, worktree, plan, item, { ...opts, noProgressNote }), buildAgentOptions2({
+        phase: "Implement",
+        label,
+        schema: IMPL_SCHEMA
+      })), label));
+      lastImpl = impl;
+      const authDetail = implementationAuthFailureDetail(impl);
+      if (authDetail) {
+        return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
+      }
+      if (!impl || !impl.ok || !impl.gatesGreen) {
+        return fail(impl?.summary || `work item did not reach a green state: ${item.text}`, impl?.openIssues || []);
+      }
+      if (Array.isArray(impl.commits)) commits.push(...impl.commits);
+      openIssues.push(...impl.openIssues || []);
+      hostReviewRuns += Number(impl.hostReviewRuns ?? impl.coderabbitRuns) || 0;
+      const committed = await verifyWorktreeCommitted(worktree);
+      if (!committed.ok) {
+        return fail(`work item returned ok but left uncommitted state in the worktree (${committed.detail}); every work item must be committed before returning`, openIssues);
+      }
+      const after = await readExecplanState(planRef);
+      if (after.status === "unreadable") return fail(`could not re-read the committed ExecPlan: ${after.error}`, openIssues);
+      if (after.status === "missing") return fail(`the committed ExecPlan disappeared mid-build: ${contained.relPath}`, openIssues);
+      if (after.unticked >= before.unticked) {
+        strikes += 1;
+        noProgressNote = `your previous turn returned ok but the committed ExecPlan still shows ${after.unticked} unticked Progress item(s) (it had ${before.unticked} before the turn); tick the work item you completed in ## Progress and commit the plan update together with the work`;
+        log(`[task ${tag}] work-item round ${round}: no committed Progress movement (strike ${strikes} of 2)`);
+        if (strikes >= 2) {
+          return fail(`the work-item build made no committed ExecPlan progress in two consecutive turns; ${after.unticked} Progress item(s) remain unticked`, openIssues);
+        }
+      } else {
+        strikes = 0;
+        noProgressNote = "";
+        log(`[task ${tag}] work-item round ${round}: ${after.ticked}/${after.ticked + after.unticked} Progress item(s) committed`);
+        if (HOST_COMMIT_GATES2 && HOST_GATES_BETWEEN_WORK_ITEMS2 || CS_CHECK2) {
+          const gate = await runBetweenItemGates(task, worktree, plan, `wi${round}`, extra);
+          if ("fail" in gate) return gate;
+        }
+        if (HOST_REVIEW_ENABLED2 && HOST_REVIEW_BETWEEN_WORK_ITEMS2) {
+          const gate = await runBetweenItemReview(task, worktree, plan, `wi${round}`, extra);
+          if ("fail" in gate) return gate;
+          hostReviewRuns += gate.hostReviewRuns;
+        }
+      }
+    }
+    const final = await readExecplanState(planRef);
+    if (final.status === "unreadable") return fail(`could not read the committed ExecPlan after the build: ${final.error}`, openIssues);
+    if (final.status === "missing") return fail(`the committed ExecPlan is absent after the build: ${contained.relPath}`, openIssues);
+    const remaining = (final.items || []).filter((entry) => !entry.ticked);
+    if (remaining.length) {
+      return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS2}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0].text}`, openIssues);
+    }
+    return {
+      impl: {
+        ok: true,
+        gatesGreen: true,
+        execplanPath: contained.relPath,
+        workItemsCompleted: final.ticked,
+        workItemsTotal: final.ticked + final.unticked,
+        commits: commits.slice(0, 50),
+        hostReviewRuns,
+        openIssues: [...new Set(openIssues)].slice(0, 20),
+        summary: lastImpl?.summary || "work-item build completed from the committed ExecPlan checklist"
+      }
+    };
+  }
+  async function runImplementationStage2(task, worktree, plan, opts = {}) {
+    const tag = task.id;
+    const extra = opts.extra || {};
+    phase("Implement");
+    if (PER_WORK_ITEM_BUILD2) {
+      const itemised = await runWorkItemBuildLoop2(task, worktree, plan, opts);
+      if (itemised) {
+        if (itemised.fail) return itemised;
+        return finishImplementationStage(task, worktree, plan, itemised.impl, extra);
+      }
+      log(`[task ${tag}] the committed ExecPlan has no Progress checklist; falling back to the single-turn build`);
+    }
+    const impl = await buildLock2(() => withInfraRetry2(() => agent(implementPrompt2(task, worktree, plan, opts), buildAgentOptions2({
+      phase: "Implement",
+      label: `implement:${tag}`,
+      schema: IMPL_SCHEMA
+    })), `implement:${tag}`));
+    const authDetail = implementationAuthFailureDetail(impl);
+    if (authDetail) {
+      return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
+    }
+    if (!impl || !impl.ok || !impl.gatesGreen) {
+      return {
+        fail: {
+          id: tag,
+          status: "failed",
+          stage: "implement",
+          detail: impl?.summary || "implementation did not reach a green state",
+          openIssues: impl?.openIssues || [],
+          worktree,
+          proposals: [],
+          ...extra
+        }
+      };
+    }
+    return finishImplementationStage(task, worktree, plan, impl, extra);
+  }
+  async function finishImplementationStage(task, worktree, plan, impl, extra) {
+    const tag = task.id;
+    const committed = await verifyWorktreeCommitted(worktree);
+    if (!committed.ok) {
+      return {
+        fail: {
+          id: tag,
+          status: "failed",
+          stage: "implement",
+          detail: `implementation returned ok but left uncommitted state in the worktree (${committed.detail}); every work item must be committed before returning`,
+          openIssues: impl?.openIssues || [],
+          worktree,
+          proposals: [],
+          ...extra
+        }
+      };
+    }
+    if (plan?.execplanPath) {
+      const contained = execplanRelPath(worktree, plan.execplanPath);
+      if (!contained.ok) {
+        log(`[task ${tag}] skipping the post-implementation plan-status check: ${contained.detail}`);
+      } else {
+        const planState = await readExecplanState({ worktreePath: worktree, execplanPath: contained.relPath });
+        if (planState.status !== "complete") {
+          log(`[task ${tag}] implementation returned ok but the committed ExecPlan status is '${planState.status}' (expected COMPLETE)${planState.error ? `: ${planState.error}` : ""}`);
+        }
+      }
+    }
+    return { impl };
+  }
+  async function integrateTask(task, mergeLock2, context) {
+    const { worktree, proposals, kindExtra, impl } = context;
+    const tag = task.id;
+    const doIntegrate = () => {
+      phase("Integrate");
+      return buildLock2(() => agent(integratePrompt2(task, worktree, impl), buildAgentOptions2({ phase: "Integrate", label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })));
+    };
+    try {
+      return { integration: mergeLock2 ? await mergeLock2(doIntegrate) : await doIntegrate() };
+    } catch (error) {
+      const message = error && error.message || String(error);
+      if (!infrastructureFailureDetail(message)) throw error;
+      faultMetrics.infraFaults += 1;
+      return {
+        fault: {
+          id: tag,
+          status: "infra-fault",
+          stage: "integrate",
+          detail: `integration agent died on an infrastructure fault (${message}); integration is never retried because the push to origin/${BASE2} is not idempotent \u2014 inspect origin/${BASE2} and the roadmap for a partial or hidden-success integration before relaunching with resumeMode: "continue"`,
+          worktree,
+          proposals,
+          ...kindExtra
+        }
+      };
+    }
+  }
+  async function runDualReviewAndIntegration2(task, worktree, plan, impl, mergeLock2, options = {}) {
+    const tag = task.id;
+    const kindExtra = options.kind ? { kind: options.kind } : {};
+    const proposals = [];
+    const reviewRounds = [];
+    let reviewsPass = false;
+    const deferredHostReviews = [];
+    for (let round = 1; round <= MAX_REVIEW_ROUNDS2; round++) {
+      let hostGates = null;
+      if (HOST_COMMIT_GATES2) {
+        hostGates = await hostGateLock2(() => runHostCommitGates2(worktree, tag, `r${round}`));
+        if (!hostGates.green) {
+          log(`[task ${tag}] host commit gates red in round ${round}`);
+          const gateBlocking = [`HOST GATES RED: ${hostGates.detail} The agent-reported gate status was wrong or is stale \u2014 reproduce the failure from the log, fix it, re-run the gates to green, and commit.`];
+          reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: gateBlocking, hostGates: hostGates.results, fix: null });
+          if (round === MAX_REVIEW_ROUNDS2) break;
+          const gateFix = await dispatchFixAndVerify(task, worktree, plan, gateBlocking, `fix:${tag} r${round}`, round);
+          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(gateFix.report);
+          if (gateFix.dirtyDetail) {
+            return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the gate-fix round left uncommitted state (${gateFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
+          }
+          continue;
+        }
+      }
+      if (CS_CHECK2) {
+        const cs = await hostGateLock2(() => runCodeSceneCheck2(worktree, tag, `r${round}`));
+        if (!cs.clean) {
+          log(`[task ${tag}] CodeScene check red in round ${round}`);
+          const csBlocking = [`CODESCENE RED: ${cs.detail} Clear these code-health regressions by refactoring, or \u2014 only where further refinement would be deleterious \u2014 suppress the specific smell with a justified @codescene(disable:"...") comment, then re-run the check to green and commit.`];
+          reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: csBlocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null });
+          if (round === MAX_REVIEW_ROUNDS2) break;
+          const csFix = await dispatchFixAndVerify(task, worktree, plan, csBlocking, `fix:${tag} cs r${round}`, round);
+          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(csFix.report);
+          if (csFix.dirtyDetail) {
+            return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeScene-fix round left uncommitted state (${csFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
+          }
+          continue;
+        }
+      }
+      if (HOST_REVIEW_ENABLED2) {
+        const hostReview = await runHostReview2(worktree, `host-review:${HOST_REVIEWER}:${tag} r${round}`);
+        await recordHostReview2(`${tag} r${round}`, hostReview);
+        if (hostReview.outcome === "auth") {
+          return { id: tag, status: "fatal-auth", stage: "review", detail: `${reviewerDisplayName} host review is not authenticated: ${hostReview.detail}`, reviewRounds, worktree, proposals, ...kindExtra };
+        }
+        if (hostReview.outcome === "rate-limited" || hostReview.outcome === "error") {
+          deferredHostReviews.push(`${reviewerDisplayName} review deferred in round ${round} (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`);
+          log(`[task ${tag}] ${reviewerDisplayName} host review deferred in round ${round}: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`);
+        } else {
+          const hostReviewBlocking = reviewBlockingItems(reviewerDisplayName, hostReview.findings);
+          log(`[task ${tag}] ${reviewerDisplayName} host review round ${round}: ${hostReview.findings.length} finding(s), ${hostReviewBlocking.length} blocking`);
+          if (hostReviewBlocking.length) {
+            reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: hostReviewBlocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null });
+            if (round === MAX_REVIEW_ROUNDS2) break;
+            const hostReviewFix = await dispatchFixAndVerify(task, worktree, plan, hostReviewBlocking, `fix:${tag} r${round}`, round);
+            reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(hostReviewFix.report);
+            if (hostReviewFix.dirtyDetail) {
+              return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the ${reviewerDisplayName} host-review fix round left uncommitted state (${hostReviewFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
+            }
+            continue;
+          }
+        }
+      }
+      const reviewInfraFaults = [];
+      const runReviewAgent = (promptText, reviewPhase, label) => () => withInfraRetry2(() => agent(promptText, reviewAgentOptions2({ phase: reviewPhase, label, schema: REVIEW_SCHEMA })), label).catch((error) => {
+        const message = error && error.message || String(error);
+        if (!infrastructureFailureDetail(message)) throw error;
+        reviewInfraFaults.push(`${label}: ${message}`);
+        return null;
+      });
+      const [codeReview, expertReview] = await parallel([
+        runReviewAgent(codeReviewPrompt2(task, worktree, plan, impl), "Code Review", `code-review:${tag} r${round}`),
+        runReviewAgent(expertReviewPrompt2(task, worktree, plan, impl), "Expert Review", `expert-review:${tag} r${round}`)
+      ]);
+      for (const r of [codeReview, expertReview]) {
+        if (r?.proposedRoadmapItems?.length) proposals.push(...r.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })));
+      }
+      if (!codeReview || !expertReview) {
+        const missing = [
+          !codeReview ? "code review" : null,
+          !expertReview ? "expert review" : null
+        ].filter(Boolean).join(" and ");
+        reviewRounds.push({ round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking: [], fix: null });
+        if (reviewInfraFaults.length) {
+          faultMetrics.infraFaults += 1;
+          return {
+            id: tag,
+            status: "infra-fault",
+            stage: "review",
+            detail: `dual review interrupted by infrastructure fault(s): ${reviewInfraFaults.join("; ")}; the branch is untouched \u2014 relaunch with resumeMode: "continue" to re-run review from the committed state`,
+            reviewRounds,
+            worktree,
+            proposals,
+            ...kindExtra
+          };
+        }
+        return {
+          id: tag,
+          status: "failed",
+          stage: "review",
+          detail: `dual review failed to return a structured verdict from ${missing}; branch left unmerged for the root agent`,
+          reviewRounds,
+          worktree,
+          proposals,
+          ...kindExtra
+        };
+      }
+      const blocking = [
+        ...codeReview.blocking || [],
+        ...expertReview.blocking || []
+      ];
+      const roundRecord = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null };
+      reviewRounds.push(roundRecord);
+      if (blocking.length === 0 && codeReview?.verdict === "pass" && expertReview?.verdict === "pass") {
+        reviewsPass = true;
+        log(`[task ${tag}] dual review passed in round ${round}`);
+        break;
+      }
+      log(`[task ${tag}] review round ${round}: ${blocking.length} blocking item(s)`);
+      if (round === MAX_REVIEW_ROUNDS2) break;
+      const fix = await dispatchFixAndVerify(task, worktree, plan, blocking, `fix:${tag} r${round}`, round);
+      roundRecord.fix = summarizeFixReport(fix.report);
+      if (fix.dirtyDetail) {
+        return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the review-fix round left uncommitted state (${fix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
+      }
+    }
+    if (!reviewsPass) {
+      const lastRound = reviewRounds[reviewRounds.length - 1];
+      const finalBlocking = (lastRound?.blocking || []).slice(0, 6).join("; ");
+      return {
+        id: tag,
+        status: "halted",
+        stage: "review",
+        detail: `reviewers not satisfied within cap; branch left unmerged for the root agent${finalBlocking ? `. Final blocking items: ${finalBlocking}` : ""}`,
+        reviewRounds,
+        worktree,
+        proposals,
+        ...kindExtra
+      };
+    }
+    let integration = null;
+    if (AUTO_MERGE2) {
+      const attempt = await integrateTask(task, mergeLock2, { worktree, proposals, kindExtra, impl });
+      if (attempt.fault) return attempt.fault;
+      integration = attempt.integration ?? null;
+      if (integrationIncomplete(integration)) {
+        return { id: tag, status: "halted", stage: "integrate", detail: integrationHaltDetail(integration), worktree, proposals, ...kindExtra };
+      }
+    } else {
+      return { id: tag, status: "manual-merge-ready", plan, impl, integration, worktree, proposals, ...deferredHostReviews.length ? { openIssues: deferredHostReviews } : {}, ...kindExtra };
+    }
+    return { id: tag, status: "done", plan, impl, integration, worktree, proposals, ...deferredHostReviews.length ? { openIssues: deferredHostReviews } : {}, ...kindExtra };
+  }
+  async function runTask2(task, mergeLock2) {
+    const tag = `${task.id}`;
+    log(`[task ${tag}] ${task.title}`);
+    if (DRY_RUN2) {
+      log(`[task ${tag}] dry run: stopping before worktree creation (lane=${task.isAddendum ? "addendum" : "normal"}, stage=pre-worktree, reason=dry-run)`);
+      return {
+        id: tag,
+        status: "dry-run",
+        stage: "pre-worktree",
+        detail: "dry run stopped before worktree creation",
+        proposals: []
+      };
+    }
+    phase("Worktree");
+    const wt = await createWorktree2(task);
+    if (!wt || !wt.ok || !wt.worktreePath) {
+      return { id: tag, status: "failed", stage: "worktree", detail: wt?.notes || "worktree creation failed", proposals: [] };
+    }
+    const worktree = wt.worktreePath;
+    log(`[task ${tag}] worktree ${wt.branch} @ ${worktree}`);
+    try {
+      const writeAccess = await ensureTaskAgentWriteAccess2(worktree, tag);
+      if (!writeAccess.ok) {
+        return {
+          id: tag,
+          status: "failed",
+          stage: "worktree-write",
+          detail: `task-agent writable-root preflight failed (launch/sandbox fault, not a task defect): ${writeAccess.failures.map((failure) => `${failure.adapter}: ${failure.detail}`).join("; ")}`,
+          worktree,
+          proposals: []
+        };
+      }
+      if (task.isAddendum) {
+        phase("Implement");
+        const impl2 = await buildLock2(() => withInfraRetry2(() => agent(implementAddendumPrompt2(task, worktree), buildAgentOptions2({ phase: "Implement", label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`));
+        const authDetail = implementationAuthFailureDetail(impl2);
+        if (authDetail) {
+          return {
+            id: tag,
+            status: "fatal-auth",
+            stage: "auth",
+            detail: authDetail,
+            openIssues: impl2?.openIssues || [],
+            worktree,
+            proposals: [],
+            kind: "addendum"
+          };
+        }
+        const openIssues = impl2?.openIssues || [];
+        const onlyDeferredReviewIssues = hasOnlyDeferredReviewIssues(openIssues);
+        if (addendumImplementationNeedsManualMerge(impl2)) {
+          const deferredEvidence = openIssues.length ? ` Outstanding deferred review evidence: ${openIssues.join("; ")}` : "";
+          return {
+            id: tag,
+            status: "manual-merge-ready",
+            stage: "addendum",
+            detail: `addendum implementation reported completed work and green gates but did not set ok=true${openIssues.length ? " and left only deferred/recoverable review issues open" : " and no open issues"}; branch left for operator verification before integration.${deferredEvidence}`,
+            openIssues,
+            impl: impl2,
+            worktree,
+            proposals: [],
+            kind: "addendum"
+          };
+        }
+        if (!impl2 || !impl2.ok || !impl2.gatesGreen || openIssues.length > 0 && !onlyDeferredReviewIssues) {
+          return await attachAssessment2(task, wt, { id: tag, status: "failed", stage: "addendum", detail: impl2?.summary || "addendum did not reach a green state or left open issues", openIssues: impl2?.openIssues || [], worktree, proposals: [], kind: "addendum" });
+        }
+        const committed = await verifyWorktreeCommitted(worktree);
+        if (!committed.ok) {
+          return await attachAssessment2(task, wt, { id: tag, status: "failed", stage: "addendum", detail: `addendum implementation returned ok but left uncommitted state in the worktree (${committed.detail}); every sub-task must be committed before returning`, openIssues, worktree, proposals: [], kind: "addendum" });
+        }
+        const proposals = [];
+        const addendumOpenIssues = [];
+        if (HOST_COMMIT_GATES2) {
+          const hostGates = await hostGateLock2(() => runHostCommitGates2(worktree, tag, "addendum"));
+          if (!hostGates.green) {
+            return await attachAssessment2(task, wt, { id: tag, status: "failed", stage: "addendum", detail: `addendum reported green gates but the host could not reproduce them: ${hostGates.detail}`, openIssues, worktree, proposals, kind: "addendum" });
+          }
+        }
+        if (CS_CHECK2) {
+          const cs = await hostGateLock2(() => runCodeSceneCheck2(worktree, tag, "addendum"));
+          if (!cs.clean) {
+            return await attachAssessment2(task, wt, { id: tag, status: "failed", stage: "addendum", detail: `addendum committed work with unresolved CodeScene code-health issues: ${cs.detail}`, openIssues, worktree, proposals, kind: "addendum" });
+          }
+        }
+        if (HOST_REVIEW_ENABLED2) {
+          phase("Code Review");
+          const hostReview = await runHostReview2(worktree, `host-review:${HOST_REVIEWER}:${tag} addendum`);
+          await recordHostReview2(`${tag} addendum`, hostReview);
+          if (hostReview.outcome === "auth") {
+            return { id: tag, status: "fatal-auth", stage: "auth", detail: `${reviewerDisplayName} host review is not authenticated: ${hostReview.detail}`, worktree, proposals, kind: "addendum" };
+          }
+          const blockingFindings = reviewBlockingItems(reviewerDisplayName, hostReview.findings);
+          if (blockingFindings.length) {
+            return await attachAssessment2(task, wt, { id: tag, status: "halted", stage: "addendum-review", detail: `${reviewerDisplayName} host review found blocking issue(s): ${blockingFindings.join("; ")}`, impl: impl2, worktree, proposals, kind: "addendum" });
+          }
+          if (hostReview.outcome === "rate-limited" || hostReview.outcome === "error") {
+            addendumOpenIssues.push(`${reviewerDisplayName} review deferred (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`);
+            log(`[task ${tag}] ${reviewerDisplayName} host review deferred for the addendum: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`);
+          }
+        }
+        let addendumReview = null;
+        if (onlyDeferredReviewIssues) {
+          phase("Code Review");
+          addendumReview = await withInfraRetry2(() => agent(addendumReviewPrompt2(task, worktree, impl2), reviewAgentOptions2({ phase: "Code Review", label: `addendum-review:${tag}`, schema: REVIEW_SCHEMA })), `addendum-review:${tag}`);
+          if (addendumReview?.proposedRoadmapItems?.length) {
+            proposals.push(...addendumReview.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })));
+          }
+          const blocking = addendumReview?.blocking || [];
+          if (!addendumReview || addendumReview.verdict !== "pass" || blocking.length > 0) {
+            return await attachAssessment2(task, wt, { id: tag, status: "halted", stage: "addendum-review", detail: blocking.join("; ") || addendumReview?.summary || "addendum fallback review did not pass", impl: impl2, addendumReview, worktree, proposals, kind: "addendum" });
+          }
+          log(`[task ${tag}] addendum fallback review passed after deferred ${reviewerDisplayName} review`);
+        }
+        let integration = null;
+        if (AUTO_MERGE2) {
+          const attempt = await integrateTask(task, mergeLock2, { worktree, proposals, kindExtra: { kind: "addendum" }, impl: impl2 });
+          if (attempt.fault) return attempt.fault;
+          integration = attempt.integration ?? null;
+          if (integrationIncomplete(integration)) {
+            return await attachAssessment2(task, wt, { id: tag, status: "halted", stage: "integrate", detail: integrationHaltDetail(integration), worktree, proposals, kind: "addendum" });
+          }
+        } else {
+          return { id: tag, status: "manual-merge-ready", impl: impl2, addendumReview, integration, worktree, proposals, ...addendumOpenIssues.length ? { openIssues: addendumOpenIssues } : {}, kind: "addendum" };
+        }
+        return { id: tag, status: "done", impl: impl2, addendumReview, integration, worktree, proposals, ...addendumOpenIssues.length ? { openIssues: addendumOpenIssues } : {}, kind: "addendum" };
+      }
+      const planned = await runPlanDesignLoop2(task, worktree);
+      if (planned.fail) return await attachAssessment2(task, wt, planned.fail);
+      const plan = planned.plan;
+      const built = await runImplementationStage2(task, worktree, plan);
+      if (built.fail) {
+        return built.fail.status === "fatal-auth" ? built.fail : await attachAssessment2(task, wt, built.fail);
+      }
+      const impl = built.impl;
+      const outcome = await runDualReviewAndIntegration2(task, worktree, plan, impl, mergeLock2);
+      if (outcome.status === "failed" || outcome.status === "halted") {
+        return await attachAssessment2(task, wt, outcome);
+      }
+      return outcome;
+    } catch (error) {
+      const detail = `unhandled agent error: ${error && error.message || String(error)}`;
+      const result = resultFromUnhandledAgentError(tag, detail, { worktree });
+      return await attachAssessment2(task, wt, result);
+    }
+  }
+  return { runPlanDesignLoop: runPlanDesignLoop2, runWorkItemBuildLoop: runWorkItemBuildLoop2, runImplementationStage: runImplementationStage2, runDualReviewAndIntegration: runDualReviewAndIntegration2, runTask: runTask2 };
+>>>>>>> theirs — function `makeTaskPipeline` (F, confidence: medium)
 }
 
 // src/workflows/df12-build-odw/main.ts
@@ -3573,7 +4516,32 @@ var { triagePrompt, runTriage } = makeRemediation({
   triageAgentOptions,
   triageEscalationModel: TRIAGE_ESCALATION_MODEL
 });
+var HOST_REVIEW_ENABLED = CODERABBIT_HOST_REVIEW;
+var HOST_REVIEW_BETWEEN_WORK_ITEMS = CODERABBIT_BETWEEN_WORK_ITEMS;
+var HOST_REVIEW_ATTEMPTS = CODERABBIT_ATTEMPTS;
+var HOST_REVIEW_BACKOFF_MINUTES = CODERABBIT_BACKOFF_MINUTES;
+var HOST_REVIEW_FINDINGS_FILE = CODERABBIT_FINDINGS_FILE;
 var {
+<<<<<<< ours — variable `{
+  reviewBackoffMinutes,
+  runHostReview,
+  recordHostReview,
+  runHostCommitGates,
+  runCodeSceneCheck
+}` (S+F, confidence: low)
+// hint: Renamed in ours ('{
+  reviewBackoffMinutes,
+  runHostReview,
+  recordHostReview,
+  runHostCommitGates,
+  runCodeSceneCheck
+}' -> '{
+  coderabbitBackoffMinutes,
+  runCoderabbitHostReview,
+  recordCoderabbitReview,
+  runHostCommitGates,
+  runCodeSceneCheck
+}'). Theirs modified the body. Take the new name and apply theirs' changes.
   coderabbitBackoffMinutes,
   runCoderabbitHostReview,
   recordCoderabbitReview,
@@ -3588,6 +4556,28 @@ var {
   coderabbitAttempts: CODERABBIT_ATTEMPTS,
   coderabbitBackoffMinutes: CODERABBIT_BACKOFF_MINUTES,
   coderabbitFindingsFile: CODERABBIT_FINDINGS_FILE,
+=======
+  reviewBackoffMinutes,
+  runHostReview,
+  recordHostReview,
+  runHostCommitGates,
+  runCodeSceneCheck
+} = makeHostReview({
+  base: BASE,
+  reviewTool: REVIEW_TOOL,
+  dakarCommand: DAKAR_COMMAND,
+  reviewTimeoutSeconds: DAKAR_TIMEOUT_SECONDS,
+  dakarBudgetGbp: DAKAR_BUDGET_GBP,
+  coderabbitAttempts: HOST_REVIEW_ATTEMPTS,
+  coderabbitBackoffMinutes: HOST_REVIEW_BACKOFF_MINUTES,
+  coderabbitFindingsFile: HOST_REVIEW_FINDINGS_FILE,
+>>>>>>> theirs — variable `{
+  reviewBackoffMinutes,
+  runHostReview,
+  recordHostReview,
+  runHostCommitGates,
+  runCodeSceneCheck
+}` (S+F, confidence: low)
   commitGates: COMMIT_GATES,
   commitGateTimeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
   csCheck: CS_CHECK,
@@ -3619,6 +4609,20 @@ async function runAuthPreflight() {
   }
   if (REQUIRE_CODERABBIT_AUTH) {
     if (REVIEW_TOOL === "dakar") {
+      const dakarInvocation = DAKAR_COMMAND.trim().split(/\s+/).filter(Boolean);
+      const dakarExecutable = dakarInvocation[0] || "dakar-review";
+      const dakarArgs = [...dakarInvocation.slice(1), "--version"];
+      const dakarProbeCommand = [...dakarInvocation, "--version"].join(" ").slice(0, 200) || "dakar-review --version";
+      const dakar = await execFileStatus(dakarExecutable, dakarArgs);
+      const dakarOutput = [dakar.stdout, dakar.stderr, dakar.message].filter(Boolean).join("\n").trim().slice(-2e3);
+      if (!dakar.ok) {
+        hostReviewMetrics.authFailures += 1;
+        failures.push({
+          tool: "dakar",
+          command: dakarProbeCommand,
+          detail: dakarOutput || `${dakarExecutable} is unavailable or its version probe failed`
+        });
+      }
       const openaiKey = process.env.OPENAI_API_KEY;
       if (typeof openaiKey !== "string" || openaiKey.trim() === "") {
         failures.push({
@@ -3990,6 +4994,14 @@ var {
   PER_WORK_ITEM_BUILD,
   HOST_COMMIT_GATES,
   HOST_GATES_BETWEEN_WORK_ITEMS,
+<<<<<<< ours — variable `{
+  runPlanDesignLoop,
+  runWorkItemBuildLoop,
+  runImplementationStage,
+  runDualReviewAndIntegration,
+  runTask
+}` (F, confidence: medium)
+// hint: Logic changed on both sides. Requires understanding intent of each change.
   CODERABBIT_HOST_REVIEW,
   CODERABBIT_BETWEEN_WORK_ITEMS,
   DRY_RUN,
@@ -4018,6 +5030,43 @@ var {
   runHostCommitGates,
   runCoderabbitHostReview,
   recordCoderabbitReview
+=======
+  HOST_REVIEW_ENABLED,
+  HOST_REVIEW_BETWEEN_WORK_ITEMS,
+  HOST_REVIEWER: REVIEW_TOOL,
+  DRY_RUN,
+  AUTO_MERGE,
+  BASE,
+  planPrompt,
+  designReviewPrompt,
+  implementPrompt,
+  implementWorkItemPrompt,
+  fixPrompt,
+  codeReviewPrompt,
+  expertReviewPrompt,
+  addendumReviewPrompt,
+  implementAddendumPrompt,
+  integratePrompt,
+  planAgentOptions,
+  reviewAgentOptions,
+  buildAgentOptions,
+  planningLock,
+  buildLock,
+  hostGateLock,
+  withInfraRetry,
+  attachAssessment,
+  ensureTaskAgentWriteAccess,
+  createWorktree,
+  runHostCommitGates,
+  runHostReview,
+  recordHostReview
+>>>>>>> theirs — variable `{
+  runPlanDesignLoop,
+  runWorkItemBuildLoop,
+  runImplementationStage,
+  runDualReviewAndIntegration,
+  runTask
+}` (F, confidence: medium)
 });
 var selectSeq = 0;
 async function doSelect(taken) {
@@ -4277,6 +5326,8 @@ async function workflowMain() {
       timeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
       ...hostGateMetrics
     },
+<<<<<<< ours — function `workflowMain` (F, confidence: medium)
+// hint: Logic changed on both sides. Requires understanding intent of each change.
     codeScene: {
       enabled: CS_CHECK,
       command: CS_CHECK_COMMAND,
@@ -4302,6 +5353,28 @@ async function workflowMain() {
       findingsFile: CODERABBIT_FINDINGS_FILE,
       ...coderabbitCapture,
       bySeverity: { ...coderabbitCapture.bySeverity }
+=======
+    stageAttempts: STAGE_ATTEMPTS,
+    // Host-driven build loop configuration: one builder turn per unticked
+    // ExecPlan Progress item when enabled, with committed progress verified
+    // after every turn.
+    workItemBuild: { enabled: PER_WORK_ITEM_BUILD, maxRounds: MAX_WORK_ITEM_ROUNDS },
+    // Bounded-cardinality fault metrics (fixed keys): stage retries spent on
+    // infrastructure faults plus terminal fault counts per class, so operators
+    // can read retry pressure straight from the result instead of the logs.
+    faultMetrics: { ...faultMetrics },
+    // Host-review aggregate: effective configuration plus bounded counters.
+    // Per-finding detail goes to the JSONL sink when
+    // coderabbitFindingsFile is configured.
+    hostReview: {
+      enabled: HOST_REVIEW_ENABLED,
+      reviewer: REVIEW_TOOL,
+      attempts: HOST_REVIEW_ATTEMPTS,
+      backoffMinutes: HOST_REVIEW_BACKOFF_MINUTES,
+      findingsFile: HOST_REVIEW_FINDINGS_FILE,
+      ...hostReviewMetrics,
+      bySeverity: { ...hostReviewMetrics.bySeverity }
+>>>>>>> theirs — function `workflowMain` (F, confidence: medium)
     },
     processed,
     results,

@@ -324,7 +324,7 @@ export function isDeferredReviewIssue(issue: unknown): boolean {
   ]
   // Dakar emits one exact prefix for budget/quota deferrals. CodeRabbit has a
   // wider historical marker set, including temporary unavailability.
-  const isDakarDeferral = text.startsWith('dakar review deferred')
+  const isDakarDeferral = text.startsWith('dakar review deferred (stage: deferred)')
   const isCoderabbitDeferral = text.includes('coderabbit')
     && coderabbitDeferredMarkers.some((marker) => text.includes(marker))
   return isDakarDeferral || isCoderabbitDeferral

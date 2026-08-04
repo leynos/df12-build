@@ -62,6 +62,7 @@ return {
   parseCoderabbitAgentOutput,
   classifyCoderabbitOutcome,
   coderabbitBackoffMinutes,
+  runHostReview,
   runCoderabbitHostReview,
   recordCoderabbitReview,
   coderabbitBlockingItems,
@@ -557,7 +558,7 @@ test('Dakar dispatch ignores the legacy host-review disable flag', async () => {
     coderabbitAttempts: 1,
   })
   const calls = []
-  const review = await surface.runCoderabbitHostReview('/tmp/wt', 'dakar:1.2.3 r1', {
+  const review = await surface.runHostReview('/tmp/wt', 'dakar:1.2.3 r1', {
     exec: async (command, commandArgs, options) => {
       calls.push({ command, commandArgs, options })
       return { ok: true, stdout: '{"ok":true,"verdict":"pass","findings":[]}', stderr: '' }
@@ -645,6 +646,8 @@ test('recoverable review faults classify as deferred review issues', async () =>
     ['CodeRabbit temporarily unavailable', true],
     ['Dakar unavailable', false],
     ['Dakar migration deferred pending approval', false],
+    ['Dakar review deferred (stage: approval-pending) — awaiting approval', false],
+    ['Dakar review deferred (stage: changes-requested) — findings remain', false],
     ['CodeRabbit rollout deferred pending approval', false],
     ['coderabbit found 3 blocking issues', false],
     ['make test failed: rate_limit spec regression', false],
@@ -773,7 +776,7 @@ test('commit gates default to make all and honour operator overrides', async () 
 // Runtime auth-preflight coverage: fake auth CLIs on PATH record every
 // invocation, so the tests fail for reordered, inverted, or dead preflight
 // code — not merely for edited source text.
-function makeAuthBin({ codexOk = true, claudeOk = true, coderabbitOk = true } = {}) {
+function makeAuthBin({ codexOk = true, claudeOk = true, coderabbitOk = true, dakarOk = true } = {}) {
   const bin = mkdtempSync(path.join(tmpdir(), 'df12-auth-bin-'))
   const logFile = path.join(bin, 'calls.log')
   writeFileSync(logFile, '')
@@ -788,6 +791,7 @@ function makeAuthBin({ codexOk = true, claudeOk = true, coderabbitOk = true } = 
   fake('codex', codexOk)
   fake('claude', claudeOk)
   fake('coderabbit', coderabbitOk)
+  fake('dakar-review', dakarOk)
   return { bin, calls: () => readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean) }
 }
 
@@ -885,6 +889,14 @@ test('the Dakar preflight requires a non-empty OPENAI_API_KEY and skips CodeRabb
     const present = makeAuthBin()
     const presentFailures = await runPreflightWithFakes(dakarWithLegacyFlagOff, present)
     assert.deepEqual(presentFailures, [])
+    assert.ok(present.calls().some((line) => line === 'dakar-review --version'))
+
+    // A key cannot make an unavailable reviewer executable runnable.
+    const unavailable = makeAuthBin({ dakarOk: false })
+    const unavailableFailures = await runPreflightWithFakes(dakarWithLegacyFlagOff, unavailable)
+    assert.equal(unavailableFailures.length, 1)
+    assert.equal(unavailableFailures[0].tool, 'dakar')
+    assert.match(unavailableFailures[0].command, /dakar-review --version/)
   } finally {
     if (previousKey === undefined) delete process.env.OPENAI_API_KEY
     else process.env.OPENAI_API_KEY = previousKey

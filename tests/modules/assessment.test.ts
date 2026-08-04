@@ -88,6 +88,8 @@ describe('deferred-review classification', () => {
     ['Dakar review deferred (stage: deferred) — budget exhausted', true],
     ['Dakar unavailable', false],
     ['Dakar migration deferred pending approval', false],
+    ['Dakar review deferred (stage: approval-pending) — awaiting approval', false],
+    ['Dakar review deferred (stage: changes-requested) — findings remain', false],
     ['CodeRabbit rollout deferred pending approval', false],
     ['dakar review changes-requested: 2 blocking findings', false],
     ['', false],

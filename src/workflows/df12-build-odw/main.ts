@@ -308,6 +308,11 @@ const { triagePrompt, runTriage } = makeRemediation({
 
 // Host review and host commit gates with the run wiring bound
 // once (see host-review.ts).
+const HOST_REVIEW_ENABLED = CODERABBIT_HOST_REVIEW
+const HOST_REVIEW_BETWEEN_WORK_ITEMS = CODERABBIT_BETWEEN_WORK_ITEMS
+const HOST_REVIEW_ATTEMPTS = CODERABBIT_ATTEMPTS
+const HOST_REVIEW_BACKOFF_MINUTES = CODERABBIT_BACKOFF_MINUTES
+const HOST_REVIEW_FINDINGS_FILE = CODERABBIT_FINDINGS_FILE
 const {
   reviewBackoffMinutes,
   runHostReview,
@@ -320,9 +325,9 @@ const {
   dakarCommand: DAKAR_COMMAND,
   reviewTimeoutSeconds: DAKAR_TIMEOUT_SECONDS,
   dakarBudgetGbp: DAKAR_BUDGET_GBP,
-  coderabbitAttempts: CODERABBIT_ATTEMPTS,
-  coderabbitBackoffMinutes: CODERABBIT_BACKOFF_MINUTES,
-  coderabbitFindingsFile: CODERABBIT_FINDINGS_FILE,
+  coderabbitAttempts: HOST_REVIEW_ATTEMPTS,
+  coderabbitBackoffMinutes: HOST_REVIEW_BACKOFF_MINUTES,
+  coderabbitFindingsFile: HOST_REVIEW_FINDINGS_FILE,
   commitGates: COMMIT_GATES,
   commitGateTimeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
   csCheck: CS_CHECK,
@@ -374,6 +379,20 @@ async function runAuthPreflight() {
   // non-empty string rather than a CLI auth-status probe.
   if (REQUIRE_CODERABBIT_AUTH) {
     if (REVIEW_TOOL === 'dakar') {
+      const dakarInvocation = DAKAR_COMMAND.trim().split(/\s+/).filter(Boolean)
+      const dakarExecutable = dakarInvocation[0] || 'dakar-review'
+      const dakarArgs = [...dakarInvocation.slice(1), '--version']
+      const dakarProbeCommand = [...dakarInvocation, '--version'].join(' ').slice(0, 200) || 'dakar-review --version'
+      const dakar = await execFileStatus(dakarExecutable, dakarArgs)
+      const dakarOutput = [dakar.stdout, dakar.stderr, dakar.message].filter(Boolean).join('\n').trim().slice(-2_000)
+      if (!dakar.ok) {
+        hostReviewMetrics.authFailures += 1
+        failures.push({
+          tool: 'dakar',
+          command: dakarProbeCommand,
+          detail: dakarOutput || `${dakarExecutable} is unavailable or its version probe failed`,
+        })
+      }
       const openaiKey = process.env.OPENAI_API_KEY
       if (typeof openaiKey !== 'string' || openaiKey.trim() === '') {
         hostReviewMetrics.authFailures += 1
@@ -858,8 +877,8 @@ const {
   PER_WORK_ITEM_BUILD,
   HOST_COMMIT_GATES,
   HOST_GATES_BETWEEN_WORK_ITEMS,
-  CODERABBIT_HOST_REVIEW,
-  CODERABBIT_BETWEEN_WORK_ITEMS,
+  HOST_REVIEW_ENABLED,
+  HOST_REVIEW_BETWEEN_WORK_ITEMS,
   HOST_REVIEWER: REVIEW_TOOL,
   DRY_RUN,
   AUTO_MERGE,
@@ -1233,11 +1252,11 @@ return {
   // Per-finding detail goes to the JSONL sink when
   // coderabbitFindingsFile is configured.
   hostReview: {
-    enabled: CODERABBIT_HOST_REVIEW,
+    enabled: HOST_REVIEW_ENABLED,
     reviewer: REVIEW_TOOL,
-    attempts: CODERABBIT_ATTEMPTS,
-    backoffMinutes: CODERABBIT_BACKOFF_MINUTES,
-    findingsFile: CODERABBIT_FINDINGS_FILE,
+    attempts: HOST_REVIEW_ATTEMPTS,
+    backoffMinutes: HOST_REVIEW_BACKOFF_MINUTES,
+    findingsFile: HOST_REVIEW_FINDINGS_FILE,
     ...hostReviewMetrics,
     bySeverity: { ...hostReviewMetrics.bySeverity },
   },

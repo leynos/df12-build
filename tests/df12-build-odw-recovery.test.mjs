@@ -1487,7 +1487,7 @@ test('host-run CodeRabbit findings drive a fix round through the real CLI seam',
   assert.equal(outcome.status, 'done', JSON.stringify(outcome))
   assert.equal(readFileSync(countFile, 'utf8').trim(), '2', 'the committed diff is re-reviewed after the fix round')
   assert.ok(labels.some((label) => label.startsWith('fix:1.2.3 r1')), 'the CodeRabbit finding forces a fix round')
-  assert.match(fixPrompts[0], /coderabbit \(major\) src\/a\.rs: guard the index/, 'the fix agent sees the neutral finding label')
+  assert.match(fixPrompts[0], /CodeRabbit \(major\) src\/a\.rs: guard the index/, 'the fix agent sees the neutral finding label')
   assert.equal(outcome.openIssues, undefined, 'no deferred-review issue on a clean pass')
 })
 

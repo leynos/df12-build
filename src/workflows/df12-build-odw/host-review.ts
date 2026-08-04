@@ -67,10 +67,9 @@ export interface HostReviewDeps {
 /** Bound configuration shared by reviewer adapters and host gates. */
 export interface HostReviewConfig {
   base: string
-  // The host review tool. 'dakar' (the default) runs the Dakar CLI and maps its
-  // JSON verdict onto the CoderabbitReview contract; 'coderabbit' keeps the
-  // retained NDJSON path. The CoderabbitReview shape and run-task call sites are
-  // deliberately unchanged — the tool-neutral rename is a separate refactor.
+  // The host review tool. 'dakar' (the default) and 'coderabbit' adapt their
+  // respective protocols into HostReviewResult. Workflow policy consumes the
+  // neutral runHostReview, recordHostReview, and reviewBlockingItems contract.
   reviewTool: 'dakar' | 'coderabbit'
   dakarCommand: string
   reviewTimeoutSeconds: number
@@ -211,34 +210,35 @@ function validateCleanDakarFindings(raw: unknown): string {
 }
 
 /** Classify and fail-closed validate one Dakar process result. */
-export function classifyDakarReview(execResult: ExecStatus): { outcome: ReviewOutcome; findings: ReviewFinding[]; detail: string } {
+export function classifyDakarReview(execResult: ExecStatus): { outcome: ReviewOutcome; findings: ReviewFinding[]; detail: string; errorCategory: ReviewErrorCategory } {
+  const category = (fallback: ReviewErrorCategory) => execResult.killed ? 'timeout' as const : fallback
   const doc = parseDakarDocument(execResult.stdout)
   if (!doc) {
     const detail = boundedTail([execResult.stderr, execResult.message].filter(Boolean).join('\n')) || 'dakar-review produced no parsable JSON output'
-    return { outcome: 'error', findings: [], detail }
+    return { outcome: 'error', findings: [], detail, errorCategory: category('invalid-output') }
   }
   if (doc.ok === false) {
     const stage = boundedTail(doc.stage ?? 'unknown', 200)
     if (String(doc.stage) === 'deferred') {
       // 'dakar' + 'deferred' markers let assessment.ts recognize this as a
       // recoverable review deferral, mirroring the CodeRabbit rate-limit path.
-      return { outcome: 'rate-limited', findings: [], detail: `Dakar review deferred (stage: ${stage}) — ${boundedTail(doc.error || 'no detail')}` }
+      return { outcome: 'rate-limited', findings: [], detail: `Dakar review deferred (stage: ${stage}) — ${boundedTail(doc.error || 'no detail')}`, errorCategory: category('deferred') }
     }
-    return { outcome: 'error', findings: [], detail: `stage: ${stage} — ${boundedTail(doc.error || 'no detail')}` }
+    return { outcome: 'error', findings: [], detail: `stage: ${stage} — ${boundedTail(doc.error || 'no detail')}`, errorCategory: category('execution') }
   }
   if (doc.ok === true) {
     if (doc.skipped === true || doc.verdict === 'pass') {
       const invalidFindings = validateCleanDakarFindings(doc.findings)
-      if (invalidFindings) return { outcome: 'error', findings: [], detail: invalidFindings }
-      return { outcome: 'clean', findings: [], detail: '' }
+      if (invalidFindings) return { outcome: 'error', findings: [], detail: invalidFindings, errorCategory: category('invalid-output') }
+      return { outcome: 'clean', findings: [], detail: '', errorCategory: category('none') }
     }
     if (doc.verdict === 'changes-requested') {
       const validation = validateChangesRequestedFindings(doc.findings)
-      if (!validation.ok) return { outcome: 'error', findings: [], detail: validation.detail }
-      return { outcome: 'findings', findings: validation.findings.map(mapDakarFinding), detail: '' }
+      if (!validation.ok) return { outcome: 'error', findings: [], detail: validation.detail, errorCategory: category('invalid-output') }
+      return { outcome: 'findings', findings: validation.findings.map(mapDakarFinding), detail: '', errorCategory: category('none') }
     }
   }
-  return { outcome: 'error', findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail(doc.verdict ?? 'none', 200)})` }
+  return { outcome: 'error', findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail(doc.verdict ?? 'none', 200)})`, errorCategory: category('invalid-output') }
 }
 
 /**
@@ -417,7 +417,7 @@ export function makeHostReview(config: HostReviewConfig) {
   // One CodeRabbit attempt: exec the NDJSON --agent review and classify from the
   // event stream (never the exit code). Detail is empty on a clean/findings
   // outcome; otherwise it carries the first parsable error text.
-  async function runCoderabbitAttempt(worktree: string, exec: NonNullable<HostReviewDeps['exec']>): Promise<{ outcome: ReviewOutcome; findings: ReviewFinding[]; detail: string; timedOut: boolean }> {
+  async function runCoderabbitAttempt(worktree: string, exec: NonNullable<HostReviewDeps['exec']>): Promise<{ outcome: ReviewOutcome; findings: ReviewFinding[]; detail: string; errorCategory: ReviewErrorCategory }> {
     const result = await exec('coderabbit', ['review', '--agent', '--type', 'committed', '--base', base], {
       cwd: worktree,
       timeoutMs: reviewTimeoutSeconds * 1000,
@@ -427,15 +427,24 @@ export function makeHostReview(config: HostReviewConfig) {
     const detail = outcome === 'clean' || outcome === 'findings'
       ? ''
       : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join('; ') || 'coderabbit produced no parsable outcome').trim()
-    return { outcome, findings: parsed.findings, detail: boundedTail(detail), timedOut: Boolean(result.killed) }
+    const errorCategory: ReviewErrorCategory = result.killed
+      ? 'timeout'
+      : outcome === 'rate-limited'
+        ? 'deferred'
+        : outcome === 'auth'
+          ? 'auth'
+          : outcome === 'error'
+            ? (parsed.error || parsed.complete ? 'execution' : 'invalid-output')
+            : 'none'
+    return { outcome, findings: parsed.findings, detail: boundedTail(detail), errorCategory }
   }
 
   // One Dakar attempt: exec the Dakar CLI against the committed diff and map its
-  // single JSON document onto the CoderabbitReview single-attempt shape. A fresh
+  // single JSON document onto the neutral single-attempt shape. A fresh
   // ephemeral state root per attempt keeps the gate stateless — Dakar otherwise
   // records reviewed heads and would skip already-seen commits across runs, so a
   // shared state root would silently turn re-reviews into no-ops.
-  async function runDakarAttempt(worktree: string, exec: NonNullable<HostReviewDeps['exec']>, removeStateRoot?: HostReviewDeps['removeDakarStateRoot']): Promise<{ outcome: ReviewOutcome; findings: ReviewFinding[]; detail: string; timedOut: boolean }> {
+  async function runDakarAttempt(worktree: string, exec: NonNullable<HostReviewDeps['exec']>, removeStateRoot?: HostReviewDeps['removeDakarStateRoot']): Promise<{ outcome: ReviewOutcome; findings: ReviewFinding[]; detail: string; errorCategory: ReviewErrorCategory }> {
     const fs = process.getBuiltinModule('node:fs')
     const os = process.getBuiltinModule('node:os')
     const path = process.getBuiltinModule('node:path')
@@ -452,7 +461,7 @@ export function makeHostReview(config: HostReviewConfig) {
         cwd: worktree,
         timeoutMs: reviewTimeoutSeconds * 1000,
       })
-      return { ...classifyDakarReview(result), timedOut: Boolean(result.killed) }
+      return classifyDakarReview(result)
     } finally {
       try {
         const cleanup = removeStateRoot || fs.rmSync
@@ -466,12 +475,11 @@ export function makeHostReview(config: HostReviewConfig) {
 
   // Run one host review against the worktree's COMMITTED changes, absorbing
   // rate-limit/deferral backoff in host wall-clock (zero agent tokens). Returns
-  // { outcome, attempts, findings, detail }. The retry/backoff loop wraps BOTH
+  // HostReviewResult. The retry/backoff loop wraps BOTH
   // tools' 'rate-limited' outcomes identically; the per-tool attempt differs
-  // only in the CLI and the parse. The tool-neutral rename of this function (and
-  // the CoderabbitReview type) is deliberately DEFERRED so run-task.ts and its
-  // tests keep calling this exact name and contract. deps are injectable for
-  // tests.
+  // only in the CLI and parser. run-task.ts consumes this neutral runner and
+  // recordHostReview/reviewBlockingItems; compatibility aliases stay at the
+  // exported boundary. deps are injectable for tests.
   async function runHostReview(worktree: string, label: string, deps: HostReviewDeps = {}): Promise<HostReviewResult> {
     const exec = deps.exec || execFileStatus
     const sleep = deps.sleep || hostSleepMinutes
@@ -494,21 +502,12 @@ export function makeHostReview(config: HostReviewConfig) {
           await sleep(minutes)
           continue
         }
-        const errorCategory: ReviewErrorCategory = single.timedOut
-          ? 'timeout'
-          : single.outcome === 'rate-limited'
-            ? 'deferred'
-            : single.outcome === 'auth'
-              ? 'auth'
-              : single.outcome === 'error'
-                ? (single.detail.includes('parsable') || single.detail.includes('unrecognized') || single.detail.includes('malformed') ? 'invalid-output' : 'execution')
-                : 'none'
         const review: HostReviewResult = {
           reviewer,
           outcome: single.outcome,
           attempts: attempt,
           elapsedMs: Math.max(0, Math.trunc(nowMs() - startedMs)),
-          errorCategory,
+          errorCategory: single.errorCategory,
           findings: single.findings,
           detail: boundedTail(single.detail),
         }
