@@ -8,6 +8,9 @@ import path from 'node:path'
 
 const REPO = new URL('../../', import.meta.url).pathname
 const TYPEDOC = path.join(REPO, 'node_modules', '.bin', 'typedoc')
+// Each case starts the TypeScript compiler through TypeDoc. Allow enough headroom
+// for a loaded CI host while still bounding a genuinely hung subprocess.
+const TYPEDOC_TEST_TIMEOUT_MS = 15_000
 
 interface TypeDocRun {
   status: number
@@ -89,7 +92,7 @@ describe('zero-tolerance TypeDoc gate', () => {
       'tsconfig.json',
       'typedoc.json',
     ])
-  })
+  }, TYPEDOC_TEST_TIMEOUT_MS)
 
   test('an undocumented exported function fails with its qualified diagnostic', () => {
     const source = DOCUMENTED_MODULE.replace(
@@ -100,7 +103,7 @@ describe('zero-tolerance TypeDoc gate', () => {
 
     expect(result.status).not.toBe(0)
     expect(result.output).toMatch(/undocumentedFunction.*does not have any documentation/i)
-  })
+  }, TYPEDOC_TEST_TIMEOUT_MS)
 
   test('an undocumented module fails with its entry-point diagnostic', () => {
     const source = DOCUMENTED_MODULE.replace(
@@ -111,5 +114,5 @@ describe('zero-tolerance TypeDoc gate', () => {
 
     expect(result.status).not.toBe(0)
     expect(result.output).toMatch(/fixture.*\(Module\).*does not have any documentation/i)
-  })
+  }, TYPEDOC_TEST_TIMEOUT_MS)
 })

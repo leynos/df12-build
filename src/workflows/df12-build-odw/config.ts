@@ -122,6 +122,14 @@ export interface RawWorkflowArgs {
    * `docs/execplans/*.md` path; defaults to the review model.
    */
   assessmentEscalationModel?: string
+  /** Host-review adapter; defaults to Dakar, with CodeRabbit retained as an opt-in compatibility path. */
+  reviewTool?: string
+  /** Dakar CLI invocation; defaults to `dakar-review`. */
+  dakarCommand?: string
+  /** Dakar review timeout in seconds, clamped to 60–7200. */
+  dakarTimeoutSeconds?: number | string
+  /** Dakar admission budget in GBP, clamped to 0–10; zero leaves Dakar's default in force. */
+  dakarBudgetGbp?: number | string
   /** Legacy agent-run CodeRabbit command told to the agent when host review is off. */
   coderabbitReviewCommand?: string
   /** Have the host run CodeRabbit against committed work; set false to restore the legacy agent-run flow. */
@@ -259,6 +267,14 @@ export interface WorkflowConfig {
   ASSESSMENT_ESCALATION_MODEL: string
   /** De-duplicated, lower-cased set of adapters whose CLI auth must be verified. */
   AUTH_REQUIRED_ADAPTERS: Set<string>
+  /** Selected host-review adapter. */
+  REVIEW_TOOL: 'dakar' | 'coderabbit'
+  /** Dakar CLI invocation. */
+  DAKAR_COMMAND: string
+  /** Dakar review timeout in seconds. */
+  DAKAR_TIMEOUT_SECONDS: number
+  /** Dakar admission budget in GBP; zero omits the CLI flag. */
+  DAKAR_BUDGET_GBP: number
   /** Legacy agent-run CodeRabbit command (agent-run mode only). */
   CODERABBIT_REVIEW_COMMAND: string
   /** True when the host runs CodeRabbit against committed work. */
@@ -399,17 +415,28 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     TRIAGE_ADAPTER,
     ASSESSMENT_ADAPTER,
   ].map((adapter) => String(adapter || '').toLowerCase()))
+  // The host review tool. Dakar is the default gate; CodeRabbit stays
+  // selectable for the retained NDJSON wire contract. An unrecognized value
+  // throws rather than silently defaulting because it controls both CLI and
+  // authentication dependencies.
+  const REVIEW_TOOL = String(cfg.reviewTool || 'dakar').toLowerCase()
+  if (!['dakar', 'coderabbit'].includes(REVIEW_TOOL)) {
+    throw new Error(`Unsupported reviewTool: ${REVIEW_TOOL} (use "dakar" or "coderabbit")`)
+  }
+  const DAKAR_COMMAND = String(cfg.dakarCommand || 'dakar-review')
+  const DAKAR_TIMEOUT_SECONDS = Math.min(7200, Math.max(60, Math.trunc(Number(cfg.dakarTimeoutSeconds) || 3600)))
+  const DAKAR_BUDGET_GBP_RAW = Number(cfg.dakarBudgetGbp)
+  const DAKAR_BUDGET_GBP = Number.isFinite(DAKAR_BUDGET_GBP_RAW) ? Math.min(10, Math.max(0, DAKAR_BUDGET_GBP_RAW)) : 0
   // LEGACY (agent-run) mode ONLY: the command the build/fix prompts tell the
   // agent to invoke when coderabbitHostReview=false. In host-review mode the
   // control loop runs a FIXED committed-diff invocation
   // (`coderabbit review --agent --type committed --base <base>`, see
   // host-review.ts) that this knob does NOT override.
   const CODERABBIT_REVIEW_COMMAND = cfg.coderabbitReviewCommand || 'coderabbit review --agent'
-  // Host-run CodeRabbit review: the control loop invokes the CLI against
-  // committed work, absorbs rate-limit backoff in host wall-clock instead of
-  // agent tokens, and feeds actionable findings back into the fix rounds.
-  // coderabbitHostReview=false restores the legacy agent-run flow.
-  const CODERABBIT_HOST_REVIEW = cfg.coderabbitHostReview !== false
+  // Despite its historical name, this is the effective host-review switch.
+  // Dakar has no agent-run mode, so the legacy false value only restores the
+  // agent-run flow when CodeRabbit is explicitly selected.
+  const CODERABBIT_HOST_REVIEW = REVIEW_TOOL === 'dakar' || cfg.coderabbitHostReview !== false
   // Run the host CodeRabbit review BETWEEN per-work-item build turns (a
   // deterministic gate on each committed work item) rather than only once at
   // the end of the implementation stage. Only meaningful when both host
@@ -466,8 +493,11 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
         'Implementation smells — Nested Complexity: if-statements nested inside other ifs and/or loops, which sharply raises defect risk. Bumpy Road: a function that fails to encapsulate its responsibilities and instead holds several separate chunks of logic — extract each chunk into its own function. Complex Conditional: a single branch condition (in an if/for/while) combining multiple logical operators such as AND/OR. Large Assertion Blocks (test smell): a long run of consecutive assert statements that signals a missing abstraction. Duplicated Assertion Blocks (test smell): the same assertion block copy-pasted across the suite — a DRY violation.',
       ].join('\n')
     : ''
+  const HOST_REVIEW_GUIDANCE = REVIEW_TOOL === 'dakar'
+    ? 'Do NOT run Dakar yourself: the workflow host runs Dakar against your COMMITTED work after the stage returns, absorbs any deferral backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work — only committed changes reach the host review.'
+    : 'Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work — only committed changes reach the host review.'
   const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW
-    ? 'Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work — only committed changes reach the host review.'
+    ? HOST_REVIEW_GUIDANCE
     : `Use \`coderabbit review --agent\` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the \`vsleep\` command) for \`$(shuf -i ${CODERABBIT_BACKOFF_MINUTES[0]}-${CODERABBIT_BACKOFF_MINUTES[1]} -n 1)\` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.`
   const SPARK_DELEGATION_GUIDANCE =
     "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
@@ -526,6 +556,10 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     ASSESSMENT_MODEL,
     ASSESSMENT_ESCALATION_MODEL,
     AUTH_REQUIRED_ADAPTERS,
+    REVIEW_TOOL: REVIEW_TOOL as 'dakar' | 'coderabbit',
+    DAKAR_COMMAND,
+    DAKAR_TIMEOUT_SECONDS,
+    DAKAR_BUDGET_GBP,
     CODERABBIT_REVIEW_COMMAND,
     CODERABBIT_HOST_REVIEW,
     CODERABBIT_BETWEEN_WORK_ITEMS,

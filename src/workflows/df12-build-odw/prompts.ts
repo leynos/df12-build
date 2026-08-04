@@ -116,9 +116,11 @@ export function makePrompts(config: WorkflowConfig) {
     CODERABBIT_REVIEW_COMMAND,
     CODERABBIT_HOST_REVIEW,
     CODERABBIT_REVIEW_GUIDANCE,
+    REVIEW_TOOL,
     SPARK_DELEGATION_GUIDANCE,
     SCRUTINEER_DELEGATION_GUIDANCE,
   } = config
+  const hostReviewer = REVIEW_TOOL === 'dakar' ? 'Dakar' : 'CodeRabbit'
 
   function grepaiSearchCommand(): string {
     const workspaceArg = shellQuote(GREPAI_WORKSPACE)
@@ -264,7 +266,7 @@ export function makePrompts(config: WorkflowConfig) {
       'Use leta for navigation, sem for history, and the language router skill for the languages you touch. Follow the per-work-item skill and documentation signposts in the plan.',
       '',
       `${DRY_RUN ? 'DRY RUN: do not run this step — it is skipped by the orchestrator.' : ''}`,
-      `When all work items are done, ensure the project commit gates (${COMMIT_GATE_TEXT}) are green at HEAD. Return the completion counts, commit subjects, whether gates are green, the number of coderabbit runs, and any open issues.`,
+      `When all work items are done, ensure the project commit gates (${COMMIT_GATE_TEXT}) are green at HEAD. Return the completion counts, commit subjects, whether gates are green, the number of host-review runs, and any open issues.`,
     ].join('\n')
   }
 
@@ -288,7 +290,7 @@ export function makePrompts(config: WorkflowConfig) {
       '',
       'Then, in this exact order:',
       `  1. DETERMINISTIC GATE: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT}, plus any further gate targets AGENTS.md names; \`make markdownlint\` and \`make nixie\` for any markdown you touched). Fix failures yourself and re-run until green. ${COMMIT_GATE_GUIDANCE}`,
-      ...(CS_CHECK ? [`  1b. CODE HEALTH: after the gates are green, the host runs a CodeScene code-health check on your committed changes before CodeRabbit. Keep functions small, cohesive, and free of nested or overly complex conditionals so it passes; a regression bounces back to you with the specific smells and the option — only where refactoring would be deleterious — to suppress a smell with a justified \`@codescene(disable:"...")\` comment.`] : []),
+      ...(CS_CHECK ? [`  1b. CODE HEALTH: after the gates are green, the host runs a CodeScene code-health check on your committed changes before ${hostReviewer}. Keep functions small, cohesive, and free of nested or overly complex conditionals so it passes; a regression bounces back to you with the specific smells and the option — only where refactoring would be deleterious — to suppress a smell with a justified \`@codescene(disable:"...")\` comment.`] : []),
       CODERABBIT_HOST_REVIEW
         ? `  2. ${CODERABBIT_REVIEW_GUIDANCE}`
         : `  2. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to confirm the gates are still green. ${CODERABBIT_REVIEW_GUIDANCE}`,
@@ -318,7 +320,7 @@ export function makePrompts(config: WorkflowConfig) {
         ? `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT}, plus markdownlint/nixie for markdown) first and green, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth — never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`
         : `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT}, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND}\`, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth — never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
       '',
-      'Return the commit subjects you added, whether every deterministic gate is green at HEAD after your fixes, the number of CodeRabbit runs you completed, how each blocking item was resolved, any open issues with reasons, and a short summary. This structured report is durable validation evidence for the branch — be precise about which gates ran and at which commit.',
+      `Return the commit subjects you added, whether every deterministic gate is green at HEAD after your fixes, the number of ${hostReviewer} runs you completed, how each blocking item was resolved, any open issues with reasons, and a short summary. This structured report is durable validation evidence for the branch — be precise about which gates ran and at which commit.`,
     ].join('\n')
   }
 
@@ -359,7 +361,7 @@ export function makePrompts(config: WorkflowConfig) {
       preamble(worktree),
       `TASK: Review the committed addendum implementation for completed roadmap task ${task.id}, scoped ONLY to sub-task(s): ${ids}.`,
       '',
-      'CodeRabbit review was deferred or unavailable for this addendum, so you are the high-model fallback reviewer. Use the `code-review` skill. Be strict, but keep the scope surgical: this is not a full design review and not a licence to expand the task.',
+      `${hostReviewer} review was deferred or unavailable for this addendum, so you are the high-model fallback reviewer. Use the \`code-review\` skill. Be strict, but keep the scope surgical: this is not a full design review and not a licence to expand the task.`,
       '',
       `Compare the branch diff against the Addenda checklist in ${parentPlan}, the relevant design/developer docs, and AGENTS.md. Confirm:`,
       '- each listed addendum sub-task is actually implemented and ticked in the execplan,',
@@ -375,7 +377,7 @@ export function makePrompts(config: WorkflowConfig) {
       'Builder-reported deferred/open issues:',
       ...((impl?.openIssues || []).map((issue, index) => `  ${index + 1}. ${issue}`)),
       '',
-      'Use leta for branch-local code navigation and sem for the committed diff. Return verdict=pass only if you would ship this addendum despite the deferred CodeRabbit review. If not, list precise blocking items. Follow-up ideas go in proposedRoadmapItems only.',
+      `Use leta for branch-local code navigation and sem for the committed diff. Return verdict=pass only if you would ship this addendum despite the deferred ${hostReviewer} review. If not, list precise blocking items. Follow-up ideas go in proposedRoadmapItems only.`,
     ].join('\n')
   }
 
@@ -401,7 +403,7 @@ export function makePrompts(config: WorkflowConfig) {
       `  4. Tick the sub-task in the Addenda checklist of its execplan (\`- [ ] ${task.id}.<n>\` → \`- [x] …\`).`,
       '  5. Commit the sub-task and Addenda tick together as one atomic commit (en-GB imperative subject).',
       '',
-      `Use leta for navigation, sem for history, and the language router skill for the languages you touch. Do NOT edit the roadmap — integration ticks the roadmap sub-tasks. When all listed sub-tasks are done, ensure the project commit gates (${COMMIT_GATE_TEXT}) are green at HEAD. Return using the IMPL schema (execplanPath = the parent execplan): completion counts, commit subjects, gatesGreen, coderabbit run count, and any open issues.`,
+      `Use leta for navigation, sem for history, and the language router skill for the languages you touch. Do NOT edit the roadmap — integration ticks the roadmap sub-tasks. When all listed sub-tasks are done, ensure the project commit gates (${COMMIT_GATE_TEXT}) are green at HEAD. Return using the IMPL schema (execplanPath = the parent execplan): completion counts, commit subjects, gatesGreen, ${hostReviewer} run count, and any open issues.`,
     ].join('\n')
   }
 

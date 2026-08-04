@@ -71,7 +71,7 @@ describe('makeConfig defaults', () => {
   test('commit gates and guidance derivation', () => {
     expect(config.COMMIT_GATES).toEqual(['make all'])
     expect(config.COMMIT_GATE_TEXT).toBe('`make all`')
-    expect(config.SCRUTINEER_DELEGATION_GUIDANCE).toContain('coderabbit review --agent')
+    expect(config.SCRUTINEER_DELEGATION_GUIDANCE).toContain('workflow host runs Dakar')
   })
 
   test('search backend defaults to grepai', () => {
@@ -79,6 +79,54 @@ describe('makeConfig defaults', () => {
     expect(config.GREPAI_WORKSPACE).toBe('Projects')
     expect(config.GREPAI_PROJECT).toBeNull()
     expect(config.MEMTRACE_REPO_ID).toBeNull()
+  })
+
+  test('review tool defaults to Dakar with its own knobs', () => {
+    expect(config.REVIEW_TOOL).toBe('dakar')
+    expect(config.DAKAR_COMMAND).toBe('dakar-review')
+    expect(config.DAKAR_TIMEOUT_SECONDS).toBe(3600)
+    // 0 means "use Dakar's own default budget" (the flag is omitted).
+    expect(config.DAKAR_BUDGET_GBP).toBe(0)
+  })
+})
+
+describe('makeConfig review-tool selection', () => {
+  test('Dakar ignores the legacy agent-run CodeRabbit switch', () => {
+    const config = makeConfig({ reviewTool: 'dakar', coderabbitHostReview: false })
+    expect(config.REVIEW_TOOL).toBe('dakar')
+    expect(config.CODERABBIT_HOST_REVIEW).toBe(true)
+    expect(config.CODERABBIT_REVIEW_GUIDANCE).toContain('Do NOT run Dakar yourself')
+  })
+
+  test('CodeRabbit still permits its legacy agent-run review flow', () => {
+    const config = makeConfig({ reviewTool: 'coderabbit', coderabbitHostReview: false })
+    expect(config.CODERABBIT_HOST_REVIEW).toBe(false)
+    expect(config.CODERABBIT_REVIEW_GUIDANCE).toStartWith('Use `coderabbit review --agent`')
+  })
+
+  test('coderabbit is a valid explicit choice', () => {
+    const coderabbit = makeConfig({ reviewTool: 'coderabbit' })
+    expect(coderabbit.REVIEW_TOOL).toBe('coderabbit')
+    expect(coderabbit.CODERABBIT_REVIEW_GUIDANCE).toContain('Do NOT run coderabbit yourself')
+    expect(makeConfig({ reviewTool: 'CodeRabbit' }).REVIEW_TOOL).toBe('coderabbit')
+  })
+
+  test('an unsupported review tool throws rather than silently defaulting', () => {
+    expect(() => makeConfig({ reviewTool: 'sonarqube' })).toThrow(/Unsupported reviewTool/)
+  })
+
+  test('the Dakar command and timeout are overridable and clamped', () => {
+    expect(makeConfig({ dakarCommand: 'dakar review' }).DAKAR_COMMAND).toBe('dakar review')
+    expect(makeConfig({ dakarTimeoutSeconds: 120 }).DAKAR_TIMEOUT_SECONDS).toBe(120)
+    // Clamp to the 60..7200 band.
+    expect(makeConfig({ dakarTimeoutSeconds: 5 }).DAKAR_TIMEOUT_SECONDS).toBe(60)
+    expect(makeConfig({ dakarTimeoutSeconds: 99999 }).DAKAR_TIMEOUT_SECONDS).toBe(7200)
+  })
+
+  test('the Dakar budget is clamped to the 0..10 GBP band', () => {
+    expect(makeConfig({ dakarBudgetGbp: 2.5 }).DAKAR_BUDGET_GBP).toBe(2.5)
+    expect(makeConfig({ dakarBudgetGbp: -1 }).DAKAR_BUDGET_GBP).toBe(0)
+    expect(makeConfig({ dakarBudgetGbp: 50 }).DAKAR_BUDGET_GBP).toBe(10)
   })
 })
 

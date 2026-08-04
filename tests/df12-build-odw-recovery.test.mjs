@@ -5,7 +5,7 @@
 // from tests/fixtures/recovery-repo.mjs.
 
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -105,6 +105,7 @@ return {
   verifyWorktreeCommitted,
   runPlanDesignLoop,
   runImplementationStage,
+  runHostReview,
   runDualReviewAndIntegration,
   runRecovery,
 }
@@ -116,7 +117,7 @@ return {
     // the host review would exec the REAL coderabbit CLI on PATH (burning
     // review quota), host gates would run `make all` in Makefile-less
     // fixtures, and the build loop expects agents to tick Progress items.
-    { coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...args },
+    { reviewTool: 'coderabbit', coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...args },
     () => {},
     () => {},
     agentImpl,
@@ -664,7 +665,7 @@ test('synthetic recovery implementation bridges into review without faking evide
   assert.equal(missingPlan.workItemsCompleted, 0)
   assert.equal(missingPlan.workItemsTotal, 0)
   assert.deepEqual(missingPlan.commits, ['abc1234 Work on roadmap-1-2-3'])
-  assert.equal(missingPlan.coderabbitRuns, 0)
+  assert.equal(missingPlan.hostReviewRuns, 0)
   assert.deepEqual(missingPlan.openIssues, ['recovered branch requires fresh review'])
   assert.deepEqual(missingPlan.residualRisk, [], 'residualRisk defaults to an empty carry-forward channel')
   assert.match(missingPlan.summary, /Recovered adopt-complete branch from durable git state/)
@@ -767,7 +768,7 @@ function reviewModeAgent(calls, overrides = {}) {
         workItemsCompleted: 1,
         workItemsTotal: 1,
         commits: ['Finish remaining work items'],
-        coderabbitRuns: 1,
+        hostReviewRuns: 1,
         openIssues: [],
         summary: 'resumed and completed the remaining work items',
       })))(prompt, opts)
@@ -1201,7 +1202,7 @@ test('continue mode resumes an approved-plan branch at the implement stage', asy
           workItemsCompleted: 2,
           workItemsTotal: 2,
           commits: ['Finish remaining work items'],
-          coderabbitRuns: 1,
+          hostReviewRuns: 1,
           openIssues: [],
           summary: 'resumed and completed the remaining work items',
         }
@@ -1457,14 +1458,16 @@ test('host-run CodeRabbit findings drive a fix round through the real CLI seam',
     }
     if (opts.label?.startsWith('fix:')) {
       fixPrompts.push(prompt)
-      return { gatesGreen: true, commits: ['Guard the index'], coderabbitRuns: 0, resolved: ['guard'], openIssues: [], summary: 'fixed' }
+      return { gatesGreen: true, commits: ['Guard the index'], hostReviewRuns: 0, resolved: ['guard'], openIssues: [], summary: 'fixed' }
     }
     if (opts.label?.startsWith('integrate:')) {
       return { ok: true, roadmapMarkedDone: true, rebased: true, squashMerged: true, mergeSha: 'feed', pushed: true, conflicts: '', summary: 'merged' }
     }
     throw new Error(`unexpected label: ${opts.label}`)
   }
-  const surface = await loadRecoverySurface({ coderabbitHostReview: true }, agentImpl)
+  // The default host review tool is now Dakar; pin CodeRabbit to exercise its
+  // real NDJSON CLI seam here.
+  const surface = await loadRecoverySurface({ coderabbitHostReview: true, reviewTool: 'coderabbit' }, agentImpl)
 
   const previousPath = process.env.PATH
   process.env.PATH = `${bin}:${previousPath}`
@@ -1484,8 +1487,65 @@ test('host-run CodeRabbit findings drive a fix round through the real CLI seam',
   assert.equal(outcome.status, 'done', JSON.stringify(outcome))
   assert.equal(readFileSync(countFile, 'utf8').trim(), '2', 'the committed diff is re-reviewed after the fix round')
   assert.ok(labels.some((label) => label.startsWith('fix:1.2.3 r1')), 'the CodeRabbit finding forces a fix round')
-  assert.match(fixPrompts[0], /CodeRabbit \(major\) src\/a\.rs: guard the index/, 'the fix agent sees the finding verbatim')
+  assert.match(fixPrompts[0], /CodeRabbit \(major\) src\/a\.rs: guard the index/, 'the fix agent sees the neutral finding label')
   assert.equal(outcome.openIssues, undefined, 'no deferred-review issue on a clean pass')
+})
+
+test('default Dakar review retries through a fake CLI with isolated state roots', async () => {
+  const repo = makeRecoveryRepo({ parserExecplanStatus: 'COMPLETE' })
+  const worktree = repo.parserWorktree
+  const bin = mkdtempSync(path.join(tmpdir(), 'df12-dakar-bin-'))
+  const countFile = path.join(bin, 'count')
+  const callsFile = path.join(bin, 'calls')
+  writeFileSync(path.join(bin, 'dakar-review'), [
+    '#!/bin/sh',
+    'all_args="$*"',
+    'state_root=""',
+    'while [ "$#" -gt 0 ]; do',
+    '  if [ "$1" = "--state-root" ]; then shift; state_root="$1"; fi',
+    '  shift',
+    'done',
+    'exists=no; if [ -d "$state_root" ]; then exists=yes; fi',
+    `printf '%s\\t%s\\t%s\\n' "$all_args" "$state_root" "$exists" >> "${callsFile}"`,
+    `n=$(cat "${countFile}" 2>/dev/null || echo 0)`,
+    `n=$((n+1)); echo "$n" > "${countFile}"`,
+    'if [ "$n" -eq 1 ]; then',
+    `  echo '{"ok":false,"stage":"deferred","error":"test budget deferral"}'`,
+    'else',
+    `  echo '{"ok":true,"verdict":"pass","findings":[]}'`,
+    'fi',
+    '',
+  ].join('\n'))
+  chmodSync(path.join(bin, 'dakar-review'), 0o755)
+
+  const surface = await loadRecoverySurface({
+    reviewTool: 'dakar',
+    coderabbitAttempts: 2,
+  })
+  const previousPath = process.env.PATH
+  process.env.PATH = `${bin}:${previousPath}`
+  try {
+    const outcome = await surface.runHostReview(
+      worktree,
+      'dakar:1.2.3 e2e',
+      { sleep: async () => {} },
+    )
+    assert.equal(outcome.outcome, 'clean', JSON.stringify(outcome))
+    assert.equal(outcome.attempts, 2)
+    assert.equal(readFileSync(countFile, 'utf8').trim(), '2')
+    const calls = readFileSync(callsFile, 'utf8').trim().split('\n').map((line) => line.split('\t'))
+    assert.equal(calls.length, 2)
+    assert.equal(new Set(calls.map(([, stateRoot]) => stateRoot)).size, 2)
+    for (const [argv, stateRoot, existed] of calls) {
+      assert.ok(argv.includes(`--repo-root ${worktree}`))
+      assert.match(argv, /--base main/)
+      assert.equal(existed, 'yes', 'state root exists while fake Dakar runs')
+      assert.equal(existsSync(stateRoot), false, 'state root is removed after its attempt')
+    }
+  } finally {
+    process.env.PATH = previousPath
+    rmSync(bin, { recursive: true, force: true })
+  }
 })
 
 test('a red host gate drives a fix round before any reviewer agent spends tokens', async () => {
@@ -1519,7 +1579,7 @@ test('a red host gate drives a fix round before any reviewer agent spends tokens
     }
     if (opts.label?.startsWith('fix:')) {
       fixPrompts.push(prompt)
-      return { gatesGreen: true, commits: ['Fix the range check'], coderabbitRuns: 0, resolved: [], openIssues: [], summary: 'fixed' }
+      return { gatesGreen: true, commits: ['Fix the range check'], hostReviewRuns: 0, resolved: [], openIssues: [], summary: 'fixed' }
     }
     if (opts.label?.startsWith('integrate:')) {
       return { ok: true, roadmapMarkedDone: true, rebased: true, squashMerged: true, mergeSha: 'feed', pushed: true, conflicts: '', summary: 'merged' }
@@ -1568,7 +1628,7 @@ test('the work-item build loop dispatches one builder turn per unticked item', a
     prompts.push(prompt)
     if (!opts.label?.startsWith('implement:')) throw new Error(`unexpected label: ${opts.label}`)
     tickFirstProgressItem(worktree)
-    return { ok: true, gatesGreen: true, execplanPath: PARSER_PLAN, workItemsCompleted: 1, workItemsTotal: 2, commits: [`Complete ${opts.label}`], coderabbitRuns: 0, openIssues: [], summary: 'work item done' }
+    return { ok: true, gatesGreen: true, execplanPath: PARSER_PLAN, workItemsCompleted: 1, workItemsTotal: 2, commits: [`Complete ${opts.label}`], hostReviewRuns: 0, openIssues: [], summary: 'work item done' }
   }
   const surface = await loadRecoverySurface({ perWorkItemBuild: true }, agentImpl)
 

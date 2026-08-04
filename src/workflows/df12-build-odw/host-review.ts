@@ -1,11 +1,8 @@
 /**
- * Host-run CodeRabbit review and host-run commit gates. The control loop
- * invokes the CodeRabbit CLI against committed work (absorbing rate-limit
- * backoff in host wall-clock instead of agent tokens) and re-runs the
- * configured gate commands against committed HEAD, so a gatesGreen claim is
- * verified, never trusted. The run wiring (base branch, attempts, backoff
- * range, findings sink, gate set, gate timeout) binds once via
- * makeHostReview; the parsers and aggregates are direct exports.
+ * Host-run Dakar and CodeRabbit review adapters plus deterministic host
+ * commit gates. Review retries, backoff, findings capture, and gate execution
+ * bind once through `makeHostReview`; parsers and bounded aggregates remain
+ * directly testable exports.
  *
  * @module
  */
@@ -13,125 +10,318 @@ import { execFileStatus } from './exec.ts'
 import type { ExecOptions, ExecStatus } from './exec.ts'
 import { authFailureDetail } from './faults.ts'
 
-/**
- * One CodeRabbit `finding` event, kept as its raw wire object (it extends
- * Record so unrecognized fields survive) plus the fields the host reads to gate
- * and to record. Every field is optional because the CLI wire shape is not
- * under our control.
- */
-export interface CoderabbitFinding extends Record<string, unknown> {
-  /** Wire discriminator; always `'finding'` for this shape. */
+/** Normalized finding shape produced by every host-review adapter. */
+export interface ReviewFinding extends Record<string, unknown> {
+  /** Wire discriminator retained for compatibility with the findings sink. */
   type?: string
-  /** CLI severity (critical|major|minor|trivial|info); only critical/major block. */
+  /** Normalized severity; critical and major findings block integration. */
   severity?: string
-  /** Repository-relative file the finding concerns, when the CLI reports one. */
+  /** Repository-relative file associated with the finding. */
   fileName?: string
-  /** Human-readable finding text; the primary blocking-item message source. */
+  /** Bounded human-readable explanation of the finding. */
   comment?: string
-  /** Machine-oriented fix guidance, used as the message when `comment` is absent. */
+  /** Bounded machine-oriented remediation guidance. */
   codegenInstructions?: string
-  /** Suggested edits; only their count is written to the findings sink. */
+  /** Suggested edits retained from the reviewer protocol. */
   suggestions?: unknown[]
 }
 
-/**
- * The parsed result of one CodeRabbit `--agent` NDJSON stream. Callers classify
- * from these fields rather than the process exit code, which is unreliable (the
- * CLI exits 0 even on fatal errors).
- */
+/** Parsed CodeRabbit NDJSON events and terminal records. */
 export interface CoderabbitParsedOutput {
-  /** Every parsed NDJSON event object, in emission order. */
+  /** Parsed NDJSON events in emission order. */
   events: Array<Record<string, unknown>>
-  /** Non-JSON stdout lines, retained as fallback evidence for error detail. */
+  /** Non-JSON lines retained as bounded diagnostic evidence. */
   rawLines: string[]
-  /** The `finding` events, narrowed for severity gating and sink recording. */
-  findings: CoderabbitFinding[]
-  /** The terminal `complete` event, or null when the stream never completed. */
+  /** Finding events narrowed to the neutral finding shape. */
+  findings: ReviewFinding[]
+  /** Terminal completion event, or null when no completion was emitted. */
   complete: Record<string, unknown> | null
-  /** The first `error` event, or null; drives the rate-limit/auth/error outcomes. */
+  /** First terminal error event, or null when none was emitted. */
   error: (Record<string, unknown> & {
-    /** Error discriminator; `'rate_limit'` marks a recoverable quota fault. */
+    /** CodeRabbit error discriminator such as `rate_limit`. */
     errorType?: string
-    /** Error message text, folded into the classifier's error-text scan. */
+    /** Reviewer-supplied error description. */
     message?: string
   }) | null
 }
 
-/** Terminal classification of a host CodeRabbit review; see classifyCoderabbitOutcome. */
-export type CoderabbitOutcome = 'clean' | 'findings' | 'rate-limited' | 'auth' | 'error'
+/** Tool-neutral terminal outcome vocabulary. */
+export type ReviewOutcome = 'clean' | 'findings' | 'rate-limited' | 'auth' | 'error'
 
-/** The outcome of one host CodeRabbit review pass, returned to the control loop. */
-export interface CoderabbitReview {
-  /** Terminal classification driving whether findings gate or the run defers. */
-  outcome: CoderabbitOutcome
-  /** How many attempts ran, including rate-limit backoff retries. */
+/** Bounded reason attached to terminal host-review telemetry. */
+export type ReviewErrorCategory = 'none' | 'deferred' | 'timeout' | 'auth' | 'invalid-output' | 'execution'
+
+/** One completed host-review result after bounded retries. */
+export interface HostReviewResult {
+  /** Bounded machine identifier for the adapter that ran. */
+  reviewer: 'dakar' | 'coderabbit'
+  /** Tool-neutral terminal classification consumed by workflow policy. */
+  outcome: ReviewOutcome
+  /** Number of attempts made, including the terminal attempt. */
   attempts: number
-  /** The findings collected on the final attempt. */
-  findings: CoderabbitFinding[]
-  /** Operator-facing failure text; empty for the clean and findings outcomes. */
+  /** Host-side elapsed duration across attempts and backoff. */
+  elapsedMs: number
+  /** Bounded diagnostic category for metrics and terminal events. */
+  errorCategory: ReviewErrorCategory
+  /** Normalized findings from the terminal attempt. */
+  findings: ReviewFinding[]
+  /** Bounded operator-facing detail; empty for successful outcomes. */
   detail: string
 }
 
-/** The result of running the configured commit gates against committed HEAD. */
+/** Public compatibility aliases for integrations compiled against older names. */
+export type CoderabbitFinding = ReviewFinding
+/** Compatibility alias for the former CodeRabbit-specific outcome type. */
+export type CoderabbitOutcome = ReviewOutcome
+/** Compatibility alias for the former CodeRabbit-specific result type. */
+export type CoderabbitReview = HostReviewResult
+
+/** Aggregate result from the configured deterministic host gates. */
 export interface HostGateRun {
-  /** True only when every configured gate passed. */
+  /** True only when every configured host gate passed. */
   green: boolean
-  /** Per-gate outcomes in run order; the run stops at the first failure. */
+  /** Per-gate results in execution order. */
   results: Array<{
-    /** The gate command line as configured. */
+    /** Configured gate command. */
     command: string
-    /** Whether this gate passed. */
+    /** Whether the gate exited successfully. */
     ok: boolean
-    /** Path to the secure per-gate log holding the full output. */
+    /** Secure log file containing the complete gate output. */
     logFile: string
   }>
-  /** Operator-facing failure text with a bounded output tail; empty when green. */
+  /** Bounded failure detail, empty when all gates pass. */
   detail: string
 }
 
-/** Injectable seams so host review can be unit-tested without real subprocesses or waits. */
+/** Injectable execution, sleep, and Dakar cleanup seams for deterministic tests. */
 export interface HostReviewDeps {
-  /** Process runner; defaults to execFileStatus. */
+  /** Process runner used by both reviewer adapters. */
   exec?: (command: string, commandArgs: readonly string[], options?: ExecOptions) => Promise<ExecStatus>
-  /** Backoff sleep in minutes; defaults to the real wall-clock hostSleepMinutes. */
+  /** Host-side backoff seam measured in minutes. */
   sleep?: (minutes: number) => Promise<void>
+  /** Recursive Dakar state-root cleanup seam. */
+  removeDakarStateRoot?: (stateRoot: string, options: { recursive: true; force: true }) => void
+  /** Monotonic-enough millisecond clock used only for bounded telemetry. */
+  nowMs?: () => number
 }
 
-/** The run wiring makeHostReview binds once: review target, retry/backoff, findings sink, and the gate set. */
+/** Bound configuration shared by reviewer adapters and host gates. */
 export interface HostReviewConfig {
-  /** Base branch the `--type committed` review diffs against. */
+  /** Base branch used for committed-diff reviews. */
   base: string
-  /** Maximum CodeRabbit attempts before a rate-limited review is deferred. */
+  /** Reviewer adapter; Dakar is the default and CodeRabbit is opt-in. */
+  reviewTool: 'dakar' | 'coderabbit'
+  /** Dakar executable plus optional fixed prefix arguments. */
+  dakarCommand: string
+  /** Parent execution timeout shared by both reviewer adapters. */
+  reviewTimeoutSeconds: number
+  /** Dakar budget in GBP; zero omits the argument and uses Dakar's default. */
+  dakarBudgetGbp: number
+  /** Maximum host-review attempts before a deferral becomes terminal. */
   coderabbitAttempts: number
-  /** Inclusive [low, high] minute range for the seeded backoff jitter. */
+  /** Inclusive deterministic retry-backoff range in minutes. */
   coderabbitBackoffMinutes: [number, number]
-  /** Path to the durable JSONL findings sink; empty disables it. */
+  /** Durable JSONL findings sink; an empty path disables recording. */
   coderabbitFindingsFile: string
-  /** The gate command lines re-run against committed HEAD. */
+  /** Deterministic host gate commands run against committed work. */
   commitGates: readonly string[]
-  /** Per-gate SIGTERM timeout, in seconds. */
+  /** Per-command host-gate timeout in seconds. */
   commitGateTimeoutSeconds: number
-  /** Whether the CodeScene code-health check runs. */
+  /** Whether the CodeScene health gate is enabled. */
   csCheck: boolean
-  /**
-   * The CodeScene command line; its executable is resolved after leading
-   * environment assignments, preserving quoted paths, then probed on PATH.
-   */
+  /** Configured CodeScene command line. */
   csCheckCommand: string
 }
 
+/** One untrusted finding from Dakar's compatibility projection. */
+export interface DakarFinding extends Record<string, unknown> {
+  /** Dakar severity before normalization. */
+  severity?: string
+  /** Repository-relative path. */
+  path?: string
+  /** Optional one-based source line. */
+  line?: number
+  /** Short finding title. */
+  title?: string
+  /** Finding explanation. */
+  detail?: string
+  /** Evidence supporting the finding. */
+  evidence?: string
+}
+
+/** Dakar's single-document stdout contract before boundary validation. */
+export interface DakarDocument extends Record<string, unknown> {
+  /** Whether Dakar completed its review protocol successfully. */
+  ok?: boolean
+  /** Whether Dakar intentionally skipped review. */
+  skipped?: boolean
+  /** Terminal verdict such as `pass` or `changes-requested`. */
+  verdict?: string
+  /** Dakar execution stage, including the exact deferred stage. */
+  stage?: string
+  /** Reviewer-supplied error detail. */
+  error?: string
+  /** Untrusted findings projection validated at the host boundary. */
+  findings?: DakarFinding[]
+}
+
+/** Map validated Dakar severities onto the retained blocking vocabulary. */
+export const DAKAR_SEVERITY_MAP: Record<string, string> = {
+  critical: 'critical',
+  high: 'major',
+  medium: 'minor',
+  low: 'trivial',
+}
+
+const DAKAR_SEVERITIES = new Set(Object.keys(DAKAR_SEVERITY_MAP))
+const DAKAR_REQUIRED_FINDING_FIELDS = ['path', 'title', 'detail', 'evidence'] as const
+
+// Keep a bounded tail of operator/CLI-controlled text so a runaway error stream
+// cannot bloat the review detail or the durable findings sink.
+function boundedTail(text: unknown, limit = 2000): string {
+  const value = String(text || '')
+  return value.length > limit ? value.slice(-limit) : value
+}
+
+/** Locate Dakar's terminal JSON object despite leading progress noise. */
+export function parseDakarDocument(stdout: unknown): DakarDocument | null {
+  const text = String(stdout || '')
+  for (
+    let start = text.lastIndexOf('{');
+    start !== -1;
+    start = start === 0 ? -1 : text.lastIndexOf('{', start - 1)
+  ) {
+    try {
+      const doc = JSON.parse(text.slice(start))
+      if (doc && typeof doc === 'object' && !Array.isArray(doc)) return doc as DakarDocument
+    } catch {
+      // A brace in progress noise or a nested object is not the terminal document root.
+    }
+  }
+  return null
+}
+
+/** Map one validated Dakar finding onto the retained findings contract. */
+export function mapDakarFinding(finding: DakarFinding): ReviewFinding {
+  const severity = DAKAR_SEVERITY_MAP[String(finding.severity || '').toLowerCase()] || 'info'
+  const filePath = String(finding.path || '')
+  const title = String(finding.title || '')
+  const detail = String(finding.detail || '')
+  const evidence = String(finding.evidence || '')
+  const hasLine = finding.line !== undefined && finding.line !== null && String(finding.line) !== ''
+  const locator = hasLine ? ` (${filePath}:${finding.line})` : ''
+  return {
+    type: 'finding',
+    severity,
+    fileName: filePath,
+    comment: `${title} — ${detail}${locator}`.slice(0, 2000),
+    codegenInstructions: `${detail}\nEvidence: ${evidence}`.slice(0, 2000),
+    suggestions: [],
+  }
+}
+
+// A rejection without valid findings would produce no blocking items and let
+// the fix-round gate continue, so validate the collection before mapping it.
+function validateChangesRequestedFindings(raw: unknown):
+  | { ok: true; findings: DakarFinding[] }
+  | { ok: false; detail: string } {
+  const findings = Array.isArray(raw) ? raw : null
+  if (!findings || findings.length === 0) {
+    return {
+      ok: false,
+      detail: 'Dakar returned changes-requested without any findings; refusing to treat a reviewer rejection as non-blocking',
+    }
+  }
+  for (const [index, finding] of findings.entries()) {
+    if (finding === null || typeof finding !== 'object' || Array.isArray(finding)) {
+      return {
+        ok: false,
+        detail: boundedTail(`Dakar returned a malformed finding at index ${index}; expected an object`, 2000),
+      }
+    }
+    const item = finding as Record<string, unknown>
+    if (typeof item.severity !== 'string' || !DAKAR_SEVERITIES.has(item.severity)) {
+      return {
+        ok: false,
+        detail: boundedTail(`Dakar returned an invalid finding at index ${index}; unsupported severity`, 2000),
+      }
+    }
+    const invalidField = DAKAR_REQUIRED_FINDING_FIELDS.find((field) => typeof item[field] !== 'string')
+    if (invalidField) {
+      return {
+        ok: false,
+        detail: boundedTail(`Dakar returned an invalid finding at index ${index}; ${invalidField} must be a string`, 2000),
+      }
+    }
+    if (item.line !== undefined && (!Number.isInteger(item.line) || Number(item.line) < 1)) {
+      return {
+        ok: false,
+        detail: boundedTail(`Dakar returned an invalid finding at index ${index}; line must be a positive integer`, 2000),
+      }
+    }
+  }
+  return { ok: true, findings: findings as DakarFinding[] }
+}
+
+function validateCleanDakarFindings(raw: unknown): string {
+  if (raw === undefined) return ''
+  if (!Array.isArray(raw)) return 'Dakar returned a clean verdict with a malformed findings field'
+  if (raw.length > 0) return 'Dakar returned a clean verdict with findings; refusing to discard reviewer findings'
+  return ''
+}
+
+/** Classify and fail-closed validate one Dakar process result. */
+export function classifyDakarReview(execResult: ExecStatus): {
+  /** Tool-neutral terminal outcome. */
+  outcome: ReviewOutcome
+  /** Validated and normalized findings. */
+  findings: ReviewFinding[]
+  /** Bounded operator-facing diagnostic. */
+  detail: string
+  /** Bounded telemetry category. */
+  errorCategory: ReviewErrorCategory
+} {
+  const category = (fallback: ReviewErrorCategory) => execResult.killed ? 'timeout' as const : fallback
+  const doc = parseDakarDocument(execResult.stdout)
+  if (!doc) {
+    const detail = boundedTail([execResult.stderr, execResult.message].filter(Boolean).join('\n')) || 'dakar-review produced no parsable JSON output'
+    return { outcome: 'error', findings: [], detail, errorCategory: category('invalid-output') }
+  }
+  if (doc.ok === false) {
+    const stage = boundedTail(doc.stage ?? 'unknown', 200)
+    if (String(doc.stage) === 'deferred') {
+      // 'dakar' + 'deferred' markers let assessment.ts recognize this as a
+      // recoverable review deferral, mirroring the CodeRabbit rate-limit path.
+      return { outcome: 'rate-limited', findings: [], detail: `Dakar review deferred (stage: ${stage}) — ${boundedTail(doc.error || 'no detail')}`, errorCategory: category('deferred') }
+    }
+    return { outcome: 'error', findings: [], detail: `stage: ${stage} — ${boundedTail(doc.error || 'no detail')}`, errorCategory: category('execution') }
+  }
+  if (doc.ok === true) {
+    if (doc.skipped === true || doc.verdict === 'pass') {
+      const invalidFindings = validateCleanDakarFindings(doc.findings)
+      if (invalidFindings) return { outcome: 'error', findings: [], detail: invalidFindings, errorCategory: category('invalid-output') }
+      return { outcome: 'clean', findings: [], detail: '', errorCategory: category('none') }
+    }
+    if (doc.verdict === 'changes-requested') {
+      const validation = validateChangesRequestedFindings(doc.findings)
+      if (!validation.ok) return { outcome: 'error', findings: [], detail: validation.detail, errorCategory: category('invalid-output') }
+      return { outcome: 'findings', findings: validation.findings.map(mapDakarFinding), detail: '', errorCategory: category('none') }
+    }
+  }
+  return { outcome: 'error', findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail(doc.verdict ?? 'none', 200)})`, errorCategory: category('invalid-output') }
+}
+
 /**
- * Parse a CodeRabbit `--agent` NDJSON stdout stream into structured events,
- * findings, terminal completion, and error. The `--agent` mode emits NDJSON on
- * stdout and exits 0 even on fatal errors, so callers classify from these
- * events, never the exit code; non-JSON lines are retained in `rawLines` as
- * fallback evidence. Wire contract pinned against coderabbit CLI internals;
- * captured live sessions documenting every observed event shape live in
- * docs/coderabbit-wire-contract.md. Summary:
- *   {"type":"review_context"|"status"|"heartbeat"} — progress events
- *   {"type":"finding", severity: critical|major|minor|trivial|info,
- *    fileName, comment?, suggestions?, codegenInstructions?}
- *   {"type":"complete", status, findings: N, message?}
+ * Parse CodeRabbit's NDJSON event stream; exit status is not its verdict.
+ *
+ * The CLI's --agent mode emits NDJSON events on stdout and exits 0 even on
+ * fatal errors, so classification parses events, never exit codes. The wire
+ * contract and captured live sessions are documented in
+ * docs/coderabbit-wire-contract.md.
+ *
+ * Event types are progress (`review_context`, `status`, `heartbeat`), finding,
+ * complete, and error records. Findings carry severity and file/detail fields;
+ * terminal records carry status or error metadata.
  *   {"type":"error", errorType ("rate_limit" for quota), message,
  *    recoverable, details?/metadata?{waitTime}}
  */
@@ -161,29 +351,22 @@ export function parseCoderabbitAgentOutput(stdout: unknown): CoderabbitParsedOut
   }
 }
 
-/** The severities that turn a CodeRabbit finding into a blocking fix-round item. */
+/** Severities that enter the shared blocking-items gate. */
 export const CODERABBIT_BLOCKING_SEVERITIES = new Set(['critical', 'major'])
 
 /**
- * The success sentinels a `complete` event's status may carry. Both spellings
- * are observed from the real CLI: 'review_completed' in the captured live
- * sessions (docs/coderabbit-wire-contract.md) and 'reviewed' in the CLI output
- * the host-review tests were written against. Any other terminal status (a
- * cancelled or aborted review) must NOT read as clean.
+ * Success sentinels observed in CodeRabbit terminal completion events.
+ *
+ * Both spellings are observed from the real CLI. Any other terminal status,
+ * including a cancelled or aborted review, must not read as clean.
  */
 export const CODERABBIT_SUCCESS_STATUSES = new Set(['review_completed', 'reviewed'])
 
-/**
- * Classify a CodeRabbit review from its parsed events and the exec result,
- * never the exit code. Rate-limit and auth faults are detected from the
- * combined error text; a `complete` event reads clean only when its status is a
- * known success sentinel, so a cancelled or aborted completion is an error, not
- * clean. Returns one of 'clean' | 'findings' | 'rate-limited' | 'auth' | 'error'.
- */
+/** Classify parsed CodeRabbit events into the shared outcome vocabulary. */
 export function classifyCoderabbitOutcome(
   execResult: { ok?: boolean; stderr?: string; message?: string },
   parsed: CoderabbitParsedOutput,
-): CoderabbitOutcome {
+): ReviewOutcome {
   const errorText = [parsed.error?.message || '', execResult.stderr || '', execResult.message || ''].join('\n')
   if (parsed.error?.errorType === 'rate_limit' || /\brate.?limit|review limit reached/i.test(errorText)) return 'rate-limited'
   if (authFailureDetail(errorText)) return 'auth'
@@ -196,68 +379,84 @@ export function classifyCoderabbitOutcome(
   return 'error'
 }
 
-/** Real wall-clock backoff sleep (minutes); the injectable default for rate-limit waits. */
+/** Sleep for a host-side review backoff without consuming agent tokens. */
 export async function hostSleepMinutes(minutes: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, minutes * 60000))
 }
 
-/**
- * Reduce findings to their blocking (critical/major) items as operator-facing
- * fix-round strings; non-blocking findings are captured for the sink and linter
- * tuning but never gate integration. Each message is bounded to 500 characters.
- */
-export function coderabbitBlockingItems(findings: readonly CoderabbitFinding[] | null | undefined): string[] {
+/** Convert blocking normalized findings into bounded fix-round items. */
+export function reviewBlockingItems(reviewer: string, findings: readonly ReviewFinding[] | null | undefined): string[] {
+  const name = boundedTail(reviewer, 40) || 'host reviewer'
   return (findings || [])
     .filter((finding) => CODERABBIT_BLOCKING_SEVERITIES.has(String(finding.severity || '').toLowerCase()))
-    .map((finding) => `CodeRabbit (${finding.severity}) ${finding.fileName || 'unknown file'}: ${String(finding.comment || finding.codegenInstructions || 'see the recorded suggestions').slice(0, 500)}`)
+    .map((finding) => `${name} (${finding.severity}) ${finding.fileName || 'unknown file'}: ${String(finding.comment || finding.codegenInstructions || 'see the recorded suggestions').slice(0, 500)}`)
 }
 
-/**
- * Bounded-cardinality run aggregate for the terminal run summary, plus the last
- * durable-sink write error. Process-wide state, updated by recordCoderabbitReview
- * and the control loop; kept low-cardinality (fixed keys) so operators can read
- * review pressure straight from the result.
- */
-export const coderabbitCapture: {
-  /** Total host reviews recorded. */
-  reviews: number
-  /** Total findings recorded across all reviews. */
+/** Bounded process-local host-review metrics. */
+export const hostReviewMetrics: {
+  /** Terminal host-review runs. */
+  runs: number
+  /** Findings recorded across terminal runs. */
   findings: number
-  /** Reviews that ended rate-limited (deferred rather than gated). */
-  rateLimitedRuns: number
-  /** Reviews that could not complete and were deferred to a relaunch. */
+  /** Non-terminal retry attempts. */
+  retries: number
+  /** Terminal deferred outcomes. */
   deferred: number
-  /** Finding counts keyed by lower-cased severity. */
-  bySeverity: Record<string, number>
-  /** Last findings-sink write error, if any; empty when the sink is healthy. */
+  /** Terminal timeout outcomes. */
+  timeouts: number
+  /** Terminal non-auth error outcomes. */
+  errors: number
+  /** Authentication and preflight failures. */
+  authFailures: number
+  /** Findings-sink write failures. */
+  sinkFailures: number
+  /** Findings grouped by a fixed severity vocabulary. */
+  bySeverity: Record<'critical' | 'major' | 'minor' | 'trivial' | 'info' | 'unknown', number>
+  /** Last bounded sink error, empty when healthy. */
   sinkError: string
-} = { reviews: 0, findings: 0, rateLimitedRuns: 0, deferred: 0, bySeverity: {}, sinkError: '' }
-
-/** Process-wide host commit-gate counters for the run summary. */
-export const hostGateMetrics = {
-  /** Total gate executions attempted. */
+} = {
   runs: 0,
-  /** Gate executions that failed. */
-  failures: 0,
+  findings: 0,
+  retries: 0,
+  deferred: 0,
+  timeouts: 0,
+  errors: 0,
+  authFailures: 0,
+  sinkFailures: 0,
+  bySeverity: { critical: 0, major: 0, minor: 0, trivial: 0, info: 0, unknown: 0 },
+  sinkError: '',
 }
 
-/** Process-wide CodeScene check counters for the run summary. */
-export const csCheckMetrics = {
-  /** Check executions attempted (excludes skips). */
-  runs: 0,
-  /** Check executions that reported code-health issues. */
-  failures: 0,
+/** Compatibility aliases retained for external module consumers. */
+export const coderabbitCapture = hostReviewMetrics
+/** Compatibility blocking helper that labels findings as CodeRabbit output. */
+export function coderabbitBlockingItems(findings: readonly ReviewFinding[] | null | undefined): string[] {
+  return reviewBlockingItems('CodeRabbit', findings)
+}
+
+/** Process-local deterministic host-gate counters. */
+export const hostGateMetrics: {
+  /** Host-gate executions attempted. */
+  runs: number
+  /** Host-gate executions that failed. */
+  failures: number
+} = { runs: 0, failures: 0 }
+
+/** Process-local CodeScene gate counters. */
+export const csCheckMetrics: {
+  /** CodeScene checks attempted. */
+  runs: number
+  /** CodeScene checks that reported unhealthy code. */
+  failures: number
   /** Availability probes that failed for infrastructure reasons. */
-  probeFailures: 0,
-  /** Checks skipped because the configured binary was not on PATH. */
-  skipped: 0,
-}
+  probeFailures: number
+  /** Checks skipped because the executable was unavailable. */
+  skipped: number
+} = { runs: 0, failures: 0, probeFailures: 0, skipped: 0 }
 
-/**
- * Split a configured shell command into words without evaluating expansions or
- * substitutions. The limited POSIX-style quoting support is sufficient to
- * identify the executable while keeping operator configuration inert.
- */
+// Split configured commands without evaluating shell expansions. This keeps
+// executable probes inert while supporting the limited quoting operators use
+// for fixed command-prefix arguments.
 function shellCommandWords(command: string): string[] | null {
   const words: string[] = []
   let word = ''
@@ -297,12 +496,10 @@ function shellCommandWords(command: string): string[] | null {
   return words
 }
 
-/** Resolve the executable after any leading shell environment assignments. */
 function codeSceneExecutable(command: string): string {
   const words = shellCommandWords(command)
   if (!words) return ''
-  const executable = words.find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word))
-  return executable || ''
+  return words.find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) || ''
 }
 
 // Per-process gate-log directory, created lazily with mkdtempSync so its name
@@ -322,101 +519,226 @@ function gateLogRoot(): string {
   return gateLogDirCache
 }
 
-/**
- * Build the secure per-run log path for one gate execution inside the private
- * mkdtemp gate-log directory (see gateLogRoot). The tag and round label are
- * slugged and length-bounded; the raw gate command is deliberately kept out of
- * the filename because it is attacker/operator-controlled text.
- */
+/** Build a sanitized path inside the private per-process gate-log directory. */
 export function hostGateLogPath(tag: string, roundLabel: string, index: number): string {
   const slug = (value: unknown) => String(value).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
   const path = process.getBuiltinModule('node:path')
   return path.join(gateLogRoot(), `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`)
 }
 
-/**
- * Bind the host-review run wiring once (base branch, attempts, backoff range,
- * findings sink, gate set, gate timeout, CodeScene) and return the host-side
- * gate surface. Host-collected evidence here is decisive: the gates and
- * CodeRabbit re-run against committed HEAD, so a gatesGreen claim is verified,
- * never trusted.
- */
-export function makeHostReview(config: HostReviewConfig) {
+/** Result of the optional CodeScene host check. */
+export interface CodeSceneCheckResult {
+  /** Whether CodeScene accepted the committed change. */
+  clean: boolean
+  /** Whether the check was skipped because its executable was unavailable. */
+  skipped: boolean
+  /** Bounded operator-facing result detail. */
+  detail: string
+  /** Secure log path containing the complete command output. */
+  logFile: string
+}
+
+/** Bound host-review operations and retained CodeRabbit compatibility aliases. */
+export interface HostReviewSurface {
+  /** Compute deterministic retry backoff for a label. */
+  reviewBackoffMinutes: (seed: unknown) => number
+  /** Run the selected reviewer through the neutral adapter boundary. */
+  runHostReview: (worktree: string, label: string, deps?: HostReviewDeps) => Promise<HostReviewResult>
+  /** Serialize one terminal review and its findings to the configured sink. */
+  recordHostReview: (label: string, review: HostReviewResult) => Promise<void>
+  /** Execute configured deterministic commit gates. */
+  runHostCommitGates: (worktree: string, tag: string, roundLabel: string) => Promise<HostGateRun>
+  /** Execute the optional CodeScene health check. */
+  runCodeSceneCheck: (worktree: string, tag: string, label: string) => Promise<CodeSceneCheckResult>
+  /** Compatibility alias for `reviewBackoffMinutes`. */
+  coderabbitBackoffMinutes: (seed: unknown) => number
+  /** Compatibility alias for `runHostReview`. */
+  runCoderabbitHostReview: (worktree: string, label: string, deps?: HostReviewDeps) => Promise<HostReviewResult>
+  /** Compatibility alias for `recordHostReview`. */
+  recordCoderabbitReview: (label: string, review: HostReviewResult) => Promise<void>
+}
+
+/** Bind reviewer dispatch, retry, findings recording, and host-gate execution. */
+export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
   const {
     base,
+    reviewTool,
+    dakarCommand,
+    reviewTimeoutSeconds,
+    dakarBudgetGbp,
     coderabbitAttempts,
     coderabbitBackoffMinutes: backoffRange,
-    coderabbitFindingsFile,
+    coderabbitFindingsFile: findingsFile,
     commitGates,
     commitGateTimeoutSeconds,
     csCheck,
     csCheckCommand,
   } = config
+  const dakarInvocation = shellCommandWords(dakarCommand) || []
+  const dakarExecutable = dakarInvocation[0] || 'dakar-review'
+  const dakarPrefixArgs = dakarInvocation.slice(1)
+  let findingsSinkTail = Promise.resolve()
 
   // Deterministic jitter in [low, high] minutes: Math.random() is banned for
   // Claude Code workflow dual-compatibility (ODW scanDualCompat), and a seeded
   // spread keeps sibling tasks from hammering the quota in lockstep.
-  function coderabbitBackoffMinutes(seed: unknown): number {
+  function reviewBackoffMinutes(seed: unknown): number {
     let hash = 5381
     for (const ch of String(seed)) hash = ((hash * 33) ^ (ch.codePointAt(0) as number)) >>> 0
     const [low, high] = backoffRange
     return low + (hash % (high - low + 1))
   }
 
-  // Run one host review against the worktree's COMMITTED changes, absorbing
-  // rate-limit backoff in host wall-clock (zero agent tokens). Returns
-  // { outcome, attempts, findings, detail }. deps are injectable for tests.
-  async function runCoderabbitHostReview(worktree: string, label: string, deps: HostReviewDeps = {}): Promise<CoderabbitReview> {
-    const exec = deps.exec || execFileStatus
-    const sleep = deps.sleep || hostSleepMinutes
-    const commandArgs = ['review', '--agent', '--type', 'committed', '--base', base]
-    for (let attempt = 1; ; attempt++) {
-      log(`[${label}] CodeRabbit host review attempt ${attempt} of ${coderabbitAttempts}`)
-      const result = await exec('coderabbit', commandArgs, { cwd: worktree })
-      const parsed = parseCoderabbitAgentOutput(result.stdout)
-      const outcome = classifyCoderabbitOutcome(result, parsed)
-      if (outcome === 'rate-limited' && attempt < coderabbitAttempts) {
-        const minutes = coderabbitBackoffMinutes(`${label}#${attempt}`)
-        log(`[${label}] CodeRabbit rate limited; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${coderabbitAttempts} (wall-clock only, no agent tokens)`)
-        await sleep(minutes)
-        continue
+  // One CodeRabbit attempt: exec the NDJSON --agent review and classify from the
+  // event stream (never the exit code). Detail is empty on a clean/findings
+  // outcome; otherwise it carries the first parsable error text.
+  async function runCoderabbitAttempt(worktree: string, exec: NonNullable<HostReviewDeps['exec']>): Promise<{ outcome: ReviewOutcome; findings: ReviewFinding[]; detail: string; errorCategory: ReviewErrorCategory }> {
+    const result = await exec('coderabbit', ['review', '--agent', '--type', 'committed', '--base', base], {
+      cwd: worktree,
+      timeoutMs: reviewTimeoutSeconds * 1000,
+    })
+    const parsed = parseCoderabbitAgentOutput(result.stdout)
+    const outcome = classifyCoderabbitOutcome(result, parsed)
+    const detail = outcome === 'clean' || outcome === 'findings'
+      ? ''
+      : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join('; ') || 'coderabbit produced no parsable outcome').trim()
+    const errorCategory: ReviewErrorCategory = result.killed
+      ? 'timeout'
+      : outcome === 'rate-limited'
+        ? 'deferred'
+        : outcome === 'auth'
+          ? 'auth'
+          : outcome === 'error'
+            ? (parsed.error || parsed.complete ? 'execution' : 'invalid-output')
+            : 'none'
+    return { outcome, findings: parsed.findings, detail: boundedTail(detail), errorCategory }
+  }
+
+  // One Dakar attempt: exec the Dakar CLI against the committed diff and map its
+  // single JSON document onto the neutral single-attempt shape. A fresh
+  // ephemeral state root per attempt keeps the gate stateless — Dakar otherwise
+  // records reviewed heads and would skip already-seen commits across runs, so a
+  // shared state root would silently turn re-reviews into no-ops.
+  async function runDakarAttempt(worktree: string, exec: NonNullable<HostReviewDeps['exec']>, removeStateRoot?: HostReviewDeps['removeDakarStateRoot']): Promise<{ outcome: ReviewOutcome; findings: ReviewFinding[]; detail: string; errorCategory: ReviewErrorCategory }> {
+    const fs = process.getBuiltinModule('node:fs')
+    const os = process.getBuiltinModule('node:os')
+    const path = process.getBuiltinModule('node:path')
+    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'df12-dakar-state-'))
+    const commandArgs = [
+      '--repo-root', worktree,
+      '--base', base,
+      '--state-root', stateRoot,
+      '--timeout', String(reviewTimeoutSeconds),
+      ...(dakarBudgetGbp > 0 ? ['--budget-gbp', String(dakarBudgetGbp)] : []),
+    ]
+    try {
+      const result = await exec(dakarExecutable, [...dakarPrefixArgs, ...commandArgs], {
+        cwd: worktree,
+        timeoutMs: reviewTimeoutSeconds * 1000,
+      })
+      return classifyDakarReview(result)
+    } finally {
+      try {
+        const cleanup = removeStateRoot || fs.rmSync
+        cleanup(stateRoot, { recursive: true, force: true })
+      } catch (error) {
+        const detail = boundedTail((error as Error | null)?.message || String(error), 500)
+        log(`[Dakar] could not remove temporary state root: ${detail}`)
       }
-      const detail = outcome === 'clean' || outcome === 'findings'
-        ? ''
-        : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join('; ') || 'coderabbit produced no parsable outcome').trim()
-      return { outcome, attempts: attempt, findings: parsed.findings, detail }
     }
   }
 
-  async function recordCoderabbitReview(label: string, review: CoderabbitReview): Promise<void> {
-    coderabbitCapture.reviews += 1
-    if (review.outcome === 'rate-limited') coderabbitCapture.rateLimitedRuns += 1
-    for (const finding of review.findings) {
-      coderabbitCapture.findings += 1
-      const severity = String(finding.severity || 'unknown').toLowerCase()
-      coderabbitCapture.bySeverity[severity] = (coderabbitCapture.bySeverity[severity] || 0) + 1
-    }
-    if (!coderabbitFindingsFile || !review.findings.length) return
-    // Wall-clock stamp shelled out to `date`: Date.now()/new Date() are banned
-    // for Claude Code workflow dual-compatibility (ODW scanDualCompat).
-    const stamp = await execFileStatus('date', ['-u', '+%Y-%m-%dT%H:%M:%SZ'])
-    const ts = stamp.ok ? stamp.stdout.trim() : ''
-    const lines = review.findings.map((finding) => JSON.stringify({
-      ts,
-      label,
-      severity: String(finding.severity || ''),
-      file: String(finding.fileName || ''),
-      comment: String(finding.comment || '').slice(0, 2000),
-      codegenInstructions: String(finding.codegenInstructions || '').slice(0, 2000),
-      suggestions: Array.isArray(finding.suggestions) ? finding.suggestions.length : 0,
-    }))
+  // Run one host review against the worktree's COMMITTED changes, absorbing
+  // rate-limit/deferral backoff in host wall-clock (zero agent tokens). Returns
+  // HostReviewResult. The retry/backoff loop wraps BOTH
+  // tools' 'rate-limited' outcomes identically; the per-tool attempt differs
+  // only in the CLI and parser. run-task.ts consumes this neutral runner and
+  // recordHostReview/reviewBlockingItems; compatibility aliases stay at the
+  // exported boundary. deps are injectable for tests.
+  async function runHostReview(worktree: string, label: string, deps: HostReviewDeps = {}): Promise<HostReviewResult> {
+    const exec = deps.exec || execFileStatus
+    const sleep = deps.sleep || hostSleepMinutes
+    const nowMs = deps.nowMs || (() => Number(process.hrtime.bigint() / 1_000_000n))
+    const reviewer = reviewTool
+    const reviewerName = reviewer === 'dakar' ? 'Dakar' : 'CodeRabbit'
+    const boundedLabel = boundedTail(label, 120)
+    const startedMs = nowMs()
+    let terminalAttempt = 1
     try {
-      const fs = process.getBuiltinModule('node:fs/promises')
-      await fs.appendFile(coderabbitFindingsFile, `${lines.join('\n')}\n`, 'utf8')
+      for (let attempt = 1; ; attempt++) {
+        terminalAttempt = attempt
+        log(`[${boundedLabel}] ${reviewerName} host review attempt ${attempt} of ${coderabbitAttempts}`)
+        const single = reviewer === 'dakar'
+          ? await runDakarAttempt(worktree, exec, deps.removeDakarStateRoot)
+          : await runCoderabbitAttempt(worktree, exec)
+        if (single.outcome === 'rate-limited' && attempt < coderabbitAttempts) {
+          const minutes = reviewBackoffMinutes(`${boundedLabel}#${attempt}`)
+          log(`[${boundedLabel}] ${reviewerName} rate limited/deferred; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${coderabbitAttempts} (wall-clock only, no agent tokens)`)
+          await sleep(minutes)
+          continue
+        }
+        const review: HostReviewResult = {
+          reviewer,
+          outcome: single.outcome,
+          attempts: attempt,
+          elapsedMs: Math.max(0, Math.trunc(nowMs() - startedMs)),
+          errorCategory: single.errorCategory,
+          findings: single.findings,
+          detail: boundedTail(single.detail),
+        }
+        hostReviewMetrics.runs += 1
+        hostReviewMetrics.retries += attempt - 1
+        if (review.outcome === 'rate-limited') hostReviewMetrics.deferred += 1
+        if (review.outcome === 'auth') hostReviewMetrics.authFailures += 1
+        if (review.outcome === 'error') hostReviewMetrics.errors += 1
+        if (review.errorCategory === 'timeout') hostReviewMetrics.timeouts += 1
+        log(`[host-review] terminal ${JSON.stringify({ reviewer, label: boundedLabel, attempts: attempt, elapsedMs: review.elapsedMs, outcome: review.outcome, errorCategory: review.errorCategory })}`)
+        return review
+      }
     } catch (error) {
-      coderabbitCapture.sinkError = ((error as Error | null) && (error as Error).message) || String(error)
-      log(`[${label}] could not append CodeRabbit findings to ${coderabbitFindingsFile}: ${coderabbitCapture.sinkError}`)
+      const elapsedMs = Math.max(0, Math.trunc(nowMs() - startedMs))
+      hostReviewMetrics.runs += 1
+      hostReviewMetrics.retries += terminalAttempt - 1
+      hostReviewMetrics.errors += 1
+      log(`[host-review] terminal ${JSON.stringify({ reviewer, label: boundedLabel, attempts: terminalAttempt, elapsedMs, outcome: 'error', errorCategory: 'execution' })}`)
+      throw error
     }
+  }
+
+  async function recordHostReview(label: string, review: HostReviewResult): Promise<void> {
+    for (const finding of review.findings) {
+      hostReviewMetrics.findings += 1
+      const rawSeverity = String(finding.severity || 'unknown').toLowerCase()
+      const severity = rawSeverity in hostReviewMetrics.bySeverity ? rawSeverity as keyof typeof hostReviewMetrics.bySeverity : 'unknown'
+      hostReviewMetrics.bySeverity[severity] += 1
+    }
+    if (!findingsFile || !review.findings.length) return
+    const append = async () => {
+      // Wall-clock stamp shelled out to `date`: Date.now()/new Date() are banned
+      // for Claude Code workflow dual-compatibility (ODW scanDualCompat).
+      const stamp = await execFileStatus('date', ['-u', '+%Y-%m-%dT%H:%M:%SZ'])
+      const ts = stamp.ok ? stamp.stdout.trim() : ''
+      const lines = review.findings.map((finding) => JSON.stringify({
+        ts,
+        label,
+        severity: String(finding.severity || ''),
+        file: String(finding.fileName || ''),
+        comment: String(finding.comment || '').slice(0, 2000),
+        codegenInstructions: String(finding.codegenInstructions || '').slice(0, 2000),
+        suggestions: Array.isArray(finding.suggestions) ? finding.suggestions.length : 0,
+      }))
+      try {
+        const fs = process.getBuiltinModule('node:fs/promises')
+        await fs.appendFile(findingsFile, `${lines.join('\n')}\n`, 'utf8')
+      } catch (error) {
+        hostReviewMetrics.sinkFailures += 1
+        hostReviewMetrics.sinkError = boundedTail((error as Error | null)?.message || String(error), 500)
+        log(`[${boundedTail(label, 120)}] could not append ${review.reviewer} host-review findings to ${findingsFile}: ${hostReviewMetrics.sinkError}`)
+      }
+    }
+    const pending = findingsSinkTail.then(append, append)
+    findingsSinkTail = pending.then(() => undefined, () => undefined)
+    await pending
   }
 
   // The control loop executes the configured gate commands itself against the
@@ -460,12 +782,17 @@ export function makeHostReview(config: HostReviewConfig) {
       // Exclusive, no-follow open (mode 0600): O_EXCL fails if anything already
       // exists at the path (a planted symlink/file cannot be clobbered), and
       // O_NOFOLLOW refuses to traverse a symlink. Any such fault surfaces on the
-      // stream 'error' listener below and settles the gate as failed.
+      // synchronous open below and settles the gate before a child is spawned.
       const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants
-      // createWriteStream accepts numeric open flags at runtime; the ambient
-      // type only allows a string, so cast the OR-ed constants.
-      const openFlags = (O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW) as unknown as string
-      const stream = fs.createWriteStream(logFile, { flags: openFlags, mode: 0o600 })
+      const openFlags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW
+      let fd: number
+      try {
+        fd = fs.openSync(logFile, openFlags, 0o600)
+      } catch (error) {
+        resolve({ ok: false, killed: false, tail: `gate log write failed: ${(error as Error).message}` })
+        return
+      }
+      const stream = fs.createWriteStream(logFile, { fd, autoClose: true })
       const tail: string[] = []
       let carry = ''
       let killed = false
@@ -544,16 +871,7 @@ export function makeHostReview(config: HostReviewConfig) {
   // Skips gracefully — like `make verify-modules` without Dafny — when the
   // configured binary is not on PATH, so environments without CodeScene are
   // not blocked. Returns { clean, skipped, detail, logFile }.
-  async function runCodeSceneCheck(worktree: string, tag: string, label: string): Promise<{
-    /** True when disabled, unavailable, or executed cleanly; false on probe faults or reported issues. */
-    clean: boolean
-    /** True when disabled or when the CodeScene binary was not on PATH; false for every attempted check or failed probe. */
-    skipped: boolean
-    /** Operator-facing detail for unavailable binaries, probe faults, and reported issues; empty when disabled or executed cleanly. */
-    detail: string
-    /** Path to the secure per-run log for executed checks; empty when disabled, unavailable, or the availability probe failed. */
-    logFile: string
-  }> {
+  async function runCodeSceneCheck(worktree: string, tag: string, label: string): Promise<{ clean: boolean; skipped: boolean; detail: string; logFile: string }> {
     if (!csCheck) return { clean: true, skipped: true, detail: '', logFile: '' }
     const bin = codeSceneExecutable(csCheckCommand) || 'cs-check-changed'
     // Pass the probed name as a positional argument ($1), never interpolated
@@ -594,15 +912,14 @@ export function makeHostReview(config: HostReviewConfig) {
   }
 
   return {
-    /** Deterministic seeded backoff jitter (minutes) for rate-limit retries. */
-    coderabbitBackoffMinutes,
-    /** Run one host CodeRabbit review against committed changes; backoff is absorbed in wall-clock. */
-    runCoderabbitHostReview,
-    /** Fold a review's findings into the capture aggregate and the durable sink. */
-    recordCoderabbitReview,
-    /** Re-run the configured commit gates against committed HEAD; host-verifies a gatesGreen claim. */
+    reviewBackoffMinutes,
+    runHostReview,
+    recordHostReview,
     runHostCommitGates,
-    /** Run the CodeScene code-health check, skipping gracefully when its binary is absent. */
     runCodeSceneCheck,
+    // Public compatibility aliases. Workflow policy uses only neutral names.
+    coderabbitBackoffMinutes: reviewBackoffMinutes,
+    runCoderabbitHostReview: runHostReview,
+    recordCoderabbitReview: recordHostReview,
   }
 }

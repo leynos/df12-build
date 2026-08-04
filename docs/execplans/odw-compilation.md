@@ -867,3 +867,18 @@ host gates and host review in the review rounds and addendum lane), and
 `main.ts` (`hostGateLock`, host-review factory binding, result aggregates). All
 114 artefact tests (18 new upstream suites included), 231 module tests, and
 `make all` green; the branch was then rebased onto `origin/main`.
+
+2026-08-03 (post-completion): the host-review subsystem gained Dakar as the
+default reviewer while retaining CodeRabbit behind `reviewTool: 'coderabbit'`.
+The Dakar adapter parses and validates the terminal verdict, maps findings onto
+the established blocking contract, and uses a fresh, finally-cleaned state root
+for every bounded attempt. The external timeout and budget remain Dakar-named
+configuration for operator compatibility, while the shared internal timeout is
+tool-neutral. Both adapters now normalize into `HostReviewResult` and
+`ReviewOutcome` before workflow policy consumes their output. The runner,
+recorder, blocking helper, capture aggregate, labels, and result summary use
+tool-neutral names; the old CodeRabbit-named exports remain compatibility
+aliases only. Each terminal run emits bounded reviewer, label, attempts,
+elapsed time, outcome, and error-category fields. Fixed-cardinality metrics
+cover runs, findings, retries, deferrals, timeouts, errors, authentication
+failures, and serialized JSONL sink failures.

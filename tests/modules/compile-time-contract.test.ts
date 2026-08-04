@@ -17,14 +17,17 @@ const TSC = path.join(REPO, 'node_modules', '.bin', 'tsc')
 // The restriction flags mirror tsconfig.json; the config-shape test below pins
 // them to the committed config so the two cannot drift.
 const FLAGS = ['--noEmit', '--strict', '--target', 'esnext', '--module', 'esnext', '--moduleResolution', 'bundler', '--erasableSyntaxOnly', '--verbatimModuleSyntax', '--isolatedModules']
-
 function typecheck(source: string): { ok: boolean; output: string } {
   const dir = mkdtempSync(path.join(tmpdir(), 'cs-compile-'))
   writeFileSync(path.join(dir, 'probe.ts'), source)
   try {
     // Run from the temp dir (which has no tsconfig.json) so tsc accepts the
     // command-line file instead of erroring TS5112 against the repo config.
-    execFileSync(TSC, [...FLAGS, 'probe.ts'], { cwd: dir, encoding: 'utf8', stdio: 'pipe' })
+    execFileSync(TSC, [...FLAGS, 'probe.ts'], {
+      cwd: dir,
+      encoding: 'utf8',
+      stdio: 'pipe',
+    })
     return { ok: true, output: '' }
   } catch (error) {
     const err = error as { stdout?: string; stderr?: string }
@@ -50,7 +53,11 @@ function typecheckWithPrelude(prelude: string, body: string, tmpPrefix: string):
   const dir = mkdtempSync(path.join(tmpdir(), tmpPrefix))
   writeFileSync(path.join(dir, 'probe.ts'), `${prelude}\n${body}\n`)
   try {
-    execFileSync(TSC, [...SALVAGE_FLAGS, ODW_GLOBALS, 'probe.ts'], { cwd: dir, encoding: 'utf8', stdio: 'pipe' })
+    execFileSync(TSC, [...SALVAGE_FLAGS, ODW_GLOBALS, 'probe.ts'], {
+      cwd: dir,
+      encoding: 'utf8',
+      stdio: 'pipe',
+    })
     return { ok: true, output: '' }
   } catch (error) {
     const err = error as { stdout?: string; stderr?: string }
@@ -80,11 +87,24 @@ function typecheckRecovery(body: string): { ok: boolean; output: string } {
   return typecheckWithPrelude(RECOVERY_PRELUDE, body, 'cs-recovery-')
 }
 
+const HOST_REVIEW_PRELUDE = [
+  `import type { WorkflowConfig } from '${path.join(ODW_SRC, 'config.ts')}'`,
+  `import type { HostReviewConfig } from '${path.join(ODW_SRC, 'host-review.ts')}'`,
+].join('\n')
+
+function typecheckHostReview(body: string): { ok: boolean; output: string } {
+  return typecheckWithPrelude(HOST_REVIEW_PRELUDE, body, 'cs-host-review-')
+}
+
 const FAULT_METRICS_PRELUDE = `import type { FaultMetrics } from '${path.join(ODW_SRC, 'types.ts')}'`
 
 function typecheckFaultMetrics(body: string): { ok: boolean; output: string } {
   return typecheckWithPrelude(FAULT_METRICS_PRELUDE, body, 'cs-fault-metrics-')
 }
+
+// These probes import the full workflow graph; leave headroom for shared-host
+// contention without weakening the compiler flags or contract assertions.
+const HOST_REVIEW_TYPECHECK_TIMEOUT_MS = 60_000
 
 describe('compile-time contract', () => {
   test('tsconfig.json keeps the erasable-syntax restriction flags on', async () => {
@@ -200,4 +220,31 @@ describe('recovery synthetic-impl type contract', () => {
     expect(result.ok).toBe(false)
     expect(result.output).toMatch(/TS2322|TS2769|not assignable/)
   }, 30_000)
+})
+
+describe('host-review public type contract', () => {
+  test('review-tool and Dakar fields accept their declared shapes', () => {
+    const result = typecheckHostReview([
+      `const workflow: Pick<WorkflowConfig, 'REVIEW_TOOL' | 'DAKAR_COMMAND' | 'DAKAR_TIMEOUT_SECONDS' | 'DAKAR_BUDGET_GBP'> = { REVIEW_TOOL: 'dakar', DAKAR_COMMAND: 'dakar-review', DAKAR_TIMEOUT_SECONDS: 3600, DAKAR_BUDGET_GBP: 0.3 }`,
+      `const host: Pick<HostReviewConfig, 'reviewTool' | 'dakarCommand' | 'reviewTimeoutSeconds' | 'dakarBudgetGbp'> = { reviewTool: 'coderabbit', dakarCommand: 'dakar-review', reviewTimeoutSeconds: 3600, dakarBudgetGbp: 0 }`,
+      `void workflow; void host`,
+    ].join('\n'))
+    expect(result.ok).toBe(true)
+  }, HOST_REVIEW_TYPECHECK_TIMEOUT_MS)
+
+  test('reviewTool rejects values outside the Dakar and CodeRabbit union', () => {
+    const result = typecheckHostReview(
+      `const x: Pick<HostReviewConfig, 'reviewTool'> = { reviewTool: 'sonarqube' }; void x`,
+    )
+    expect(result.ok).toBe(false)
+    expect(result.output).toMatch(/TS2322|not assignable/)
+  }, HOST_REVIEW_TYPECHECK_TIMEOUT_MS)
+
+  test('Dakar timeout and budget fields reject non-numeric values', () => {
+    const result = typecheckHostReview(
+      `const x: Pick<WorkflowConfig, 'DAKAR_TIMEOUT_SECONDS' | 'DAKAR_BUDGET_GBP'> = { DAKAR_TIMEOUT_SECONDS: 'slow', DAKAR_BUDGET_GBP: 'free' }; void x`,
+    )
+    expect(result.ok).toBe(false)
+    expect(result.output).toMatch(/TS2322|not assignable/)
+  }, HOST_REVIEW_TYPECHECK_TIMEOUT_MS)
 })

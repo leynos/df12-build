@@ -186,7 +186,8 @@ var IMPL_SCHEMA = {
     workItemsTotal: { type: "integer" },
     commits: { type: "array", items: { type: "string" } },
     gatesGreen: { type: "boolean", description: "every project commit gate (plus markdownlint/nixie where markdown changed) passes at HEAD" },
-    coderabbitRuns: { type: "integer" },
+    hostReviewRuns: { type: "integer" },
+    coderabbitRuns: { type: "integer", description: "Deprecated compatibility alias for hostReviewRuns." },
     openIssues: { type: "array", items: { type: "string" }, description: "anything left unresolved, with reason" },
     summary: { type: "string" }
   },
@@ -229,7 +230,8 @@ var FIX_SCHEMA = {
   properties: {
     commits: { type: "array", items: { type: "string" }, description: "commit subjects added in this fix round" },
     gatesGreen: { type: "boolean", description: "every project commit gate (plus markdownlint/nixie where markdown changed) passes at HEAD after the fixes" },
-    coderabbitRuns: { type: "integer" },
+    hostReviewRuns: { type: "integer" },
+    coderabbitRuns: { type: "integer", description: "Deprecated compatibility alias for hostReviewRuns." },
     resolved: { type: "array", items: { type: "string" }, description: "how each blocking item was resolved" },
     openIssues: { type: "array", items: { type: "string" }, description: "anything left unresolved, with reason" },
     summary: { type: "string" }
@@ -914,8 +916,8 @@ async function syntheticRecoveryImpl(candidate, evidence, residualRisk = []) {
      * as the delivered work.
      */
     commits: evidence?.recentCommits || [],
-    /** Zero: no CodeRabbit runs were performed by the bridge. */
-    coderabbitRuns: 0,
+    /** Zero: no host-review runs were performed by the bridge. */
+    hostReviewRuns: 0,
     /** Open issues forcing fresh review, plus any ExecPlan-verification fault. */
     openIssues: [
       "recovered branch requires fresh review",
@@ -997,8 +999,16 @@ function makeConfig(rawArgs) {
     TRIAGE_ADAPTER2,
     ASSESSMENT_ADAPTER2
   ].map((adapter) => String(adapter || "").toLowerCase()));
+  const REVIEW_TOOL2 = String(cfg.reviewTool || "dakar").toLowerCase();
+  if (!["dakar", "coderabbit"].includes(REVIEW_TOOL2)) {
+    throw new Error(`Unsupported reviewTool: ${REVIEW_TOOL2} (use "dakar" or "coderabbit")`);
+  }
+  const DAKAR_COMMAND2 = String(cfg.dakarCommand || "dakar-review");
+  const DAKAR_TIMEOUT_SECONDS2 = Math.min(7200, Math.max(60, Math.trunc(Number(cfg.dakarTimeoutSeconds) || 3600)));
+  const DAKAR_BUDGET_GBP_RAW = Number(cfg.dakarBudgetGbp);
+  const DAKAR_BUDGET_GBP2 = Number.isFinite(DAKAR_BUDGET_GBP_RAW) ? Math.min(10, Math.max(0, DAKAR_BUDGET_GBP_RAW)) : 0;
   const CODERABBIT_REVIEW_COMMAND2 = cfg.coderabbitReviewCommand || "coderabbit review --agent";
-  const CODERABBIT_HOST_REVIEW2 = cfg.coderabbitHostReview !== false;
+  const CODERABBIT_HOST_REVIEW2 = REVIEW_TOOL2 === "dakar" || cfg.coderabbitHostReview !== false;
   const CODERABBIT_BETWEEN_WORK_ITEMS2 = cfg.coderabbitBetweenWorkItems !== false;
   const CODERABBIT_ATTEMPTS2 = Math.max(1, Math.trunc(Number(cfg.coderabbitAttempts) || 3));
   const CODERABBIT_BACKOFF_MINUTES2 = (() => {
@@ -1023,7 +1033,8 @@ function makeConfig(rawArgs) {
     "Function smells \u2014 Brain Method (God Function): one complex function concentrates the module's behaviour and becomes a local hotspot. DRY violations: duplicated logic that is actually changed together in predictable patterns. Complex Method: high cyclomatic complexity from many conditionals (if/for/while). Primitive Obsession: heavy use of raw primitives (integers, strings, floats) where a domain type would encapsulate the validation and meaning of the values. Large Method: a function with too many lines to comprehend easily.",
     "Implementation smells \u2014 Nested Complexity: if-statements nested inside other ifs and/or loops, which sharply raises defect risk. Bumpy Road: a function that fails to encapsulate its responsibilities and instead holds several separate chunks of logic \u2014 extract each chunk into its own function. Complex Conditional: a single branch condition (in an if/for/while) combining multiple logical operators such as AND/OR. Large Assertion Blocks (test smell): a long run of consecutive assert statements that signals a missing abstraction. Duplicated Assertion Blocks (test smell): the same assertion block copy-pasted across the suite \u2014 a DRY violation."
   ].join("\n") : "";
-  const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? "Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work \u2014 only committed changes reach the host review." : `Use \`coderabbit review --agent\` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the \`vsleep\` command) for \`$(shuf -i ${CODERABBIT_BACKOFF_MINUTES2[0]}-${CODERABBIT_BACKOFF_MINUTES2[1]} -n 1)\` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.`;
+  const HOST_REVIEW_GUIDANCE = REVIEW_TOOL2 === "dakar" ? "Do NOT run Dakar yourself: the workflow host runs Dakar against your COMMITTED work after the stage returns, absorbs any deferral backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work \u2014 only committed changes reach the host review." : "Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work \u2014 only committed changes reach the host review.";
+  const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? HOST_REVIEW_GUIDANCE : `Use \`coderabbit review --agent\` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the \`vsleep\` command) for \`$(shuf -i ${CODERABBIT_BACKOFF_MINUTES2[0]}-${CODERABBIT_BACKOFF_MINUTES2[1]} -n 1)\` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.`;
   const SPARK_DELEGATION_GUIDANCE = "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks.";
   const SCRUTINEER_DELEGATION_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? `Delegate deterministic gate execution to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until the gates are green. ${CODERABBIT_REVIEW_GUIDANCE}` : `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND2}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`;
   return {
@@ -1077,6 +1088,10 @@ function makeConfig(rawArgs) {
     ASSESSMENT_MODEL: ASSESSMENT_MODEL2,
     ASSESSMENT_ESCALATION_MODEL: ASSESSMENT_ESCALATION_MODEL2,
     AUTH_REQUIRED_ADAPTERS: AUTH_REQUIRED_ADAPTERS2,
+    REVIEW_TOOL: REVIEW_TOOL2,
+    DAKAR_COMMAND: DAKAR_COMMAND2,
+    DAKAR_TIMEOUT_SECONDS: DAKAR_TIMEOUT_SECONDS2,
+    DAKAR_BUDGET_GBP: DAKAR_BUDGET_GBP2,
     CODERABBIT_REVIEW_COMMAND: CODERABBIT_REVIEW_COMMAND2,
     CODERABBIT_HOST_REVIEW: CODERABBIT_HOST_REVIEW2,
     CODERABBIT_BETWEEN_WORK_ITEMS: CODERABBIT_BETWEEN_WORK_ITEMS2,
@@ -1142,9 +1157,11 @@ function makePrompts(config) {
     CODERABBIT_REVIEW_COMMAND: CODERABBIT_REVIEW_COMMAND2,
     CODERABBIT_HOST_REVIEW: CODERABBIT_HOST_REVIEW2,
     CODERABBIT_REVIEW_GUIDANCE,
+    REVIEW_TOOL: REVIEW_TOOL2,
     SPARK_DELEGATION_GUIDANCE,
     SCRUTINEER_DELEGATION_GUIDANCE
   } = config;
+  const hostReviewer = REVIEW_TOOL2 === "dakar" ? "Dakar" : "CodeRabbit";
   function grepaiSearchCommand() {
     const workspaceArg = shellQuote(GREPAI_WORKSPACE);
     const projectArg = GREPAI_PROJECT ? shellQuote(GREPAI_PROJECT) : "$(get-project)";
@@ -1265,7 +1282,7 @@ function makePrompts(config) {
       "Use leta for navigation, sem for history, and the language router skill for the languages you touch. Follow the per-work-item skill and documentation signposts in the plan.",
       "",
       `${DRY_RUN2 ? "DRY RUN: do not run this step \u2014 it is skipped by the orchestrator." : ""}`,
-      `When all work items are done, ensure the project commit gates (${COMMIT_GATE_TEXT2}) are green at HEAD. Return the completion counts, commit subjects, whether gates are green, the number of coderabbit runs, and any open issues.`
+      `When all work items are done, ensure the project commit gates (${COMMIT_GATE_TEXT2}) are green at HEAD. Return the completion counts, commit subjects, whether gates are green, the number of host-review runs, and any open issues.`
     ].join("\n");
   }
   function implementWorkItemPrompt2(task, worktree, plan, item, opts = {}) {
@@ -1285,7 +1302,7 @@ function makePrompts(config) {
       "",
       "Then, in this exact order:",
       `  1. DETERMINISTIC GATE: summon \`scrutineer\` to run the project commit gates (${COMMIT_GATE_TEXT2}, plus any further gate targets AGENTS.md names; \`make markdownlint\` and \`make nixie\` for any markdown you touched). Fix failures yourself and re-run until green. ${COMMIT_GATE_GUIDANCE2}`,
-      ...CS_CHECK2 ? [`  1b. CODE HEALTH: after the gates are green, the host runs a CodeScene code-health check on your committed changes before CodeRabbit. Keep functions small, cohesive, and free of nested or overly complex conditionals so it passes; a regression bounces back to you with the specific smells and the option \u2014 only where refactoring would be deleterious \u2014 to suppress a smell with a justified \`@codescene(disable:"...")\` comment.`] : [],
+      ...CS_CHECK2 ? [`  1b. CODE HEALTH: after the gates are green, the host runs a CodeScene code-health check on your committed changes before ${hostReviewer}. Keep functions small, cohesive, and free of nested or overly complex conditionals so it passes; a regression bounces back to you with the specific smells and the option \u2014 only where refactoring would be deleterious \u2014 to suppress a smell with a justified \`@codescene(disable:"...")\` comment.`] : [],
       CODERABBIT_HOST_REVIEW2 ? `  2. ${CODERABBIT_REVIEW_GUIDANCE}` : `  2. Summon \`scrutineer\` to run \`${CODERABBIT_REVIEW_COMMAND2}\` from inside the worktree; address actionable feedback yourself (highest severity first); summon \`scrutineer\` again to confirm the gates are still green. ${CODERABBIT_REVIEW_GUIDANCE}`,
       "  3. Update the ExecPlan IN PLACE: tick this work item in ## Progress and record findings, decisions, and deviations. If this was the first work item, also set the header Status to `IN PROGRESS`; if it was the LAST unticked item, set Status to `COMPLETE` together with the Outcomes & Retrospective update.",
       "  4. Commit the work item and the ExecPlan update together as one atomic commit (en-GB imperative subject ~50 cols, wrapped body explaining what and why).",
@@ -1310,7 +1327,7 @@ function makePrompts(config) {
       ...CS_CHECK_GUIDANCE2 ? [CS_CHECK_GUIDANCE2, ""] : [],
       CODERABBIT_HOST_REVIEW2 ? `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT2}, plus markdownlint/nixie for markdown) first and green, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth \u2014 never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.` : `Same per-change discipline as implementation: summon \`scrutineer\` for the deterministic gates (${COMMIT_GATE_TEXT2}, plus markdownlint/nixie for markdown) first and green, THEN summon \`scrutineer\` for \`${CODERABBIT_REVIEW_COMMAND2}\`, then one atomic commit that includes the execplan update recording what changed and why (the committed ExecPlan is the durable source of truth \u2014 never leave it stale or uncommitted). ${CODERABBIT_REVIEW_GUIDANCE} Do not introduce scope beyond the blocking items.`,
       "",
-      "Return the commit subjects you added, whether every deterministic gate is green at HEAD after your fixes, the number of CodeRabbit runs you completed, how each blocking item was resolved, any open issues with reasons, and a short summary. This structured report is durable validation evidence for the branch \u2014 be precise about which gates ran and at which commit."
+      `Return the commit subjects you added, whether every deterministic gate is green at HEAD after your fixes, the number of ${hostReviewer} runs you completed, how each blocking item was resolved, any open issues with reasons, and a short summary. This structured report is durable validation evidence for the branch \u2014 be precise about which gates ran and at which commit.`
     ].join("\n");
   }
   function codeReviewPrompt2(task, worktree, plan, impl) {
@@ -1348,7 +1365,7 @@ function makePrompts(config) {
       preamble2(worktree),
       `TASK: Review the committed addendum implementation for completed roadmap task ${task.id}, scoped ONLY to sub-task(s): ${ids}.`,
       "",
-      "CodeRabbit review was deferred or unavailable for this addendum, so you are the high-model fallback reviewer. Use the `code-review` skill. Be strict, but keep the scope surgical: this is not a full design review and not a licence to expand the task.",
+      `${hostReviewer} review was deferred or unavailable for this addendum, so you are the high-model fallback reviewer. Use the \`code-review\` skill. Be strict, but keep the scope surgical: this is not a full design review and not a licence to expand the task.`,
       "",
       `Compare the branch diff against the Addenda checklist in ${parentPlan}, the relevant design/developer docs, and AGENTS.md. Confirm:`,
       "- each listed addendum sub-task is actually implemented and ticked in the execplan,",
@@ -1364,7 +1381,7 @@ function makePrompts(config) {
       "Builder-reported deferred/open issues:",
       ...(impl?.openIssues || []).map((issue, index) => `  ${index + 1}. ${issue}`),
       "",
-      "Use leta for branch-local code navigation and sem for the committed diff. Return verdict=pass only if you would ship this addendum despite the deferred CodeRabbit review. If not, list precise blocking items. Follow-up ideas go in proposedRoadmapItems only."
+      `Use leta for branch-local code navigation and sem for the committed diff. Return verdict=pass only if you would ship this addendum despite the deferred ${hostReviewer} review. If not, list precise blocking items. Follow-up ideas go in proposedRoadmapItems only.`
     ].join("\n");
   }
   function implementAddendumPrompt2(task, worktree) {
@@ -1387,7 +1404,7 @@ function makePrompts(config) {
       `  4. Tick the sub-task in the Addenda checklist of its execplan (\`- [ ] ${task.id}.<n>\` \u2192 \`- [x] \u2026\`).`,
       "  5. Commit the sub-task and Addenda tick together as one atomic commit (en-GB imperative subject).",
       "",
-      `Use leta for navigation, sem for history, and the language router skill for the languages you touch. Do NOT edit the roadmap \u2014 integration ticks the roadmap sub-tasks. When all listed sub-tasks are done, ensure the project commit gates (${COMMIT_GATE_TEXT2}) are green at HEAD. Return using the IMPL schema (execplanPath = the parent execplan): completion counts, commit subjects, gatesGreen, coderabbit run count, and any open issues.`
+      `Use leta for navigation, sem for history, and the language router skill for the languages you touch. Do NOT edit the roadmap \u2014 integration ticks the roadmap sub-tasks. When all listed sub-tasks are done, ensure the project commit gates (${COMMIT_GATE_TEXT2}) are green at HEAD. Return using the IMPL schema (execplanPath = the parent execplan): completion counts, commit subjects, gatesGreen, ${hostReviewer} run count, and any open issues.`
     ].join("\n");
   }
   function integratePrompt2(task, worktree, impl) {
@@ -1849,7 +1866,7 @@ function isInfraFaultResult(result) {
 }
 function isDeferredReviewIssue(issue) {
   const text = String(issue || "").toLowerCase();
-  const deferredReviewMarkers = [
+  const coderabbitDeferredMarkers = [
     "rate limit",
     "rate_limit",
     "rate-limit",
@@ -1858,12 +1875,13 @@ function isDeferredReviewIssue(issue) {
     "retry after",
     "waittime",
     "wait time",
-    "deferred review",
     "deferred coderabbit review",
     "coderabbit review deferred",
     "unavailable"
   ];
-  return text.includes("coderabbit") && deferredReviewMarkers.some((marker) => text.includes(marker));
+  const isDakarDeferral = text.startsWith("dakar review deferred (stage: deferred)");
+  const isCoderabbitDeferral = text.includes("coderabbit") && coderabbitDeferredMarkers.some((marker) => text.includes(marker));
+  return isDakarDeferral || isCoderabbitDeferral;
 }
 function hasOnlyDeferredReviewIssues(openIssues) {
   const issues = openIssues || [];
@@ -2174,6 +2192,119 @@ function makeRemediation({ preamble: preamble2, worktreeSafetyNet: worktreeSafet
 }
 
 // src/workflows/df12-build-odw/host-review.ts
+var DAKAR_SEVERITY_MAP = {
+  critical: "critical",
+  high: "major",
+  medium: "minor",
+  low: "trivial"
+};
+var DAKAR_SEVERITIES = new Set(Object.keys(DAKAR_SEVERITY_MAP));
+var DAKAR_REQUIRED_FINDING_FIELDS = ["path", "title", "detail", "evidence"];
+function boundedTail(text, limit = 2e3) {
+  const value = String(text || "");
+  return value.length > limit ? value.slice(-limit) : value;
+}
+function parseDakarDocument(stdout) {
+  const text = String(stdout || "");
+  for (let start = text.lastIndexOf("{"); start !== -1; start = start === 0 ? -1 : text.lastIndexOf("{", start - 1)) {
+    try {
+      const doc = JSON.parse(text.slice(start));
+      if (doc && typeof doc === "object" && !Array.isArray(doc)) return doc;
+    } catch {
+    }
+  }
+  return null;
+}
+function mapDakarFinding(finding) {
+  const severity = DAKAR_SEVERITY_MAP[String(finding.severity || "").toLowerCase()] || "info";
+  const filePath = String(finding.path || "");
+  const title = String(finding.title || "");
+  const detail = String(finding.detail || "");
+  const evidence = String(finding.evidence || "");
+  const hasLine = finding.line !== void 0 && finding.line !== null && String(finding.line) !== "";
+  const locator = hasLine ? ` (${filePath}:${finding.line})` : "";
+  return {
+    type: "finding",
+    severity,
+    fileName: filePath,
+    comment: `${title} \u2014 ${detail}${locator}`.slice(0, 2e3),
+    codegenInstructions: `${detail}
+Evidence: ${evidence}`.slice(0, 2e3),
+    suggestions: []
+  };
+}
+function validateChangesRequestedFindings(raw) {
+  const findings = Array.isArray(raw) ? raw : null;
+  if (!findings || findings.length === 0) {
+    return {
+      ok: false,
+      detail: "Dakar returned changes-requested without any findings; refusing to treat a reviewer rejection as non-blocking"
+    };
+  }
+  for (const [index, finding] of findings.entries()) {
+    if (finding === null || typeof finding !== "object" || Array.isArray(finding)) {
+      return {
+        ok: false,
+        detail: boundedTail(`Dakar returned a malformed finding at index ${index}; expected an object`, 2e3)
+      };
+    }
+    const item = finding;
+    if (typeof item.severity !== "string" || !DAKAR_SEVERITIES.has(item.severity)) {
+      return {
+        ok: false,
+        detail: boundedTail(`Dakar returned an invalid finding at index ${index}; unsupported severity`, 2e3)
+      };
+    }
+    const invalidField = DAKAR_REQUIRED_FINDING_FIELDS.find((field) => typeof item[field] !== "string");
+    if (invalidField) {
+      return {
+        ok: false,
+        detail: boundedTail(`Dakar returned an invalid finding at index ${index}; ${invalidField} must be a string`, 2e3)
+      };
+    }
+    if (item.line !== void 0 && (!Number.isInteger(item.line) || Number(item.line) < 1)) {
+      return {
+        ok: false,
+        detail: boundedTail(`Dakar returned an invalid finding at index ${index}; line must be a positive integer`, 2e3)
+      };
+    }
+  }
+  return { ok: true, findings };
+}
+function validateCleanDakarFindings(raw) {
+  if (raw === void 0) return "";
+  if (!Array.isArray(raw)) return "Dakar returned a clean verdict with a malformed findings field";
+  if (raw.length > 0) return "Dakar returned a clean verdict with findings; refusing to discard reviewer findings";
+  return "";
+}
+function classifyDakarReview(execResult) {
+  const category = (fallback) => execResult.killed ? "timeout" : fallback;
+  const doc = parseDakarDocument(execResult.stdout);
+  if (!doc) {
+    const detail = boundedTail([execResult.stderr, execResult.message].filter(Boolean).join("\n")) || "dakar-review produced no parsable JSON output";
+    return { outcome: "error", findings: [], detail, errorCategory: category("invalid-output") };
+  }
+  if (doc.ok === false) {
+    const stage = boundedTail(doc.stage ?? "unknown", 200);
+    if (String(doc.stage) === "deferred") {
+      return { outcome: "rate-limited", findings: [], detail: `Dakar review deferred (stage: ${stage}) \u2014 ${boundedTail(doc.error || "no detail")}`, errorCategory: category("deferred") };
+    }
+    return { outcome: "error", findings: [], detail: `stage: ${stage} \u2014 ${boundedTail(doc.error || "no detail")}`, errorCategory: category("execution") };
+  }
+  if (doc.ok === true) {
+    if (doc.skipped === true || doc.verdict === "pass") {
+      const invalidFindings = validateCleanDakarFindings(doc.findings);
+      if (invalidFindings) return { outcome: "error", findings: [], detail: invalidFindings, errorCategory: category("invalid-output") };
+      return { outcome: "clean", findings: [], detail: "", errorCategory: category("none") };
+    }
+    if (doc.verdict === "changes-requested") {
+      const validation = validateChangesRequestedFindings(doc.findings);
+      if (!validation.ok) return { outcome: "error", findings: [], detail: validation.detail, errorCategory: category("invalid-output") };
+      return { outcome: "findings", findings: validation.findings.map(mapDakarFinding), detail: "", errorCategory: category("none") };
+    }
+  }
+  return { outcome: "error", findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail(doc.verdict ?? "none", 200)})`, errorCategory: category("invalid-output") };
+}
 function parseCoderabbitAgentOutput(stdout) {
   const events = [];
   const rawLines = [];
@@ -2212,26 +2343,28 @@ function classifyCoderabbitOutcome(execResult, parsed) {
 async function hostSleepMinutes(minutes) {
   await new Promise((resolve) => setTimeout(resolve, minutes * 6e4));
 }
-function coderabbitBlockingItems(findings) {
-  return (findings || []).filter((finding) => CODERABBIT_BLOCKING_SEVERITIES.has(String(finding.severity || "").toLowerCase())).map((finding) => `CodeRabbit (${finding.severity}) ${finding.fileName || "unknown file"}: ${String(finding.comment || finding.codegenInstructions || "see the recorded suggestions").slice(0, 500)}`);
+function reviewBlockingItems(reviewer, findings) {
+  const name = boundedTail(reviewer, 40) || "host reviewer";
+  return (findings || []).filter((finding) => CODERABBIT_BLOCKING_SEVERITIES.has(String(finding.severity || "").toLowerCase())).map((finding) => `${name} (${finding.severity}) ${finding.fileName || "unknown file"}: ${String(finding.comment || finding.codegenInstructions || "see the recorded suggestions").slice(0, 500)}`);
 }
-var coderabbitCapture = { reviews: 0, findings: 0, rateLimitedRuns: 0, deferred: 0, bySeverity: {}, sinkError: "" };
-var hostGateMetrics = {
-  /** Total gate executions attempted. */
+var hostReviewMetrics = {
   runs: 0,
-  /** Gate executions that failed. */
-  failures: 0
+  findings: 0,
+  retries: 0,
+  deferred: 0,
+  timeouts: 0,
+  errors: 0,
+  authFailures: 0,
+  sinkFailures: 0,
+  bySeverity: { critical: 0, major: 0, minor: 0, trivial: 0, info: 0, unknown: 0 },
+  sinkError: ""
 };
-var csCheckMetrics = {
-  /** Check executions attempted (excludes skips). */
-  runs: 0,
-  /** Check executions that reported code-health issues. */
-  failures: 0,
-  /** Availability probes that failed for infrastructure reasons. */
-  probeFailures: 0,
-  /** Checks skipped because the configured binary was not on PATH. */
-  skipped: 0
-};
+var coderabbitCapture = hostReviewMetrics;
+function coderabbitBlockingItems(findings) {
+  return reviewBlockingItems("CodeRabbit", findings);
+}
+var hostGateMetrics = { runs: 0, failures: 0 };
+var csCheckMetrics = { runs: 0, failures: 0, probeFailures: 0, skipped: 0 };
 function shellCommandWords(command) {
   const words = [];
   let word = "";
@@ -2273,8 +2406,7 @@ function shellCommandWords(command) {
 function codeSceneExecutable(command) {
   const words = shellCommandWords(command);
   if (!words) return "";
-  const executable = words.find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
-  return executable || "";
+  return words.find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) || "";
 }
 var gateLogDirCache = null;
 function gateLogRoot() {
@@ -2294,67 +2426,151 @@ function hostGateLogPath(tag, roundLabel, index) {
 function makeHostReview(config) {
   const {
     base,
+    reviewTool,
+    dakarCommand,
+    reviewTimeoutSeconds,
+    dakarBudgetGbp,
     coderabbitAttempts,
     coderabbitBackoffMinutes: backoffRange,
-    coderabbitFindingsFile,
+    coderabbitFindingsFile: findingsFile,
     commitGates,
     commitGateTimeoutSeconds,
     csCheck,
     csCheckCommand
   } = config;
-  function coderabbitBackoffMinutes2(seed) {
+  const dakarInvocation = shellCommandWords(dakarCommand) || [];
+  const dakarExecutable = dakarInvocation[0] || "dakar-review";
+  const dakarPrefixArgs = dakarInvocation.slice(1);
+  let findingsSinkTail = Promise.resolve();
+  function reviewBackoffMinutes2(seed) {
     let hash = 5381;
     for (const ch of String(seed)) hash = (hash * 33 ^ ch.codePointAt(0)) >>> 0;
     const [low, high] = backoffRange;
     return low + hash % (high - low + 1);
   }
-  async function runCoderabbitHostReview2(worktree, label, deps = {}) {
-    const exec = deps.exec || execFileStatus;
-    const sleep = deps.sleep || hostSleepMinutes;
-    const commandArgs = ["review", "--agent", "--type", "committed", "--base", base];
-    for (let attempt = 1; ; attempt++) {
-      log(`[${label}] CodeRabbit host review attempt ${attempt} of ${coderabbitAttempts}`);
-      const result = await exec("coderabbit", commandArgs, { cwd: worktree });
-      const parsed = parseCoderabbitAgentOutput(result.stdout);
-      const outcome = classifyCoderabbitOutcome(result, parsed);
-      if (outcome === "rate-limited" && attempt < coderabbitAttempts) {
-        const minutes = coderabbitBackoffMinutes2(`${label}#${attempt}`);
-        log(`[${label}] CodeRabbit rate limited; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${coderabbitAttempts} (wall-clock only, no agent tokens)`);
-        await sleep(minutes);
-        continue;
+  async function runCoderabbitAttempt(worktree, exec) {
+    const result = await exec("coderabbit", ["review", "--agent", "--type", "committed", "--base", base], {
+      cwd: worktree,
+      timeoutMs: reviewTimeoutSeconds * 1e3
+    });
+    const parsed = parseCoderabbitAgentOutput(result.stdout);
+    const outcome = classifyCoderabbitOutcome(result, parsed);
+    const detail = outcome === "clean" || outcome === "findings" ? "" : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join("; ") || "coderabbit produced no parsable outcome").trim();
+    const errorCategory = result.killed ? "timeout" : outcome === "rate-limited" ? "deferred" : outcome === "auth" ? "auth" : outcome === "error" ? parsed.error || parsed.complete ? "execution" : "invalid-output" : "none";
+    return { outcome, findings: parsed.findings, detail: boundedTail(detail), errorCategory };
+  }
+  async function runDakarAttempt(worktree, exec, removeStateRoot) {
+    const fs = process.getBuiltinModule("node:fs");
+    const os = process.getBuiltinModule("node:os");
+    const path = process.getBuiltinModule("node:path");
+    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "df12-dakar-state-"));
+    const commandArgs = [
+      "--repo-root",
+      worktree,
+      "--base",
+      base,
+      "--state-root",
+      stateRoot,
+      "--timeout",
+      String(reviewTimeoutSeconds),
+      ...dakarBudgetGbp > 0 ? ["--budget-gbp", String(dakarBudgetGbp)] : []
+    ];
+    try {
+      const result = await exec(dakarExecutable, [...dakarPrefixArgs, ...commandArgs], {
+        cwd: worktree,
+        timeoutMs: reviewTimeoutSeconds * 1e3
+      });
+      return classifyDakarReview(result);
+    } finally {
+      try {
+        const cleanup = removeStateRoot || fs.rmSync;
+        cleanup(stateRoot, { recursive: true, force: true });
+      } catch (error) {
+        const detail = boundedTail(error?.message || String(error), 500);
+        log(`[Dakar] could not remove temporary state root: ${detail}`);
       }
-      const detail = outcome === "clean" || outcome === "findings" ? "" : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join("; ") || "coderabbit produced no parsable outcome").trim();
-      return { outcome, attempts: attempt, findings: parsed.findings, detail };
     }
   }
-  async function recordCoderabbitReview2(label, review) {
-    coderabbitCapture.reviews += 1;
-    if (review.outcome === "rate-limited") coderabbitCapture.rateLimitedRuns += 1;
-    for (const finding of review.findings) {
-      coderabbitCapture.findings += 1;
-      const severity = String(finding.severity || "unknown").toLowerCase();
-      coderabbitCapture.bySeverity[severity] = (coderabbitCapture.bySeverity[severity] || 0) + 1;
-    }
-    if (!coderabbitFindingsFile || !review.findings.length) return;
-    const stamp = await execFileStatus("date", ["-u", "+%Y-%m-%dT%H:%M:%SZ"]);
-    const ts = stamp.ok ? stamp.stdout.trim() : "";
-    const lines = review.findings.map((finding) => JSON.stringify({
-      ts,
-      label,
-      severity: String(finding.severity || ""),
-      file: String(finding.fileName || ""),
-      comment: String(finding.comment || "").slice(0, 2e3),
-      codegenInstructions: String(finding.codegenInstructions || "").slice(0, 2e3),
-      suggestions: Array.isArray(finding.suggestions) ? finding.suggestions.length : 0
-    }));
+  async function runHostReview2(worktree, label, deps = {}) {
+    const exec = deps.exec || execFileStatus;
+    const sleep = deps.sleep || hostSleepMinutes;
+    const nowMs = deps.nowMs || (() => Number(process.hrtime.bigint() / 1000000n));
+    const reviewer = reviewTool;
+    const reviewerName = reviewer === "dakar" ? "Dakar" : "CodeRabbit";
+    const boundedLabel = boundedTail(label, 120);
+    const startedMs = nowMs();
+    let terminalAttempt = 1;
     try {
-      const fs = process.getBuiltinModule("node:fs/promises");
-      await fs.appendFile(coderabbitFindingsFile, `${lines.join("\n")}
-`, "utf8");
+      for (let attempt = 1; ; attempt++) {
+        terminalAttempt = attempt;
+        log(`[${boundedLabel}] ${reviewerName} host review attempt ${attempt} of ${coderabbitAttempts}`);
+        const single = reviewer === "dakar" ? await runDakarAttempt(worktree, exec, deps.removeDakarStateRoot) : await runCoderabbitAttempt(worktree, exec);
+        if (single.outcome === "rate-limited" && attempt < coderabbitAttempts) {
+          const minutes = reviewBackoffMinutes2(`${boundedLabel}#${attempt}`);
+          log(`[${boundedLabel}] ${reviewerName} rate limited/deferred; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${coderabbitAttempts} (wall-clock only, no agent tokens)`);
+          await sleep(minutes);
+          continue;
+        }
+        const review = {
+          reviewer,
+          outcome: single.outcome,
+          attempts: attempt,
+          elapsedMs: Math.max(0, Math.trunc(nowMs() - startedMs)),
+          errorCategory: single.errorCategory,
+          findings: single.findings,
+          detail: boundedTail(single.detail)
+        };
+        hostReviewMetrics.runs += 1;
+        hostReviewMetrics.retries += attempt - 1;
+        if (review.outcome === "rate-limited") hostReviewMetrics.deferred += 1;
+        if (review.outcome === "auth") hostReviewMetrics.authFailures += 1;
+        if (review.outcome === "error") hostReviewMetrics.errors += 1;
+        if (review.errorCategory === "timeout") hostReviewMetrics.timeouts += 1;
+        log(`[host-review] terminal ${JSON.stringify({ reviewer, label: boundedLabel, attempts: attempt, elapsedMs: review.elapsedMs, outcome: review.outcome, errorCategory: review.errorCategory })}`);
+        return review;
+      }
     } catch (error) {
-      coderabbitCapture.sinkError = error && error.message || String(error);
-      log(`[${label}] could not append CodeRabbit findings to ${coderabbitFindingsFile}: ${coderabbitCapture.sinkError}`);
+      const elapsedMs = Math.max(0, Math.trunc(nowMs() - startedMs));
+      hostReviewMetrics.runs += 1;
+      hostReviewMetrics.retries += terminalAttempt - 1;
+      hostReviewMetrics.errors += 1;
+      log(`[host-review] terminal ${JSON.stringify({ reviewer, label: boundedLabel, attempts: terminalAttempt, elapsedMs, outcome: "error", errorCategory: "execution" })}`);
+      throw error;
     }
+  }
+  async function recordHostReview2(label, review) {
+    for (const finding of review.findings) {
+      hostReviewMetrics.findings += 1;
+      const rawSeverity = String(finding.severity || "unknown").toLowerCase();
+      const severity = rawSeverity in hostReviewMetrics.bySeverity ? rawSeverity : "unknown";
+      hostReviewMetrics.bySeverity[severity] += 1;
+    }
+    if (!findingsFile || !review.findings.length) return;
+    const append = async () => {
+      const stamp = await execFileStatus("date", ["-u", "+%Y-%m-%dT%H:%M:%SZ"]);
+      const ts = stamp.ok ? stamp.stdout.trim() : "";
+      const lines = review.findings.map((finding) => JSON.stringify({
+        ts,
+        label,
+        severity: String(finding.severity || ""),
+        file: String(finding.fileName || ""),
+        comment: String(finding.comment || "").slice(0, 2e3),
+        codegenInstructions: String(finding.codegenInstructions || "").slice(0, 2e3),
+        suggestions: Array.isArray(finding.suggestions) ? finding.suggestions.length : 0
+      }));
+      try {
+        const fs = process.getBuiltinModule("node:fs/promises");
+        await fs.appendFile(findingsFile, `${lines.join("\n")}
+`, "utf8");
+      } catch (error) {
+        hostReviewMetrics.sinkFailures += 1;
+        hostReviewMetrics.sinkError = boundedTail(error?.message || String(error), 500);
+        log(`[${boundedTail(label, 120)}] could not append ${review.reviewer} host-review findings to ${findingsFile}: ${hostReviewMetrics.sinkError}`);
+      }
+    };
+    const pending = findingsSinkTail.then(append, append);
+    findingsSinkTail = pending.then(() => void 0, () => void 0);
+    await pending;
   }
   async function runHostCommitGates2(worktree, tag, roundLabel) {
     const results2 = [];
@@ -2385,7 +2601,14 @@ ${outcome.tail}`
     return new Promise((resolve) => {
       const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
       const openFlags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
-      const stream = fs.createWriteStream(logFile, { flags: openFlags, mode: 384 });
+      let fd;
+      try {
+        fd = fs.openSync(logFile, openFlags, 384);
+      } catch (error) {
+        resolve({ ok: false, killed: false, tail: `gate log write failed: ${error.message}` });
+        return;
+      }
+      const stream = fs.createWriteStream(logFile, { fd, autoClose: true });
       const tail = [];
       let carry = "";
       let killed = false;
@@ -2473,16 +2696,15 @@ ${outcome.tail}`
 ${outcome.tail}`, logFile };
   }
   return {
-    /** Deterministic seeded backoff jitter (minutes) for rate-limit retries. */
-    coderabbitBackoffMinutes: coderabbitBackoffMinutes2,
-    /** Run one host CodeRabbit review against committed changes; backoff is absorbed in wall-clock. */
-    runCoderabbitHostReview: runCoderabbitHostReview2,
-    /** Fold a review's findings into the capture aggregate and the durable sink. */
-    recordCoderabbitReview: recordCoderabbitReview2,
-    /** Re-run the configured commit gates against committed HEAD; host-verifies a gatesGreen claim. */
+    reviewBackoffMinutes: reviewBackoffMinutes2,
+    runHostReview: runHostReview2,
+    recordHostReview: recordHostReview2,
     runHostCommitGates: runHostCommitGates2,
-    /** Run the CodeScene code-health check, skipping gracefully when its binary is absent. */
-    runCodeSceneCheck: runCodeSceneCheck2
+    runCodeSceneCheck: runCodeSceneCheck2,
+    // Public compatibility aliases. Workflow policy uses only neutral names.
+    coderabbitBackoffMinutes: reviewBackoffMinutes2,
+    runCoderabbitHostReview: runHostReview2,
+    recordCoderabbitReview: recordHostReview2
   };
 }
 
@@ -2490,32 +2712,20 @@ ${outcome.tail}`, logFile };
 function summarizeReviewVerdict(review) {
   if (!review) return null;
   return {
-    /** The reviewer's verdict string (e.g. `pass`), empty when unset. */
     verdict: review.verdict || "",
-    /** Blocking items the reviewer raised; empty means nothing blocked. */
     blocking: review.blocking || [],
-    /** The reviewer's summary line, empty when unset. */
     summary: review.summary || ""
   };
 }
 function summarizeFixReport(fix) {
   if (!fix) return null;
-  if (typeof fix === "string") return {
-    /** Summary carried when the fix report was a bare string. */
-    summary: fix
-  };
+  if (typeof fix === "string") return { summary: fix };
   return {
-    /** Commit subjects the fix produced, defaulted to an empty list. */
     commits: fix.commits || [],
-    /** True only when the fix reported the literal boolean `true`. */
     gatesGreen: fix.gatesGreen === true,
-    /** Count of CodeRabbit runs the fix performed, coerced to a number. */
-    coderabbitRuns: Number(fix.coderabbitRuns) || 0,
-    /** Blocking items the fix claims to have resolved. */
+    hostReviewRuns: Number(fix.hostReviewRuns ?? fix.coderabbitRuns) || 0,
     resolved: fix.resolved || [],
-    /** Blocking items the fix left open. */
     openIssues: fix.openIssues || [],
-    /** The fix agent's summary line, empty when unset. */
     summary: fix.summary || ""
   };
 }
@@ -2535,8 +2745,8 @@ function makeTaskPipeline(deps) {
     HOST_COMMIT_GATES: HOST_COMMIT_GATES2,
     HOST_GATES_BETWEEN_WORK_ITEMS: HOST_GATES_BETWEEN_WORK_ITEMS2,
     CS_CHECK: CS_CHECK2,
-    CODERABBIT_HOST_REVIEW: CODERABBIT_HOST_REVIEW2,
-    CODERABBIT_BETWEEN_WORK_ITEMS: CODERABBIT_BETWEEN_WORK_ITEMS2,
+    HOST_REVIEW_ENABLED: HOST_REVIEW_ENABLED2,
+    HOST_REVIEW_BETWEEN_WORK_ITEMS: HOST_REVIEW_BETWEEN_WORK_ITEMS2,
     DRY_RUN: DRY_RUN2,
     AUTO_MERGE: AUTO_MERGE2,
     BASE: BASE2,
@@ -2562,9 +2772,11 @@ function makeTaskPipeline(deps) {
     createWorktree: createWorktree2,
     runHostCommitGates: runHostCommitGates2,
     runCodeSceneCheck: runCodeSceneCheck2,
-    runCoderabbitHostReview: runCoderabbitHostReview2,
-    recordCoderabbitReview: recordCoderabbitReview2
+    HOST_REVIEWER,
+    runHostReview: runHostReview2,
+    recordHostReview: recordHostReview2
   } = deps;
+  const reviewerDisplayName = HOST_REVIEWER === "dakar" ? "Dakar" : "CodeRabbit";
   async function runPlanDesignLoop2(task, worktree, opts = {}) {
     const tag = task.id;
     const extra = opts.extra || {};
@@ -2704,29 +2916,28 @@ function makeTaskPipeline(deps) {
     const tag = task.id;
     let runs = 0;
     for (let attempt = 1; attempt <= MAX_REVIEW_ROUNDS2; attempt++) {
-      const review = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} ${itemLabel} a${attempt}`);
-      await recordCoderabbitReview2(`${tag} ${itemLabel} a${attempt}`, review);
+      const review = await runHostReview2(worktree, `host-review:${HOST_REVIEWER}:${tag} ${itemLabel} a${attempt}`);
+      await recordHostReview2(`${tag} ${itemLabel} a${attempt}`, review);
       runs += 1;
       if (review.outcome === "auth") {
         faultMetrics.authFaults += 1;
-        return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: `CodeRabbit host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } };
+        return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: `${reviewerDisplayName} host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } };
       }
       if (review.outcome === "rate-limited" || review.outcome === "error") {
-        coderabbitCapture.deferred += 1;
-        return { fail: { id: tag, status: "halted", stage: "code-review", detail: `CodeRabbit between-item review could not complete for ${itemLabel} (${review.outcome} after ${review.attempts} attempt(s)): ${review.detail}; the work is committed but unreviewed \u2014 resolve the CodeRabbit quota/CLI fault and relaunch with resumeMode: "continue"`, worktree, proposals: [], ...extra } };
+        return { fail: { id: tag, status: "halted", stage: "code-review", detail: `${reviewerDisplayName} between-item review could not complete for ${itemLabel} (${review.outcome} after ${review.attempts} attempt(s), ${review.errorCategory}): ${review.detail}; the work is committed but unreviewed \u2014 resolve the host-review fault and relaunch with resumeMode: "continue"`, worktree, proposals: [], ...extra } };
       }
-      const blocking = coderabbitBlockingItems(review.findings);
-      log(`[task ${tag}] between-item CodeRabbit ${itemLabel} attempt ${attempt}: ${review.findings.length} finding(s), ${blocking.length} blocking`);
-      if (!blocking.length) return { ok: true, coderabbitRuns: runs };
+      const blocking = reviewBlockingItems(reviewerDisplayName, review.findings);
+      log(`[task ${tag}] between-item ${reviewerDisplayName} ${itemLabel} attempt ${attempt}: ${review.findings.length} finding(s), ${blocking.length} blocking`);
+      if (!blocking.length) return { ok: true, hostReviewRuns: runs };
       if (attempt === MAX_REVIEW_ROUNDS2) {
-        return { fail: { id: tag, status: "failed", stage: "code-review", detail: `CodeRabbit between-item review left blocking finding(s) unresolved after ${MAX_REVIEW_ROUNDS2} fix attempt(s) on ${itemLabel}: ${blocking.join("; ")}`, worktree, proposals: [], ...extra } };
+        return { fail: { id: tag, status: "failed", stage: "code-review", detail: `${reviewerDisplayName} between-item review left blocking finding(s) unresolved after ${MAX_REVIEW_ROUNDS2} fix attempt(s) on ${itemLabel}: ${blocking.join("; ")}`, worktree, proposals: [], ...extra } };
       }
       const { dirtyDetail } = await dispatchFixAndVerify(task, worktree, plan, blocking, `fix:${tag} ${itemLabel} a${attempt}`, attempt);
       if (dirtyDetail) {
-        return { fail: { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeRabbit fix for ${itemLabel} left uncommitted state (${dirtyDetail}); every fix must be committed before re-review`, worktree, proposals: [], ...extra } };
+        return { fail: { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the ${reviewerDisplayName} host-review fix for ${itemLabel} left uncommitted state (${dirtyDetail}); every fix must be committed before re-review`, worktree, proposals: [], ...extra } };
       }
     }
-    return { ok: true, coderabbitRuns: runs };
+    return { ok: true, hostReviewRuns: runs };
   }
   async function runWorkItemBuildLoop2(task, worktree, plan, opts = {}) {
     const tag = task.id;
@@ -2741,7 +2952,7 @@ function makeTaskPipeline(deps) {
     if (!(initial.items || []).length) return null;
     const commits = [];
     const openIssues = [];
-    let coderabbitRuns = 0;
+    let hostReviewRuns = 0;
     let lastImpl = null;
     let noProgressNote = "";
     let strikes = 0;
@@ -2768,7 +2979,7 @@ function makeTaskPipeline(deps) {
       }
       if (Array.isArray(impl.commits)) commits.push(...impl.commits);
       openIssues.push(...impl.openIssues || []);
-      coderabbitRuns += Number(impl.coderabbitRuns) || 0;
+      hostReviewRuns += Number(impl.hostReviewRuns ?? impl.coderabbitRuns) || 0;
       const committed = await verifyWorktreeCommitted(worktree);
       if (!committed.ok) {
         return fail(`work item returned ok but left uncommitted state in the worktree (${committed.detail}); every work item must be committed before returning`, openIssues);
@@ -2791,10 +3002,10 @@ function makeTaskPipeline(deps) {
           const gate = await runBetweenItemGates(task, worktree, plan, `wi${round}`, extra);
           if ("fail" in gate) return gate;
         }
-        if (CODERABBIT_HOST_REVIEW2 && CODERABBIT_BETWEEN_WORK_ITEMS2) {
+        if (HOST_REVIEW_ENABLED2 && HOST_REVIEW_BETWEEN_WORK_ITEMS2) {
           const gate = await runBetweenItemReview(task, worktree, plan, `wi${round}`, extra);
           if ("fail" in gate) return gate;
-          coderabbitRuns += gate.coderabbitRuns;
+          hostReviewRuns += gate.hostReviewRuns;
         }
       }
     }
@@ -2813,7 +3024,7 @@ function makeTaskPipeline(deps) {
         workItemsCompleted: final.ticked,
         workItemsTotal: final.ticked + final.unticked,
         commits: commits.slice(0, 50),
-        coderabbitRuns,
+        hostReviewRuns,
         openIssues: [...new Set(openIssues)].slice(0, 20),
         summary: lastImpl?.summary || "work-item build completed from the committed ExecPlan checklist"
       }
@@ -2919,7 +3130,7 @@ function makeTaskPipeline(deps) {
     const proposals = [];
     const reviewRounds = [];
     let reviewsPass = false;
-    const coderabbitDeferred = [];
+    const deferredHostReviews = [];
     for (let round = 1; round <= MAX_REVIEW_ROUNDS2; round++) {
       let hostGates = null;
       if (HOST_COMMIT_GATES2) {
@@ -2952,27 +3163,26 @@ function makeTaskPipeline(deps) {
           continue;
         }
       }
-      if (CODERABBIT_HOST_REVIEW2) {
-        const coderabbit = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} r${round}`);
-        await recordCoderabbitReview2(`${tag} r${round}`, coderabbit);
-        if (coderabbit.outcome === "auth") {
+      if (HOST_REVIEW_ENABLED2) {
+        const hostReview = await runHostReview2(worktree, `host-review:${HOST_REVIEWER}:${tag} r${round}`);
+        await recordHostReview2(`${tag} r${round}`, hostReview);
+        if (hostReview.outcome === "auth") {
           faultMetrics.authFaults += 1;
-          return { id: tag, status: "fatal-auth", stage: "review", detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, reviewRounds, worktree, proposals, ...kindExtra };
+          return { id: tag, status: "fatal-auth", stage: "review", detail: `${reviewerDisplayName} host review is not authenticated: ${hostReview.detail}`, reviewRounds, worktree, proposals, ...kindExtra };
         }
-        if (coderabbit.outcome === "rate-limited" || coderabbit.outcome === "error") {
-          coderabbitCapture.deferred += 1;
-          coderabbitDeferred.push(`CodeRabbit review deferred in round ${round} (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`);
-          log(`[task ${tag}] CodeRabbit host review deferred in round ${round}: ${coderabbit.outcome} (${coderabbit.detail})`);
+        if (hostReview.outcome === "rate-limited" || hostReview.outcome === "error") {
+          deferredHostReviews.push(`${reviewerDisplayName} review deferred in round ${round} (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`);
+          log(`[task ${tag}] ${reviewerDisplayName} host review deferred in round ${round}: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`);
         } else {
-          const coderabbitBlocking = coderabbitBlockingItems(coderabbit.findings);
-          log(`[task ${tag}] CodeRabbit host review round ${round}: ${coderabbit.findings.length} finding(s), ${coderabbitBlocking.length} blocking`);
-          if (coderabbitBlocking.length) {
-            reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: coderabbitBlocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null });
+          const hostReviewBlocking = reviewBlockingItems(reviewerDisplayName, hostReview.findings);
+          log(`[task ${tag}] ${reviewerDisplayName} host review round ${round}: ${hostReview.findings.length} finding(s), ${hostReviewBlocking.length} blocking`);
+          if (hostReviewBlocking.length) {
+            reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: hostReviewBlocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null });
             if (round === MAX_REVIEW_ROUNDS2) break;
-            const crFix = await dispatchFixAndVerify(task, worktree, plan, coderabbitBlocking, `fix:${tag} r${round}`, round);
-            reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(crFix.report);
-            if (crFix.dirtyDetail) {
-              return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeRabbit-fix round left uncommitted state (${crFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
+            const hostReviewFix = await dispatchFixAndVerify(task, worktree, plan, hostReviewBlocking, `fix:${tag} r${round}`, round);
+            reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(hostReviewFix.report);
+            if (hostReviewFix.dirtyDetail) {
+              return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the ${reviewerDisplayName} host-review fix round left uncommitted state (${hostReviewFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
             }
             continue;
           }
@@ -3064,9 +3274,9 @@ function makeTaskPipeline(deps) {
         return { id: tag, status: "halted", stage: "integrate", detail: integrationHaltDetail(integration), worktree, proposals, ...kindExtra };
       }
     } else {
-      return { id: tag, status: "manual-merge-ready", plan, impl, integration, worktree, proposals, ...coderabbitDeferred.length ? { openIssues: coderabbitDeferred } : {}, ...kindExtra };
+      return { id: tag, status: "manual-merge-ready", plan, impl, integration, worktree, proposals, ...deferredHostReviews.length ? { openIssues: deferredHostReviews } : {}, ...kindExtra };
     }
-    return { id: tag, status: "done", plan, impl, integration, worktree, proposals, ...coderabbitDeferred.length ? { openIssues: coderabbitDeferred } : {}, ...kindExtra };
+    return { id: tag, status: "done", plan, impl, integration, worktree, proposals, ...deferredHostReviews.length ? { openIssues: deferredHostReviews } : {}, ...kindExtra };
   }
   async function runTask2(task, mergeLock2) {
     const tag = `${task.id}`;
@@ -3154,22 +3364,21 @@ function makeTaskPipeline(deps) {
             return await attachAssessment2(task, wt, { id: tag, status: "failed", stage: "addendum", detail: `addendum committed work with unresolved CodeScene code-health issues: ${cs.detail}`, openIssues, worktree, proposals, kind: "addendum" });
           }
         }
-        if (CODERABBIT_HOST_REVIEW2) {
+        if (HOST_REVIEW_ENABLED2) {
           phase("Code Review");
-          const coderabbit = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} addendum`);
-          await recordCoderabbitReview2(`${tag} addendum`, coderabbit);
-          if (coderabbit.outcome === "auth") {
+          const hostReview = await runHostReview2(worktree, `host-review:${HOST_REVIEWER}:${tag} addendum`);
+          await recordHostReview2(`${tag} addendum`, hostReview);
+          if (hostReview.outcome === "auth") {
             faultMetrics.authFaults += 1;
-            return { id: tag, status: "fatal-auth", stage: "auth", detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, worktree, proposals, kind: "addendum" };
+            return { id: tag, status: "fatal-auth", stage: "auth", detail: `${reviewerDisplayName} host review is not authenticated: ${hostReview.detail}`, worktree, proposals, kind: "addendum" };
           }
-          const blockingFindings = coderabbitBlockingItems(coderabbit.findings);
+          const blockingFindings = reviewBlockingItems(reviewerDisplayName, hostReview.findings);
           if (blockingFindings.length) {
-            return await attachAssessment2(task, wt, { id: tag, status: "halted", stage: "addendum-review", detail: `CodeRabbit host review found blocking issue(s): ${blockingFindings.join("; ")}`, impl: impl2, worktree, proposals, kind: "addendum" });
+            return await attachAssessment2(task, wt, { id: tag, status: "halted", stage: "addendum-review", detail: `${reviewerDisplayName} host review found blocking issue(s): ${blockingFindings.join("; ")}`, impl: impl2, worktree, proposals, kind: "addendum" });
           }
-          if (coderabbit.outcome === "rate-limited" || coderabbit.outcome === "error") {
-            coderabbitCapture.deferred += 1;
-            addendumOpenIssues.push(`CodeRabbit review deferred (${coderabbit.outcome} after ${coderabbit.attempts} attempt(s)): ${coderabbit.detail}`);
-            log(`[task ${tag}] CodeRabbit host review deferred for the addendum: ${coderabbit.outcome} (${coderabbit.detail})`);
+          if (hostReview.outcome === "rate-limited" || hostReview.outcome === "error") {
+            addendumOpenIssues.push(`${reviewerDisplayName} review deferred (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`);
+            log(`[task ${tag}] ${reviewerDisplayName} host review deferred for the addendum: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`);
           }
         }
         let addendumReview = null;
@@ -3183,7 +3392,7 @@ function makeTaskPipeline(deps) {
           if (!addendumReview || addendumReview.verdict !== "pass" || blocking.length > 0) {
             return await attachAssessment2(task, wt, { id: tag, status: "halted", stage: "addendum-review", detail: blocking.join("; ") || addendumReview?.summary || "addendum fallback review did not pass", impl: impl2, addendumReview, worktree, proposals, kind: "addendum" });
           }
-          log(`[task ${tag}] addendum fallback review passed after deferred CodeRabbit review`);
+          log(`[task ${tag}] addendum fallback review passed after deferred ${reviewerDisplayName} review`);
         }
         let integration = null;
         if (AUTO_MERGE2) {
@@ -3217,18 +3426,7 @@ function makeTaskPipeline(deps) {
       return await attachAssessment2(task, wt, result);
     }
   }
-  return {
-    /** Adversarial plan <-> design-review loop; the entry point for continue-mode resume. */
-    runPlanDesignLoop: runPlanDesignLoop2,
-    /** Host-driven checklist build, one turn per unticked ExecPlan Progress item. */
-    runWorkItemBuildLoop: runWorkItemBuildLoop2,
-    /** Implementation stage: work-item loop or single-turn build, then the durability gate. */
-    runImplementationStage: runImplementationStage2,
-    /** Dual review, fix rounds and integration; shared with review-mode recovery resume. */
-    runDualReviewAndIntegration: runDualReviewAndIntegration2,
-    /** Full per-task pipeline from worktree creation through integration. */
-    runTask: runTask2
-  };
+  return { runPlanDesignLoop: runPlanDesignLoop2, runWorkItemBuildLoop: runWorkItemBuildLoop2, runImplementationStage: runImplementationStage2, runDualReviewAndIntegration: runDualReviewAndIntegration2, runTask: runTask2 };
 }
 
 // src/workflows/df12-build-odw/main.ts
@@ -3278,6 +3476,10 @@ var {
   ASSESSMENT_MODEL,
   ASSESSMENT_ESCALATION_MODEL,
   AUTH_REQUIRED_ADAPTERS,
+  REVIEW_TOOL,
+  DAKAR_COMMAND,
+  DAKAR_TIMEOUT_SECONDS,
+  DAKAR_BUDGET_GBP,
   CODERABBIT_REVIEW_COMMAND,
   CODERABBIT_HOST_REVIEW,
   CODERABBIT_BETWEEN_WORK_ITEMS,
@@ -3382,22 +3584,36 @@ var { triagePrompt, runTriage } = makeRemediation({
   triageAgentOptions,
   triageEscalationModel: TRIAGE_ESCALATION_MODEL
 });
+var HOST_REVIEW_ENABLED = CODERABBIT_HOST_REVIEW;
+var HOST_REVIEW_BETWEEN_WORK_ITEMS = CODERABBIT_BETWEEN_WORK_ITEMS;
+var HOST_REVIEW_ATTEMPTS = CODERABBIT_ATTEMPTS;
+var HOST_REVIEW_BACKOFF_MINUTES = CODERABBIT_BACKOFF_MINUTES;
+var HOST_REVIEW_FINDINGS_FILE = CODERABBIT_FINDINGS_FILE;
 var {
-  coderabbitBackoffMinutes,
-  runCoderabbitHostReview,
-  recordCoderabbitReview,
+  reviewBackoffMinutes,
+  runHostReview,
+  recordHostReview,
   runHostCommitGates,
   runCodeSceneCheck
 } = makeHostReview({
   base: BASE,
-  coderabbitAttempts: CODERABBIT_ATTEMPTS,
-  coderabbitBackoffMinutes: CODERABBIT_BACKOFF_MINUTES,
-  coderabbitFindingsFile: CODERABBIT_FINDINGS_FILE,
+  reviewTool: REVIEW_TOOL,
+  dakarCommand: DAKAR_COMMAND,
+  reviewTimeoutSeconds: DAKAR_TIMEOUT_SECONDS,
+  dakarBudgetGbp: DAKAR_BUDGET_GBP,
+  coderabbitAttempts: HOST_REVIEW_ATTEMPTS,
+  coderabbitBackoffMinutes: HOST_REVIEW_BACKOFF_MINUTES,
+  coderabbitFindingsFile: HOST_REVIEW_FINDINGS_FILE,
   commitGates: COMMIT_GATES,
   commitGateTimeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
   csCheck: CS_CHECK,
   csCheckCommand: CS_CHECK_COMMAND
 });
+var coderabbitBackoffMinutes = reviewBackoffMinutes;
+var runCoderabbitHostReview = runHostReview;
+var recordCoderabbitReview = recordHostReview;
+var coderabbitCapture2 = hostReviewMetrics;
+var coderabbitBlockingItems2 = (findings) => reviewBlockingItems("CodeRabbit", findings);
 async function runAuthPreflight() {
   if (!AUTH_PREFLIGHT) return [];
   phase("Auth Preflight");
@@ -3423,14 +3639,41 @@ async function runAuthPreflight() {
     }
   }
   if (REQUIRE_CODERABBIT_AUTH) {
-    const coderabbit = await execFileStatus("coderabbit", ["auth", "status"]);
-    const coderabbitOutput = [coderabbit.stdout, coderabbit.stderr, coderabbit.message].filter(Boolean).join("\n");
-    if (!coderabbit.ok || authFailureDetail(coderabbitOutput)) {
-      failures.push({
-        tool: "coderabbit",
-        command: "coderabbit auth status",
-        detail: authFailureDetail(coderabbitOutput) || coderabbitOutput.trim() || "CodeRabbit auth status check failed"
-      });
+    if (REVIEW_TOOL === "dakar") {
+      const dakarInvocation = DAKAR_COMMAND.trim().split(/\s+/).filter(Boolean);
+      const dakarExecutable = dakarInvocation[0] || "dakar-review";
+      const dakarArgs = [...dakarInvocation.slice(1), "--version"];
+      const dakarProbeCommand = [...dakarInvocation, "--version"].join(" ").slice(0, 200) || "dakar-review --version";
+      const dakar = await execFileStatus(dakarExecutable, dakarArgs);
+      const dakarOutput = [dakar.stdout, dakar.stderr, dakar.message].filter(Boolean).join("\n").trim().slice(-2e3);
+      if (!dakar.ok) {
+        hostReviewMetrics.authFailures += 1;
+        failures.push({
+          tool: "dakar",
+          command: dakarProbeCommand,
+          detail: dakarOutput || `${dakarExecutable} is unavailable or its version probe failed`
+        });
+      }
+      const openaiKey = process.env.OPENAI_API_KEY;
+      if (typeof openaiKey !== "string" || openaiKey.trim() === "") {
+        hostReviewMetrics.authFailures += 1;
+        failures.push({
+          tool: "dakar",
+          command: "OPENAI_API_KEY (env)",
+          detail: "OPENAI_API_KEY is unset or empty; the Dakar host review needs it to reach the OpenAI-backed reviewer"
+        });
+      }
+    } else {
+      const coderabbit = await execFileStatus("coderabbit", ["auth", "status"]);
+      const coderabbitOutput = [coderabbit.stdout, coderabbit.stderr, coderabbit.message].filter(Boolean).join("\n");
+      if (!coderabbit.ok || authFailureDetail(coderabbitOutput)) {
+        hostReviewMetrics.authFailures += 1;
+        failures.push({
+          tool: "coderabbit",
+          command: "coderabbit auth status",
+          detail: authFailureDetail(coderabbitOutput) || coderabbitOutput.trim() || "CodeRabbit auth status check failed"
+        });
+      }
     }
   }
   if (failures.length) {
@@ -3438,7 +3681,7 @@ async function runAuthPreflight() {
   } else {
     const passed = ["Codex"];
     if (AUTH_REQUIRED_ADAPTERS.has("claude")) passed.push("Claude");
-    if (REQUIRE_CODERABBIT_AUTH) passed.push("CodeRabbit");
+    if (REQUIRE_CODERABBIT_AUTH) passed.push(REVIEW_TOOL === "dakar" ? "Dakar (OPENAI_API_KEY)" : "CodeRabbit");
     log(`[auth] preflight passed for ${passed.join(", ")}`);
   }
   return failures;
@@ -3784,8 +4027,9 @@ var {
   PER_WORK_ITEM_BUILD,
   HOST_COMMIT_GATES,
   HOST_GATES_BETWEEN_WORK_ITEMS,
-  CODERABBIT_HOST_REVIEW,
-  CODERABBIT_BETWEEN_WORK_ITEMS,
+  HOST_REVIEW_ENABLED,
+  HOST_REVIEW_BETWEEN_WORK_ITEMS,
+  HOST_REVIEWER: REVIEW_TOOL,
   DRY_RUN,
   AUTO_MERGE,
   BASE,
@@ -3810,8 +4054,8 @@ var {
   ensureTaskAgentWriteAccess,
   createWorktree,
   runHostCommitGates,
-  runCoderabbitHostReview,
-  recordCoderabbitReview
+  runHostReview,
+  recordHostReview
 });
 var selectSeq = 0;
 async function doSelect(taken) {
@@ -4085,17 +4329,17 @@ async function workflowMain() {
     // infrastructure faults plus terminal fault counts per class, so operators
     // can read retry pressure straight from the result instead of the logs.
     faultMetrics: { ...faultMetrics },
-    // Host-run CodeRabbit review aggregate: effective configuration plus
-    // bounded counters (reviews run, findings by severity, rate-limited runs,
-    // deferred reviews). Per-finding detail goes to the JSONL sink when
+    // Host-review aggregate: effective configuration plus bounded counters.
+    // Per-finding detail goes to the JSONL sink when
     // coderabbitFindingsFile is configured.
-    coderabbit: {
-      hostReview: CODERABBIT_HOST_REVIEW,
-      attempts: CODERABBIT_ATTEMPTS,
-      backoffMinutes: CODERABBIT_BACKOFF_MINUTES,
-      findingsFile: CODERABBIT_FINDINGS_FILE,
-      ...coderabbitCapture,
-      bySeverity: { ...coderabbitCapture.bySeverity }
+    hostReview: {
+      enabled: HOST_REVIEW_ENABLED,
+      reviewer: REVIEW_TOOL,
+      attempts: HOST_REVIEW_ATTEMPTS,
+      backoffMinutes: HOST_REVIEW_BACKOFF_MINUTES,
+      findingsFile: HOST_REVIEW_FINDINGS_FILE,
+      ...hostReviewMetrics,
+      bySeverity: { ...hostReviewMetrics.bySeverity }
     },
     processed,
     results,

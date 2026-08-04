@@ -47,7 +47,7 @@ Relevant paths:
   `config.ts`, `schemas.ts`, `types.ts`, `roadmap.ts`, `exec.ts`, `faults.ts`,
   `git-evidence.ts`, `recovery-decision.ts`, `recovery-discovery.ts`,
   `prompts.ts`, `write-preflight.ts`, `execplan-durability.ts`, `assessment.ts`,
-  `remediation.ts`, `host-review.ts` (host-run CodeRabbit NDJSON
+  `remediation.ts`, `host-review.ts` (host-run Dakar/CodeRabbit
   parsing/classification and the host commit gates), and `run-task.ts`, with
   the injected ODW primitives declared in `odw-globals.d.ts`. TypeScript is
   restricted to erasable syntax by compiler flags (`erasableSyntaxOnly`,
@@ -86,6 +86,12 @@ Relevant paths:
 
 Tick the matching roadmap task and update the relevant ExecPlan whenever a
 branch lands planned work.
+
+The JavaScript files under `workflows/` are runtime/deployment artefacts. Treat
+them as object code, not as source modules subject to the module-level
+docstring rule. In particular, `workflows/df12-build.js` is the baseline Claude
+Code workflow artefact, while `workflows/df12-build-odw.js` is generated from
+the documented TypeScript source tree and must never be edited by hand.
 
 ## ODW workflow contract
 
@@ -291,6 +297,47 @@ Recovery assessment carries two distinct evidence channels, typed by
 eligibility on `missingEvidence` alone and never consults `residualRisk`; the
 advisory risk is instead carried forward into the resumed code-review,
 expert-review, and integration prompts as a non-blocking section.
+
+The host review tool is selected by `reviewTool`, which defaults to `dakar`.
+Dakar runs `dakar-review` (overridable with `dakarCommand`) against the
+committed diff, parses one JSON document, and maps its verdict onto the same
+review contract described below: clean, findings (`critical`/`major`
+blocking), a deferred backoff, or an error. Dakar uses an OpenAI-backed model,
+so its preflight checks `OPENAI_API_KEY`. Set `reviewTool: 'coderabbit'` to
+restore the NDJSON CodeRabbit path documented in
+`docs/coderabbit-wire-contract.md`.
+
+The external `dakarTimeoutSeconds` setting is clamped to 60–7200 seconds and
+enters `HostReviewConfig` as the tool-neutral `reviewTimeoutSeconds`. It bounds
+the parent process for either reviewer and is also passed to Dakar as
+`--timeout`. `dakarBudgetGbp` is clamped to 0–10; positive values become
+`--budget-gbp`, while `0` lets Dakar apply its own hard admission budget. Each
+Dakar attempt creates a fresh `--state-root` below the host temporary directory
+and removes it in a `finally` block after execution and classification settle.
+Retries therefore share no Dakar state and leave no persistent cache tree.
+
+`host-review.ts` exports `parseDakarDocument` and `classifyDakarReview` as the
+Dakar adapter boundary tested directly by the module suite. Both Dakar and
+CodeRabbit then produce the neutral `HostReviewResult` and `ReviewOutcome`
+contract consumed by `run-task.ts`. The parser searches
+backwards through stdout for the terminal JSON object and returns `null` when
+no valid object exists. The classifier validates the complete document before
+mapping it: unknown shapes, malformed findings, findings-free rejections, and
+clean verdicts carrying findings fail closed as review errors. Valid
+`changes-requested` findings map onto the established blocking severity
+contract. The historical `CoderabbitReview`, `CoderabbitOutcome`,
+`CoderabbitFinding`, `runCoderabbitHostReview`, and
+`recordCoderabbitReview` exports remain thin compatibility aliases; workflow
+policy uses only the neutral names.
+
+Every terminal host review emits one bounded structured log event containing
+the reviewer, review label, terminal attempt count, elapsed milliseconds,
+outcome, and error category. `ExecStatus.killed` classifies parent-process
+timeouts without inspecting error prose. The run result's `hostReview` object
+uses fixed metric keys for runs, findings, retries, deferrals, timeouts,
+errors, authentication failures, and JSONL sink failures. Finding severity
+counts also use a fixed vocabulary; task ids and error strings never become
+metric keys. JSONL writes remain serialized through a promise tail.
 
 Host-run CodeRabbit review (`coderabbitHostReview`, default on) moves the CLI
 invocation from agent prompts to the control loop:

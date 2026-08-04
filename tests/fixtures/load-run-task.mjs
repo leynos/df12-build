@@ -30,7 +30,7 @@ return { runTask }
 `,
   )
   const surface = factory(
-    { coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...args },
+    { reviewTool: 'coderabbit', coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...args },
     () => {},
     (message) => logs.push(message),
     agentImpl,

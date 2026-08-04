@@ -301,15 +301,15 @@ function isInfraFaultResult(result: AssessableResult | null | undefined): boolea
 }
 
 /**
- * Whether an open issue text describes a deferred/rate-limited CodeRabbit
- * review rather than a substantive product defect.
+ * Whether an open issue text describes a deferred/rate-limited host review
+ * rather than a substantive product defect.
  *
  * @param issue A single open-issue string (or any value, coerced to text).
- * @returns True when the text mentions CodeRabbit alongside a deferred/rate-limit marker.
+ * @returns True when the text names a host reviewer alongside a specific deferral marker.
  */
 export function isDeferredReviewIssue(issue: unknown): boolean {
   const text = String(issue || '').toLowerCase()
-  const deferredReviewMarkers = [
+  const coderabbitDeferredMarkers = [
     'rate limit',
     'rate_limit',
     'rate-limit',
@@ -318,12 +318,16 @@ export function isDeferredReviewIssue(issue: unknown): boolean {
     'retry after',
     'waittime',
     'wait time',
-    'deferred review',
     'deferred coderabbit review',
     'coderabbit review deferred',
     'unavailable',
   ]
-  return text.includes('coderabbit') && deferredReviewMarkers.some((marker) => text.includes(marker))
+  // Dakar emits one exact prefix for budget/quota deferrals. CodeRabbit has a
+  // wider historical marker set, including temporary unavailability.
+  const isDakarDeferral = text.startsWith('dakar review deferred (stage: deferred)')
+  const isCoderabbitDeferral = text.includes('coderabbit')
+    && coderabbitDeferredMarkers.some((marker) => text.includes(marker))
+  return isDakarDeferral || isCoderabbitDeferral
 }
 
 /**
