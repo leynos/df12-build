@@ -692,180 +692,184 @@ async function runTriage(stepPrefix, proposals) {
 // remediation flush in the control loop. Runs until the frontier is dry, the
 // task ceiling or budget reserve is hit, or a task fails (then drain + stop).
 // ---------------------------------------------------------------------------
-const processed = [] // task ids merged (or terminal) this run
-const results = []
-const audits = []
-const triages = []
-const pendingByStep = new Map() // step prefix -> accrued review/audit proposals awaiting that step's flush
-const inflight = new Map() // task id -> Promise<{id, task, result}> for tasks currently being built
-let halted = null
+async function workflowMain() {
+  const processed = [] // task ids merged (or terminal) this run
+  const results = []
+  const audits = []
+  const triages = []
+  const pendingByStep = new Map() // step prefix -> accrued review/audit proposals awaiting that step's flush
+  const inflight = new Map() // task id -> Promise<{id, task, result}> for tasks currently being built
+  let halted = null
 
-// Only fold remediation into the roadmap when we are actually advancing BASE.
-const canFlush = AUTO_MERGE && !DRY_RUN
+  // Only fold remediation into the roadmap when we are actually advancing BASE.
+  const canFlush = AUTO_MERGE && !DRY_RUN
 
-// Minimal async mutex: serialize callers through a promise chain. Used as a
-// merge queue so only one task rebases + squash-merges + pushes BASE at a time.
-function mutex() {
-  let tail = Promise.resolve()
-  return (fn) => {
-    const result = tail.then(() => fn())
-    tail = result.then(() => {}, () => {}) // keep the queue alive regardless of outcome
-    return result
+  // Minimal async mutex: serialize callers through a promise chain. Used as a
+  // merge queue so only one task rebases + squash-merges + pushes BASE at a time.
+  function mutex() {
+    let tail = Promise.resolve()
+    return (fn) => {
+      const result = tail.then(() => fn())
+      tail = result.then(() => {}, () => {}) // keep the queue alive regardless of outcome
+      return result
+    }
   }
-}
-const mergeLock = mutex()
+  const mergeLock = mutex()
 
-let selectSeq = 0
-async function doSelect(excludeIds) {
-  phase('Select')
-  return await agent(selectPrompt(excludeIds), { phase: 'Select', label: `select#${++selectSeq}`, schema: SELECTION_SCHEMA })
-}
-
-function addPending(step, items) {
-  if (!items || !items.length) return
-  if (!pendingByStep.has(step)) pendingByStep.set(step, [])
-  pendingByStep.get(step).push(...items)
-}
-
-// Fold a step's accrued remediation into the roadmap once no in-flight task
-// belongs to that step. The parallel pool has no single "current step", so debt
-// is flushed per step at the point that step quiesces (nothing from it still
-// building). Inserted tasks are live + unblocked, so the pool picks them up on
-// the next refill — fix-debt-first within the step.
-async function flushSettledSteps() {
-  if (!canFlush) return
-  const inflightSteps = new Set([...inflight.keys()].map(stepOf))
-  for (const [step, items] of [...pendingByStep.entries()]) {
-    if (!items.length || inflightSteps.has(step)) continue
-    const tr = await mergeLock(() => runTriage(step, items))
-    triages.push({ step, ...(tr || {}) })
-    const lanes = (tr?.decisions || []).reduce((m, d) => ((m[d.lane] = (m[d.lane] || 0) + 1), m), {})
-    log(`[step ${step}] triaged ${items.length} proposal(s): ${Object.entries(lanes).map(([k, v]) => `${v} ${k}`).join(', ') || 'none recorded'}`)
-    pendingByStep.delete(step)
+  let selectSeq = 0
+  async function doSelect(excludeIds) {
+    phase('Select')
+    return await agent(selectPrompt(excludeIds), { phase: 'Select', label: `select#${++selectSeq}`, schema: SELECTION_SCHEMA })
   }
-}
 
-// Open new tasks until the pool is full or the frontier is dry. select excludes
-// both merged and in-flight ids, so each spawn grabs a distinct task, and only
-// tasks whose dependencies are already merged are ever offered.
-async function fillPool() {
-  while (inflight.size < MAX_PARALLEL && processed.length + inflight.size < MAX_TASKS) {
-    if (budget.total && budget.remaining() < BUDGET_RESERVE) {
-      if (!halted) halted = `budget reserve reached (${Math.round(budget.remaining() / 1000)}k remaining)`
-      return
-    }
-    const exclude = [...processed, ...inflight.keys()]
-    let sel
-    try {
-      sel = await doSelect(exclude)
-    } catch (err) {
-      log(`[pool] select agent failed (${(err && err.message) || String(err)}); stop opening new work, drain in-flight`)
-      if (!halted) halted = `select agent error: ${(err && err.message) || String(err)}`
-      return
-    }
-    if (!sel || !sel.hasTask || !sel.task) {
-      if (inflight.size === 0) log(sel?.blockedSummary ? `No unblocked task: ${sel.blockedSummary}` : 'No unblocked roadmap tasks remain.')
-      return
-    }
-    const task = sel.task
-    if (processed.includes(task.id) || inflight.has(task.id)) {
-      log(`Selector re-offered in-flight/processed ${task.id}; not double-spawning.`)
-      return
-    }
-    log(`[pool] spawning ${task.id} (${inflight.size + 1}/${MAX_PARALLEL} in flight)`)
-    inflight.set(
-      task.id,
-      // A thrown agent error (e.g. a subagent that completes without emitting
-      // structured output) must NOT reject through Promise.race and crash the
-      // whole run — convert it to a failed result the control loop drains.
-      runTask(task, mergeLock).then(
-        (result) => ({ id: task.id, task, result }),
-        (err) => ({
-          id: task.id,
-          task,
-          result: { id: task.id, status: 'failed', stage: 'error', detail: `unhandled agent error: ${(err && err.message) || String(err)}`, proposals: [] },
-        }),
-      ),
-    )
+  function addPending(step, items) {
+    if (!items || !items.length) return
+    if (!pendingByStep.has(step)) pendingByStep.set(step, [])
+    pendingByStep.get(step).push(...items)
   }
-}
 
-// --- Worker-pool control loop -----------------------------------------------
-// Fill the pool, then await whichever task finishes first (Promise.race),
-// record it, and refill — re-running select the instant any flow completes. A
-// failed task stops new work but lets in-flight siblings drain. Audits and
-// remediation triage run here in the control loop (serialized), so their
-// worktrees and BASE writes never collide with each other.
-let stop = false
-while (true) {
-  if (!stop && !halted) {
+  // Fold a step's accrued remediation into the roadmap once no in-flight task
+  // belongs to that step. The parallel pool has no single "current step", so debt
+  // is flushed per step at the point that step quiesces (nothing from it still
+  // building). Inserted tasks are live + unblocked, so the pool picks them up on
+  // the next refill — fix-debt-first within the step.
+  async function flushSettledSteps() {
+    if (!canFlush) return
+    const inflightSteps = new Set([...inflight.keys()].map(stepOf))
+    for (const [step, items] of [...pendingByStep.entries()]) {
+      if (!items.length || inflightSteps.has(step)) continue
+      const tr = await mergeLock(() => runTriage(step, items))
+      triages.push({ step, ...(tr || {}) })
+      const lanes = (tr?.decisions || []).reduce((m, d) => ((m[d.lane] = (m[d.lane] || 0) + 1), m), {})
+      log(`[step ${step}] triaged ${items.length} proposal(s): ${Object.entries(lanes).map(([k, v]) => `${v} ${k}`).join(', ') || 'none recorded'}`)
+      pendingByStep.delete(step)
+    }
+  }
+
+  // Open new tasks until the pool is full or the frontier is dry. select excludes
+  // both merged and in-flight ids, so each spawn grabs a distinct task, and only
+  // tasks whose dependencies are already merged are ever offered.
+  async function fillPool() {
+    while (inflight.size < MAX_PARALLEL && processed.length + inflight.size < MAX_TASKS) {
+      if (budget.total && budget.remaining() < BUDGET_RESERVE) {
+        if (!halted) halted = `budget reserve reached (${Math.round(budget.remaining() / 1000)}k remaining)`
+        return
+      }
+      const exclude = [...processed, ...inflight.keys()]
+      let sel
+      try {
+        sel = await doSelect(exclude)
+      } catch (err) {
+        log(`[pool] select agent failed (${(err && err.message) || String(err)}); stop opening new work, drain in-flight`)
+        if (!halted) halted = `select agent error: ${(err && err.message) || String(err)}`
+        return
+      }
+      if (!sel || !sel.hasTask || !sel.task) {
+        if (inflight.size === 0) log(sel?.blockedSummary ? `No unblocked task: ${sel.blockedSummary}` : 'No unblocked roadmap tasks remain.')
+        return
+      }
+      const task = sel.task
+      if (processed.includes(task.id) || inflight.has(task.id)) {
+        log(`Selector re-offered in-flight/processed ${task.id}; not double-spawning.`)
+        return
+      }
+      log(`[pool] spawning ${task.id} (${inflight.size + 1}/${MAX_PARALLEL} in flight)`)
+      inflight.set(
+        task.id,
+        // A thrown agent error (e.g. a subagent that completes without emitting
+        // structured output) must NOT reject through Promise.race and crash the
+        // whole run — convert it to a failed result the control loop drains.
+        runTask(task, mergeLock).then(
+          (result) => ({ id: task.id, task, result }),
+          (err) => ({
+            id: task.id,
+            task,
+            result: { id: task.id, status: 'failed', stage: 'error', detail: `unhandled agent error: ${(err && err.message) || String(err)}`, proposals: [] },
+          }),
+        ),
+      )
+    }
+  }
+
+  // --- Worker-pool control loop -----------------------------------------------
+  // Fill the pool, then await whichever task finishes first (Promise.race),
+  // record it, and refill — re-running select the instant any flow completes. A
+  // failed task stops new work but lets in-flight siblings drain. Audits and
+  // remediation triage run here in the control loop (serialized), so their
+  // worktrees and BASE writes never collide with each other.
+  let stop = false
+  while (true) {
+    if (!stop && !halted) {
+      try {
+        await flushSettledSteps()
+      } catch (err) {
+        log(`[triage] failed (${(err && err.message) || String(err)}); proposals stay pending for a later sweep`)
+      }
+      await fillPool()
+    }
+    if (inflight.size === 0) break
+
+    const done = await Promise.race(inflight.values())
+    inflight.delete(done.id)
+    const result = done.result
+    results.push(result)
+
+    if (result.status === 'done') {
+      processed.push(done.id)
+      if (result.kind !== 'addendum') {
+        // Addendum passes deliberately generate no audit and no proposals — that
+        // is what breaks the remediation-of-remediation recursion.
+        addPending(stepOf(done.id), result.proposals)
+        let audit = null
+        try {
+          audit = await mergeLock(() => runAudit({ id: done.id }))
+        } catch (err) {
+          log(`[audit ${done.id}] failed (${(err && err.message) || String(err)}); skipping (task already merged)`)
+        }
+        if (audit) {
+          audits.push({ afterTask: done.id, ...audit })
+          addPending(stepOf(done.id), (audit.proposedRoadmapItems || []).map((p) => ({ ...p, source: `audit:${done.id}` })))
+        }
+      }
+    } else if (!halted) {
+      // Record the failure, stop opening new work, and let in-flight siblings
+      // finish rather than abandoning their (possibly mergeable) branches.
+      halted = `task ${done.id} ${result.status} at ${result.stage}: ${result.detail}`
+      stop = true
+    }
+  }
+
+  // End-of-run: the pool is drained, so every step has quiesced. Fold any
+  // remaining remediation into the roadmap — even on a halt, since triage only
+  // RECORDS proposals (it never implements), so accrued audit findings are not
+  // lost to a single task's failure.
+  if (canFlush) {
     try {
       await flushSettledSteps()
     } catch (err) {
-      log(`[triage] failed (${(err && err.message) || String(err)}); proposals stay pending for a later sweep`)
+      log(`[triage:end] failed (${(err && err.message) || String(err)}); ${[...pendingByStep.values()].flat().length} proposal(s) left pending`)
     }
-    await fillPool()
   }
-  if (inflight.size === 0) break
+  const pendingProposals = [...pendingByStep.values()].flat()
 
-  const done = await Promise.race(inflight.values())
-  inflight.delete(done.id)
-  const result = done.result
-  results.push(result)
-
-  if (result.status === 'done') {
-    processed.push(done.id)
-    if (result.kind !== 'addendum') {
-      // Addendum passes deliberately generate no audit and no proposals — that
-      // is what breaks the remediation-of-remediation recursion.
-      addPending(stepOf(done.id), result.proposals)
-      let audit = null
-      try {
-        audit = await mergeLock(() => runAudit({ id: done.id }))
-      } catch (err) {
-        log(`[audit ${done.id}] failed (${(err && err.message) || String(err)}); skipping (task already merged)`)
-      }
-      if (audit) {
-        audits.push({ afterTask: done.id, ...audit })
-        addPending(stepOf(done.id), (audit.proposedRoadmapItems || []).map((p) => ({ ...p, source: `audit:${done.id}` })))
-      }
-    }
-  } else if (!halted) {
-    // Record the failure, stop opening new work, and let in-flight siblings
-    // finish rather than abandoning their (possibly mergeable) branches.
-    halted = `task ${done.id} ${result.status} at ${result.stage}: ${result.detail}`
-    stop = true
+  return {
+    base: BASE,
+    maxParallel: MAX_PARALLEL,
+    processed,
+    results,
+    audits,
+    // Remediation GIST-triaged into addendum / step-task / reroute lanes when each
+    // step quiesced (see remediationTriage). Anything in pendingProposals was left
+    // unwritten because the run halted — triage it manually.
+    remediationTriage: triages,
+    pendingProposals,
+    halted,
+    summary:
+      `Processed ${processed.length} roadmap task(s) (pool width ${MAX_PARALLEL}): ` +
+      results.map((r) => `${r.id}=${r.status}`).join(', ') +
+      (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : '') +
+      (halted ? ` | halted: ${halted}` : ' | clean stop (no more unblocked tasks).'),
   }
 }
 
-// End-of-run: the pool is drained, so every step has quiesced. Fold any
-// remaining remediation into the roadmap — even on a halt, since triage only
-// RECORDS proposals (it never implements), so accrued audit findings are not
-// lost to a single task's failure.
-if (canFlush) {
-  try {
-    await flushSettledSteps()
-  } catch (err) {
-    log(`[triage:end] failed (${(err && err.message) || String(err)}); ${[...pendingByStep.values()].flat().length} proposal(s) left pending`)
-  }
-}
-const pendingProposals = [...pendingByStep.values()].flat()
-
-return {
-  base: BASE,
-  maxParallel: MAX_PARALLEL,
-  processed,
-  results,
-  audits,
-  // Remediation GIST-triaged into addendum / step-task / reroute lanes when each
-  // step quiesced (see remediationTriage). Anything in pendingProposals was left
-  // unwritten because the run halted — triage it manually.
-  remediationTriage: triages,
-  pendingProposals,
-  halted,
-  summary:
-    `Processed ${processed.length} roadmap task(s) (pool width ${MAX_PARALLEL}): ` +
-    results.map((r) => `${r.id}=${r.status}`).join(', ') +
-    (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : '') +
-    (halted ? ` | halted: ${halted}` : ' | clean stop (no more unblocked tasks).'),
-}
+await workflowMain()
