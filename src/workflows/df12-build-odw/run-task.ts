@@ -1200,7 +1200,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
           return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: `addendum reported green gates but the host could not reproduce them: ${hostGates.detail}`, openIssues, worktree, proposals, kind: 'addendum' })
         }
       }
-      // CodeScene code-health check, after the gates and before CodeRabbit.
+      // CodeScene code-health check, after the gates and before host review.
       // Addenda have no fix loop, so a regression halts for assessment.
       if (CS_CHECK) {
         const cs = await hostGateLock(() => runCodeSceneCheck(worktree, tag, 'addendum'))
@@ -1225,12 +1225,19 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
           return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: `${reviewerDisplayName} host review found blocking issue(s): ${blockingFindings.join('; ')}`, impl, worktree, proposals, kind: 'addendum' })
         }
         if (hostReview.outcome === 'rate-limited' || hostReview.outcome === 'error') {
-          addendumOpenIssues.push(`${reviewerDisplayName} review deferred (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`)
+          const deferredIssue = HOST_REVIEWER === 'dakar'
+            && hostReview.outcome === 'rate-limited'
+            && hostReview.detail
+            ? hostReview.detail
+            : `${reviewerDisplayName} review deferred (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`
+          addendumOpenIssues.push(deferredIssue)
           log(`[task ${tag}] ${reviewerDisplayName} host review deferred for the addendum: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`)
         }
       }
       let addendumReview: StageReview | null = null
-      if (onlyDeferredReviewIssues) {
+      const needsFallbackReview = onlyDeferredReviewIssues
+        || hasOnlyDeferredReviewIssues(addendumOpenIssues)
+      if (needsFallbackReview) {
         phase('Code Review')
         addendumReview = (await withInfraRetry(() => agent(addendumReviewPrompt(task, worktree, impl), reviewAgentOptions({ phase: 'Code Review', label: `addendum-review:${tag}`, schema: REVIEW_SCHEMA })), `addendum-review:${tag}`)) as StageReview | null
         if (addendumReview?.proposedRoadmapItems?.length) {

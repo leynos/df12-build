@@ -195,7 +195,7 @@ const {
   AUTH_REQUIRED_ADAPTERS,
   REVIEW_TOOL,
   DAKAR_COMMAND,
-  DAKAR_TIMEOUT_SECONDS,
+  REVIEW_TIMEOUT_SECONDS,
   DAKAR_BUDGET_GBP,
   CODERABBIT_REVIEW_COMMAND,
   CODERABBIT_HOST_REVIEW,
@@ -341,7 +341,7 @@ const {
   base: BASE,
   reviewTool: REVIEW_TOOL,
   dakarCommand: DAKAR_COMMAND,
-  reviewTimeoutSeconds: DAKAR_TIMEOUT_SECONDS,
+  reviewTimeoutSeconds: REVIEW_TIMEOUT_SECONDS,
   dakarBudgetGbp: DAKAR_BUDGET_GBP,
   coderabbitAttempts: HOST_REVIEW_ATTEMPTS,
   coderabbitBackoffMinutes: HOST_REVIEW_BACKOFF_MINUTES,
@@ -411,6 +411,16 @@ async function runAuthPreflight() {
           detail: dakarOutput || `${dakarExecutable} is unavailable or its version probe failed`,
         })
       }
+      const pi = await execFileStatus('pi', ['--version'])
+      const piOutput = [pi.stdout, pi.stderr, pi.message].filter(Boolean).join('\n').trim().slice(-2_000)
+      if (!pi.ok) {
+        hostReviewMetrics.authFailures += 1
+        failures.push({
+          tool: 'dakar',
+          command: 'pi --version',
+          detail: piOutput || 'pi is unavailable or its version probe failed',
+        })
+      }
       const openaiKey = process.env.OPENAI_API_KEY
       if (typeof openaiKey !== 'string' || openaiKey.trim() === '') {
         hostReviewMetrics.authFailures += 1
@@ -439,7 +449,7 @@ async function runAuthPreflight() {
   } else {
     const passed = ['Codex']
     if (AUTH_REQUIRED_ADAPTERS.has('claude')) passed.push('Claude')
-    if (REQUIRE_CODERABBIT_AUTH) passed.push(REVIEW_TOOL === 'dakar' ? 'Dakar (OPENAI_API_KEY)' : 'CodeRabbit')
+    if (REQUIRE_CODERABBIT_AUTH) passed.push(REVIEW_TOOL === 'dakar' ? 'Dakar (dakar-review, pi, OPENAI_API_KEY)' : 'CodeRabbit')
     log(`[auth] preflight passed for ${passed.join(', ')}`)
   }
 

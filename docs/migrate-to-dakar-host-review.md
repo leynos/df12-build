@@ -29,12 +29,13 @@ next implementation run.
    ```json
    {
      "dakarCommand": "dakar-review",
-     "dakarTimeoutSeconds": 3600,
+     "reviewTimeoutSeconds": 3600,
      "dakarBudgetGbp": 0
    }
    ```
 
-   `dakarTimeoutSeconds` is clamped to 60–7200 seconds. `dakarBudgetGbp` is
+   `reviewTimeoutSeconds` is clamped to 60–7200 seconds; the former
+   `dakarTimeoutSeconds` name remains an input alias. `dakarBudgetGbp` is
    clamped to 0–10; `0` lets Dakar apply its own hard admission budget.
 
 3. Launch the workflow normally. With authentication preflight enabled, a

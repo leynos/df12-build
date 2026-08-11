@@ -776,7 +776,7 @@ test('commit gates default to make all and honour operator overrides', async () 
 // Runtime auth-preflight coverage: fake auth CLIs on PATH record every
 // invocation, so the tests fail for reordered, inverted, or dead preflight
 // code — not merely for edited source text.
-function makeAuthBin({ codexOk = true, claudeOk = true, coderabbitOk = true, dakarOk = true } = {}) {
+function makeAuthBin({ codexOk = true, claudeOk = true, coderabbitOk = true, dakarOk = true, piOk = true } = {}) {
   const bin = mkdtempSync(path.join(tmpdir(), 'df12-auth-bin-'))
   const logFile = path.join(bin, 'calls.log')
   writeFileSync(logFile, '')
@@ -792,6 +792,7 @@ function makeAuthBin({ codexOk = true, claudeOk = true, coderabbitOk = true, dak
   fake('claude', claudeOk)
   fake('coderabbit', coderabbitOk)
   fake('dakar-review', dakarOk)
+  fake('pi', piOk)
   return { bin, calls: () => readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean) }
 }
 
@@ -890,6 +891,7 @@ test('the Dakar preflight requires a non-empty OPENAI_API_KEY and skips CodeRabb
     const presentFailures = await runPreflightWithFakes(dakarWithLegacyFlagOff, present)
     assert.deepEqual(presentFailures, [])
     assert.ok(present.calls().some((line) => line === 'dakar-review --version'))
+    assert.ok(present.calls().some((line) => line === 'pi --version'))
 
     // A key cannot make an unavailable reviewer executable runnable.
     const unavailable = makeAuthBin({ dakarOk: false })
@@ -897,6 +899,14 @@ test('the Dakar preflight requires a non-empty OPENAI_API_KEY and skips CodeRabb
     assert.equal(unavailableFailures.length, 1)
     assert.equal(unavailableFailures[0].tool, 'dakar')
     assert.match(unavailableFailures[0].command, /dakar-review --version/)
+
+    // Dakar shells out through pi, so a healthy front-end alone is insufficient.
+    const unavailablePi = makeAuthBin({ piOk: false })
+    const unavailablePiFailures = await runPreflightWithFakes(dakarWithLegacyFlagOff, unavailablePi)
+    assert.equal(unavailablePiFailures.length, 1)
+    assert.equal(unavailablePiFailures[0].tool, 'dakar')
+    assert.equal(unavailablePiFailures[0].command, 'pi --version')
+    assert.match(unavailablePiFailures[0].detail, /Not logged in/)
   } finally {
     if (previousKey === undefined) delete process.env.OPENAI_API_KEY
     else process.env.OPENAI_API_KEY = previousKey

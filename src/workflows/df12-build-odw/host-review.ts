@@ -709,7 +709,9 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
     for (const finding of review.findings) {
       hostReviewMetrics.findings += 1
       const rawSeverity = String(finding.severity || 'unknown').toLowerCase()
-      const severity = rawSeverity in hostReviewMetrics.bySeverity ? rawSeverity as keyof typeof hostReviewMetrics.bySeverity : 'unknown'
+      const severity = Object.hasOwn(hostReviewMetrics.bySeverity, rawSeverity)
+        ? rawSeverity as keyof typeof hostReviewMetrics.bySeverity
+        : 'unknown'
       hostReviewMetrics.bySeverity[severity] += 1
     }
     if (!findingsFile || !review.findings.length) return
@@ -871,7 +873,7 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
   // Skips gracefully — like `make verify-modules` without Dafny — when the
   // configured binary is not on PATH, so environments without CodeScene are
   // not blocked. Returns { clean, skipped, detail, logFile }.
-  async function runCodeSceneCheck(worktree: string, tag: string, label: string): Promise<{ clean: boolean; skipped: boolean; detail: string; logFile: string }> {
+  async function runCodeSceneCheck(worktree: string, tag: string, label: string): Promise<CodeSceneCheckResult> {
     if (!csCheck) return { clean: true, skipped: true, detail: '', logFile: '' }
     const bin = codeSceneExecutable(csCheckCommand) || 'cs-check-changed'
     // Pass the probed name as a positional argument ($1), never interpolated

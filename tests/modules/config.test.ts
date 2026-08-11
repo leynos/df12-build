@@ -84,7 +84,7 @@ describe('makeConfig defaults', () => {
   test('review tool defaults to Dakar with its own knobs', () => {
     expect(config.REVIEW_TOOL).toBe('dakar')
     expect(config.DAKAR_COMMAND).toBe('dakar-review')
-    expect(config.DAKAR_TIMEOUT_SECONDS).toBe(3600)
+    expect(config.REVIEW_TIMEOUT_SECONDS).toBe(3600)
     // 0 means "use Dakar's own default budget" (the flag is omitted).
     expect(config.DAKAR_BUDGET_GBP).toBe(0)
   })
@@ -117,10 +117,12 @@ describe('makeConfig review-tool selection', () => {
 
   test('the Dakar command and timeout are overridable and clamped', () => {
     expect(makeConfig({ dakarCommand: 'dakar review' }).DAKAR_COMMAND).toBe('dakar review')
-    expect(makeConfig({ dakarTimeoutSeconds: 120 }).DAKAR_TIMEOUT_SECONDS).toBe(120)
+    expect(makeConfig({ reviewTimeoutSeconds: 120 }).REVIEW_TIMEOUT_SECONDS).toBe(120)
+    expect(makeConfig({ dakarTimeoutSeconds: 240 }).REVIEW_TIMEOUT_SECONDS).toBe(240)
+    expect(makeConfig({ reviewTimeoutSeconds: 180, dakarTimeoutSeconds: 240 }).REVIEW_TIMEOUT_SECONDS).toBe(180)
     // Clamp to the 60..7200 band.
-    expect(makeConfig({ dakarTimeoutSeconds: 5 }).DAKAR_TIMEOUT_SECONDS).toBe(60)
-    expect(makeConfig({ dakarTimeoutSeconds: 99999 }).DAKAR_TIMEOUT_SECONDS).toBe(7200)
+    expect(makeConfig({ reviewTimeoutSeconds: 5 }).REVIEW_TIMEOUT_SECONDS).toBe(60)
+    expect(makeConfig({ reviewTimeoutSeconds: 99999 }).REVIEW_TIMEOUT_SECONDS).toBe(7200)
   })
 
   test('the Dakar budget is clamped to the 0..10 GBP band', () => {

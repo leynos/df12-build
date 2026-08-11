@@ -120,9 +120,9 @@ flowchart TD
     plan --> design[Design review]
     design -->|not satisfied| plan
     design -->|approved| build[Implement<br/>one work item per turn]
-    build --> between[Dakar between<br/>each work item]
+    build --> between["Selected host reviewer<br/>between each work item<br/>(Dakar default)"]
     between -->|blocking| build
-    between --> review[Dual review +<br/>host gates + Dakar]
+    between --> review[Dual review +<br/>host gates + selected reviewer]
     review -->|blocking| fix[Fix round]
     fix --> review
 

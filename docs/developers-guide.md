@@ -301,16 +301,18 @@ advisory risk is instead carried forward into the resumed code-review,
 expert-review, and integration prompts as a non-blocking section.
 
 The host review tool is selected by `reviewTool`, which defaults to `dakar`.
-Dakar runs `dakar-review` (overridable with `dakarCommand`) against the
-committed diff, parses one JSON document, and maps its verdict onto the same
-review contract described below: clean, findings (`critical`/`major`
+Dakar requires `dakar-review` and `pi` on `PATH` plus a non-empty
+`OPENAI_API_KEY`. It runs `dakar-review` (overridable with `dakarCommand`)
+against the committed diff, parses one JSON document, and maps its verdict onto
+the same review contract described below: clean, findings (`critical`/`major`
 blocking), a deferred backoff, or an error. Dakar uses an OpenAI-backed model,
 so its preflight checks `OPENAI_API_KEY`. Set `reviewTool: 'coderabbit'` to
 restore the NDJSON CodeRabbit path documented in
 `docs/coderabbit-wire-contract.md`.
 
-The external `dakarTimeoutSeconds` setting is clamped to 60–7200 seconds and
-enters `HostReviewConfig` as the tool-neutral `reviewTimeoutSeconds`. It bounds
+The external `reviewTimeoutSeconds` setting is clamped to 60–7200 seconds;
+`dakarTimeoutSeconds` remains a backward-compatible input alias. The resolved
+value enters `HostReviewConfig` as `reviewTimeoutSeconds` and bounds
 the parent process for either reviewer and is also passed to Dakar as
 `--timeout`. `dakarBudgetGbp` is clamped to 0–10; positive values become
 `--budget-gbp`, while `0` lets Dakar apply its own hard admission budget. Each

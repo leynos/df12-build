@@ -225,11 +225,11 @@ describe('recovery synthetic-impl type contract', () => {
 describe('host-review public type contract', () => {
   test('review-tool and Dakar fields accept their declared shapes', () => {
     const result = typecheckHostReview([
-      `const workflow: Pick<WorkflowConfig, 'REVIEW_TOOL' | 'DAKAR_COMMAND' | 'DAKAR_TIMEOUT_SECONDS' | 'DAKAR_BUDGET_GBP'> = { REVIEW_TOOL: 'dakar', DAKAR_COMMAND: 'dakar-review', DAKAR_TIMEOUT_SECONDS: 3600, DAKAR_BUDGET_GBP: 0.3 }`,
+      `const workflow: Pick<WorkflowConfig, 'REVIEW_TOOL' | 'DAKAR_COMMAND' | 'REVIEW_TIMEOUT_SECONDS' | 'DAKAR_BUDGET_GBP'> = { REVIEW_TOOL: 'dakar', DAKAR_COMMAND: 'dakar-review', REVIEW_TIMEOUT_SECONDS: 3600, DAKAR_BUDGET_GBP: 0.3 }`,
       `const host: Pick<HostReviewConfig, 'reviewTool' | 'dakarCommand' | 'reviewTimeoutSeconds' | 'dakarBudgetGbp'> = { reviewTool: 'coderabbit', dakarCommand: 'dakar-review', reviewTimeoutSeconds: 3600, dakarBudgetGbp: 0 }`,
       `void workflow; void host`,
     ].join('\n'))
-    expect(result.ok).toBe(true)
+    expect(result.ok, result.output).toBe(true)
   }, HOST_REVIEW_TYPECHECK_TIMEOUT_MS)
 
   test('reviewTool rejects values outside the Dakar and CodeRabbit union', () => {
@@ -242,7 +242,7 @@ describe('host-review public type contract', () => {
 
   test('Dakar timeout and budget fields reject non-numeric values', () => {
     const result = typecheckHostReview(
-      `const x: Pick<WorkflowConfig, 'DAKAR_TIMEOUT_SECONDS' | 'DAKAR_BUDGET_GBP'> = { DAKAR_TIMEOUT_SECONDS: 'slow', DAKAR_BUDGET_GBP: 'free' }; void x`,
+      `const x: Pick<WorkflowConfig, 'REVIEW_TIMEOUT_SECONDS' | 'DAKAR_BUDGET_GBP'> = { REVIEW_TIMEOUT_SECONDS: 'slow', DAKAR_BUDGET_GBP: 'free' }; void x`,
     )
     expect(result.ok).toBe(false)
     expect(result.output).toMatch(/TS2322|not assignable/)

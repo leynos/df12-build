@@ -32,11 +32,11 @@ locale = "en-gb"
 extend-ignore-re = [
     "(?s)```.*?```",
     "\\brust-analyzer\\b",
-    "`[^`\\n]+`",
 ]
 
 [default.extend-words]
 "ASO" = "ASO"
+"Artifact" = "Artifact"
 "Flavored" = "Flavored"
 "absolutisable" = "absolutizable"
 "absolutisation" = "absolutization"
@@ -110,6 +110,7 @@ extend-ignore-re = [
 "amortizers" = "amortizers"
 "amortizes" = "amortizes"
 "amortizing" = "amortizing"
+"analyzing" = "analyzing"
 "anonymisable" = "anonymizable"
 "anonymisation" = "anonymization"
 "anonymisations" = "anonymizations"
@@ -146,6 +147,7 @@ extend-ignore-re = [
 "apologizers" = "apologizers"
 "apologizes" = "apologizes"
 "apologizing" = "apologizing"
+"artifact" = "artifact"
 "atomisable" = "atomizable"
 "atomisation" = "atomization"
 "atomisations" = "atomizations"
@@ -308,6 +310,7 @@ extend-ignore-re = [
 "colonizers" = "colonizers"
 "colonizes" = "colonizes"
 "colonizing" = "colonizing"
+"color" = "color"
 "colourisable" = "colourizable"
 "colourisation" = "colourization"
 "colourisations" = "colourizations"

@@ -15,6 +15,14 @@ import {
 } from '../../src/workflows/df12-build-odw/run-task.ts'
 import type { FaultMetrics } from '../../src/workflows/df12-build-odw/types.ts'
 
+import { faultMetrics } from '../../src/workflows/df12-build-odw/faults.ts'
+import type { HostReviewResult } from '../../src/workflows/df12-build-odw/host-review.ts'
+
+// Module tests for the per-task pipeline (decomposition milestone 9), run
+// with scripted primitives keyed on stable agent labels — mirroring the
+// artefact-level simulation suites, but by direct import. Real git fixtures
+// back the durability gates the pipeline consults.
+
 const globals = globalThis as Record<string, unknown>
 
 function git(cwd: string, ...args: string[]): string {
@@ -33,6 +41,18 @@ function git(cwd: string, ...args: string[]): string {
 
 const PLAN_PATH = 'docs/execplans/roadmap-1-2-3.md'
 
+function hostReviewResult(overrides: Partial<HostReviewResult> = {}): HostReviewResult {
+  return {
+    reviewer: 'dakar',
+    outcome: 'clean',
+    attempts: 1,
+    elapsedMs: 1,
+    errorCategory: 'none',
+    findings: [],
+    detail: '',
+    ...overrides,
+  }
+}
 function makeWorktree() {
   const dir = mkdtempSync(path.join(tmpdir(), 'pipeline-'))
   git(dir, 'init', '-b', 'roadmap-1-2-3')
@@ -100,7 +120,7 @@ function subject(worktree: string, overrides: Record<string, unknown> = {}) {
     createWorktree: async () => ({ ok: true, worktreePath: worktree, branch: 'roadmap-1-2-3', baseSha: git(worktree, 'rev-parse', 'HEAD'), notes: '' }),
     runHostCommitGates: async () => ({ green: true, results: [], detail: '' }),
     runCodeSceneCheck: async () => ({ clean: true, skipped: true, detail: '', logFile: '' }),
-    runHostReview: async () => ({ reviewer: 'dakar' as const, outcome: 'clean' as const, attempts: 1, elapsedMs: 1, errorCategory: 'none' as const, findings: [], detail: '' }),
+    runHostReview: async () => hostReviewResult(),
     recordHostReview: async () => {},
     ...overrides,
   })
@@ -430,6 +450,35 @@ describe('runTask', () => {
     expect(outcome.kind).toBe('addendum')
   })
 
+  test('a Dakar-deferred green addendum runs fallback review before integration', async () => {
+    const worktree = makeWorktree()
+    scriptAgent((label) => {
+      if (label.startsWith('addendum:')) return greenAddendum
+      if (label.startsWith('addendum-review:')) return passReview
+      if (label.startsWith('integrate:')) return cleanIntegration
+      throw new Error(`unscripted label: ${label}`)
+    })
+    const pipe = subject(worktree, {
+      HOST_REVIEW_ENABLED: true,
+      runHostReview: async () => hostReviewResult({
+        outcome: 'rate-limited',
+        attempts: 3,
+        errorCategory: 'deferred',
+        detail: 'Dakar review deferred (stage: deferred) — budget exhausted',
+      }),
+    })
+    const addendum = { ...task, isAddendum: true, subtasks: ['1.2.3.1'] }
+    const outcome = await pipe.runTask(addendum, null)
+    expect(outcome.status).toBe('done')
+    const fallbackIndex = labels.findIndex((label) => label.startsWith('addendum-review:'))
+    const integrationIndex = labels.findIndex((label) => label.startsWith('integrate:'))
+    expect(fallbackIndex).toBeGreaterThanOrEqual(0)
+    expect(fallbackIndex).toBeLessThan(integrationIndex)
+    expect(outcome.openIssues).toEqual([
+      'Dakar review deferred (stage: deferred) — budget exhausted',
+    ])
+  })
+
   test('per-work-item build fails when the committed plan disappears mid-build', async () => {
     const worktree = makeWorktree()
     // A committed plan with one unticked Progress item, so the work-item loop
@@ -477,7 +526,7 @@ describe('runTask', () => {
       HOST_REVIEW_BETWEEN_WORK_ITEMS: true,
       runHostReview: async (_wt: string, label: string) => {
         reviews.push(label)
-        return { reviewer: 'dakar' as const, outcome: 'clean' as const, attempts: 1, elapsedMs: 1, errorCategory: 'none' as const, findings: [], detail: '' }
+        return hostReviewResult()
       },
     })
     const outcome = await pipe.runTask(task, null)
@@ -517,7 +566,7 @@ describe('runTask', () => {
       },
       runHostReview: async () => {
         order.push('host-review')
-        return { reviewer: 'dakar' as const, outcome: 'clean' as const, attempts: 1, elapsedMs: 1, errorCategory: 'none' as const, findings: [], detail: '' }
+        return hostReviewResult()
       },
     })
     const outcome = await pipe.runTask(task, null)
@@ -556,7 +605,7 @@ describe('runTask', () => {
       },
       runHostReview: async () => {
         order.push('host-review')
-        return { reviewer: 'dakar' as const, outcome: 'clean' as const, attempts: 1, elapsedMs: 1, errorCategory: 'none' as const, findings: [], detail: '' }
+        return hostReviewResult()
       },
     })
     const outcome = await pipe.runTask(task, null)
@@ -669,7 +718,10 @@ describe('runTask', () => {
       HOST_REVIEW_ENABLED: true,
       HOST_REVIEW_BETWEEN_WORK_ITEMS: true,
       // Always returns a blocking finding, so the bounded fix loop exhausts.
-      runHostReview: async () => ({ reviewer: 'dakar' as const, outcome: 'findings' as const, attempts: 1, elapsedMs: 1, errorCategory: 'none' as const, findings: [{ type: 'finding', severity: 'major', fileName: 'x.ts', comment: 'fix me' }], detail: '' }),
+      runHostReview: async () => hostReviewResult({
+        outcome: 'findings',
+        findings: [{ type: 'finding', severity: 'major', fileName: 'x.ts', comment: 'fix me' }],
+      }),
     })
     const outcome = await pipe.runTask(task, null)
     expect(outcome.status).toBe('failed')
@@ -694,7 +746,12 @@ describe('runTask', () => {
       PER_WORK_ITEM_BUILD: true,
       HOST_REVIEW_ENABLED: true,
       HOST_REVIEW_BETWEEN_WORK_ITEMS: true,
-      runHostReview: async () => ({ reviewer: 'dakar' as const, outcome: 'rate-limited' as const, attempts: 3, elapsedMs: 1, errorCategory: 'deferred' as const, findings: [], detail: 'quota exhausted' }),
+      runHostReview: async () => hostReviewResult({
+        outcome: 'rate-limited',
+        attempts: 3,
+        errorCategory: 'deferred',
+        detail: 'quota exhausted',
+      }),
     })
     const outcome = await pipe.runTask(task, null)
     expect(outcome.status).toBe('halted')
@@ -722,8 +779,11 @@ describe('runTask', () => {
         crRound += 1
         // Round 1 blocks (agents must NOT run); round 2 is clean.
         return crRound === 1
-          ? { reviewer: 'dakar' as const, outcome: 'findings' as const, attempts: 1, elapsedMs: 1, errorCategory: 'none' as const, findings: [{ type: 'finding', severity: 'major', fileName: 'x.ts', comment: 'fix me' }], detail: '' }
-          : { reviewer: 'dakar' as const, outcome: 'clean' as const, attempts: 1, elapsedMs: 1, errorCategory: 'none' as const, findings: [], detail: '' }
+          ? hostReviewResult({
+              outcome: 'findings',
+              findings: [{ type: 'finding', severity: 'major', fileName: 'x.ts', comment: 'fix me' }],
+            })
+          : hostReviewResult()
       },
     })
     const outcome = await pipe.runTask(task, null)

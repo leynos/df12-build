@@ -49,6 +49,15 @@ describe('parseDakarDocument', () => {
     ).toEqual({ ok: true, verdict: 'pass', findings: [] })
   })
 
+  test('continues past a nested finding object to the terminal root', () => {
+    const document = {
+      ok: true,
+      verdict: 'changes-requested',
+      findings: [{ severity: 'high', path: 'src/a.ts', title: 'Fix it', detail: 'Broken', evidence: 'test' }],
+    }
+    expect(parseDakarDocument(JSON.stringify(document))).toEqual(document)
+  })
+
   test('returns null when no valid terminal object exists', () => {
     expect(parseDakarDocument('no document')).toBeNull()
     expect(parseDakarDocument('{not json}')).toBeNull()
@@ -213,6 +222,14 @@ describe('runDakarHostReview', () => {
       expect(review.outcome).toBe(scenario.outcome)
     })
   }
+
+  test('a killed Dakar process with no document is a timeout error', async () => {
+    const { exec } = recordingExec({ ok: false, killed: true, stdout: '', message: 'review timed out' })
+    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+    const review = await runCoderabbitHostReview('/w', 'l', { exec })
+    expect(review.outcome).toBe('error')
+    expect(review.errorCategory).toBe('timeout')
+  })
 
   test('unparsable stdout is an error carrying a bounded detail', async () => {
     // An oversized stderr payload must be tail-bounded, not passed through
@@ -405,6 +422,21 @@ describe('runDakarHostReview', () => {
     })
     expect(hostReviewMetrics.sinkFailures - before).toBe(1)
     expect(hostReviewMetrics.sinkError.length).toBeLessThanOrEqual(500)
+  })
+
+  test('prototype-named severities count as unknown', async () => {
+    const before = hostReviewMetrics.bySeverity.unknown
+    const { recordHostReview } = hostReview()
+    await recordHostReview('prototype severity', {
+      reviewer: 'dakar',
+      outcome: 'findings',
+      attempts: 1,
+      elapsedMs: 1,
+      errorCategory: 'none',
+      findings: [{ severity: 'constructor' }],
+      detail: '',
+    })
+    expect(hostReviewMetrics.bySeverity.unknown - before).toBe(1)
   })
 })
 

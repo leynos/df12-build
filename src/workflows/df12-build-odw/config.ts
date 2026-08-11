@@ -127,7 +127,9 @@ export interface RawWorkflowArgs {
   reviewTool?: string
   /** Dakar CLI invocation; defaults to `dakar-review`. */
   dakarCommand?: string
-  /** Dakar review timeout in seconds, clamped to 60–7200. */
+  /** Host-review timeout in seconds, clamped to 60–7200. */
+  reviewTimeoutSeconds?: number | string
+  /** Deprecated alias for `reviewTimeoutSeconds`. */
   dakarTimeoutSeconds?: number | string
   /** Dakar admission budget in GBP, clamped to 0–10; zero leaves Dakar's default in force. */
   dakarBudgetGbp?: number | string
@@ -272,8 +274,8 @@ export interface WorkflowConfig {
   REVIEW_TOOL: 'dakar' | 'coderabbit'
   /** Dakar CLI invocation. */
   DAKAR_COMMAND: string
-  /** Dakar review timeout in seconds. */
-  DAKAR_TIMEOUT_SECONDS: number
+  /** Host-review timeout in seconds. */
+  REVIEW_TIMEOUT_SECONDS: number
   /** Dakar admission budget in GBP; zero omits the CLI flag. */
   DAKAR_BUDGET_GBP: number
   /** Legacy agent-run CodeRabbit command (agent-run mode only). */
@@ -425,7 +427,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     throw new Error(`Unsupported reviewTool: ${REVIEW_TOOL} (use "dakar" or "coderabbit")`)
   }
   const DAKAR_COMMAND = String(cfg.dakarCommand || 'dakar-review')
-  const DAKAR_TIMEOUT_SECONDS = Math.min(7200, Math.max(60, Math.trunc(Number(cfg.dakarTimeoutSeconds) || 3600)))
+  const REVIEW_TIMEOUT_SECONDS = Math.min(7200, Math.max(60, Math.trunc(Number(cfg.reviewTimeoutSeconds ?? cfg.dakarTimeoutSeconds) || 3600)))
   const DAKAR_BUDGET_GBP_RAW = Number(cfg.dakarBudgetGbp)
   const DAKAR_BUDGET_GBP = Number.isFinite(DAKAR_BUDGET_GBP_RAW) ? Math.min(10, Math.max(0, DAKAR_BUDGET_GBP_RAW)) : 0
   // LEGACY (agent-run) mode ONLY: the command the build/fix prompts tell the
@@ -560,7 +562,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     AUTH_REQUIRED_ADAPTERS,
     REVIEW_TOOL: REVIEW_TOOL as 'dakar' | 'coderabbit',
     DAKAR_COMMAND,
-    DAKAR_TIMEOUT_SECONDS,
+    REVIEW_TIMEOUT_SECONDS,
     DAKAR_BUDGET_GBP,
     CODERABBIT_REVIEW_COMMAND,
     CODERABBIT_HOST_REVIEW,

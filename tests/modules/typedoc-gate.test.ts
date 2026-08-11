@@ -53,6 +53,7 @@ function runTypeDocFixture(source: string): TypeDocRun {
       cwd: dir,
       stdout: 'pipe',
       stderr: 'pipe',
+      timeout: TYPEDOC_TEST_TIMEOUT_MS,
     })
     return {
       status: result.exitCode,

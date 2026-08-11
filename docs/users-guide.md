@@ -463,9 +463,10 @@ Common arguments:
   operator checklist.
 - `dakarCommand`: Dakar CLI invoked in `dakar` mode. Defaults to
   `dakar-review`.
-- `dakarTimeoutSeconds`: host-side timeout for each Dakar or CodeRabbit review
+- `reviewTimeoutSeconds`: host-side timeout for each Dakar or CodeRabbit review
   process and, in Dakar mode, the value passed as Dakar's `--timeout`. Defaults
-  to `3600` and is clamped to 60–7200 seconds.
+  to `3600` and is clamped to 60–7200 seconds. The former
+  `dakarTimeoutSeconds` name remains an accepted input alias.
 - `dakarBudgetGbp`: optional Dakar admission budget, clamped to 0–10. Values
   above `0` are forwarded as `--budget-gbp`; `0` defers to Dakar's own hard
   budget.

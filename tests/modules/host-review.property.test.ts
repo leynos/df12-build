@@ -4,6 +4,7 @@ import { describe, expect, test } from 'bun:test'
 import fc from 'fast-check'
 
 import {
+  DAKAR_SEVERITY_MAP,
   classifyCoderabbitOutcome,
   classifyDakarReview,
   parseCoderabbitAgentOutput,
@@ -18,11 +19,9 @@ function dakarResult(doc: Record<string, unknown>): ExecStatus {
   }
 }
 
+const dakarSeverityEntries = Object.entries(DAKAR_SEVERITY_MAP)
 const dakarSeverity = fc.constantFrom(
-  ['critical', 'critical'],
-  ['high', 'major'],
-  ['medium', 'minor'],
-  ['low', 'trivial'],
+  ...dakarSeverityEntries,
 ) as fc.Arbitrary<readonly [string, string]>
 
 const findingText = fc.string({ maxLength: 80 })
