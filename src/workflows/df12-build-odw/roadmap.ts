@@ -157,11 +157,13 @@ export function completedIds(tasks: readonly RoadmapTask[]): Set<string> {
   const completed = new Set<string>()
   const prefixes = new Map<string, RoadmapTask[]>()
 
-  for (const task of tasks) {
+  const recordCompletedSubtasks = (task: RoadmapTask) => {
     if (isTaskFullyComplete(task)) completed.add(task.id)
-    for (const subtask of task.subtasks || []) {
-      if (isComplete(subtask)) completed.add(subtask.id)
-    }
+    for (const subtask of task.subtasks) recordCompletedSubtasks(subtask)
+  }
+
+  for (const task of tasks) {
+    recordCompletedSubtasks(task)
     const parts = task.id.split('.')
     for (let length = 1; length < parts.length; length += 1) {
       const prefix = parts.slice(0, length).join('.')
@@ -177,9 +179,9 @@ export function completedIds(tasks: readonly RoadmapTask[]): Set<string> {
   return completed
 }
 
-/** A task is fully complete only when its own checkbox AND every addendum subtask are ticked. */
+/** A task is fully complete only when its own checkbox and every addendum descendant are ticked. */
 export function isTaskFullyComplete(task: RoadmapTask): boolean {
-  return isComplete(task) && task.subtasks.every(isComplete)
+  return isComplete(task) && task.subtasks.every(isTaskFullyComplete)
 }
 
 /**
@@ -221,7 +223,7 @@ export function selectRoadmapTask(
   const blocked: string[] = []
 
   for (const task of tasks) {
-    const openSubtasks = task.subtasks.filter((subtask) => !isComplete(subtask))
+    const openSubtasks = task.subtasks.filter((subtask) => !isTaskFullyComplete(subtask))
     if (isComplete(task) && openSubtasks.length && !addendumTaken.has(task.id)) {
       candidates.push({
         order: task.line,

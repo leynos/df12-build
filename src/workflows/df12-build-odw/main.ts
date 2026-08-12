@@ -988,6 +988,52 @@ async function fillPool() {
   }
 }
 
+/**
+ * Redact leading shell environment-assignment values before command
+ * configuration reaches durable workflow output. The original command remains
+ * the host-gate input, so operator behaviour is unchanged while result.json
+ * cannot expose a token embedded in `NAME=value` syntax.
+ */
+function redactedCodeSceneCommand(command: string): string {
+  let cursor = 0
+  let redacted = ''
+  while (cursor < command.length) {
+    const whitespaceStart = cursor
+    while (cursor < command.length && /\s/.test(command[cursor])) cursor += 1
+    redacted += command.slice(whitespaceStart, cursor)
+    const wordStart = cursor
+    if (!/[A-Za-z_]/.test(command[cursor] || '')) return redacted + command.slice(wordStart)
+    cursor += 1
+    while (cursor < command.length && /[A-Za-z0-9_]/.test(command[cursor])) cursor += 1
+    if (command[cursor] !== '=') return redacted + command.slice(wordStart)
+
+    const name = command.slice(wordStart, cursor)
+    cursor += 1
+    let quote = ''
+    while (cursor < command.length) {
+      const character = command[cursor]
+      if (character === '\\' && quote !== "'") {
+        cursor += 2
+        continue
+      }
+      if (quote) {
+        if (character === quote) quote = ''
+        cursor += 1
+        continue
+      }
+      if (character === "'" || character === '"') {
+        quote = character
+        cursor += 1
+        continue
+      }
+      if (/\s/.test(character)) break
+      cursor += 1
+    }
+    redacted += `${name}=<redacted>`
+  }
+  return redacted
+}
+
 // --- Worker-pool control loop -----------------------------------------------
 async function workflowMain() {
 // Fill the pool, then await whichever task finishes first (Promise.race),
@@ -1182,7 +1228,7 @@ return {
   },
   codeScene: {
     enabled: CS_CHECK,
-    command: CS_CHECK_COMMAND,
+    command: redactedCodeSceneCommand(CS_CHECK_COMMAND),
     ...csCheckMetrics,
   },
   stageAttempts: STAGE_ATTEMPTS,

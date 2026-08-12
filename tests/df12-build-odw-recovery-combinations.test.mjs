@@ -108,6 +108,19 @@ test('result reports disabled CodeScene configuration without counters', async (
   assert.deepEqual(result.codeScene, expectedCodeScene())
 })
 
+test('result redacts CodeScene environment-assignment values', async () => {
+  const repo = makeRecoveryRepo()
+  const secret = 'df12-codescene-secret'
+  const command = `DF12_CS_TOKEN="${secret}" cs-check-changed --changed`
+  const { result } = await runSimulation({
+    repo,
+    args: { csCheck: false, csCheckCommand: command },
+  })
+
+  assert.equal(result.codeScene.command, 'DF12_CS_TOKEN=<redacted> cs-check-changed --changed')
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(secret))
+})
+
 test('result reports a missing CodeScene binary as skipped', async () => {
   const repo = makeRecoveryRepo()
   const command = 'df12-cs-result-test-not-installed'

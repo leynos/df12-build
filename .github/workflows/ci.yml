@@ -31,6 +31,8 @@ jobs:
         with:
           bun-version: '1.3.14'
       - uses: astral-sh/setup-uv@c5680ec91f7b9b91406fab4ded5d45245abf7b67
+        with:
+          version: '0.11.19'
       - name: Install JavaScript dependencies
         run: bun install --frozen-lockfile
       - name: Install Mermaid validators

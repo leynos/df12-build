@@ -5,8 +5,9 @@ import { describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const REPO = new URL('../../', import.meta.url).pathname
+const REPO = fileURLToPath(new URL('../../', import.meta.url))
 const TYPEDOC = path.join(REPO, 'node_modules', '.bin', 'typedoc')
 
 interface TypeDocRun {

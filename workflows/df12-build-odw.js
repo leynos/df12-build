@@ -419,11 +419,12 @@ function parseRoadmap(text) {
 function completedIds(tasks) {
   const completed = /* @__PURE__ */ new Set();
   const prefixes = /* @__PURE__ */ new Map();
-  for (const task of tasks) {
+  const recordCompletedSubtasks = (task) => {
     if (isTaskFullyComplete(task)) completed.add(task.id);
-    for (const subtask of task.subtasks || []) {
-      if (isComplete(subtask)) completed.add(subtask.id);
-    }
+    for (const subtask of task.subtasks) recordCompletedSubtasks(subtask);
+  };
+  for (const task of tasks) {
+    recordCompletedSubtasks(task);
     const parts = task.id.split(".");
     for (let length = 1; length < parts.length; length += 1) {
       const prefix = parts.slice(0, length).join(".");
@@ -437,7 +438,7 @@ function completedIds(tasks) {
   return completed;
 }
 function isTaskFullyComplete(task) {
-  return isComplete(task) && task.subtasks.every(isComplete);
+  return isComplete(task) && task.subtasks.every(isTaskFullyComplete);
 }
 function taskMatchesOnlyTask(candidate, onlyTask) {
   if (!onlyTask) return true;
@@ -457,7 +458,7 @@ function selectRoadmapTask(roadmapText, taken, onlyTask) {
   const candidates = [];
   const blocked = [];
   for (const task of tasks) {
-    const openSubtasks = task.subtasks.filter((subtask) => !isComplete(subtask));
+    const openSubtasks = task.subtasks.filter((subtask) => !isTaskFullyComplete(subtask));
     if (isComplete(task) && openSubtasks.length && !addendumTaken.has(task.id)) {
       candidates.push({
         order: task.line,
@@ -3956,6 +3957,44 @@ async function fillPool() {
     );
   }
 }
+function redactedCodeSceneCommand(command) {
+  let cursor = 0;
+  let redacted = "";
+  while (cursor < command.length) {
+    const whitespaceStart = cursor;
+    while (cursor < command.length && /\s/.test(command[cursor])) cursor += 1;
+    redacted += command.slice(whitespaceStart, cursor);
+    const wordStart = cursor;
+    if (!/[A-Za-z_]/.test(command[cursor] || "")) return redacted + command.slice(wordStart);
+    cursor += 1;
+    while (cursor < command.length && /[A-Za-z0-9_]/.test(command[cursor])) cursor += 1;
+    if (command[cursor] !== "=") return redacted + command.slice(wordStart);
+    const name = command.slice(wordStart, cursor);
+    cursor += 1;
+    let quote = "";
+    while (cursor < command.length) {
+      const character = command[cursor];
+      if (character === "\\" && quote !== "'") {
+        cursor += 2;
+        continue;
+      }
+      if (quote) {
+        if (character === quote) quote = "";
+        cursor += 1;
+        continue;
+      }
+      if (character === "'" || character === '"') {
+        quote = character;
+        cursor += 1;
+        continue;
+      }
+      if (/\s/.test(character)) break;
+      cursor += 1;
+    }
+    redacted += `${name}=<redacted>`;
+  }
+  return redacted;
+}
 // --- Worker-pool control loop -----------------------------------------------
 async function workflowMain() {
   const authPreflight = await runAuthPreflight();
@@ -4101,7 +4140,7 @@ async function workflowMain() {
     },
     codeScene: {
       enabled: CS_CHECK,
-      command: CS_CHECK_COMMAND,
+      command: redactedCodeSceneCommand(CS_CHECK_COMMAND),
       ...csCheckMetrics
     },
     stageAttempts: STAGE_ATTEMPTS,

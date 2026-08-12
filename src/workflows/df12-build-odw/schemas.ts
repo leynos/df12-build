@@ -207,6 +207,7 @@ export const AUDIT_SCHEMA = {
  * `discard`. Referenced by `ASSESSMENT_SCHEMA`'s `classification` property,
  * so treat this as a contract, not documentation.
  */
+/** @internal */
 export const ASSESSMENT_CLASSIFICATIONS = [
   'adopt-complete',
   'adopt-partial',

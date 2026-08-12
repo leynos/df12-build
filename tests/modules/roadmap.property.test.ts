@@ -118,6 +118,26 @@ describe('parseRoadmap', () => {
       }),
     )
   })
+
+  test('does not complete an addendum ancestry with an open nested descendant', () => {
+    const text = [
+      '- [x] 1.1. Completed parent.',
+      '  - [x] 1.1.1. Completed direct addendum.',
+      '    - [ ] 1.1.1.1. Open nested addendum.',
+      '- [ ] 1.2. Depends on the completed parent.',
+      '  - Requires: 1.1',
+    ].join('\n')
+    const { tasks, completed } = parseRoadmap(text)
+
+    expect(isTaskFullyComplete(tasks[0])).toBe(false)
+    expect(completed.has('1.1')).toBe(false)
+    expect(completed.has('1.1.1')).toBe(false)
+    expect(completed.has('1')).toBe(false)
+    expect(selectRoadmapTask(text, { normal: [], addendum: [] }, null)).toMatchObject({
+      hasTask: true,
+      task: { id: '1.1', isAddendum: true },
+    })
+  })
 })
 
 describe('selectRoadmapTask invariants', () => {
