@@ -8,6 +8,7 @@ import path from 'node:path'
 
 import {
   classifyCoderabbitOutcome,
+  createHostGateLogNamespace,
   csCheckMetrics,
   hostGateLogPath,
   makeHostReview,
@@ -44,7 +45,10 @@ describe('classifyCoderabbitOutcome terminal completion', () => {
 const g = globalThis as Record<string, unknown>
 g.log = () => {}
 
-function hostReview(overrides: Partial<Parameters<typeof makeHostReview>[0]> = {}) {
+function hostReview(
+  overrides: Partial<Parameters<typeof makeHostReview>[0]> = {},
+  deps: Parameters<typeof makeHostReview>[1] = {},
+) {
   return makeHostReview({
     base: 'main',
     coderabbitAttempts: 3,
@@ -55,7 +59,7 @@ function hostReview(overrides: Partial<Parameters<typeof makeHostReview>[0]> = {
     csCheck: false,
     csCheckCommand: 'cs-check-changed',
     ...overrides,
-  })
+  }, deps)
 }
 
 describe('runCodeSceneCheck', () => {
@@ -193,6 +197,24 @@ describe('runHostCommitGates streaming', () => {
     expect(result.detail).toContain(result.results[0].logFile)
   })
 
+  test('repeated gate executions allocate distinct logs for the same tag and round', async () => {
+    const dir = tmp('gate-stream-repeated-')
+    const { runHostCommitGates } = hostReview({ commitGates: ['echo repeated-gate-output'] })
+    const first = await runHostCommitGates(dir, '1.2.3', 'r1')
+    const second = await runHostCommitGates(dir, '1.2.3', 'r1')
+    const firstLog = first.results[0]?.logFile
+    const secondLog = second.results[0]?.logFile
+    if (firstLog) junk.push(firstLog)
+    if (secondLog) junk.push(secondLog)
+    expect(first.green).toBe(true)
+    expect(second.green).toBe(true)
+    expect(first.results).toHaveLength(1)
+    expect(second.results).toHaveLength(1)
+    expect(firstLog).not.toBe(secondLog)
+    expect(readFileSync(firstLog as string, 'utf8')).toContain('repeated-gate-output')
+    expect(readFileSync(secondLog as string, 'utf8')).toContain('repeated-gate-output')
+  })
+
   test('a planted symlink at the log path cannot clobber its target (O_NOFOLLOW|O_EXCL)', async () => {
     const dir = tmp('gate-stream-symlink-')
     const victim = path.join(tmp('gate-victim-'), 'victim.txt')
@@ -200,10 +222,14 @@ describe('runHostCommitGates streaming', () => {
     // Plant a symlink where the gate will write; the exclusive no-follow open
     // must refuse it (fail the gate) rather than following it and clobbering
     // the target, and must not crash the run.
-    const logPath = hostGateLogPath('1.2.3', 'r1', 0)
-    junk.push(logPath)
+    const logNamespace = createHostGateLogNamespace()
+    const logPath = hostGateLogPath(logNamespace, '1.2.3', 'r1', 0)
+    junk.push(logNamespace)
     symlinkSync(victim, logPath)
-    const { runHostCommitGates } = hostReview({ commitGates: ['echo hi'] })
+    const { runHostCommitGates } = hostReview(
+      { commitGates: ['echo hi'] },
+      { createGateLogNamespace: () => logNamespace },
+    )
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
     expect(result.green).toBe(false)
     expect(result.detail).toMatch(/gate log write failed|failed/)

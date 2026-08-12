@@ -95,6 +95,8 @@ export interface HostReviewDeps {
   exec?: (command: string, commandArgs: readonly string[], options?: ExecOptions) => Promise<ExecStatus>
   /** Backoff sleep in minutes; defaults to the real wall-clock hostSleepMinutes. */
   sleep?: (minutes: number) => Promise<void>
+  /** Allocate one private log namespace per host-gate execution; injectable for security tests. */
+  createGateLogNamespace?: () => string
 }
 
 /** The run wiring makeHostReview binds once: review target, retry/backoff, findings sink, and the gate set. */
@@ -323,15 +325,26 @@ function gateLogRoot(): string {
 }
 
 /**
- * Build the secure per-run log path for one gate execution inside the private
- * mkdtemp gate-log directory (see gateLogRoot). The tag and round label are
- * slugged and length-bounded; the raw gate command is deliberately kept out of
- * the filename because it is attacker/operator-controlled text.
+ * Allocate a fresh private namespace for one host-gate execution beneath the
+ * process-private gate-log root. A distinct namespace keeps repeated gates
+ * from colliding while preserving exclusive creation for each final log file.
  */
-export function hostGateLogPath(tag: string, roundLabel: string, index: number): string {
+export function createHostGateLogNamespace(): string {
+  const fs = process.getBuiltinModule('node:fs')
+  const path = process.getBuiltinModule('node:path')
+  return fs.mkdtempSync(path.join(gateLogRoot(), 'run-'))
+}
+
+/**
+ * Build one secure gate-log filename inside an allocated private namespace.
+ * The tag and round label are slugged and length-bounded; the raw gate command
+ * is deliberately kept out of the filename because it is attacker/operator-
+ * controlled text.
+ */
+export function hostGateLogPath(logNamespace: string, tag: string, roundLabel: string, index: number): string {
   const slug = (value: unknown) => String(value).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
   const path = process.getBuiltinModule('node:path')
-  return path.join(gateLogRoot(), `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`)
+  return path.join(logNamespace, `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`)
 }
 
 /**
@@ -341,7 +354,7 @@ export function hostGateLogPath(tag: string, roundLabel: string, index: number):
  * CodeRabbit re-run against committed HEAD, so a gatesGreen claim is verified,
  * never trusted.
  */
-export function makeHostReview(config: HostReviewConfig) {
+export function makeHostReview(config: HostReviewConfig, deps: HostReviewDeps = {}) {
   const {
     base,
     coderabbitAttempts,
@@ -352,6 +365,7 @@ export function makeHostReview(config: HostReviewConfig) {
     csCheck,
     csCheckCommand,
   } = config
+  const createGateLogNamespace = deps.createGateLogNamespace || createHostGateLogNamespace
 
   // Deterministic jitter in [low, high] minutes: Math.random() is banned for
   // Claude Code workflow dual-compatibility (ODW scanDualCompat), and a seeded
@@ -427,10 +441,11 @@ export function makeHostReview(config: HostReviewConfig) {
   // bounded tail.
   async function runHostCommitGates(worktree: string, tag: string, roundLabel: string): Promise<HostGateRun> {
     const results: Array<{ command: string; ok: boolean; logFile: string }> = []
+    const logNamespace = createGateLogNamespace()
     for (const [index, command] of commitGates.entries()) {
       hostGateMetrics.runs += 1
       log(`[task ${tag}] host gate ${index + 1}/${commitGates.length} (${roundLabel}): ${command}`)
-      const logFile = hostGateLogPath(tag, roundLabel, index)
+      const logFile = hostGateLogPath(logNamespace, tag, roundLabel, index)
       const outcome = await streamGate(command, worktree, logFile)
       if (!outcome.ok) {
         hostGateMetrics.failures += 1
@@ -507,7 +522,11 @@ export function makeHostReview(config: HostReviewConfig) {
       // the stream; without this listener Node would treat it as an uncaught
       // exception and crash the run. Route it into a failed gate result.
       stream.on('error', (error) => finish(false, `gate log write failed: ${(error as Error).message}`))
-      const child = spawn('sh', ['-c', command], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = spawn('sh', ['-c', command], {
+        cwd,
+        detached: process.platform !== 'win32',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
       // Resume the paused child pipes once the log stream has drained (see the
       // backpressure guard in record()).
       stream.on('drain', () => {
@@ -516,23 +535,42 @@ export function makeHostReview(config: HostReviewConfig) {
       })
       child.stdout.on('data', record)
       child.stderr.on('data', record)
-      const sigterm = setTimeout(() => {
+      const signalGateProcess = (signal: 'SIGTERM' | 'SIGKILL') => {
+        if (process.platform !== 'win32' && child.pid && child.pid > 0) {
+          try {
+            process.kill(-child.pid, signal)
+            return
+          } catch {
+            // Fall back when process-group signalling is unavailable or the
+            // group has already exited; never signal the host's own group.
+          }
+        }
+        child.kill(signal)
+      }
+      let sigterm: ReturnType<typeof setTimeout> | undefined
+      let sigkill: ReturnType<typeof setTimeout> | undefined
+      const clearTerminationTimeouts = () => {
+        if (sigterm) clearTimeout(sigterm)
+        if (sigkill) clearTimeout(sigkill)
+      }
+      sigterm = setTimeout(() => {
         killed = true
         // Resume any pipes paused by backpressure BEFORE killing: a paused pipe
         // never reaches EOF, so the child's 'close' would not fire and the gate
         // promise would hang behind a full log buffer even after the kill.
         child.stdout?.resume()
         child.stderr?.resume()
-        child.kill('SIGTERM')
+        signalGateProcess('SIGTERM')
         // Escalate if the child ignores SIGTERM; unref so it never holds the loop.
-        setTimeout(() => child.kill('SIGKILL'), 2000).unref()
+        sigkill = setTimeout(() => signalGateProcess('SIGKILL'), 2000)
+        sigkill.unref()
       }, commitGateTimeoutSeconds * 1000)
       child.on('close', (code) => {
-        clearTimeout(sigterm)
+        clearTerminationTimeouts()
         finish(code === 0 && !killed)
       })
       child.on('error', (error) => {
-        clearTimeout(sigterm)
+        clearTerminationTimeouts()
         finish(false, `spawn failed: ${(error as Error).message}`)
       })
     })
@@ -584,7 +622,7 @@ export function makeHostReview(config: HostReviewConfig) {
       }
     }
     csCheckMetrics.runs += 1
-    const logFile = hostGateLogPath(tag, `cs-${label}`, 0)
+    const logFile = hostGateLogPath(createGateLogNamespace(), tag, `cs-${label}`, 0)
     log(`[task ${tag}] CodeScene check (${label}): ${csCheckCommand}`)
     const outcome = await streamGate(csCheckCommand, worktree, logFile)
     if (outcome.ok) return { clean: true, skipped: false, detail: '', logFile }

@@ -2286,12 +2286,17 @@ function gateLogRoot() {
   }
   return gateLogDirCache;
 }
-function hostGateLogPath(tag, roundLabel, index) {
+function createHostGateLogNamespace() {
+  const fs = process.getBuiltinModule("node:fs");
+  const path = process.getBuiltinModule("node:path");
+  return fs.mkdtempSync(path.join(gateLogRoot(), "run-"));
+}
+function hostGateLogPath(logNamespace, tag, roundLabel, index) {
   const slug = (value) => String(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
   const path = process.getBuiltinModule("node:path");
-  return path.join(gateLogRoot(), `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`);
+  return path.join(logNamespace, `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`);
 }
-function makeHostReview(config) {
+function makeHostReview(config, deps = {}) {
   const {
     base,
     coderabbitAttempts,
@@ -2302,15 +2307,16 @@ function makeHostReview(config) {
     csCheck,
     csCheckCommand
   } = config;
+  const createGateLogNamespace = deps.createGateLogNamespace || createHostGateLogNamespace;
   function coderabbitBackoffMinutes2(seed) {
     let hash = 5381;
     for (const ch of String(seed)) hash = (hash * 33 ^ ch.codePointAt(0)) >>> 0;
     const [low, high] = backoffRange;
     return low + hash % (high - low + 1);
   }
-  async function runCoderabbitHostReview2(worktree, label, deps = {}) {
-    const exec = deps.exec || execFileStatus;
-    const sleep = deps.sleep || hostSleepMinutes;
+  async function runCoderabbitHostReview2(worktree, label, deps2 = {}) {
+    const exec = deps2.exec || execFileStatus;
+    const sleep = deps2.sleep || hostSleepMinutes;
     const commandArgs = ["review", "--agent", "--type", "committed", "--base", base];
     for (let attempt = 1; ; attempt++) {
       log(`[${label}] CodeRabbit host review attempt ${attempt} of ${coderabbitAttempts}`);
@@ -2358,10 +2364,11 @@ function makeHostReview(config) {
   }
   async function runHostCommitGates2(worktree, tag, roundLabel) {
     const results2 = [];
+    const logNamespace = createGateLogNamespace();
     for (const [index, command] of commitGates.entries()) {
       hostGateMetrics.runs += 1;
       log(`[task ${tag}] host gate ${index + 1}/${commitGates.length} (${roundLabel}): ${command}`);
-      const logFile = hostGateLogPath(tag, roundLabel, index);
+      const logFile = hostGateLogPath(logNamespace, tag, roundLabel, index);
       const outcome = await streamGate(command, worktree, logFile);
       if (!outcome.ok) {
         hostGateMetrics.failures += 1;
@@ -2414,26 +2421,47 @@ ${outcome.tail}`
         stream.end(() => resolve({ ok, killed, tail: tail.slice(-TAIL_LINES).join("\n").trim() }));
       };
       stream.on("error", (error) => finish(false, `gate log write failed: ${error.message}`));
-      const child = spawn("sh", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn("sh", ["-c", command], {
+        cwd,
+        detached: process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe"]
+      });
       stream.on("drain", () => {
         child.stdout?.resume();
         child.stderr?.resume();
       });
       child.stdout.on("data", record);
       child.stderr.on("data", record);
-      const sigterm = setTimeout(() => {
+      const signalGateProcess = (signal) => {
+        if (process.platform !== "win32" && child.pid && child.pid > 0) {
+          try {
+            process.kill(-child.pid, signal);
+            return;
+          } catch {
+          }
+        }
+        child.kill(signal);
+      };
+      let sigterm;
+      let sigkill;
+      const clearTerminationTimeouts = () => {
+        if (sigterm) clearTimeout(sigterm);
+        if (sigkill) clearTimeout(sigkill);
+      };
+      sigterm = setTimeout(() => {
         killed = true;
         child.stdout?.resume();
         child.stderr?.resume();
-        child.kill("SIGTERM");
-        setTimeout(() => child.kill("SIGKILL"), 2e3).unref();
+        signalGateProcess("SIGTERM");
+        sigkill = setTimeout(() => signalGateProcess("SIGKILL"), 2e3);
+        sigkill.unref();
       }, commitGateTimeoutSeconds * 1e3);
       child.on("close", (code) => {
-        clearTimeout(sigterm);
+        clearTerminationTimeouts();
         finish(code === 0 && !killed);
       });
       child.on("error", (error) => {
-        clearTimeout(sigterm);
+        clearTerminationTimeouts();
         finish(false, `spawn failed: ${error.message}`);
       });
     });
@@ -2463,7 +2491,7 @@ ${outcome.tail}`
       };
     }
     csCheckMetrics.runs += 1;
-    const logFile = hostGateLogPath(tag, `cs-${label}`, 0);
+    const logFile = hostGateLogPath(createGateLogNamespace(), tag, `cs-${label}`, 0);
     log(`[task ${tag}] CodeScene check (${label}): ${csCheckCommand}`);
     const outcome = await streamGate(csCheckCommand, worktree, logFile);
     if (outcome.ok) return { clean: true, skipped: false, detail: "", logFile };
