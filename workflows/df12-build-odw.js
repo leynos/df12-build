@@ -587,7 +587,11 @@ function authFailureDetail(value) {
     /\bnot authenticated\b/i,
     /"loggedIn"\s*:\s*false/i,
     /Run `?coderabbit auth login`?/i,
-    /Run codex login/i
+    /Run codex login/i,
+    // CodeRabbit's complete non-interactive login abandonment. Match the
+    // complete message rather than its common fragments: this classifier also
+    // examines implementation prose, where a login timeout can be intentional.
+    /\bautomatic login tim(?:ed out|eout)\.\s*use the printed fallback URL to finish authentication\b/i
   ];
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
 }
