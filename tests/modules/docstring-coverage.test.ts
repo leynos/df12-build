@@ -18,6 +18,7 @@ const SCRIPT = path.join(REPO, 'scripts', 'docstring-coverage.mjs')
 const MODULES = [
   path.join(REPO, 'src', 'workflows', 'df12-build-odw', 'assessment.ts'),
   path.join(REPO, 'src', 'workflows', 'df12-build-odw', 'execplan-durability.ts'),
+  path.join(REPO, 'src', 'workflows', 'df12-build-odw', 'faults.ts'),
   path.join(REPO, 'src', 'workflows', 'df12-build-odw', 'main.ts'),
 ]
 
