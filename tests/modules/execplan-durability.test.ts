@@ -20,6 +20,7 @@ import {
   verifyWorktreeCommitted,
 } from '../../src/workflows/df12-build-odw/execplan-durability.ts'
 import * as exec from '../../src/workflows/df12-build-odw/exec.ts'
+import { isReviewSibling, partitionExecplanDirtyPaths } from '../../src/workflows/df12-build-odw/git-worktree.ts'
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, {
@@ -36,6 +37,44 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 const PLAN = 'docs/execplans/roadmap-1-2-3.md'
+
+const safeStem = fc.stringMatching(/^[a-z][a-z0-9-]{0,12}$/)
+
+describe('review-sibling dirty-path filtering', () => {
+  test('recognises exactly the full plan stem and a decimal review round', () => {
+    fc.assert(
+      fc.property(safeStem, fc.integer({ min: 1, max: 1_000_000 }), (stem, round) => {
+        const planPath = `docs/execplans/${stem}.md`
+        const sibling = `docs/execplans/${stem}.review-r${round}.md`
+        expect(isReviewSibling(sibling, planPath)).toBe(true)
+        expect(isReviewSibling(`docs/execplans/${stem}-other.review-r${round}.md`, planPath)).toBe(false)
+        expect(isReviewSibling(`docs/other/${stem}.review-r${round}.md`, planPath)).toBe(false)
+        expect(isReviewSibling(`docs/execplans/${stem}.review-r0.md`, planPath)).toBe(true)
+        expect(isReviewSibling(`docs/execplans/${stem}.review-rx.md`, planPath)).toBe(false)
+      }),
+    )
+  })
+
+  test('partitions arbitrary dirty-path order without admitting foreign dirt', () => {
+    const planLine = fc.constant(` M ${PLAN}`)
+    const reviewLine = fc.integer({ min: 0, max: 1_000_000 }).map((round) => `?? docs/execplans/roadmap-1-2-3.review-r${round}.md`)
+    const foreignLine = safeStem.map((stem) => `?? src/${stem}.ts`)
+    fc.assert(
+      fc.property(fc.array(fc.oneof(planLine, reviewLine, foreignLine), { maxLength: 40 }), (lines) => {
+        const partition = partitionExecplanDirtyPaths(lines, PLAN)
+        const expectedAllowed = lines
+          .map((line) => line.slice(3))
+          .filter((dirty) => dirty === PLAN || isReviewSibling(dirty, PLAN))
+        const expectedForeign = lines.filter((line) => {
+          const dirty = line.slice(3)
+          return dirty !== PLAN && !isReviewSibling(dirty, PLAN)
+        })
+        expect(partition.allowed).toEqual(expectedAllowed)
+        expect(partition.foreign).toEqual(expectedForeign)
+      }),
+    )
+  })
+})
 
 function makeWorktree(planText = '# ExecPlan\n\nStatus: DRAFT\n') {
   const dir = mkdtempSync(path.join(tmpdir(), 'durability-'))
@@ -123,19 +162,24 @@ describe('verifyExecplanCommitted', () => {
 describe('commitExecplanApproval', () => {
   test('flips the committed status to APPROVED exactly once', async () => {
     const dir = makeWorktree()
-    expect(await commitExecplanApproval(dir, PLAN, '1.2.3')).toEqual({ ok: true, detail: '' })
+    expect(await commitExecplanApproval({ worktree: dir, planPath: PLAN, tag: '1.2.3' })).toEqual({
+      ok: true,
+      detail: '',
+      committedPathCount: 1,
+      skippedPathCount: 0,
+    })
     expect(readFileSync(path.join(dir, PLAN), 'utf8')).toContain('Status: APPROVED')
     expect(git(dir, 'log', '-1', '--format=%s')).toBe('Approve ExecPlan for task 1.2.3')
     expect(git(dir, 'status', '--porcelain=v1')).toBe('')
 
-    const again = await commitExecplanApproval(dir, PLAN, '1.2.3')
+    const again = await commitExecplanApproval({ worktree: dir, planPath: PLAN, tag: '1.2.3' })
     expect(again.ok).toBe(true)
     expect(again.detail).toBe('already committed as APPROVED')
   })
 
   test('appends a Status line when the plan lacks one', async () => {
     const dir = makeWorktree('# ExecPlan without status\n')
-    expect((await commitExecplanApproval(dir, PLAN, '1.2.3')).ok).toBe(true)
+    expect((await commitExecplanApproval({ worktree: dir, planPath: PLAN, tag: '1.2.3' })).ok).toBe(true)
     expect(readFileSync(path.join(dir, PLAN), 'utf8')).toMatch(/\n\nStatus: APPROVED\n$/)
   })
 })
@@ -150,7 +194,7 @@ describe('symlinked plan paths (untrusted worktree)', () => {
     git(dir, 'add', '.')
     git(dir, 'commit', '-m', 'Swap the plan for a symlink')
 
-    const flipped = await commitExecplanApproval(dir, PLAN, '1.2.3')
+    const flipped = await commitExecplanApproval({ worktree: dir, planPath: PLAN, tag: '1.2.3' })
     expect(flipped.ok).toBe(false)
     expect(flipped.detail).toMatch(/could not update the plan status/)
     // The symlink target must be untouched: no read-modify-write escape.
@@ -162,7 +206,12 @@ describe('commitExecplanDraft', () => {
   test('commits the plan when it is the only dirty path', async () => {
     const dir = makeWorktree()
     writeFileSync(path.join(dir, PLAN), '# ExecPlan\n\nStatus: DRAFT\n\nRevised.\n')
-    expect(await commitExecplanDraft(dir, PLAN, '1.2.3')).toEqual({ ok: true, detail: '' })
+    expect(await commitExecplanDraft({ worktree: dir, planPath: PLAN, tag: '1.2.3' })).toEqual({
+      ok: true,
+      detail: '',
+      committedPathCount: 1,
+      skippedPathCount: 0,
+    })
     expect(git(dir, 'log', '-1', '--format=%s')).toBe('Draft ExecPlan for task 1.2.3')
     expect(git(dir, 'status', '--porcelain=v1')).toBe('')
   })
@@ -171,13 +220,15 @@ describe('commitExecplanDraft', () => {
     const dir = makeWorktree()
     writeFileSync(path.join(dir, PLAN), 'revised\n')
     writeFileSync(path.join(dir, 'stray.txt'), 'stray\n')
-    const bounced = await commitExecplanDraft(dir, PLAN, '1.2.3')
+    const bounced = await commitExecplanDraft({ worktree: dir, planPath: PLAN, tag: '1.2.3' })
     expect(bounced.ok).toBe(false)
     expect(bounced.detail).toMatch(/beyond the plan file/)
     expect(bounced.detail).toContain('stray.txt')
+    expect(bounced.skippedPathCount).toBe(1)
+    expect(bounced.errorClass).toBe('foreign-dirt')
 
     const clean = makeWorktree()
-    const nothing = await commitExecplanDraft(clean, PLAN, '1.2.3')
+    const nothing = await commitExecplanDraft({ worktree: clean, planPath: PLAN, tag: '1.2.3' })
     expect(nothing.ok).toBe(false)
     expect(nothing.detail).toMatch(/already clean/)
   })

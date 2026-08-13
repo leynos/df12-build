@@ -71,7 +71,17 @@ describe('planning prompts', () => {
   test('design review names the plan path and the round', () => {
     const text = prompts.designReviewPrompt(task, worktree, plan, 3)
     expect(text).toContain(plan.execplanPath)
+    expect(text).toContain('docs/execplans/roadmap-1-2-3.review-r3.md')
     expect(text).toContain(task.id)
+  })
+
+  test('addendum design review derives the review sibling from the full plan stem', () => {
+    const addendum = { ...task, id: '1.2.8', isAddendum: true }
+    const addendumPlan = { ...plan, execplanPath: 'docs/execplans/roadmap-1-2-8-addendum.md' }
+    const text = prompts.designReviewPrompt(addendum, worktree, addendumPlan, 2)
+
+    expect(text).toContain('docs/execplans/roadmap-1-2-8-addendum.review-r2.md')
+    expect(text).not.toContain('docs/execplans/roadmap-1-2-8.review-r2.md')
   })
 })
 

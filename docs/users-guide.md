@@ -710,6 +710,18 @@ Assessment is report-only. It never marks roadmap checkboxes, pushes, merges,
 or cherry-picks. Use it to decide whether to preserve, manually finish, park,
 or discard the branch before relaunching from `origin/<base>`.
 
+Planning recovery has a narrower host-owned salvage boundary. A design reviewer
+may write notes beside the task's ExecPlan at
+`docs/execplans/<plan-stem>.review-r<N>.md`; the full plan stem includes the
+`-addendum` suffix for addendum tasks. When continue mode encounters a dirty
+draft plan plus only these workflow-owned review siblings, the host commits the
+plan and notes together instead of bouncing through another planning round.
+Foreign dirty paths still force the ordinary durability bounce. When a design
+review passes, the host commits the plan's `APPROVED` transition and then commits
+any dirty review sibling before implementation begins. Structured
+`[review-artefact]` log records identify the task, round, boundary, committed and
+skipped path counts, error class, and the bounded approval-review failure count.
+
 After an `adopt-partial` or `continue-manual` verdict — and also after an
 infrastructure fault such as schema-retry exhaustion — the workflow commits any
 dirty `docs/execplans/*.md` artefacts onto the task branch so they survive
