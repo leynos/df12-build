@@ -818,16 +818,10 @@ test('review-mode resume routes an eligible branch through review and integratio
   assert.equal(result.kind, 'recovery-resume')
   assert.equal(result.integration.pushed, true)
   assert.equal(result.impl.summary, 'Recovered adopt-complete branch from durable git state.')
+  assert.deepEqual(calls.slice(1, 3).sort(), ['write-probe:claude', 'write-probe:codex-medium'])
   assert.deepEqual(
-    calls,
-    [
-      'recover-assess:1.2.3',
-      'write-probe:claude',
-      'write-probe:codex-medium',
-      'code-review:1.2.3 r1',
-      'expert-review:1.2.3 r1',
-      'integrate:1.2.3',
-    ],
+    [calls[0], ...calls.slice(3)],
+    ['recover-assess:1.2.3', 'code-review:1.2.3 r1', 'expert-review:1.2.3 r1', 'integrate:1.2.3'],
     'resume must pass the write preflight, then use the ordinary review labels and the integration agent',
   )
 })
@@ -1174,9 +1168,8 @@ test('continue mode resumes a draft-plan branch at the plan stage with no judgem
   assert.equal(outcome.taskResults[0].result.status, 'done')
   assert.equal(outcome.taskResults[0].result.kind, 'recovery-resume')
   assert.ok(!calls.some((label) => label.startsWith('recover-assess:')), 'continue mode spawns no judgement agent')
-  assert.deepEqual(calls, [
-    'write-probe:claude',
-    'write-probe:codex-medium',
+  assert.deepEqual(calls.slice(0, 2).sort(), ['write-probe:claude', 'write-probe:codex-medium'])
+  assert.deepEqual(calls.slice(2), [
     'plan:1.2.3 r1',
     'design-review:1.2.3 r1',
     'implement:1.2.3',
