@@ -109,16 +109,31 @@ test('result reports disabled CodeScene configuration without counters', async (
 })
 
 test('result redacts CodeScene environment-assignment values', async () => {
-  const repo = makeRecoveryRepo()
-  const secret = 'df12-codescene-secret'
-  const command = `DF12_CS_TOKEN="${secret}" cs-check-changed --changed`
-  const { result } = await runSimulation({
-    repo,
-    args: { csCheck: false, csCheckCommand: command },
-  })
+  const cases = [
+    {
+      command: 'DF12_CS_TOKEN=$(read simple-secret) cs-check-changed --changed',
+      secrets: ['simple-secret'],
+    },
+    {
+      command: 'DF12_CS_TOKEN="$(read quoted-secret)" cs-check-changed --changed',
+      secrets: ['quoted-secret'],
+    },
+    {
+      command: 'DF12_CS_TOKEN=$(outer "$(inner nested-secret)") cs-check-changed --changed',
+      secrets: ['nested-secret'],
+    },
+  ]
 
-  assert.equal(result.codeScene.command, 'DF12_CS_TOKEN=<redacted> cs-check-changed --changed')
-  assert.doesNotMatch(JSON.stringify(result), new RegExp(secret))
+  for (const { command, secrets } of cases) {
+    const repo = makeRecoveryRepo()
+    const { result } = await runSimulation({
+      repo,
+      args: { csCheck: false, csCheckCommand: command },
+    })
+
+    assert.equal(result.codeScene.command, 'DF12_CS_TOKEN=<redacted> cs-check-changed --changed')
+    for (const secret of secrets) assert.doesNotMatch(JSON.stringify(result), new RegExp(secret))
+  }
 })
 
 test('result reports a missing CodeScene binary as skipped', async () => {

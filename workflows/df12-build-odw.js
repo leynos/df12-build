@@ -3958,6 +3958,44 @@ async function fillPool() {
   }
 }
 function redactedCodeSceneCommand(command) {
+  const commandSubstitutionEnd = (start) => {
+    let cursor2 = start + 2;
+    const quotes = [""];
+    while (cursor2 < command.length) {
+      const character = command[cursor2];
+      const quoteIndex = quotes.length - 1;
+      const quote = quotes[quoteIndex];
+      if (character === "\\" && quote !== "'") {
+        cursor2 += 2;
+        continue;
+      }
+      if (character === "$" && command[cursor2 + 1] === "(") {
+        if (quote !== "'") {
+          quotes.push("");
+          cursor2 += 2;
+          continue;
+        }
+      }
+      if (quote) {
+        if (character === quote) quotes[quoteIndex] = "";
+        cursor2 += 1;
+        continue;
+      }
+      if (character === "'" || character === '"') {
+        quotes[quoteIndex] = character;
+        cursor2 += 1;
+        continue;
+      }
+      if (!quote && character === ")") {
+        quotes.pop();
+        cursor2 += 1;
+        if (!quotes.length) return cursor2;
+        continue;
+      }
+      cursor2 += 1;
+    }
+    return cursor2;
+  };
   let cursor = 0;
   let redacted = "";
   while (cursor < command.length) {
@@ -3974,6 +4012,10 @@ function redactedCodeSceneCommand(command) {
     let quote = "";
     while (cursor < command.length) {
       const character = command[cursor];
+      if (character === "$" && command[cursor + 1] === "(" && quote !== "'") {
+        cursor = commandSubstitutionEnd(cursor);
+        continue;
+      }
       if (character === "\\" && quote !== "'") {
         cursor += 2;
         continue;

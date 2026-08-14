@@ -995,6 +995,45 @@ async function fillPool() {
  * cannot expose a token embedded in `NAME=value` syntax.
  */
 function redactedCodeSceneCommand(command: string): string {
+  const commandSubstitutionEnd = (start: number): number => {
+    let cursor = start + 2
+    const quotes = ['']
+    while (cursor < command.length) {
+      const character = command[cursor]
+      const quoteIndex = quotes.length - 1
+      const quote = quotes[quoteIndex]
+      if (character === '\\' && quote !== "'") {
+        cursor += 2
+        continue
+      }
+      if (character === '$' && command[cursor + 1] === '(') {
+        if (quote !== "'") {
+          quotes.push('')
+          cursor += 2
+          continue
+        }
+      }
+      if (quote) {
+        if (character === quote) quotes[quoteIndex] = ''
+        cursor += 1
+        continue
+      }
+      if (character === "'" || character === '"') {
+        quotes[quoteIndex] = character
+        cursor += 1
+        continue
+      }
+      if (!quote && character === ')') {
+        quotes.pop()
+        cursor += 1
+        if (!quotes.length) return cursor
+        continue
+      }
+      cursor += 1
+    }
+    return cursor
+  }
+
   let cursor = 0
   let redacted = ''
   while (cursor < command.length) {
@@ -1012,6 +1051,10 @@ function redactedCodeSceneCommand(command: string): string {
     let quote = ''
     while (cursor < command.length) {
       const character = command[cursor]
+      if (character === '$' && command[cursor + 1] === '(' && quote !== "'") {
+        cursor = commandSubstitutionEnd(cursor)
+        continue
+      }
       if (character === '\\' && quote !== "'") {
         cursor += 2
         continue
