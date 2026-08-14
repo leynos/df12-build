@@ -12,6 +12,7 @@
 import { execFileStatus } from './exec.ts'
 import type { ExecOptions, ExecStatus } from './exec.ts'
 import { authFailureDetail } from './faults.ts'
+import { tokenizeShellCommand } from './shell-command.ts'
 
 /**
  * One CodeRabbit `finding` event, kept as its raw wire object (it extends
@@ -255,56 +256,11 @@ export const csCheckMetrics = {
   skipped: 0,
 }
 
-/**
- * Split a configured shell command into words without evaluating expansions or
- * substitutions. The limited POSIX-style quoting support is sufficient to
- * identify the executable while keeping operator configuration inert.
- */
-function shellCommandWords(command: string): string[] | null {
-  const words: string[] = []
-  let word = ''
-  let quote = ''
-  let hasWord = false
-  for (let index = 0; index < command.length; index++) {
-    const character = command[index]
-    if (!quote && /\s/.test(character)) {
-      if (hasWord) {
-        words.push(word)
-        word = ''
-        hasWord = false
-      }
-      continue
-    }
-    if (!quote && (character === "'" || character === '"')) {
-      quote = character
-      hasWord = true
-      continue
-    }
-    if (quote && character === quote) {
-      quote = ''
-      continue
-    }
-    if (character === '\\' && quote !== "'") {
-      index += 1
-      if (index >= command.length) return null
-      word += command[index]
-      hasWord = true
-      continue
-    }
-    word += character
-    hasWord = true
-  }
-  if (quote) return null
-  if (hasWord) words.push(word)
-  return words
-}
-
 /** Resolve the executable after any leading shell environment assignments. */
 function codeSceneExecutable(command: string): string {
-  const words = shellCommandWords(command)
-  if (!words) return ''
-  const executable = words.find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word))
-  return executable || ''
+  const tokens = tokenizeShellCommand(command)
+  if (!tokens) return ''
+  return tokens.words[tokens.leadingAssignments.length]?.value || ''
 }
 
 // Per-process gate-log directory, created lazily with mkdtempSync so its name

@@ -130,6 +130,18 @@ function happyScript(): Script {
   }
 }
 
+function prepareSingleWorkItem(worktree: string) {
+  writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: IN PROGRESS\n\n## Progress\n\n- [ ] WI-1: only\n')
+  git(worktree, 'add', '.')
+  git(worktree, 'commit', '-m', 'Add one-item checklist')
+}
+
+function completeSingleWorkItem(worktree: string) {
+  writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: COMPLETE\n\n## Progress\n\n- [x] WI-1: only\n')
+  git(worktree, 'commit', '-aqm', 'Complete WI-1')
+  return { ok: true, gatesGreen: true, workItemsCompleted: 1, workItemsTotal: 1, commits: ['c1'], coderabbitRuns: 0, openIssues: [], summary: 'item done' }
+}
+
 // The five booleans the host requires before a task counts as integrated. The
 // gate is shared by the normal and addendum lanes, so the matrix below drives
 // every combination through both.
@@ -292,6 +304,80 @@ describe('runTask', () => {
     const outcome = await subject(worktree).runTask(task, null)
     expect(outcome.status).toBe('fatal-auth')
     expect(outcome.assessed).toBeUndefined()
+    expect(faultMetrics.authFaults).toBe(1)
+  })
+
+  test('a per-work-item implementation auth failure increments authFaults', async () => {
+    const worktree = makeWorktree()
+    prepareSingleWorkItem(worktree)
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('implement:')) return { ok: false, gatesGreen: false, summary: 'Not logged in', openIssues: [] }
+      return happyScript()(label, prompt)
+    })
+
+    const outcome = await subject(worktree, { PER_WORK_ITEM_BUILD: true }).runTask(task, null)
+
+    expect(outcome.status).toBe('fatal-auth')
+    expect(faultMetrics.authFaults).toBe(1)
+  })
+
+  test('a between-item CodeRabbit auth failure increments authFaults', async () => {
+    const worktree = makeWorktree()
+    prepareSingleWorkItem(worktree)
+    scriptAgent((label, prompt) => label.startsWith('implement:') ? completeSingleWorkItem(worktree) : happyScript()(label, prompt))
+
+    const outcome = await subject(worktree, {
+      PER_WORK_ITEM_BUILD: true,
+      CODERABBIT_HOST_REVIEW: true,
+      CODERABBIT_BETWEEN_WORK_ITEMS: true,
+      runCoderabbitHostReview: async () => ({ outcome: 'auth' as const, attempts: 1, findings: [], detail: 'login required' }),
+    }).runTask(task, null)
+
+    expect(outcome.status).toBe('fatal-auth')
+    expect(faultMetrics.authFaults).toBe(1)
+  })
+
+  test('a dual-review CodeRabbit auth failure increments authFaults', async () => {
+    const worktree = makeWorktree()
+    scriptAgent(happyScript())
+
+    const outcome = await subject(worktree, {
+      CODERABBIT_HOST_REVIEW: true,
+      runCoderabbitHostReview: async () => ({ outcome: 'auth' as const, attempts: 1, findings: [], detail: 'login required' }),
+    }).runTask(task, null)
+
+    expect(outcome.status).toBe('fatal-auth')
+    expect(faultMetrics.authFaults).toBe(1)
+  })
+
+  test('an addendum implementation auth failure increments authFaults', async () => {
+    const worktree = makeWorktree()
+    const addendum = { ...task, isAddendum: true, subtasks: ['1.2.3.1'] }
+    scriptAgent((label) => {
+      if (label.startsWith('addendum:')) return { ok: false, gatesGreen: false, summary: 'Not logged in', openIssues: [] }
+      throw new Error(`unscripted label: ${label}`)
+    })
+
+    const outcome = await subject(worktree).runTask(addendum, null)
+
+    expect(outcome.status).toBe('fatal-auth')
+    expect(faultMetrics.authFaults).toBe(1)
+  })
+
+  test('an addendum CodeRabbit auth failure increments authFaults', async () => {
+    const worktree = makeWorktree()
+    const addendum = { ...task, isAddendum: true, subtasks: ['1.2.3.1'] }
+    scriptAgent((label) => {
+      if (label.startsWith('addendum:')) return greenAddendum
+      throw new Error(`unscripted label: ${label}`)
+    })
+
+    const outcome = await subject(worktree, {
+      CODERABBIT_HOST_REVIEW: true,
+      runCoderabbitHostReview: async () => ({ outcome: 'auth' as const, attempts: 1, findings: [], detail: 'login required' }),
+    }).runTask(addendum, null)
+
+    expect(outcome.status).toBe('fatal-auth')
     expect(faultMetrics.authFaults).toBe(1)
   })
 

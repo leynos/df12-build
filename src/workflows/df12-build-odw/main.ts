@@ -81,6 +81,7 @@ import {
   parseCoderabbitAgentOutput,
 } from './host-review.ts'
 import { makeTaskPipeline, summarizeFixReport, summarizeReviewVerdict } from './run-task.ts'
+import { tokenizeShellCommand } from './shell-command.ts'
 import type { AssessmentEvidence } from './git-evidence.ts'
 import type { ExecplanState, RecoveryAssessmentFields } from './recovery-decision.ts'
 import type { SelectionResult } from './roadmap.ts'
@@ -992,87 +993,16 @@ async function fillPool() {
  * Redact leading shell environment-assignment values before command
  * configuration reaches durable workflow output. The original command remains
  * the host-gate input, so operator behaviour is unchanged while result.json
- * cannot expose a token embedded in `NAME=value` syntax.
+ * cannot expose a token embedded in `NAME=value` syntax. Shared tokenization
+ * also identifies the host's executable; this function only projects its
+ * assignment spans into displayed evidence.
  */
 function redactedCodeSceneCommand(command: string): string {
-  const commandSubstitutionEnd = (start: number): number => {
-    let cursor = start + 2
-    const quotes = ['']
-    while (cursor < command.length) {
-      const character = command[cursor]
-      const quoteIndex = quotes.length - 1
-      const quote = quotes[quoteIndex]
-      if (character === '\\' && quote !== "'") {
-        cursor += 2
-        continue
-      }
-      if (character === '$' && command[cursor + 1] === '(') {
-        if (quote !== "'") {
-          quotes.push('')
-          cursor += 2
-          continue
-        }
-      }
-      if (quote) {
-        if (character === quote) quotes[quoteIndex] = ''
-        cursor += 1
-        continue
-      }
-      if (character === "'" || character === '"') {
-        quotes[quoteIndex] = character
-        cursor += 1
-        continue
-      }
-      if (!quote && character === ')') {
-        quotes.pop()
-        cursor += 1
-        if (!quotes.length) return cursor
-        continue
-      }
-      cursor += 1
-    }
-    return cursor
-  }
-
-  let cursor = 0
-  let redacted = ''
-  while (cursor < command.length) {
-    const whitespaceStart = cursor
-    while (cursor < command.length && /\s/.test(command[cursor])) cursor += 1
-    redacted += command.slice(whitespaceStart, cursor)
-    const wordStart = cursor
-    if (!/[A-Za-z_]/.test(command[cursor] || '')) return redacted + command.slice(wordStart)
-    cursor += 1
-    while (cursor < command.length && /[A-Za-z0-9_]/.test(command[cursor])) cursor += 1
-    if (command[cursor] !== '=') return redacted + command.slice(wordStart)
-
-    const name = command.slice(wordStart, cursor)
-    cursor += 1
-    let quote = ''
-    while (cursor < command.length) {
-      const character = command[cursor]
-      if (character === '$' && command[cursor + 1] === '(' && quote !== "'") {
-        cursor = commandSubstitutionEnd(cursor)
-        continue
-      }
-      if (character === '\\' && quote !== "'") {
-        cursor += 2
-        continue
-      }
-      if (quote) {
-        if (character === quote) quote = ''
-        cursor += 1
-        continue
-      }
-      if (character === "'" || character === '"') {
-        quote = character
-        cursor += 1
-        continue
-      }
-      if (/\s/.test(character)) break
-      cursor += 1
-    }
-    redacted += `${name}=<redacted>`
+  const tokens = tokenizeShellCommand(command)
+  if (!tokens) return '<redacted command>'
+  let redacted = command
+  for (const assignment of tokens.leadingAssignments.toReversed()) {
+    redacted = `${redacted.slice(0, assignment.start)}${assignment.name}=<redacted>${redacted.slice(assignment.end)}`
   }
   return redacted
 }

@@ -419,9 +419,24 @@ function parseRoadmap(text) {
 function completedIds(tasks) {
   const completed = /* @__PURE__ */ new Set();
   const prefixes = /* @__PURE__ */ new Map();
+  const completionByTask = /* @__PURE__ */ new Map();
+  const postOrder = [];
+  const pending = [...tasks];
+  while (pending.length) {
+    const task = pending.pop();
+    postOrder.push(task);
+    pending.push(...task.subtasks);
+  }
+  for (const task of postOrder.reverse()) {
+    completionByTask.set(task, isComplete(task) && task.subtasks.every((subtask) => completionByTask.get(subtask)));
+  }
   const recordCompletedSubtasks = (task) => {
-    if (isTaskFullyComplete(task)) completed.add(task.id);
-    for (const subtask of task.subtasks) recordCompletedSubtasks(subtask);
+    const pendingSubtasks = [task];
+    while (pendingSubtasks.length) {
+      const subtask = pendingSubtasks.pop();
+      if (completionByTask.get(subtask)) completed.add(subtask.id);
+      pendingSubtasks.push(...subtask.subtasks);
+    }
   };
   for (const task of tasks) {
     recordCompletedSubtasks(task);
@@ -433,12 +448,18 @@ function completedIds(tasks) {
     }
   }
   for (const [prefix, groupedTasks] of prefixes.entries()) {
-    if (groupedTasks.length && groupedTasks.every(isTaskFullyComplete)) completed.add(prefix);
+    if (groupedTasks.length && groupedTasks.every((task) => completionByTask.get(task))) completed.add(prefix);
   }
   return completed;
 }
 function isTaskFullyComplete(task) {
-  return isComplete(task) && task.subtasks.every(isTaskFullyComplete);
+  const pending = [task];
+  while (pending.length) {
+    const current = pending.pop();
+    if (!isComplete(current)) return false;
+    pending.push(...current.subtasks);
+  }
+  return true;
 }
 function taskMatchesOnlyTask(candidate, onlyTask) {
   if (!onlyTask) return true;
@@ -2174,6 +2195,98 @@ function makeRemediation({ preamble: preamble2, worktreeSafetyNet: worktreeSafet
   };
 }
 
+// src/workflows/df12-build-odw/shell-command.ts
+function commandSubstitutionEnd(command, start) {
+  let cursor = start + 2;
+  let quote = "";
+  let depth = 1;
+  while (cursor < command.length) {
+    const character = command[cursor];
+    if (character === "\\" && quote !== "'") {
+      cursor += 2;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = "";
+      cursor += 1;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      cursor += 1;
+      continue;
+    }
+    if (character === "$" && command[cursor + 1] === "(") {
+      depth += 1;
+      cursor += 2;
+      continue;
+    }
+    if (character === ")") {
+      depth -= 1;
+      cursor += 1;
+      if (!depth) return cursor;
+      continue;
+    }
+    cursor += 1;
+  }
+  return null;
+}
+function tokenizeShellCommand(command) {
+  const words = [];
+  let cursor = 0;
+  while (cursor < command.length) {
+    while (cursor < command.length && /\s/.test(command[cursor])) cursor += 1;
+    if (cursor >= command.length) break;
+    const start = cursor;
+    let value = "";
+    let quote = "";
+    let hasWord = false;
+    while (cursor < command.length) {
+      const character = command[cursor];
+      if (!quote && /\s/.test(character)) break;
+      if (!quote && (character === "'" || character === '"')) {
+        quote = character;
+        hasWord = true;
+        cursor += 1;
+        continue;
+      }
+      if (quote && character === quote) {
+        quote = "";
+        cursor += 1;
+        continue;
+      }
+      if (character === "$" && command[cursor + 1] === "(" && quote !== "'") {
+        const end = commandSubstitutionEnd(command, cursor);
+        if (end === null) return null;
+        value += command.slice(cursor, end);
+        hasWord = true;
+        cursor = end;
+        continue;
+      }
+      if (character === "\\" && quote !== "'") {
+        cursor += 1;
+        if (cursor >= command.length) return null;
+        value += command[cursor];
+        hasWord = true;
+        cursor += 1;
+        continue;
+      }
+      value += character;
+      hasWord = true;
+      cursor += 1;
+    }
+    if (quote || !hasWord) return null;
+    words.push({ value, start, end: cursor });
+  }
+  const leadingAssignments = [];
+  for (const word of words) {
+    const match = word.value.match(/^([A-Za-z_][A-Za-z0-9_]*)=/);
+    if (!match) break;
+    leadingAssignments.push({ name: match[1], start: word.start, end: word.end });
+  }
+  return { words, leadingAssignments };
+}
+
 // src/workflows/df12-build-odw/host-review.ts
 function parseCoderabbitAgentOutput(stdout) {
   const events = [];
@@ -2233,49 +2346,10 @@ var csCheckMetrics = {
   /** Checks skipped because the configured binary was not on PATH. */
   skipped: 0
 };
-function shellCommandWords(command) {
-  const words = [];
-  let word = "";
-  let quote = "";
-  let hasWord = false;
-  for (let index = 0; index < command.length; index++) {
-    const character = command[index];
-    if (!quote && /\s/.test(character)) {
-      if (hasWord) {
-        words.push(word);
-        word = "";
-        hasWord = false;
-      }
-      continue;
-    }
-    if (!quote && (character === "'" || character === '"')) {
-      quote = character;
-      hasWord = true;
-      continue;
-    }
-    if (quote && character === quote) {
-      quote = "";
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      index += 1;
-      if (index >= command.length) return null;
-      word += command[index];
-      hasWord = true;
-      continue;
-    }
-    word += character;
-    hasWord = true;
-  }
-  if (quote) return null;
-  if (hasWord) words.push(word);
-  return words;
-}
 function codeSceneExecutable(command) {
-  const words = shellCommandWords(command);
-  if (!words) return "";
-  const executable = words.find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
-  return executable || "";
+  const tokens = tokenizeShellCommand(command);
+  if (!tokens) return "";
+  return tokens.words[tokens.leadingAssignments.length]?.value || "";
 }
 var gateLogDirCache = null;
 function gateLogRoot() {
@@ -3970,82 +4044,11 @@ async function fillPool() {
   }
 }
 function redactedCodeSceneCommand(command) {
-  const commandSubstitutionEnd = (start) => {
-    let cursor2 = start + 2;
-    const quotes = [""];
-    while (cursor2 < command.length) {
-      const character = command[cursor2];
-      const quoteIndex = quotes.length - 1;
-      const quote = quotes[quoteIndex];
-      if (character === "\\" && quote !== "'") {
-        cursor2 += 2;
-        continue;
-      }
-      if (character === "$" && command[cursor2 + 1] === "(") {
-        if (quote !== "'") {
-          quotes.push("");
-          cursor2 += 2;
-          continue;
-        }
-      }
-      if (quote) {
-        if (character === quote) quotes[quoteIndex] = "";
-        cursor2 += 1;
-        continue;
-      }
-      if (character === "'" || character === '"') {
-        quotes[quoteIndex] = character;
-        cursor2 += 1;
-        continue;
-      }
-      if (!quote && character === ")") {
-        quotes.pop();
-        cursor2 += 1;
-        if (!quotes.length) return cursor2;
-        continue;
-      }
-      cursor2 += 1;
-    }
-    return cursor2;
-  };
-  let cursor = 0;
-  let redacted = "";
-  while (cursor < command.length) {
-    const whitespaceStart = cursor;
-    while (cursor < command.length && /\s/.test(command[cursor])) cursor += 1;
-    redacted += command.slice(whitespaceStart, cursor);
-    const wordStart = cursor;
-    if (!/[A-Za-z_]/.test(command[cursor] || "")) return redacted + command.slice(wordStart);
-    cursor += 1;
-    while (cursor < command.length && /[A-Za-z0-9_]/.test(command[cursor])) cursor += 1;
-    if (command[cursor] !== "=") return redacted + command.slice(wordStart);
-    const name = command.slice(wordStart, cursor);
-    cursor += 1;
-    let quote = "";
-    while (cursor < command.length) {
-      const character = command[cursor];
-      if (character === "$" && command[cursor + 1] === "(" && quote !== "'") {
-        cursor = commandSubstitutionEnd(cursor);
-        continue;
-      }
-      if (character === "\\" && quote !== "'") {
-        cursor += 2;
-        continue;
-      }
-      if (quote) {
-        if (character === quote) quote = "";
-        cursor += 1;
-        continue;
-      }
-      if (character === "'" || character === '"') {
-        quote = character;
-        cursor += 1;
-        continue;
-      }
-      if (/\s/.test(character)) break;
-      cursor += 1;
-    }
-    redacted += `${name}=<redacted>`;
+  const tokens = tokenizeShellCommand(command);
+  if (!tokens) return "<redacted command>";
+  let redacted = command;
+  for (const assignment of tokens.leadingAssignments.toReversed()) {
+    redacted = `${redacted.slice(0, assignment.start)}${assignment.name}=<redacted>${redacted.slice(assignment.end)}`;
   }
   return redacted;
 }

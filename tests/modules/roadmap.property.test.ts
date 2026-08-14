@@ -4,6 +4,7 @@
 // hand-picked fixtures.
 import { describe, expect, test } from 'bun:test'
 import fc from 'fast-check'
+import type { RoadmapTask } from '../../src/workflows/df12-build-odw/types.ts'
 
 import {
   completedIds,
@@ -137,6 +138,35 @@ describe('parseRoadmap', () => {
       hasTask: true,
       task: { id: '1.1', isAddendum: true },
     })
+  })
+
+  test('handles a deeply nested addendum chain without recursive recomputation', () => {
+    const root: RoadmapTask = {
+      id: '1.1',
+      checked: 'x',
+      title: 'Root task',
+      requires: [],
+      line: 1,
+      indent: 0,
+      subtasks: [],
+    }
+    let parent = root
+    for (let index = 1; index <= 10_000; index += 1) {
+      const child: RoadmapTask = {
+        id: `1.${index + 1}`,
+        checked: 'x',
+        title: `Addendum ${index}`,
+        requires: [],
+        line: index + 1,
+        indent: index,
+        subtasks: [],
+      }
+      parent.subtasks.push(child)
+      parent = child
+    }
+
+    expect(isTaskFullyComplete(root)).toBe(true)
+    expect(completedIds([root]).has(root.id)).toBe(true)
   })
 })
 

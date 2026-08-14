@@ -263,4 +263,22 @@ describe('runHostCommitGates streaming', () => {
     expect(result.green).toBe(false)
     expect(result.detail).toMatch(/killed after the 2s gate timeout/)
   })
+
+  test('a gate timeout kills descendant processes before their delayed write', async () => {
+    const dir = tmp('gate-stream-descendant-timeout-')
+    const sideEffect = path.join(dir, 'descendant-survived.txt')
+    // The shell waits for a background descendant. Killing only the shell
+    // leaves the child holding the pipes and eventually writing this file.
+    const { runHostCommitGates } = hostReview({
+      commitGates: [`(sleep 2; printf survived > ${JSON.stringify(sideEffect)}) & wait`],
+      commitGateTimeoutSeconds: 1,
+    })
+    const result = await runHostCommitGates(dir, '1.2.3', 'descendant')
+
+    if (result.results[0]?.logFile) junk.push(result.results[0].logFile)
+    expect(result.green).toBe(false)
+    expect(result.detail).toMatch(/killed after the 1s gate timeout/)
+    await new Promise((resolve) => setTimeout(resolve, 2_200))
+    expect(existsSync(sideEffect)).toBe(false)
+  }, 10_000)
 })

@@ -156,10 +156,27 @@ export function parseRoadmap(text: string): {
 export function completedIds(tasks: readonly RoadmapTask[]): Set<string> {
   const completed = new Set<string>()
   const prefixes = new Map<string, RoadmapTask[]>()
+  const completionByTask = new Map<RoadmapTask, boolean>()
+  const postOrder: RoadmapTask[] = []
+  const pending = [...tasks]
+
+  while (pending.length) {
+    const task = pending.pop()!
+    postOrder.push(task)
+    pending.push(...task.subtasks)
+  }
+
+  for (const task of postOrder.reverse()) {
+    completionByTask.set(task, isComplete(task) && task.subtasks.every((subtask) => completionByTask.get(subtask)))
+  }
 
   const recordCompletedSubtasks = (task: RoadmapTask) => {
-    if (isTaskFullyComplete(task)) completed.add(task.id)
-    for (const subtask of task.subtasks) recordCompletedSubtasks(subtask)
+    const pendingSubtasks = [task]
+    while (pendingSubtasks.length) {
+      const subtask = pendingSubtasks.pop()!
+      if (completionByTask.get(subtask)) completed.add(subtask.id)
+      pendingSubtasks.push(...subtask.subtasks)
+    }
   }
 
   for (const task of tasks) {
@@ -173,7 +190,7 @@ export function completedIds(tasks: readonly RoadmapTask[]): Set<string> {
   }
 
   for (const [prefix, groupedTasks] of prefixes.entries()) {
-    if (groupedTasks.length && groupedTasks.every(isTaskFullyComplete)) completed.add(prefix)
+    if (groupedTasks.length && groupedTasks.every((task) => completionByTask.get(task))) completed.add(prefix)
   }
 
   return completed
@@ -181,7 +198,13 @@ export function completedIds(tasks: readonly RoadmapTask[]): Set<string> {
 
 /** A task is fully complete only when its own checkbox and every addendum descendant are ticked. */
 export function isTaskFullyComplete(task: RoadmapTask): boolean {
-  return isComplete(task) && task.subtasks.every(isTaskFullyComplete)
+  const pending = [task]
+  while (pending.length) {
+    const current = pending.pop()!
+    if (!isComplete(current)) return false
+    pending.push(...current.subtasks)
+  }
+  return true
 }
 
 /**
