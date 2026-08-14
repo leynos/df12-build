@@ -449,7 +449,7 @@ export function makeHostReview(config: HostReviewConfig, deps: HostReviewDeps = 
       const outcome = await streamGate(command, worktree, logFile)
       if (!outcome.ok) {
         hostGateMetrics.failures += 1
-        const timedOut = outcome.killed ? ` (killed after the ${commitGateTimeoutSeconds}s gate timeout)` : ''
+        const timedOut = outcome.timedOut ? ` (killed after the ${commitGateTimeoutSeconds}s gate timeout)` : ''
         results.push({ command, ok: false, logFile })
         return {
           green: false,
@@ -467,7 +467,7 @@ export function makeHostReview(config: HostReviewConfig, deps: HostReviewDeps = 
   // keeping a bounded ring buffer of the last TAIL_LINES lines for the
   // structured result. A SIGTERM fires at the configured timeout, escalating
   // to SIGKILL if the child ignores it.
-  function streamGate(command: string, cwd: string, logFile: string): Promise<{ ok: boolean; killed: boolean; tail: string }> {
+  function streamGate(command: string, cwd: string, logFile: string): Promise<{ ok: boolean; killed: boolean; timedOut: boolean; tail: string }> {
     const TAIL_LINES = 12
     const { spawn } = process.getBuiltinModule('node:child_process')
     const fs = process.getBuiltinModule('node:fs')
@@ -484,6 +484,8 @@ export function makeHostReview(config: HostReviewConfig, deps: HostReviewDeps = 
       const tail: string[] = []
       let carry = ''
       let killed = false
+      let timedOut = false
+      let streamFailure = ''
       // finish() is settled-once: the child's 'close' and 'error' are mutually
       // exclusive, but the log stream is an independent emitter that can fault
       // at any time, so more than one settle path can race. The guard keeps
@@ -516,12 +518,10 @@ export function makeHostReview(config: HostReviewConfig, deps: HostReviewDeps = 
           if (tail.length > TAIL_LINES) tail.shift()
         }
         if (extraTail) tail.push(extraTail)
-        stream.end(() => resolve({ ok, killed, tail: tail.slice(-TAIL_LINES).join('\n').trim() }))
+        const complete = () => resolve({ ok, killed, timedOut, tail: tail.slice(-TAIL_LINES).join('\n').trim() })
+        if (stream.destroyed) complete()
+        else stream.end(complete)
       }
-      // A log open/write fault (ENOSPC, EACCES on the path) emits 'error' on
-      // the stream; without this listener Node would treat it as an uncaught
-      // exception and crash the run. Route it into a failed gate result.
-      stream.on('error', (error) => finish(false, `gate log write failed: ${(error as Error).message}`))
       const child = spawn('sh', ['-c', command], {
         cwd,
         detached: process.platform !== 'win32',
@@ -553,8 +553,10 @@ export function makeHostReview(config: HostReviewConfig, deps: HostReviewDeps = 
         if (sigterm) clearTimeout(sigterm)
         if (sigkill) clearTimeout(sigkill)
       }
-      sigterm = setTimeout(() => {
+      const terminateGate = (didTimeOut: boolean) => {
+        if (killed) return
         killed = true
+        timedOut = didTimeOut
         // Resume any pipes paused by backpressure BEFORE killing: a paused pipe
         // never reaches EOF, so the child's 'close' would not fire and the gate
         // promise would hang behind a full log buffer even after the kill.
@@ -564,10 +566,21 @@ export function makeHostReview(config: HostReviewConfig, deps: HostReviewDeps = 
         // Escalate if the child ignores SIGTERM; unref so it never holds the loop.
         sigkill = setTimeout(() => signalGateProcess('SIGKILL'), 2000)
         sigkill.unref()
+      }
+      // A log open/write fault (ENOSPC, EACCES on the path) emits 'error' on
+      // the stream; without this listener Node would treat it as an uncaught
+      // exception and crash the run. Reap the detached process group before
+      // resolving so a command cannot outlive its failed evidence sink.
+      stream.on('error', (error) => {
+        streamFailure = `gate log write failed: ${(error as Error).message}`
+        terminateGate(false)
+      })
+      sigterm = setTimeout(() => {
+        terminateGate(true)
       }, commitGateTimeoutSeconds * 1000)
       child.on('close', (code) => {
         clearTerminationTimeouts()
-        finish(code === 0 && !killed)
+        finish(code === 0 && !killed, streamFailure)
       })
       child.on('error', (error) => {
         clearTerminationTimeouts()
@@ -627,7 +640,7 @@ export function makeHostReview(config: HostReviewConfig, deps: HostReviewDeps = 
     const outcome = await streamGate(csCheckCommand, worktree, logFile)
     if (outcome.ok) return { clean: true, skipped: false, detail: '', logFile }
     csCheckMetrics.failures += 1
-    const timedOut = outcome.killed ? ` (killed after the ${commitGateTimeoutSeconds}s timeout)` : ''
+    const timedOut = outcome.timedOut ? ` (killed after the ${commitGateTimeoutSeconds}s timeout)` : ''
     return { clean: false, skipped: false, detail: `CodeScene check \`${csCheckCommand}\` reported code-health issues${timedOut}; full log: ${logFile}; output tail:\n${outcome.tail}`, logFile }
   }
 

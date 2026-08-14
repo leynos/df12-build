@@ -2,7 +2,7 @@
 // classifier's terminal-completion guard, and the spawn-streamed host commit
 // gates (secure per-run log directory).
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -215,9 +215,10 @@ describe('runHostCommitGates streaming', () => {
     expect(readFileSync(secondLog as string, 'utf8')).toContain('repeated-gate-output')
   })
 
-  test('a planted symlink at the log path cannot clobber its target (O_NOFOLLOW|O_EXCL)', async () => {
+  test('a planted symlink reaps its spawned gate without clobbering the target', async () => {
     const dir = tmp('gate-stream-symlink-')
     const victim = path.join(tmp('gate-victim-'), 'victim.txt')
+    const sideEffect = path.join(dir, 'must-not-exist.txt')
     writeFileSync(victim, 'original\n')
     // Plant a symlink where the gate will write; the exclusive no-follow open
     // must refuse it (fail the gate) rather than following it and clobbering
@@ -227,14 +228,18 @@ describe('runHostCommitGates streaming', () => {
     junk.push(logNamespace)
     symlinkSync(victim, logPath)
     const { runHostCommitGates } = hostReview(
-      { commitGates: ['echo hi'] },
+      { commitGates: [`sleep 1; printf delayed > ${JSON.stringify(sideEffect)}`] },
       { createGateLogNamespace: () => logNamespace },
     )
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
     expect(result.green).toBe(false)
     expect(result.detail).toMatch(/gate log write failed|failed/)
     expect(readFileSync(victim, 'utf8')).toBe('original\n')
-  })
+    // The open fails after the detached shell has been spawned. Waiting beyond
+    // the command's delayed write proves its whole process group was reaped.
+    await new Promise((resolve) => setTimeout(resolve, 1_200))
+    expect(existsSync(sideEffect)).toBe(false)
+  }, 10_000)
 
   test('a backpressured gate that times out still settles instead of hanging', async () => {
     const dir = tmp('gate-stream-bp-timeout-')

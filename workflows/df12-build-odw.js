@@ -2373,7 +2373,7 @@ function makeHostReview(config, deps = {}) {
       const outcome = await streamGate(command, worktree, logFile);
       if (!outcome.ok) {
         hostGateMetrics.failures += 1;
-        const timedOut = outcome.killed ? ` (killed after the ${commitGateTimeoutSeconds}s gate timeout)` : "";
+        const timedOut = outcome.timedOut ? ` (killed after the ${commitGateTimeoutSeconds}s gate timeout)` : "";
         results2.push({ command, ok: false, logFile });
         return {
           green: false,
@@ -2397,6 +2397,8 @@ ${outcome.tail}`
       const tail = [];
       let carry = "";
       let killed = false;
+      let timedOut = false;
+      let streamFailure = "";
       let settled = false;
       const record = (chunk) => {
         if (!stream.write(chunk) && !killed) {
@@ -2419,9 +2421,10 @@ ${outcome.tail}`
           if (tail.length > TAIL_LINES) tail.shift();
         }
         if (extraTail) tail.push(extraTail);
-        stream.end(() => resolve({ ok, killed, tail: tail.slice(-TAIL_LINES).join("\n").trim() }));
+        const complete = () => resolve({ ok, killed, timedOut, tail: tail.slice(-TAIL_LINES).join("\n").trim() });
+        if (stream.destroyed) complete();
+        else stream.end(complete);
       };
-      stream.on("error", (error) => finish(false, `gate log write failed: ${error.message}`));
       const child = spawn("sh", ["-c", command], {
         cwd,
         detached: process.platform !== "win32",
@@ -2449,17 +2452,26 @@ ${outcome.tail}`
         if (sigterm) clearTimeout(sigterm);
         if (sigkill) clearTimeout(sigkill);
       };
-      sigterm = setTimeout(() => {
+      const terminateGate = (didTimeOut) => {
+        if (killed) return;
         killed = true;
+        timedOut = didTimeOut;
         child.stdout?.resume();
         child.stderr?.resume();
         signalGateProcess("SIGTERM");
         sigkill = setTimeout(() => signalGateProcess("SIGKILL"), 2e3);
         sigkill.unref();
+      };
+      stream.on("error", (error) => {
+        streamFailure = `gate log write failed: ${error.message}`;
+        terminateGate(false);
+      });
+      sigterm = setTimeout(() => {
+        terminateGate(true);
       }, commitGateTimeoutSeconds * 1e3);
       child.on("close", (code) => {
         clearTerminationTimeouts();
-        finish(code === 0 && !killed);
+        finish(code === 0 && !killed, streamFailure);
       });
       child.on("error", (error) => {
         clearTerminationTimeouts();
@@ -2497,7 +2509,7 @@ ${outcome.tail}`
     const outcome = await streamGate(csCheckCommand, worktree, logFile);
     if (outcome.ok) return { clean: true, skipped: false, detail: "", logFile };
     csCheckMetrics.failures += 1;
-    const timedOut = outcome.killed ? ` (killed after the ${commitGateTimeoutSeconds}s timeout)` : "";
+    const timedOut = outcome.timedOut ? ` (killed after the ${commitGateTimeoutSeconds}s timeout)` : "";
     return { clean: false, skipped: false, detail: `CodeScene check \`${csCheckCommand}\` reported code-health issues${timedOut}; full log: ${logFile}; output tail:
 ${outcome.tail}`, logFile };
   }
