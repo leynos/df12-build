@@ -359,10 +359,11 @@ Step ranges are also accepted in `Requires` lines:
 
 Both endpoints must use dotted numeric syntax with safe-integer components,
 belong to the same phase, and be in ascending order. A range may contain at
-most 1,000 ids. Malformed, cross-phase, reversed, unsafe-integer or oversized
-ranges are ignored rather than raising an error. For affected roadmaps, split
-ranges into in-phase ascending ranges of no more than 1,000 ids and correct
-malformed ids.
+most 1,000 ids. In `Requires` parsing, malformed, cross-phase, reversed,
+unsafe-integer or oversized ranges are not expanded and do not raise an error;
+any dotted endpoints remain ordinary individual references. For affected
+roadmaps, split ranges into in-phase ascending ranges of no more than 1,000
+ids and correct malformed ids.
 
 The deterministic selector treats a task as unblocked when all of these are
 true:
