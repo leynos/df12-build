@@ -120,12 +120,13 @@ export function dedupeProposals(proposals: readonly Record<string, unknown>[]): 
       ? proposal.sources.map((source) => String(source)).filter(Boolean)
       : []
     if (fallback && !sources.includes(fallback)) sources.push(fallback)
+    const uniqueSources = [...new Set(sources)]
     const existing = byKey.get(key)
     if (existing) {
-      for (const source of sources) if (!existing.sources.includes(source)) existing.sources.push(source)
+      for (const source of uniqueSources) if (!existing.sources.includes(source)) existing.sources.push(source)
       continue
     }
-    byKey.set(key, { ...proposal, title, sources })
+    byKey.set(key, { ...proposal, title, sources: uniqueSources })
   }
   return [...byKey.values()]
 }

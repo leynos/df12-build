@@ -33,6 +33,8 @@ export interface ShellCommandTokens {
   words: ShellCommandWord[]
   /** Leading environment assignments, preserving the original source spans. */
   leadingAssignments: ShellCommandAssignment[]
+  /** Whether an unquoted shell control operator makes redaction fail closed. */
+  hasUnquotedControlOperator: boolean
 }
 
 /** Return the exclusive end offset of a balanced shell command substitution. */
@@ -72,6 +74,20 @@ function commandSubstitutionEnd(command: string, start: number): number | null {
   return null
 }
 
+/** Return an unquoted, unescaped assignment name, or null for an executable word. */
+function assignmentName(command: string, word: ShellCommandWord): string | null {
+  let cursor = word.start
+  let name = ''
+  while (cursor < word.end) {
+    const character = command[cursor]
+    if (character === '=') return name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : null
+    if (!/[A-Za-z0-9_]/.test(character)) return null
+    name += character
+    cursor += 1
+  }
+  return null
+}
+
 /**
  * Parse a limited POSIX-style command without evaluating expansions. Quoting,
  * escapes, and nested command substitutions keep whitespace inside a word;
@@ -80,8 +96,12 @@ function commandSubstitutionEnd(command: string, start: number): number | null {
 export function tokenizeShellCommand(command: string): ShellCommandTokens | null {
   const words: ShellCommandWord[] = []
   let cursor = 0
+  let hasUnquotedControlOperator = false
   while (cursor < command.length) {
-    while (cursor < command.length && /\s/.test(command[cursor])) cursor += 1
+    while (cursor < command.length && /\s/.test(command[cursor])) {
+      if (command[cursor] === '\n') hasUnquotedControlOperator = true
+      cursor += 1
+    }
     if (cursor >= command.length) break
     const start = cursor
     let value = ''
@@ -90,6 +110,9 @@ export function tokenizeShellCommand(command: string): ShellCommandTokens | null
     while (cursor < command.length) {
       const character = command[cursor]
       if (!quote && /\s/.test(character)) break
+      if (!quote && (character === ';' || character === '&' || character === '|')) {
+        hasUnquotedControlOperator = true
+      }
       if (!quote && (character === "'" || character === '"')) {
         quote = character
         hasWord = true
@@ -109,6 +132,7 @@ export function tokenizeShellCommand(command: string): ShellCommandTokens | null
         cursor = end
         continue
       }
+      if (!quote && (character === '`' || (character === '$' && command[cursor + 1] === '{'))) return null
       if (character === '\\' && quote !== "'") {
         cursor += 1
         if (cursor >= command.length) return null
@@ -127,9 +151,9 @@ export function tokenizeShellCommand(command: string): ShellCommandTokens | null
 
   const leadingAssignments: ShellCommandAssignment[] = []
   for (const word of words) {
-    const match = word.value.match(/^([A-Za-z_][A-Za-z0-9_]*)=/)
-    if (!match) break
-    leadingAssignments.push({ name: match[1], start: word.start, end: word.end })
+    const name = assignmentName(command, word)
+    if (!name) break
+    leadingAssignments.push({ name, start: word.start, end: word.end })
   }
-  return { words, leadingAssignments }
+  return { words, leadingAssignments, hasUnquotedControlOperator }
 }

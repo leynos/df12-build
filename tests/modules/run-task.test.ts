@@ -321,35 +321,6 @@ describe('runTask', () => {
     expect(faultMetrics.authFaults).toBe(1)
   })
 
-  test('a between-item CodeRabbit auth failure increments authFaults', async () => {
-    const worktree = makeWorktree()
-    prepareSingleWorkItem(worktree)
-    scriptAgent((label, prompt) => label.startsWith('implement:') ? completeSingleWorkItem(worktree) : happyScript()(label, prompt))
-
-    const outcome = await subject(worktree, {
-      PER_WORK_ITEM_BUILD: true,
-      CODERABBIT_HOST_REVIEW: true,
-      CODERABBIT_BETWEEN_WORK_ITEMS: true,
-      runCoderabbitHostReview: async () => ({ outcome: 'auth' as const, attempts: 1, findings: [], detail: 'login required' }),
-    }).runTask(task, null)
-
-    expect(outcome.status).toBe('fatal-auth')
-    expect(faultMetrics.authFaults).toBe(1)
-  })
-
-  test('a dual-review CodeRabbit auth failure increments authFaults', async () => {
-    const worktree = makeWorktree()
-    scriptAgent(happyScript())
-
-    const outcome = await subject(worktree, {
-      CODERABBIT_HOST_REVIEW: true,
-      runCoderabbitHostReview: async () => ({ outcome: 'auth' as const, attempts: 1, findings: [], detail: 'login required' }),
-    }).runTask(task, null)
-
-    expect(outcome.status).toBe('fatal-auth')
-    expect(faultMetrics.authFaults).toBe(1)
-  })
-
   test('an addendum implementation auth failure increments authFaults', async () => {
     const worktree = makeWorktree()
     const addendum = { ...task, isAddendum: true, subtasks: ['1.2.3.1'] }
@@ -364,18 +335,41 @@ describe('runTask', () => {
     expect(faultMetrics.authFaults).toBe(1)
   })
 
-  test('an addendum CodeRabbit auth failure increments authFaults', async () => {
+  test.each([
+    {
+      name: 'between-item',
+      prepare: (worktree: string) => {
+        prepareSingleWorkItem(worktree)
+        scriptAgent((label, prompt) => label.startsWith('implement:') ? completeSingleWorkItem(worktree) : happyScript()(label, prompt))
+      },
+      overrides: { PER_WORK_ITEM_BUILD: true, CODERABBIT_BETWEEN_WORK_ITEMS: true },
+      taskData: task,
+    },
+    {
+      name: 'dual-review',
+      prepare: () => scriptAgent(happyScript()),
+      overrides: {},
+      taskData: task,
+    },
+    {
+      name: 'addendum',
+      prepare: () => scriptAgent((label) => {
+        if (label.startsWith('addendum:')) return greenAddendum
+        throw new Error(`unscripted label: ${label}`)
+      }),
+      overrides: {},
+      taskData: { ...task, isAddendum: true, subtasks: ['1.2.3.1'] as string[] },
+    },
+  ])('$name CodeRabbit auth failure increments authFaults', async ({ prepare, overrides, taskData }) => {
     const worktree = makeWorktree()
-    const addendum = { ...task, isAddendum: true, subtasks: ['1.2.3.1'] }
-    scriptAgent((label) => {
-      if (label.startsWith('addendum:')) return greenAddendum
-      throw new Error(`unscripted label: ${label}`)
-    })
+    prepare(worktree)
+    const authReview = async () => ({ outcome: 'auth' as const, attempts: 1, findings: [], detail: 'login required' })
 
     const outcome = await subject(worktree, {
       CODERABBIT_HOST_REVIEW: true,
-      runCoderabbitHostReview: async () => ({ outcome: 'auth' as const, attempts: 1, findings: [], detail: 'login required' }),
-    }).runTask(addendum, null)
+      runCoderabbitHostReview: authReview,
+      ...overrides,
+    }).runTask(taskData, null)
 
     expect(outcome.status).toBe('fatal-auth')
     expect(faultMetrics.authFaults).toBe(1)

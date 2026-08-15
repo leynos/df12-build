@@ -210,7 +210,8 @@ they never enter a diff, trip `workflow-freshness`, or affect a gate:
   durable artefacts there: `events.jsonl` (an ordered stream with
   `agent_started`/`agent_finished` per `agent()` call, tagged by adapter,
   label, and phase), `result.json` (the final return, including every
-  `reviewRounds`, `assessments`, host-gate result, and CodeRabbit summary), and
+  `reviewRounds`, `assessments`, host-gate and CodeScene result, and CodeRabbit
+  summary), and
   `error.json`. This is entirely ODW's domain — no workflow involvement.
   Regenerate the value per run, or use a shared `~/.odw/runs` for a single
   pool; the sidecar keeps each run's logs beside its config and notes.
@@ -493,8 +494,9 @@ Common arguments:
   bounded fix round; the build agent clears it by refactoring or, only where
   refactoring would be deleterious, suppresses the specific smell with a
   justified `@codescene(disable:"...")` comment. The check skips gracefully
-  when its binary is absent, like `make verify-modules` without Dafny. Set
-  `false` to disable it.
+  only when its binary is absent from `PATH`, like `make verify-modules` without
+  Dafny; an availability-probe fault is reported as a failed check instead of
+  being treated as an absent binary. Set `false` to disable it.
 - `csCheckCommand`: the command the CodeScene check runs in the worktree.
   Defaults to `cs-check-changed` (an operator-provided wrapper); override it
   with the exact invocation, e.g. `cs check --changed --base main`.
@@ -693,6 +695,17 @@ in the failure evidence. A command that exceeds `commitGateTimeoutSeconds` is
 killed and reported as a failure. The run result's `hostGates` object reports
 the configuration and bounded counters (gate runs, failures); per-round
 pass/fail detail appears in each failed task's `reviewRounds[].hostGates`.
+
+The run result's top-level `codeScene` object durably records the effective
+setting and command, plus bounded counters: `runs` (checks executed, excluding
+availability skips), `failures` (executed checks that failed, including
+code-health findings),
+`probeFailures` (availability probes that failed for another infrastructure
+reason), and `skipped` (the configured binary was not found on `PATH`). The
+`command` value redacts values in leading `NAME=value` assignments, for example
+`CS_TOKEN=<redacted> cs-check-changed --base main`; the original command is
+still used for execution. A missing binary is therefore a clean skip, whereas
+`probeFailures` is a surfaced fault and is not counted as a skip.
 
 ## Recovery model
 

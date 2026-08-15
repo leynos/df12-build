@@ -2,6 +2,7 @@
 // grouping key, the lane contract in the triage schema, and the prompt/agent
 // wiring for a settled step's proposals.
 import { beforeEach, describe, expect, test } from 'bun:test'
+import fc from 'fast-check'
 
 import {
   TRIAGE_SCHEMA,
@@ -77,6 +78,33 @@ describe('dedupeProposals', () => {
     ])
     expect(second).toHaveLength(1)
     expect(second[0].sources).toEqual(['audit:1.2.3', 'review:1.2.4', 'expert:1.2.5'])
+  })
+
+  test('is idempotent, preserves first-title order, and unions every source', () => {
+    const title = fc.constantFrom('Fix flaky teardown', 'Harden the queue', 'Repair docs')
+    const source = fc.constantFrom('audit:1.2.3', 'review:1.2.4', 'expert:1.2.5')
+    const proposals = fc.array(fc.record({
+      title,
+      source,
+      sources: fc.array(source, { maxLength: 3 }),
+    }), { minLength: 1, maxLength: 20 })
+    fc.assert(fc.property(proposals, (items) => {
+      const deduped = dedupeProposals(items)
+      const key = (value: string) => value.trim().toLowerCase().replace(/\s+/g, ' ')
+      const expectedKeys = [...new Set(items.map((item) => key(item.title)))]
+
+      expect(dedupeProposals(deduped)).toEqual(deduped)
+      expect(deduped.map((item) => key(item.title))).toEqual(expectedKeys)
+      for (const item of deduped) {
+        const expectedSources: string[] = []
+        for (const input of items.filter((candidate) => key(candidate.title) === key(item.title))) {
+          for (const candidateSource of [...input.sources, input.source]) {
+            if (!expectedSources.includes(candidateSource)) expectedSources.push(candidateSource)
+          }
+        }
+        expect(item.sources).toEqual(expectedSources)
+      }
+    }), { numRuns: 100 })
   })
 })
 

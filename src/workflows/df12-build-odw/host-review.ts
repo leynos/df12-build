@@ -90,6 +90,20 @@ export interface HostGateRun {
   detail: string
 }
 
+/** Minimal writable log surface, retained as an injectable final-flush seam. */
+export interface GateLogStream {
+  /** Whether the stream has already been destroyed. */
+  readonly destroyed: boolean
+  /** Write one streamed child-output chunk, returning its backpressure state. */
+  write(chunk: Buffer): boolean
+  /** Finish the stream and report any final-flush error. */
+  end(callback: (error?: Error | null) => void): void
+  /** Subscribe to log-stream backpressure completion. */
+  on(event: 'drain', listener: () => void): GateLogStream
+  /** Subscribe to log-stream write failures. */
+  on(event: 'error', listener: (error: Error) => void): GateLogStream
+}
+
 /** Injectable seams so host review can be unit-tested without real subprocesses or waits. */
 export interface HostReviewDeps {
   /** Process runner; defaults to execFileStatus. */
@@ -97,7 +111,9 @@ export interface HostReviewDeps {
   /** Backoff sleep in minutes; defaults to the real wall-clock hostSleepMinutes. */
   sleep?: (minutes: number) => Promise<void>
   /** Allocate one private log namespace per host-gate execution; injectable for security tests. */
-  createGateLogNamespace?: () => string
+  createGateLogNamespace?: () => Promise<string>
+  /** Create the secure gate log stream; injectable to cover final-flush faults. */
+  createGateLogStream?: (path: string, options: { flags: string; mode: number }) => GateLogStream
 }
 
 /** The run wiring makeHostReview binds once: review target, retry/backoff, findings sink, and the gate set. */
@@ -285,10 +301,10 @@ function gateLogRoot(): string {
  * process-private gate-log root. A distinct namespace keeps repeated gates
  * from colliding while preserving exclusive creation for each final log file.
  */
-export function createHostGateLogNamespace(): string {
-  const fs = process.getBuiltinModule('node:fs')
+export async function createHostGateLogNamespace(): Promise<string> {
+  const fs = process.getBuiltinModule('node:fs/promises')
   const path = process.getBuiltinModule('node:path')
-  return fs.mkdtempSync(path.join(gateLogRoot(), 'run-'))
+  return fs.mkdtemp(path.join(gateLogRoot(), 'run-'))
 }
 
 /**
@@ -397,7 +413,7 @@ export function makeHostReview(config: HostReviewConfig, deps: HostReviewDeps = 
   // bounded tail.
   async function runHostCommitGates(worktree: string, tag: string, roundLabel: string): Promise<HostGateRun> {
     const results: Array<{ command: string; ok: boolean; logFile: string }> = []
-    const logNamespace = createGateLogNamespace()
+    const logNamespace = await createGateLogNamespace()
     for (const [index, command] of commitGates.entries()) {
       hostGateMetrics.runs += 1
       log(`[task ${tag}] host gate ${index + 1}/${commitGates.length} (${roundLabel}): ${command}`)
@@ -436,12 +452,16 @@ export function makeHostReview(config: HostReviewConfig, deps: HostReviewDeps = 
       // createWriteStream accepts numeric open flags at runtime; the ambient
       // type only allows a string, so cast the OR-ed constants.
       const openFlags = (O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW) as unknown as string
-      const stream = fs.createWriteStream(logFile, { flags: openFlags, mode: 0o600 })
+      const stream = (deps.createGateLogStream
+        ? deps.createGateLogStream(logFile, { flags: openFlags, mode: 0o600 })
+        : fs.createWriteStream(logFile, { flags: openFlags, mode: 0o600 }) as unknown as GateLogStream)
       const tail: string[] = []
       let carry = ''
       let killed = false
       let timedOut = false
       let streamFailure = ''
+      let finishing = false
+      let completeGate: ((error?: Error | null) => void) | null = null
       // finish() is settled-once: the child's 'close' and 'error' are mutually
       // exclusive, but the log stream is an independent emitter that can fault
       // at any time, so more than one settle path can race. The guard keeps
@@ -467,14 +487,27 @@ export function makeHostReview(config: HostReviewConfig, deps: HostReviewDeps = 
         }
       }
       const finish = (ok: boolean, extraTail?: string) => {
-        if (settled) return
-        settled = true
+        if (settled || finishing) return
+        finishing = true
         if (carry) {
           tail.push(carry)
           if (tail.length > TAIL_LINES) tail.shift()
         }
         if (extraTail) tail.push(extraTail)
-        const complete = () => resolve({ ok, killed, timedOut, tail: tail.slice(-TAIL_LINES).join('\n').trim() })
+        const complete = (error?: Error | null) => {
+          if (settled) return
+          settled = true
+          completeGate = null
+          const finalFailure = streamFailure || (error ? `gate log write failed: ${error.message}` : '')
+          if (finalFailure && finalFailure !== extraTail) tail.push(finalFailure)
+          resolve({
+            ok: ok && !finalFailure,
+            killed,
+            timedOut,
+            tail: tail.slice(-TAIL_LINES).join('\n').trim(),
+          })
+        }
+        completeGate = complete
         if (stream.destroyed) complete()
         else stream.end(complete)
       }
@@ -529,7 +562,8 @@ export function makeHostReview(config: HostReviewConfig, deps: HostReviewDeps = 
       // resolving so a command cannot outlive its failed evidence sink.
       stream.on('error', (error) => {
         streamFailure = `gate log write failed: ${(error as Error).message}`
-        terminateGate(false)
+        if (finishing) completeGate?.(error as Error)
+        else terminateGate(false)
       })
       sigterm = setTimeout(() => {
         terminateGate(true)
@@ -591,7 +625,7 @@ export function makeHostReview(config: HostReviewConfig, deps: HostReviewDeps = 
       }
     }
     csCheckMetrics.runs += 1
-    const logFile = hostGateLogPath(createGateLogNamespace(), tag, `cs-${label}`, 0)
+    const logFile = hostGateLogPath(await createGateLogNamespace(), tag, `cs-${label}`, 0)
     log(`[task ${tag}] CodeScene check (${label}): ${csCheckCommand}`)
     const outcome = await streamGate(csCheckCommand, worktree, logFile)
     if (outcome.ok) return { clean: true, skipped: false, detail: '', logFile }

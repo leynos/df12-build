@@ -14,6 +14,7 @@ import {
   makeHostReview,
   parseCoderabbitAgentOutput,
 } from '../../src/workflows/df12-build-odw/host-review.ts'
+import type { GateLogStream } from '../../src/workflows/df12-build-odw/host-review.ts'
 
 describe('classifyCoderabbitOutcome terminal completion', () => {
   test('both observed success statuses (review_completed, reviewed) are clean', () => {
@@ -223,23 +224,48 @@ describe('runHostCommitGates streaming', () => {
     // Plant a symlink where the gate will write; the exclusive no-follow open
     // must refuse it (fail the gate) rather than following it and clobbering
     // the target, and must not crash the run.
-    const logNamespace = createHostGateLogNamespace()
+    const logNamespace = await createHostGateLogNamespace()
     const logPath = hostGateLogPath(logNamespace, '1.2.3', 'r1', 0)
     junk.push(logNamespace)
     symlinkSync(victim, logPath)
     const { runHostCommitGates } = hostReview(
       { commitGates: [`sleep 1; printf delayed > ${JSON.stringify(sideEffect)}`] },
-      { createGateLogNamespace: () => logNamespace },
+      { createGateLogNamespace: async () => logNamespace },
     )
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
     expect(result.green).toBe(false)
-    expect(result.detail).toMatch(/gate log write failed|failed/)
+    expect(result.detail).toMatch(/gate log write failed/)
     expect(readFileSync(victim, 'utf8')).toBe('original\n')
     // The open fails after the detached shell has been spawned. Waiting beyond
     // the command's delayed write proves its whole process group was reaped.
     await new Promise((resolve) => setTimeout(resolve, 1_200))
     expect(existsSync(sideEffect)).toBe(false)
   }, 10_000)
+
+  test('a final log flush failure turns a completed gate red', async () => {
+    const dir = tmp('gate-stream-final-flush-')
+    let reportError: ((error: Error) => void) | undefined
+    const stream: GateLogStream = {
+      destroyed: false,
+      write: () => true,
+      end: () => {
+        queueMicrotask(() => reportError?.(new Error('final flush failed')))
+      },
+      on: (event, listener) => {
+        if (event === 'error') reportError = listener
+        return stream
+      },
+    }
+    const { runHostCommitGates } = hostReview(
+      { commitGates: ['printf completed-gate-output'] },
+      { createGateLogStream: () => stream },
+    )
+
+    const result = await runHostCommitGates(dir, '1.2.3', 'flush')
+
+    expect(result.green).toBe(false)
+    expect(result.detail).toMatch(/gate log write failed: final flush failed/)
+  })
 
   test('a backpressured gate that times out still settles instead of hanging', async () => {
     const dir = tmp('gate-stream-bp-timeout-')

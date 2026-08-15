@@ -2,13 +2,14 @@
 // case runs the repository-pinned executable against an isolated fixture so
 // failures prove TypeDoc validation behaviour rather than repository content.
 import { describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const REPO = fileURLToPath(new URL('../../', import.meta.url))
 const TYPEDOC = path.join(REPO, 'node_modules', '.bin', 'typedoc')
+const TYPEDOC_OPTIONS = JSON.parse(readFileSync(path.join(REPO, 'typedoc.json'), 'utf8')) as Record<string, unknown>
 
 interface TypeDocRun {
   status: number
@@ -40,14 +41,10 @@ function runTypeDocFixture(source: string): TypeDocRun {
     writeFileSync(
       options,
       JSON.stringify({
+        ...TYPEDOC_OPTIONS,
         tsconfig,
         entryPoints: [sourceDir],
         entryPointStrategy: 'expand',
-        commentStyle: 'jsdoc',
-        emit: 'none',
-        validation: { notDocumented: true },
-        treatValidationWarningsAsErrors: true,
-        requiredToBeDocumented: ['Module', 'Function'],
       }),
     )
 
@@ -79,6 +76,31 @@ export function documentedFunction(): string {
 `
 
 describe('zero-tolerance TypeDoc gate', () => {
+  test('repository docs:check invokes the committed TypeDoc configuration', () => {
+    const result = Bun.spawnSync(['bun', 'run', 'docs:check'], {
+      cwd: REPO,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+
+    expect(result.exitCode, `${result.stdout.toString()}\n${result.stderr.toString()}`).toBe(0)
+  })
+
+  test('the committed configuration requires module and declaration documentation', () => {
+    expect(TYPEDOC_OPTIONS.treatValidationWarningsAsErrors).toBe(true)
+    expect(TYPEDOC_OPTIONS.validation).toMatchObject({ notDocumented: true })
+    expect(TYPEDOC_OPTIONS.requiredToBeDocumented).toEqual(expect.arrayContaining([
+      'Module',
+      'Function',
+      'Class',
+      'Interface',
+      'Method',
+      'Property',
+      'TypeAlias',
+      'Variable',
+    ]))
+  })
+
   test('a documented module and exported function pass without emitting artefacts', () => {
     const result = runTypeDocFixture(DOCUMENTED_MODULE)
 
@@ -92,7 +114,7 @@ describe('zero-tolerance TypeDoc gate', () => {
     ])
   })
 
-  test('an undocumented exported function fails with its qualified diagnostic', () => {
+  test('an undocumented exported function promotes a TypeDoc warning to failure', () => {
     const source = DOCUMENTED_MODULE.replace(
       '/** Return a stable fixture value. */\n',
       '',

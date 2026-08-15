@@ -122,17 +122,33 @@ test('result redacts CodeScene environment-assignment values', async () => {
       command: 'DF12_CS_TOKEN=$(outer "$(inner nested-secret)") cs-check-changed --changed',
       secrets: ['nested-secret'],
     },
+    {
+      command: 'DF12_CS_TOKEN=first-secret; DF12_CS_TOKEN_2=second-secret cs-check-changed --changed',
+      secrets: ['first-secret', 'second-secret'],
+      expected: '<redacted command>',
+    },
   ]
 
-  for (const { command, secrets } of cases) {
+  for (const { command, secrets, expected } of cases) {
     const repo = makeRecoveryRepo()
     const { result } = await runSimulation({
       repo,
       args: { csCheck: false, csCheckCommand: command },
     })
 
-    assert.equal(result.codeScene.command, 'DF12_CS_TOKEN=<redacted> cs-check-changed --changed')
-    for (const secret of secrets) assert.doesNotMatch(JSON.stringify(result), new RegExp(secret))
+    assert.equal(
+      result.codeScene.command,
+      expected || 'DF12_CS_TOKEN=<redacted> cs-check-changed --changed',
+      `CodeScene command should redact assignments for ${command}`,
+    )
+    const serialized = JSON.stringify(result)
+    for (const secret of secrets) {
+      assert.equal(
+        serialized.includes(secret),
+        false,
+        `CodeScene result must not serialize ${secret} from ${command}`,
+      )
+    }
   }
 })
 

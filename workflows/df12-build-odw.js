@@ -2120,12 +2120,13 @@ function dedupeProposals(proposals) {
     const fallback = String(proposal?.source || proposal?.rationale || "");
     const sources = Array.isArray(proposal.sources) ? proposal.sources.map((source) => String(source)).filter(Boolean) : [];
     if (fallback && !sources.includes(fallback)) sources.push(fallback);
+    const uniqueSources = [...new Set(sources)];
     const existing = byKey.get(key);
     if (existing) {
-      for (const source of sources) if (!existing.sources.includes(source)) existing.sources.push(source);
+      for (const source of uniqueSources) if (!existing.sources.includes(source)) existing.sources.push(source);
       continue;
     }
-    byKey.set(key, { ...proposal, title, sources });
+    byKey.set(key, { ...proposal, title, sources: uniqueSources });
   }
   return [...byKey.values()];
 }
@@ -2231,11 +2232,27 @@ function commandSubstitutionEnd(command, start) {
   }
   return null;
 }
+function assignmentName(command, word) {
+  let cursor = word.start;
+  let name = "";
+  while (cursor < word.end) {
+    const character = command[cursor];
+    if (character === "=") return name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : null;
+    if (!/[A-Za-z0-9_]/.test(character)) return null;
+    name += character;
+    cursor += 1;
+  }
+  return null;
+}
 function tokenizeShellCommand(command) {
   const words = [];
   let cursor = 0;
+  let hasUnquotedControlOperator = false;
   while (cursor < command.length) {
-    while (cursor < command.length && /\s/.test(command[cursor])) cursor += 1;
+    while (cursor < command.length && /\s/.test(command[cursor])) {
+      if (command[cursor] === "\n") hasUnquotedControlOperator = true;
+      cursor += 1;
+    }
     if (cursor >= command.length) break;
     const start = cursor;
     let value = "";
@@ -2244,6 +2261,9 @@ function tokenizeShellCommand(command) {
     while (cursor < command.length) {
       const character = command[cursor];
       if (!quote && /\s/.test(character)) break;
+      if (!quote && (character === ";" || character === "&" || character === "|")) {
+        hasUnquotedControlOperator = true;
+      }
       if (!quote && (character === "'" || character === '"')) {
         quote = character;
         hasWord = true;
@@ -2263,6 +2283,7 @@ function tokenizeShellCommand(command) {
         cursor = end;
         continue;
       }
+      if (!quote && (character === "`" || character === "$" && command[cursor + 1] === "{")) return null;
       if (character === "\\" && quote !== "'") {
         cursor += 1;
         if (cursor >= command.length) return null;
@@ -2280,11 +2301,11 @@ function tokenizeShellCommand(command) {
   }
   const leadingAssignments = [];
   for (const word of words) {
-    const match = word.value.match(/^([A-Za-z_][A-Za-z0-9_]*)=/);
-    if (!match) break;
-    leadingAssignments.push({ name: match[1], start: word.start, end: word.end });
+    const name = assignmentName(command, word);
+    if (!name) break;
+    leadingAssignments.push({ name, start: word.start, end: word.end });
   }
-  return { words, leadingAssignments };
+  return { words, leadingAssignments, hasUnquotedControlOperator };
 }
 
 // src/workflows/df12-build-odw/host-review.ts
@@ -2361,10 +2382,10 @@ function gateLogRoot() {
   }
   return gateLogDirCache;
 }
-function createHostGateLogNamespace() {
-  const fs = process.getBuiltinModule("node:fs");
+async function createHostGateLogNamespace() {
+  const fs = process.getBuiltinModule("node:fs/promises");
   const path = process.getBuiltinModule("node:path");
-  return fs.mkdtempSync(path.join(gateLogRoot(), "run-"));
+  return fs.mkdtemp(path.join(gateLogRoot(), "run-"));
 }
 function hostGateLogPath(logNamespace, tag, roundLabel, index) {
   const slug = (value) => String(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
@@ -2439,7 +2460,7 @@ function makeHostReview(config, deps = {}) {
   }
   async function runHostCommitGates2(worktree, tag, roundLabel) {
     const results2 = [];
-    const logNamespace = createGateLogNamespace();
+    const logNamespace = await createGateLogNamespace();
     for (const [index, command] of commitGates.entries()) {
       hostGateMetrics.runs += 1;
       log(`[task ${tag}] host gate ${index + 1}/${commitGates.length} (${roundLabel}): ${command}`);
@@ -2467,12 +2488,14 @@ ${outcome.tail}`
     return new Promise((resolve) => {
       const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
       const openFlags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
-      const stream = fs.createWriteStream(logFile, { flags: openFlags, mode: 384 });
+      const stream = deps.createGateLogStream ? deps.createGateLogStream(logFile, { flags: openFlags, mode: 384 }) : fs.createWriteStream(logFile, { flags: openFlags, mode: 384 });
       const tail = [];
       let carry = "";
       let killed = false;
       let timedOut = false;
       let streamFailure = "";
+      let finishing = false;
+      let completeGate = null;
       let settled = false;
       const record = (chunk) => {
         if (!stream.write(chunk) && !killed) {
@@ -2488,14 +2511,27 @@ ${outcome.tail}`
         }
       };
       const finish = (ok, extraTail) => {
-        if (settled) return;
-        settled = true;
+        if (settled || finishing) return;
+        finishing = true;
         if (carry) {
           tail.push(carry);
           if (tail.length > TAIL_LINES) tail.shift();
         }
         if (extraTail) tail.push(extraTail);
-        const complete = () => resolve({ ok, killed, timedOut, tail: tail.slice(-TAIL_LINES).join("\n").trim() });
+        const complete = (error) => {
+          if (settled) return;
+          settled = true;
+          completeGate = null;
+          const finalFailure = streamFailure || (error ? `gate log write failed: ${error.message}` : "");
+          if (finalFailure && finalFailure !== extraTail) tail.push(finalFailure);
+          resolve({
+            ok: ok && !finalFailure,
+            killed,
+            timedOut,
+            tail: tail.slice(-TAIL_LINES).join("\n").trim()
+          });
+        };
+        completeGate = complete;
         if (stream.destroyed) complete();
         else stream.end(complete);
       };
@@ -2538,7 +2574,8 @@ ${outcome.tail}`
       };
       stream.on("error", (error) => {
         streamFailure = `gate log write failed: ${error.message}`;
-        terminateGate(false);
+        if (finishing) completeGate?.(error);
+        else terminateGate(false);
       });
       sigterm = setTimeout(() => {
         terminateGate(true);
@@ -2578,7 +2615,7 @@ ${outcome.tail}`
       };
     }
     csCheckMetrics.runs += 1;
-    const logFile = hostGateLogPath(createGateLogNamespace(), tag, `cs-${label}`, 0);
+    const logFile = hostGateLogPath(await createGateLogNamespace(), tag, `cs-${label}`, 0);
     log(`[task ${tag}] CodeScene check (${label}): ${csCheckCommand}`);
     const outcome = await streamGate(csCheckCommand, worktree, logFile);
     if (outcome.ok) return { clean: true, skipped: false, detail: "", logFile };
@@ -4045,7 +4082,7 @@ async function fillPool() {
 }
 function redactedCodeSceneCommand(command) {
   const tokens = tokenizeShellCommand(command);
-  if (!tokens) return "<redacted command>";
+  if (!tokens || tokens.hasUnquotedControlOperator) return "<redacted command>";
   let redacted = command;
   for (const assignment of tokens.leadingAssignments.toReversed()) {
     redacted = `${redacted.slice(0, assignment.start)}${assignment.name}=<redacted>${redacted.slice(assignment.end)}`;

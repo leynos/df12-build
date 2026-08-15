@@ -999,7 +999,7 @@ async function fillPool() {
  */
 function redactedCodeSceneCommand(command: string): string {
   const tokens = tokenizeShellCommand(command)
-  if (!tokens) return '<redacted command>'
+  if (!tokens || tokens.hasUnquotedControlOperator) return '<redacted command>'
   let redacted = command
   for (const assignment of tokens.leadingAssignments.toReversed()) {
     redacted = `${redacted.slice(0, assignment.start)}${assignment.name}=<redacted>${redacted.slice(assignment.end)}`

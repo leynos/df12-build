@@ -34,9 +34,9 @@ Read these before changing launch or workflow behaviour:
 
 The repository contains workflow scripts, skill documentation, docs, operator
 scripts, focused test suites, a project roadmap with ExecPlans, and a small
-validation `Makefile`. Development dependencies (esbuild, fast-check,
-bun-test-cucumber, LemmaScript, TypeScript, and Bun's type definitions) are
-managed with `bun` via `package.json`.
+validation `Makefile`. Development dependencies (`esbuild`, `fast-check`,
+`@aboviq/bun-test-cucumber`, `ajv`, `lemmascript`, `typescript`, `@types/bun`,
+`markdownlint-cli2`, and `typedoc`) are managed with `bun` via `package.json`.
 
 Relevant paths:
 
@@ -48,7 +48,9 @@ Relevant paths:
   `git-evidence.ts`, `recovery-decision.ts`, `recovery-discovery.ts`,
   `prompts.ts`, `write-preflight.ts`, `execplan-durability.ts`, `assessment.ts`,
   `remediation.ts`, `host-review.ts` (host-run CodeRabbit NDJSON
-  parsing/classification and the host commit gates), and `run-task.ts`, with
+  parsing/classification and the host commit gates), `shell-command.ts` (a
+  non-evaluating parser for configured shell-command words and assignment
+  spans), and `run-task.ts`, with
   the injected ODW primitives declared in `odw-globals.d.ts`. TypeScript is
   restricted to erasable syntax by compiler flags (`erasableSyntaxOnly`,
   `verbatimModuleSyntax`).
@@ -357,6 +359,14 @@ fail-closed) rather than only at the dual-review stage — closing the window
 where an intermediate red commit could persist across work items on the agent's
 `gatesGreen` claim alone.
 
+`streamGate` starts each command through `sh -c` with `spawn`. On POSIX it
+detaches the child into its own process group, so timeout or log-write failure
+handling sends `SIGTERM` and then `SIGKILL` to the group rather than leaving
+grandchildren behind; it falls back to signalling the direct child when group
+signalling is unavailable (including on Windows). The output stream is resumed
+before termination so a backpressured pipe cannot prevent the child from being
+reaped.
+
 `runCodeSceneCheck` (`csCheck`, default on) is a SECOND deterministic gate, run
 after the commit gates and before CodeRabbit at every gate point (each work
 item, each dual-review round, and the addendum lane). It runs `csCheckCommand`
@@ -371,6 +381,14 @@ absent. Test loaders and the simulation driver force `hostCommitGates: false`
 (fixture repos have no `Makefile`); pipeline coverage uses a scripted fake gate
 command, and the streaming path is covered by a module test with output past
 the old buffer ceiling.
+
+The shared `shell-command.ts` abstraction tokenizes the limited POSIX quoting,
+escaping, and nested-substitution forms needed here without evaluating the
+command. Host review uses it to identify the executable after leading
+environment assignments; the final result uses the preserved assignment spans
+to redact those values in the displayed CodeScene command while executing the
+original command unchanged. Malformed input fails closed rather than being
+interpreted by this parser.
 
 `make verify-modules` skips when Dafny is absent, so local runs stay friendly;
 CI must run `make verify-modules-strict`, which FAILS when Dafny is not on
@@ -555,6 +573,15 @@ not recurse into the schema literals:
 ```bash
 make docs-check
 ```
+
+`make markdownlint` is the separate Markdown gate. It runs the pinned
+`markdownlint-cli2` configuration over maintained Markdown and then refreshes
+the shared en-GB Oxford spelling configuration and checks prose with the
+pinned `typos` release. Keep prose and list items within 80 columns, code
+blocks within 120 columns, and leave tables and headings unwrapped. The
+TypeDoc gate has no percentage-coverage threshold: every included reflection
+required by `typedoc.json` must be documented, and any validation warning is an
+error.
 
 Do not use a live `odw run` as a routine gate. Run it only when the task
 explicitly asks for execution or smoke testing, because it can spawn agents and
