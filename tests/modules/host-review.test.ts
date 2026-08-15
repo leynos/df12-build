@@ -662,7 +662,10 @@ describe('runHostCommitGates streaming', () => {
     const dir = tmp('gate-stream-')
     // ~40MB of stdout would have tripped maxBuffer under execFile; streaming
     // must pass it through and still report green.
-    const { runHostCommitGates } = hostReview({ commitGates: ['yes x | head -c 40000000; echo; echo DONE-OK'] })
+    const { runHostCommitGates } = hostReview({
+      commitGates: ['yes x | head -c 40000000; echo; echo DONE-OK'],
+      commitGateTimeoutSeconds: 60,
+    })
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
     junk.push(result.results[0]?.logFile)
     expect(result.green).toBe(true)
@@ -720,4 +723,19 @@ describe('runHostCommitGates streaming', () => {
     expect(result.green).toBe(false)
     expect(result.detail).toMatch(/killed after the 2s gate timeout/)
   })
+
+  test('a timed-out gate kills a background writer in its process group', async () => {
+    const dir = tmp('gate-stream-descendant-')
+    const marker = path.join(dir, 'survived.txt')
+    const command = `(sleep 3; printf survived > ${JSON.stringify(marker)}) & while :; do :; done`
+    const { runHostCommitGates } = hostReview({ commitGates: [command], commitGateTimeoutSeconds: 1 })
+
+    const result = await runHostCommitGates(dir, '1.2.3', 'r1')
+    if (result.results[0]?.logFile) junk.push(result.results[0].logFile)
+
+    expect(result.green).toBe(false)
+    expect(result.detail).toMatch(/killed after the 1s gate timeout/)
+    await new Promise((resolve) => setTimeout(resolve, 2500))
+    expect(existsSync(marker)).toBe(false)
+  }, 10000)
 })

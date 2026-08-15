@@ -1,19 +1,22 @@
-// Regression tests for the zero-tolerance TypeDoc documentation gate. Each
-// case runs the repository-pinned executable against an isolated fixture so
-// failures prove TypeDoc validation behaviour rather than repository content.
+/**
+ * @file Regression tests for the zero-tolerance TypeDoc gate. Each isolated
+ * fixture proves TypeDoc validation behaviour rather than repository content.
+ */
+import path from 'node:path'
 import { describe, expect, test } from 'bun:test'
+import { fileURLToPath } from 'node:url'
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 const REPO = fileURLToPath(new URL('../../', import.meta.url))
 const TYPEDOC = path.join(REPO, 'node_modules', '.bin', 'typedoc')
+const TYPEDOC_SPAWN_TIMEOUT_MS = 15_000
 const TYPEDOC_OPTIONS = JSON.parse(readFileSync(path.join(REPO, 'typedoc.json'), 'utf8')) as Record<string, unknown>
-const TYPEDOC_TEST_TIMEOUT_MS = 15_000
+const TYPEDOC_TEST_TIMEOUT_MS = TYPEDOC_SPAWN_TIMEOUT_MS + 5_000
 
 interface TypeDocRun {
   status: number
+  exitedDueToTimeout: boolean
   output: string
   entries: string[]
 }
@@ -53,10 +56,11 @@ function runTypeDocFixture(source: string): TypeDocRun {
       cwd: dir,
       stdout: 'pipe',
       stderr: 'pipe',
-      timeout: TYPEDOC_TEST_TIMEOUT_MS,
+      timeout: TYPEDOC_SPAWN_TIMEOUT_MS,
     })
     return {
       status: result.exitCode,
+      exitedDueToTimeout: result.exitedDueToTimeout ?? false,
       output: `${result.stdout.toString()}\n${result.stderr.toString()}`,
       entries: readdirSync(dir, { recursive: true }).map(String).sort(),
     }
@@ -106,6 +110,7 @@ describe('zero-tolerance TypeDoc gate', () => {
   test('a documented module and exported function pass without emitting artefacts', () => {
     const result = runTypeDocFixture(DOCUMENTED_MODULE)
 
+    expect(result.exitedDueToTimeout).toBe(false)
     expect(result.status).toBe(0)
     expect(result.entries).toEqual([
       'src',
@@ -123,6 +128,7 @@ describe('zero-tolerance TypeDoc gate', () => {
     ).replace('documentedFunction', 'undocumentedFunction')
     const result = runTypeDocFixture(source)
 
+    expect(result.exitedDueToTimeout).toBe(false)
     expect(result.status).not.toBe(0)
     expect(result.output).toMatch(/undocumentedFunction.*does not have any documentation/i)
   }, TYPEDOC_TEST_TIMEOUT_MS)
@@ -134,6 +140,7 @@ describe('zero-tolerance TypeDoc gate', () => {
     )
     const result = runTypeDocFixture(source)
 
+    expect(result.exitedDueToTimeout).toBe(false)
     expect(result.status).not.toBe(0)
     expect(result.output).toMatch(/fixture.*\(Module\).*does not have any documentation/i)
   }, TYPEDOC_TEST_TIMEOUT_MS)

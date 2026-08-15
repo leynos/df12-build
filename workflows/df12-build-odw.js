@@ -1305,6 +1305,97 @@ function makeConfig(rawArgs) {
   };
 }
 
+// src/workflows/df12-build-odw/auth-preflight.ts
+function boundedTail(value, limit = 2e3) {
+  const text = String(value || "").trim();
+  return text.length <= limit ? text : text.slice(-limit);
+}
+function statusDetail(status) {
+  return boundedTail([status.stdout, status.stderr, status.message].filter(Boolean).join("\n"));
+}
+function redactedDakarProbeCommand(invocation) {
+  const executable = invocation[0] || "dakar-review";
+  const optionNames = invocation.slice(1).filter((argument) => /^--[A-Za-z][A-Za-z0-9-]*$/.test(argument)).slice(0, 12);
+  return [executable, ...optionNames, "--version"].join(" ");
+}
+function makeAuthPreflight(config, deps) {
+  return async function runAuthPreflight2() {
+    if (!config.enabled) return [];
+    deps.phase("Auth Preflight");
+    const failures = [];
+    const codex = await deps.exec("codex", ["login", "status"]);
+    const codexOutput = statusDetail(codex);
+    if (!codex.ok || authFailureDetail(codexOutput)) {
+      failures.push({
+        tool: "codex",
+        command: "codex login status",
+        detail: authFailureDetail(codexOutput) || codexOutput || "Codex auth status check failed"
+      });
+    }
+    if (config.requiredAdapters.has("claude")) {
+      const claude = await deps.exec("claude", ["auth", "status"]);
+      const claudeOutput = statusDetail(claude);
+      if (!claude.ok || authFailureDetail(claudeOutput)) {
+        failures.push({
+          tool: "claude",
+          command: "claude auth status",
+          detail: authFailureDetail(claudeOutput) || claudeOutput || "Claude auth status check failed"
+        });
+      }
+    }
+    if (config.requireHostReviewAuth) {
+      if (config.reviewTool === "dakar") {
+        const dakarExecutable = config.dakarInvocation[0] || "dakar-review";
+        const dakar = await deps.exec(dakarExecutable, [...config.dakarInvocation.slice(1), "--version"]);
+        const dakarOutput = statusDetail(dakar);
+        if (!dakar.ok) {
+          deps.recordHostReviewAuthFailure();
+          failures.push({
+            tool: "dakar",
+            command: redactedDakarProbeCommand(config.dakarInvocation),
+            detail: dakarOutput || `${dakarExecutable} is unavailable or its version probe failed`
+          });
+        }
+        const pi = await deps.exec("pi", ["--version"]);
+        const piOutput = statusDetail(pi);
+        if (!pi.ok) {
+          deps.recordHostReviewAuthFailure();
+          failures.push({ tool: "dakar", command: "pi --version", detail: piOutput || "pi is unavailable or its version probe failed" });
+        }
+        const openaiKey = deps.environment.get("OPENAI_API_KEY");
+        if (typeof openaiKey !== "string" || openaiKey.trim() === "") {
+          deps.recordHostReviewAuthFailure();
+          failures.push({
+            tool: "dakar",
+            command: "OPENAI_API_KEY (env)",
+            detail: "OPENAI_API_KEY is unset or empty; the Dakar host review needs it to reach the OpenAI-backed reviewer"
+          });
+        }
+      } else {
+        const coderabbit = await deps.exec("coderabbit", ["auth", "status"]);
+        const coderabbitOutput = statusDetail(coderabbit);
+        if (!coderabbit.ok || authFailureDetail(coderabbitOutput)) {
+          deps.recordHostReviewAuthFailure();
+          failures.push({
+            tool: "coderabbit",
+            command: "coderabbit auth status",
+            detail: authFailureDetail(coderabbitOutput) || coderabbitOutput || "CodeRabbit auth status check failed"
+          });
+        }
+      }
+    }
+    if (failures.length) {
+      deps.log(`[auth] fatal preflight failure: ${failures.map((failure) => `${failure.tool}: ${failure.detail.split(/\r?\n/)[0]}`).join("; ")}`);
+    } else {
+      const passed = ["Codex"];
+      if (config.requiredAdapters.has("claude")) passed.push("Claude");
+      if (config.requireHostReviewAuth) passed.push(config.reviewTool === "dakar" ? "Dakar (dakar-review, pi, OPENAI_API_KEY)" : "CodeRabbit");
+      deps.log(`[auth] preflight passed for ${passed.join(", ")}`);
+    }
+    return failures;
+  };
+}
+
 // src/workflows/df12-build-odw/prompts.ts
 function encodeUntrustedLine(value) {
   return JSON.stringify(value).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
@@ -2394,7 +2485,7 @@ function hostReviewDeferral(review) {
     outcome: review.outcome,
     errorCategory: review.errorCategory,
     attempts: review.attempts,
-    detail: boundedTail(review.detail)
+    detail: boundedTail2(review.detail)
   };
 }
 var DAKAR_SEVERITY_MAP = {
@@ -2405,7 +2496,7 @@ var DAKAR_SEVERITY_MAP = {
 };
 var DAKAR_SEVERITIES = new Set(Object.keys(DAKAR_SEVERITY_MAP));
 var DAKAR_REQUIRED_FINDING_FIELDS = ["path", "title", "detail", "evidence"];
-function boundedTail(text, limit = 2e3) {
+function boundedTail2(text, limit = 2e3) {
   const value = String(text || "");
   return value.length > limit ? value.slice(-limit) : value;
 }
@@ -2473,27 +2564,27 @@ function validateChangesRequestedFindings(raw) {
     if (finding === null || typeof finding !== "object" || Array.isArray(finding)) {
       return {
         ok: false,
-        detail: boundedTail(`Dakar returned a malformed finding at index ${index}; expected an object`, 2e3)
+        detail: boundedTail2(`Dakar returned a malformed finding at index ${index}; expected an object`, 2e3)
       };
     }
     const item = finding;
     if (typeof item.severity !== "string" || !DAKAR_SEVERITIES.has(item.severity.toLowerCase())) {
       return {
         ok: false,
-        detail: boundedTail(`Dakar returned an invalid finding at index ${index}; unsupported severity`, 2e3)
+        detail: boundedTail2(`Dakar returned an invalid finding at index ${index}; unsupported severity`, 2e3)
       };
     }
     const invalidField = DAKAR_REQUIRED_FINDING_FIELDS.find((field) => typeof item[field] !== "string");
     if (invalidField) {
       return {
         ok: false,
-        detail: boundedTail(`Dakar returned an invalid finding at index ${index}; ${invalidField} must be a string`, 2e3)
+        detail: boundedTail2(`Dakar returned an invalid finding at index ${index}; ${invalidField} must be a string`, 2e3)
       };
     }
     if (item.line !== void 0 && (!Number.isInteger(item.line) || Number(item.line) < 1)) {
       return {
         ok: false,
-        detail: boundedTail(`Dakar returned an invalid finding at index ${index}; line must be a positive integer`, 2e3)
+        detail: boundedTail2(`Dakar returned an invalid finding at index ${index}; line must be a positive integer`, 2e3)
       };
     }
   }
@@ -2509,15 +2600,15 @@ function classifyDakarReview(execResult) {
   const category = (fallback) => execResult.killed ? "timeout" : fallback;
   const doc = parseDakarDocument(execResult.stdout);
   if (!doc) {
-    const detail = boundedTail([execResult.stderr, execResult.message].filter(Boolean).join("\n")) || "dakar-review produced no parsable JSON output";
+    const detail = boundedTail2([execResult.stderr, execResult.message].filter(Boolean).join("\n")) || "dakar-review produced no parsable JSON output";
     return { outcome: "error", findings: [], detail, errorCategory: category("invalid-output") };
   }
   if (doc.ok === false) {
-    const stage = boundedTail(doc.stage ?? "unknown", 200);
+    const stage = boundedTail2(doc.stage ?? "unknown", 200);
     if (String(doc.stage) === "deferred") {
-      return { outcome: "rate-limited", findings: [], detail: `Dakar review deferred (stage: ${stage}) \u2014 ${boundedTail(doc.error || "no detail")}`, errorCategory: category("deferred") };
+      return { outcome: "rate-limited", findings: [], detail: `Dakar review deferred (stage: ${stage}) \u2014 ${boundedTail2(doc.error || "no detail")}`, errorCategory: category("deferred") };
     }
-    return { outcome: "error", findings: [], detail: `stage: ${stage} \u2014 ${boundedTail(doc.error || "no detail")}`, errorCategory: category("execution") };
+    return { outcome: "error", findings: [], detail: `stage: ${stage} \u2014 ${boundedTail2(doc.error || "no detail")}`, errorCategory: category("execution") };
   }
   if (doc.ok === true) {
     if (doc.skipped === true || doc.verdict === "pass") {
@@ -2531,7 +2622,7 @@ function classifyDakarReview(execResult) {
       return { outcome: "findings", findings: validation.findings.map(mapDakarFinding), detail: "", errorCategory: category("none") };
     }
   }
-  return { outcome: "error", findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail(doc.verdict ?? "none", 200)})`, errorCategory: category("invalid-output") };
+  return { outcome: "error", findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail2(doc.verdict ?? "none", 200)})`, errorCategory: category("invalid-output") };
 }
 function parseCoderabbitAgentOutput(stdout) {
   const events = [];
@@ -2572,7 +2663,7 @@ async function hostSleepMinutes(minutes) {
   await new Promise((resolve) => setTimeout(resolve, minutes * 6e4));
 }
 function reviewBlockingItems(reviewer, findings) {
-  const name = boundedTail(reviewer, 40) || "host reviewer";
+  const name = boundedTail2(reviewer, 40) || "host reviewer";
   return (findings || []).filter((finding) => CODERABBIT_BLOCKING_SEVERITIES.has(String(finding.severity || "").toLowerCase())).map((finding) => `${name} (${finding.severity}) ${finding.fileName || "unknown file"}: ${String(finding.comment || finding.codegenInstructions || "see the recorded suggestions").slice(0, 500)}`);
 }
 var hostReviewMetrics = {
@@ -2685,7 +2776,7 @@ function makeHostReview(config) {
     const outcome = classifyCoderabbitOutcome(result, parsed);
     const detail = outcome === "clean" || outcome === "findings" ? "" : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join("; ") || "coderabbit produced no parsable outcome").trim();
     const errorCategory = result.killed ? "timeout" : outcome === "rate-limited" ? "deferred" : outcome === "auth" ? "auth" : outcome === "error" ? parsed.error || parsed.complete ? "execution" : "invalid-output" : "none";
-    return { outcome, findings: parsed.findings, detail: boundedTail(detail), errorCategory };
+    return { outcome, findings: parsed.findings, detail: boundedTail2(detail), errorCategory };
   }
   async function runDakarAttempt(worktree, exec, deps) {
     const fs = process.getBuiltinModule("node:fs");
@@ -2702,7 +2793,7 @@ function makeHostReview(config) {
       return {
         outcome: "error",
         findings: [],
-        detail: boundedTail(error?.message || String(error)),
+        detail: boundedTail2(error?.message || String(error)),
         errorCategory: "execution"
       };
     }
@@ -2727,7 +2818,7 @@ function makeHostReview(config) {
       try {
         stateRoots.remove(stateRoot, { recursive: true, force: true });
       } catch (error) {
-        const detail = boundedTail(error?.message || String(error), 500);
+        const detail = boundedTail2(error?.message || String(error), 500);
         log(`[Dakar] could not remove temporary state root: ${detail}`);
       }
     }
@@ -2738,7 +2829,7 @@ function makeHostReview(config) {
     const nowMs = deps.nowMs || (() => Number(process.hrtime.bigint() / 1000000n));
     const reviewer = reviewTool;
     const reviewerName = reviewer === "dakar" ? "Dakar" : "CodeRabbit";
-    const boundedLabel = boundedTail(label, 120);
+    const boundedLabel = boundedTail2(label, 120);
     const startedMs = nowMs();
     let terminalAttempt = 1;
     try {
@@ -2759,7 +2850,7 @@ function makeHostReview(config) {
           elapsedMs: Math.max(0, Math.trunc(nowMs() - startedMs)),
           errorCategory: single.errorCategory,
           findings: single.findings,
-          detail: boundedTail(single.detail)
+          detail: boundedTail2(single.detail)
         };
         hostReviewMetrics.runs += 1;
         hostReviewMetrics.retries += attempt - 1;
@@ -2805,8 +2896,8 @@ function makeHostReview(config) {
 `, "utf8");
       } catch (error) {
         hostReviewMetrics.sinkFailures += 1;
-        hostReviewMetrics.sinkError = boundedTail(error?.message || String(error), 500);
-        log(`[${boundedTail(label, 120)}] could not append ${review.reviewer} host-review findings to ${findingsFile}: ${hostReviewMetrics.sinkError}`);
+        hostReviewMetrics.sinkError = boundedTail2(error?.message || String(error), 500);
+        log(`[${boundedTail2(label, 120)}] could not append ${review.reviewer} host-review findings to ${findingsFile}: ${hostReviewMetrics.sinkError}`);
       }
     };
     const pending = findingsSinkTail.then(append, append);
@@ -2853,6 +2944,9 @@ ${outcome.tail}`
       const tail = [];
       let carry = "";
       let killed = false;
+      let sigterm;
+      let sigkill;
+      let forcedSettle;
       let settled = false;
       const record = (chunk) => {
         if (!stream.write(chunk) && !killed) {
@@ -2867,7 +2961,7 @@ ${outcome.tail}`
           if (tail.length > TAIL_LINES) tail.shift();
         }
       };
-      const finish = (ok, extraTail) => {
+      const finish = (ok, extraTail, forceResolve = false) => {
         if (settled) return;
         settled = true;
         if (carry) {
@@ -2875,29 +2969,50 @@ ${outcome.tail}`
           if (tail.length > TAIL_LINES) tail.shift();
         }
         if (extraTail) tail.push(extraTail);
-        stream.end(() => resolve({ ok, killed, tail: tail.slice(-TAIL_LINES).join("\n").trim() }));
+        const settle = () => resolve({ ok, killed, tail: tail.slice(-TAIL_LINES).join("\n").trim() });
+        stream.end(settle);
+        if (forceResolve) setTimeout(settle, 100).unref();
       };
       stream.on("error", (error) => finish(false, `gate log write failed: ${error.message}`));
-      const child = spawn("sh", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn("sh", ["-c", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
       stream.on("drain", () => {
         child.stdout?.resume();
         child.stderr?.resume();
       });
       child.stdout.on("data", record);
       child.stderr.on("data", record);
-      const sigterm = setTimeout(() => {
+      const terminateProcessGroup = (signal) => {
+        if (typeof child.pid === "number") {
+          try {
+            process.kill(-child.pid, signal);
+            return;
+          } catch {
+          }
+        }
+        child.kill(signal);
+      };
+      sigterm = setTimeout(() => {
         killed = true;
         child.stdout?.resume();
         child.stderr?.resume();
-        child.kill("SIGTERM");
-        setTimeout(() => child.kill("SIGKILL"), 2e3).unref();
+        terminateProcessGroup("SIGTERM");
+        sigkill = setTimeout(() => {
+          terminateProcessGroup("SIGKILL");
+          forcedSettle = setTimeout(() => finish(false, "gate process group did not close after SIGKILL", true), 1e3);
+          forcedSettle.unref();
+        }, 2e3);
+        sigkill.unref();
       }, commitGateTimeoutSeconds * 1e3);
       child.on("close", (code) => {
-        clearTimeout(sigterm);
+        if (sigterm) clearTimeout(sigterm);
+        if (sigkill) clearTimeout(sigkill);
+        if (forcedSettle) clearTimeout(forcedSettle);
         finish(code === 0 && !killed);
       });
       child.on("error", (error) => {
-        clearTimeout(sigterm);
+        if (sigterm) clearTimeout(sigterm);
+        if (sigkill) clearTimeout(sigkill);
+        if (forcedSettle) clearTimeout(forcedSettle);
         finish(false, `spawn failed: ${error.message}`);
       });
     });
@@ -3834,7 +3949,11 @@ var HOST_REVIEW_BETWEEN_WORK_ITEMS = CODERABBIT_BETWEEN_WORK_ITEMS;
 var HOST_REVIEW_ATTEMPTS = CODERABBIT_ATTEMPTS;
 var HOST_REVIEW_BACKOFF_MINUTES = CODERABBIT_BACKOFF_MINUTES;
 var HOST_REVIEW_FINDINGS_FILE = CODERABBIT_FINDINGS_FILE;
-var DAKAR_INVOCATION = tokenizeShellCommand(DAKAR_COMMAND)?.words.map((word) => word.value) || [];
+var parsedDakarInvocation = tokenizeShellCommand(DAKAR_COMMAND);
+if (!parsedDakarInvocation || parsedDakarInvocation.words.length === 0) {
+  throw new Error("Invalid dakarCommand: expected a non-empty command with balanced shell quoting");
+}
+var DAKAR_INVOCATION = parsedDakarInvocation.words.map((word) => word.value);
 var hostReview = makeHostReview({
   base: BASE,
   reviewTool: REVIEW_TOOL,
@@ -3857,87 +3976,24 @@ var {
   runHostCommitGates,
   runCodeSceneCheck
 } = hostReview;
-async function runAuthPreflight() {
-  if (!AUTH_PREFLIGHT) return [];
-  phase("Auth Preflight");
-  const failures = [];
-  const codex = await execFileStatus("codex", ["login", "status"]);
-  const codexOutput = [codex.stdout, codex.stderr, codex.message].filter(Boolean).join("\n");
-  if (!codex.ok || authFailureDetail(codexOutput)) {
-    failures.push({
-      tool: "codex",
-      command: "codex login status",
-      detail: authFailureDetail(codexOutput) || codexOutput.trim() || "Codex auth status check failed"
-    });
-  }
-  if (AUTH_REQUIRED_ADAPTERS.has("claude")) {
-    const claude = await execFileStatus("claude", ["auth", "status"]);
-    const claudeOutput = [claude.stdout, claude.stderr, claude.message].filter(Boolean).join("\n");
-    if (!claude.ok || authFailureDetail(claudeOutput)) {
-      failures.push({
-        tool: "claude",
-        command: "claude auth status",
-        detail: authFailureDetail(claudeOutput) || claudeOutput.trim() || "Claude auth status check failed"
-      });
+var runAuthPreflight = makeAuthPreflight(
+  {
+    enabled: AUTH_PREFLIGHT,
+    requireHostReviewAuth: REQUIRE_CODERABBIT_AUTH,
+    requiredAdapters: AUTH_REQUIRED_ADAPTERS,
+    reviewTool: REVIEW_TOOL,
+    dakarInvocation: DAKAR_INVOCATION
+  },
+  {
+    exec: execFileStatus,
+    environment: { get: (name) => process.env[name] },
+    phase,
+    log,
+    recordHostReviewAuthFailure: () => {
+      hostReviewMetrics.authFailures += 1;
     }
   }
-  if (REQUIRE_CODERABBIT_AUTH) {
-    if (REVIEW_TOOL === "dakar") {
-      const dakarExecutable = DAKAR_INVOCATION[0] || "dakar-review";
-      const dakarArgs = [...DAKAR_INVOCATION.slice(1), "--version"];
-      const dakarProbeCommand = [...DAKAR_INVOCATION, "--version"].join(" ").slice(0, 200) || "dakar-review --version";
-      const dakar = await execFileStatus(dakarExecutable, dakarArgs);
-      const dakarOutput = [dakar.stdout, dakar.stderr, dakar.message].filter(Boolean).join("\n").trim().slice(-2e3);
-      if (!dakar.ok) {
-        hostReviewMetrics.authFailures += 1;
-        failures.push({
-          tool: "dakar",
-          command: dakarProbeCommand,
-          detail: dakarOutput || `${dakarExecutable} is unavailable or its version probe failed`
-        });
-      }
-      const pi = await execFileStatus("pi", ["--version"]);
-      const piOutput = [pi.stdout, pi.stderr, pi.message].filter(Boolean).join("\n").trim().slice(-2e3);
-      if (!pi.ok) {
-        hostReviewMetrics.authFailures += 1;
-        failures.push({
-          tool: "dakar",
-          command: "pi --version",
-          detail: piOutput || "pi is unavailable or its version probe failed"
-        });
-      }
-      const openaiKey = process.env.OPENAI_API_KEY;
-      if (typeof openaiKey !== "string" || openaiKey.trim() === "") {
-        hostReviewMetrics.authFailures += 1;
-        failures.push({
-          tool: "dakar",
-          command: "OPENAI_API_KEY (env)",
-          detail: "OPENAI_API_KEY is unset or empty; the Dakar host review needs it to reach the OpenAI-backed reviewer"
-        });
-      }
-    } else {
-      const coderabbit = await execFileStatus("coderabbit", ["auth", "status"]);
-      const coderabbitOutput = [coderabbit.stdout, coderabbit.stderr, coderabbit.message].filter(Boolean).join("\n");
-      if (!coderabbit.ok || authFailureDetail(coderabbitOutput)) {
-        hostReviewMetrics.authFailures += 1;
-        failures.push({
-          tool: "coderabbit",
-          command: "coderabbit auth status",
-          detail: authFailureDetail(coderabbitOutput) || coderabbitOutput.trim() || "CodeRabbit auth status check failed"
-        });
-      }
-    }
-  }
-  if (failures.length) {
-    log(`[auth] fatal preflight failure: ${failures.map((failure) => `${failure.tool}: ${failure.detail.split(/\r?\n/)[0]}`).join("; ")}`);
-  } else {
-    const passed = ["Codex"];
-    if (AUTH_REQUIRED_ADAPTERS.has("claude")) passed.push("Claude");
-    if (REQUIRE_CODERABBIT_AUTH) passed.push(REVIEW_TOOL === "dakar" ? "Dakar (dakar-review, pi, OPENAI_API_KEY)" : "CodeRabbit");
-    log(`[auth] preflight passed for ${passed.join(", ")}`);
-  }
-  return failures;
-}
+);
 function slugForTask(task) {
   return `roadmap-${roadmapIdSlug(task.id)}${task.isAddendum ? "-addendum" : ""}`;
 }

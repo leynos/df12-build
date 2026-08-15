@@ -159,7 +159,7 @@ function prepareSingleWorkItem(worktree: string) {
 function completeSingleWorkItem(worktree: string) {
   writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: COMPLETE\n\n## Progress\n\n- [x] WI-1: only\n')
   git(worktree, 'commit', '-aqm', 'Complete WI-1')
-  return { ok: true, gatesGreen: true, workItemsCompleted: 1, workItemsTotal: 1, commits: ['c1'], coderabbitRuns: 0, openIssues: [], summary: 'item done' }
+  return { ok: true, gatesGreen: true, workItemsCompleted: 1, workItemsTotal: 1, commits: ['c1'], hostReviewRuns: 0, openIssues: [], summary: 'item done' }
 }
 
 // The five booleans the host requires before a task counts as integrated. The

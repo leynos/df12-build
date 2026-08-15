@@ -59,6 +59,7 @@ import {
   syntheticRecoveryImpl,
 } from './recovery-discovery.ts'
 import { makeConfig } from './config.ts'
+import { makeAuthPreflight } from './auth-preflight.ts'
 import { makePrompts, worktreeSafetyNet } from './prompts.ts'
 import { makeWritePreflight } from './write-preflight.ts'
 import {
@@ -333,7 +334,11 @@ const HOST_REVIEW_BACKOFF_MINUTES = CODERABBIT_BACKOFF_MINUTES
 const HOST_REVIEW_FINDINGS_FILE = CODERABBIT_FINDINGS_FILE
 // Parse the operator-configured command once so preflight probes and review
 // execution preserve the same quoted fixed arguments.
-const DAKAR_INVOCATION = tokenizeShellCommand(DAKAR_COMMAND)?.words.map((word) => word.value) || []
+const parsedDakarInvocation = tokenizeShellCommand(DAKAR_COMMAND)
+if (!parsedDakarInvocation || parsedDakarInvocation.words.length === 0) {
+  throw new Error('Invalid dakarCommand: expected a non-empty command with balanced shell quoting')
+}
+const DAKAR_INVOCATION = parsedDakarInvocation.words.map((word) => word.value)
 const hostReview = makeHostReview({
   base: BASE,
   reviewTool: REVIEW_TOOL,
@@ -357,100 +362,26 @@ const {
   runCodeSceneCheck,
 } = hostReview
 
+const runAuthPreflight = makeAuthPreflight(
+  {
+    enabled: AUTH_PREFLIGHT,
+    requireHostReviewAuth: REQUIRE_CODERABBIT_AUTH,
+    requiredAdapters: AUTH_REQUIRED_ADAPTERS,
+    reviewTool: REVIEW_TOOL,
+    dakarInvocation: DAKAR_INVOCATION,
+  },
+  {
+    exec: execFileStatus,
+    environment: { get: (name) => process.env[name] },
+    phase,
+    log,
+    recordHostReviewAuthFailure: () => { hostReviewMetrics.authFailures += 1 },
+  },
+)
+
 // ---------------------------------------------------------------------------
 // Deterministic roadmap selection
 // ---------------------------------------------------------------------------
-async function runAuthPreflight() {
-  if (!AUTH_PREFLIGHT) return []
-  phase('Auth Preflight')
-  const failures: Array<{ tool: string; command: string; detail: string }> = []
-
-  const codex = await execFileStatus('codex', ['login', 'status'])
-  const codexOutput = [codex.stdout, codex.stderr, codex.message].filter(Boolean).join('\n')
-  if (!codex.ok || authFailureDetail(codexOutput)) {
-    failures.push({
-      tool: 'codex',
-      command: 'codex login status',
-      detail: authFailureDetail(codexOutput) || codexOutput.trim() || 'Codex auth status check failed',
-    })
-  }
-
-  if (AUTH_REQUIRED_ADAPTERS.has('claude')) {
-    const claude = await execFileStatus('claude', ['auth', 'status'])
-    const claudeOutput = [claude.stdout, claude.stderr, claude.message].filter(Boolean).join('\n')
-    if (!claude.ok || authFailureDetail(claudeOutput)) {
-      failures.push({
-        tool: 'claude',
-        command: 'claude auth status',
-        detail: authFailureDetail(claudeOutput) || claudeOutput.trim() || 'Claude auth status check failed',
-      })
-    }
-  }
-
-  // The host review preflight is gated by the same REQUIRE_CODERABBIT_AUTH flag
-  // regardless of tool (the flag name is CodeRabbit-specific for historical
-  // reasons; it means "the run needs a working host reviewer"). Dakar reviews
-  // via `pi`/OpenAI, so its preflight is a host check that OPENAI_API_KEY is a
-  // non-empty string rather than a CLI auth-status probe.
-  if (REQUIRE_CODERABBIT_AUTH) {
-    if (REVIEW_TOOL === 'dakar') {
-      const dakarExecutable = DAKAR_INVOCATION[0] || 'dakar-review'
-      const dakarArgs = [...DAKAR_INVOCATION.slice(1), '--version']
-      const dakarProbeCommand = [...DAKAR_INVOCATION, '--version'].join(' ').slice(0, 200) || 'dakar-review --version'
-      const dakar = await execFileStatus(dakarExecutable, dakarArgs)
-      const dakarOutput = [dakar.stdout, dakar.stderr, dakar.message].filter(Boolean).join('\n').trim().slice(-2_000)
-      if (!dakar.ok) {
-        hostReviewMetrics.authFailures += 1
-        failures.push({
-          tool: 'dakar',
-          command: dakarProbeCommand,
-          detail: dakarOutput || `${dakarExecutable} is unavailable or its version probe failed`,
-        })
-      }
-      const pi = await execFileStatus('pi', ['--version'])
-      const piOutput = [pi.stdout, pi.stderr, pi.message].filter(Boolean).join('\n').trim().slice(-2_000)
-      if (!pi.ok) {
-        hostReviewMetrics.authFailures += 1
-        failures.push({
-          tool: 'dakar',
-          command: 'pi --version',
-          detail: piOutput || 'pi is unavailable or its version probe failed',
-        })
-      }
-      const openaiKey = process.env.OPENAI_API_KEY
-      if (typeof openaiKey !== 'string' || openaiKey.trim() === '') {
-        hostReviewMetrics.authFailures += 1
-        failures.push({
-          tool: 'dakar',
-          command: 'OPENAI_API_KEY (env)',
-          detail: 'OPENAI_API_KEY is unset or empty; the Dakar host review needs it to reach the OpenAI-backed reviewer',
-        })
-      }
-    } else {
-      const coderabbit = await execFileStatus('coderabbit', ['auth', 'status'])
-      const coderabbitOutput = [coderabbit.stdout, coderabbit.stderr, coderabbit.message].filter(Boolean).join('\n')
-      if (!coderabbit.ok || authFailureDetail(coderabbitOutput)) {
-        hostReviewMetrics.authFailures += 1
-        failures.push({
-          tool: 'coderabbit',
-          command: 'coderabbit auth status',
-          detail: authFailureDetail(coderabbitOutput) || coderabbitOutput.trim() || 'CodeRabbit auth status check failed',
-        })
-      }
-    }
-  }
-
-  if (failures.length) {
-    log(`[auth] fatal preflight failure: ${failures.map((failure) => `${failure.tool}: ${failure.detail.split(/\r?\n/)[0]}`).join('; ')}`)
-  } else {
-    const passed = ['Codex']
-    if (AUTH_REQUIRED_ADAPTERS.has('claude')) passed.push('Claude')
-    if (REQUIRE_CODERABBIT_AUTH) passed.push(REVIEW_TOOL === 'dakar' ? 'Dakar (dakar-review, pi, OPENAI_API_KEY)' : 'CodeRabbit')
-    log(`[auth] preflight passed for ${passed.join(', ')}`)
-  }
-
-  return failures
-}
 
 function slugForTask(task: SelectedTask): string {
   return `roadmap-${roadmapIdSlug(task.id)}${task.isAddendum ? '-addendum' : ''}`

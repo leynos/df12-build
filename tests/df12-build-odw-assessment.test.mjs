@@ -806,6 +806,13 @@ async function runPreflightWithFakes(args, fakes) {
   }
 }
 
+test('an invalid Dakar command fails before preflight can select a fallback executable', async () => {
+  await assert.rejects(
+    loadAssessmentSurface({ dakarCommand: "dakar-review 'unterminated" }),
+    /Invalid dakarCommand: expected a non-empty command with balanced shell quoting/,
+  )
+})
+
 test('auth preflight consults Claude only when a stage routes to the claude adapter', async () => {
   // reviewTool: 'coderabbit' keeps the CodeRabbit auth-status probe in the
   // preflight; the Dakar default probes OPENAI_API_KEY instead (covered below).

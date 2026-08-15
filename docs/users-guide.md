@@ -220,8 +220,9 @@ they never enter a diff, trip `workflow-freshness`, or affect a gate:
 - **Review findings** — set `coderabbitFindingsFile` (in `args.json`) to a
   sidecar JSONL path, e.g. `"$SIDECAR/coderabbit-findings.jsonl"`. Every parsed
   finding (timestamp, task label, severity, file, comment, codegen
-  instructions, suggestion count) is appended best-effort: a bad path or full
-  disk degrades logging with a warning and never fails a task. In the default
+  instructions, suggestion count) is appended as a best-effort serialized JSONL
+  write: a bad path or full disk degrades logging with a warning, reports the
+  sink failure through `hostReview`, and never fails a task. In the default
   Dakar mode, the sink carries Dakar findings with severities mapped onto the
   CodeRabbit scale (`critical`/`high` become `critical`/`major`); the field name
   keeps its historical spelling.
@@ -511,18 +512,18 @@ Common arguments:
   this flag has no effect in the default mode.
 - `hostGatesBetweenWorkItems`: when `true` (the default), and when both
   `hostCommitGates` and `perWorkItemBuild` are on, the host re-runs the commit
-  gates after each committed work item — before the between-item CodeRabbit
-  review — so a committed work item whose gates are actually red is caught at
+  gates after each committed work item — before the between-item selected host
+  reviewer — so a committed work item whose gates are actually red is caught at
   the item boundary instead of only at the dual-review stage. A red gate drives
   a bounded fix loop; if it cannot be made green the work item fails. Set
   `false` to verify gates only at the dual-review boundary (cheaper: one gate
   run per review round rather than one per work item).
 - `csCheck`: when `true` (the default), the host runs a CodeScene code-health
   check on the committed changed files as a deterministic gate AFTER the commit
-  gates and BEFORE CodeRabbit (both free checks precede the quota-limited
-  CodeRabbit and the token-spending reviewer agents). A regression drives a
-  bounded fix round; the build agent clears it by refactoring or, only where
-  refactoring would be deleterious, suppresses the specific smell with a
+  gates and BEFORE the selected host reviewer (both free checks precede the
+  selected host reviewer and the token-spending reviewer agents). A regression
+  drives a bounded fix round; the build agent clears it by refactoring or, only
+  where refactoring would be deleterious, suppresses the specific smell with a
   justified `@codescene(disable:"...")` comment. The check skips gracefully
   only when its binary is absent from `PATH`, like `make verify-modules` without
   Dafny; an availability-probe fault is reported as a failed check instead of
@@ -656,6 +657,15 @@ Example `args.json`:
   "auditEffort": "medium"
 }
 ```
+
+
+## Default Dakar host review
+
+Dakar is the default host reviewer and always runs host-side. In each
+dual-review round, the host runs the deterministic commit gates, then CodeScene,
+then Dakar, and only then dispatches the reviewer agents. Set `reviewTool` to
+`coderabbit` to select the retained CodeRabbit adapter; its CLI-specific
+behaviour is documented next.
 
 ## Host-run CodeRabbit review
 

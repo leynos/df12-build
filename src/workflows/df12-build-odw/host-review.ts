@@ -846,8 +846,8 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
   // Run one gate with spawn, streaming stdout+stderr straight to the log as
   // it runs (no maxBuffer ceiling, evidence visible during long gates) while
   // keeping a bounded ring buffer of the last TAIL_LINES lines for the
-  // structured result. A SIGTERM fires at the configured timeout, escalating
-  // to SIGKILL if the child ignores it.
+  // structured result. The shell leads its own process group, so a timeout
+  // reaches background descendants as well as the shell itself.
   function streamGate(command: string, cwd: string, logFile: string): Promise<{ ok: boolean; killed: boolean; tail: string }> {
     const TAIL_LINES = 12
     const { spawn } = process.getBuiltinModule('node:child_process')
@@ -870,6 +870,9 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
       const tail: string[] = []
       let carry = ''
       let killed = false
+      let sigterm: ReturnType<typeof setTimeout> | undefined
+      let sigkill: ReturnType<typeof setTimeout> | undefined
+      let forcedSettle: ReturnType<typeof setTimeout> | undefined
       // finish() is settled-once: the child's 'close' and 'error' are mutually
       // exclusive, but the log stream is an independent emitter that can fault
       // at any time, so more than one settle path can race. The guard keeps
@@ -894,7 +897,7 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
           if (tail.length > TAIL_LINES) tail.shift()
         }
       }
-      const finish = (ok: boolean, extraTail?: string) => {
+      const finish = (ok: boolean, extraTail?: string, forceResolve = false) => {
         if (settled) return
         settled = true
         if (carry) {
@@ -902,13 +905,18 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
           if (tail.length > TAIL_LINES) tail.shift()
         }
         if (extraTail) tail.push(extraTail)
-        stream.end(() => resolve({ ok, killed, tail: tail.slice(-TAIL_LINES).join('\n').trim() }))
+        const settle = () => resolve({ ok, killed, tail: tail.slice(-TAIL_LINES).join('\n').trim() })
+        stream.end(settle)
+        // A surviving descendant can keep a pipe open even after SIGKILL. Do
+        // not let that prevent the timeout result from reaching the control
+        // loop; the process-group signal has already stopped the gate work.
+        if (forceResolve) setTimeout(settle, 100).unref()
       }
       // A log open/write fault (ENOSPC, EACCES on the path) emits 'error' on
       // the stream; without this listener Node would treat it as an uncaught
       // exception and crash the run. Route it into a failed gate result.
       stream.on('error', (error) => finish(false, `gate log write failed: ${(error as Error).message}`))
-      const child = spawn('sh', ['-c', command], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = spawn('sh', ['-c', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
       // Resume the paused child pipes once the log stream has drained (see the
       // backpressure guard in record()).
       stream.on('drain', () => {
@@ -917,23 +925,45 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
       })
       child.stdout.on('data', record)
       child.stderr.on('data', record)
-      const sigterm = setTimeout(() => {
+      const terminateProcessGroup = (signal: 'SIGTERM' | 'SIGKILL') => {
+        if (typeof child.pid === 'number') {
+          try {
+            process.kill(-child.pid, signal)
+            return
+          } catch {
+            // A platform without process groups, or a child that exited while
+            // the timeout raced, still benefits from the direct-child signal.
+          }
+        }
+        child.kill(signal)
+      }
+      sigterm = setTimeout(() => {
         killed = true
         // Resume any pipes paused by backpressure BEFORE killing: a paused pipe
         // never reaches EOF, so the child's 'close' would not fire and the gate
         // promise would hang behind a full log buffer even after the kill.
         child.stdout?.resume()
         child.stderr?.resume()
-        child.kill('SIGTERM')
-        // Escalate if the child ignores SIGTERM; unref so it never holds the loop.
-        setTimeout(() => child.kill('SIGKILL'), 2000).unref()
+        terminateProcessGroup('SIGTERM')
+        // Escalate the entire group if it ignores SIGTERM, then settle even if
+        // a malformed descendant retains an inherited output descriptor.
+        sigkill = setTimeout(() => {
+          terminateProcessGroup('SIGKILL')
+          forcedSettle = setTimeout(() => finish(false, 'gate process group did not close after SIGKILL', true), 1000)
+          forcedSettle.unref()
+        }, 2000)
+        sigkill.unref()
       }, commitGateTimeoutSeconds * 1000)
       child.on('close', (code) => {
-        clearTimeout(sigterm)
+        if (sigterm) clearTimeout(sigterm)
+        if (sigkill) clearTimeout(sigkill)
+        if (forcedSettle) clearTimeout(forcedSettle)
         finish(code === 0 && !killed)
       })
       child.on('error', (error) => {
-        clearTimeout(sigterm)
+        if (sigterm) clearTimeout(sigterm)
+        if (sigkill) clearTimeout(sigkill)
+        if (forcedSettle) clearTimeout(forcedSettle)
         finish(false, `spawn failed: ${(error as Error).message}`)
       })
     })

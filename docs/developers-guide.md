@@ -353,10 +353,13 @@ round it falls through to the reviewer agents, while a deferred between-item
 review halts the task for assessment. Blocking Dakar findings short-circuit
 the reviewer agents and enter the bounded fix loop.
 
-With the default host gates enabled, each review point therefore runs the
-deterministic commit gates, then CodeScene, then Dakar, and only then the
-token-spending reviewer agents. `tests/modules/host-review.test.ts` covers the
-Dakar command line, temporary-state cleanup, budget flag, and outcome mapping;
+In default `reviewTool: 'dakar'` mode, each review point runs the deterministic
+commit gates, then CodeScene, then Dakar as the selected host reviewer, and
+only then the token-spending reviewer agents. With host-run review enabled,
+selecting `reviewTool: 'coderabbit'` replaces Dakar in that sequence; its CLI,
+quota, and adapter-specific test details are documented below.
+`tests/modules/host-review.test.ts` covers the Dakar command line,
+temporary-state cleanup, budget flag, and outcome mapping;
 `tests/df12-build-odw-assessment.test.mjs` covers the Dakar authentication
 preflight and its independence from the legacy CodeRabbit flag.
 
@@ -424,8 +427,8 @@ branch goes to a fix round with the host evidence without spending reviewer
 agents; in the addendum lane an unreproducible green claim fails the addendum
 before any review. With `hostGatesBetweenWorkItems` on (the default), the gates
 ALSO re-run after each committed work item during the per-work-item build,
-BEFORE the between-item CodeRabbit review, so a committed work item whose gates
-are really red is caught at the item boundary (bounded fix loop, then
+BEFORE the between-item selected host review, so a committed work item whose
+gates are really red is caught at the item boundary (bounded fix loop, then
 fail-closed) rather than only at the dual-review stage — closing the window
 where an intermediate red commit could persist across work items on the agent's
 `gatesGreen` claim alone.
@@ -439,12 +442,13 @@ before termination so a backpressured pipe cannot prevent the child from being
 reaped.
 
 `runCodeSceneCheck` (`csCheck`, default on) is a SECOND deterministic gate, run
-after the commit gates and before CodeRabbit at every gate point (each work
-item, each dual-review round, and the addendum lane). It runs `csCheckCommand`
+after the commit gates and before the selected host reviewer at every gate point
+(each work item, each dual-review round, and the addendum lane). It runs
+`csCheckCommand`
 (default `cs-check-changed`, an operator-provided wrapper) through the same
 secure-log spawn path as the commit gates, on the committed changed files. A
 code-health regression short-circuits to a fix round — free gates before the
-quota-limited CodeRabbit and the token-spending reviewer agents — and the
+selected host review and the token-spending reviewer agents — and the
 build/fix prompts carry the smell glossary plus the `@codescene(disable:"...")`
 suppression escape hatch (`CS_CHECK_GUIDANCE`). Like `make verify-modules`
 without Dafny, it skips gracefully (clean, not failed) when the binary is
