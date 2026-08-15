@@ -61,12 +61,11 @@ return {
   CODERABBIT_BACKOFF_MINUTES,
   parseCoderabbitAgentOutput,
   classifyCoderabbitOutcome,
-  coderabbitBackoffMinutes,
+  reviewBackoffMinutes,
   runHostReview,
-  runCoderabbitHostReview,
-  recordCoderabbitReview,
-  coderabbitBlockingItems,
-  coderabbitCapture,
+  recordHostReview,
+  reviewBlockingItems,
+  hostReviewMetrics,
   implementPrompt,
   fixPrompt,
   resultFromUnhandledAgentError,
@@ -406,15 +405,15 @@ test('CodeRabbit outcomes classify from events, never exit codes', async () => {
 test('CodeRabbit backoff jitter is deterministic, seeded, and range-bound', async () => {
   const surface = await loadAssessmentSurface()
   assert.deepEqual(surface.CODERABBIT_BACKOFF_MINUTES, [45, 90])
-  const first = surface.coderabbitBackoffMinutes('coderabbit:1.2.3 r1#1')
-  assert.equal(surface.coderabbitBackoffMinutes('coderabbit:1.2.3 r1#1'), first, 'same seed, same wait')
+  const first = surface.reviewBackoffMinutes('coderabbit:1.2.3 r1#1')
+  assert.equal(surface.reviewBackoffMinutes('coderabbit:1.2.3 r1#1'), first, 'same seed, same wait')
   const seeds = ['a#1', 'a#2', 'b#1', 'coderabbit:9.9.9 r3#2']
   for (const seed of seeds) {
-    const minutes = surface.coderabbitBackoffMinutes(seed)
+    const minutes = surface.reviewBackoffMinutes(seed)
     assert.ok(minutes >= 45 && minutes <= 90, `${seed} -> ${minutes}`)
   }
   const narrow = await loadAssessmentSurface({ coderabbitBackoffMinutes: [1, 2] })
-  const minutes = narrow.coderabbitBackoffMinutes('x#1')
+  const minutes = narrow.reviewBackoffMinutes('x#1')
   assert.ok(minutes >= 1 && minutes <= 2)
 })
 
@@ -439,7 +438,7 @@ test('the host review loop backs off on rate limits and stops at the attempt cap
     },
     sleep: async (minutes) => { sleeps.push(minutes) },
   }
-  const review = await surface.runCoderabbitHostReview('/tmp/wt', 'coderabbit:1.2.3 r1', deps)
+  const review = await surface.runHostReview('/tmp/wt', 'coderabbit:1.2.3 r1', deps)
   assert.equal(review.outcome, 'clean')
   assert.equal(review.attempts, 3)
   assert.equal(execCalls.length, 3)
@@ -452,7 +451,7 @@ test('the host review loop backs off on rate limits and stops at the attempt cap
   // slept on again after the final attempt.
   replies = [rateLimited, rateLimited, rateLimited]
   sleeps.length = 0
-  const exhausted = await surface.runCoderabbitHostReview('/tmp/wt', 'coderabbit:1.2.3 r2', deps)
+  const exhausted = await surface.runHostReview('/tmp/wt', 'coderabbit:1.2.3 r2', deps)
   assert.equal(exhausted.outcome, 'rate-limited')
   assert.equal(exhausted.attempts, 3)
   assert.equal(sleeps.length, 2)
@@ -461,7 +460,7 @@ test('the host review loop backs off on rate limits and stops at the attempt cap
   // Auth failures never sleep: the run must halt, not wait 45 minutes.
   replies = [{ ok: true, stdout: '{"type":"error","errorType":"unknown","message":"Run `coderabbit auth login`"}', stderr: '' }]
   sleeps.length = 0
-  const auth = await surface.runCoderabbitHostReview('/tmp/wt', 'coderabbit:1.2.3 r3', deps)
+  const auth = await surface.runHostReview('/tmp/wt', 'coderabbit:1.2.3 r3', deps)
   assert.equal(auth.outcome, 'auth')
   assert.equal(sleeps.length, 0)
 })
@@ -475,7 +474,7 @@ test('only critical and major CodeRabbit findings block; the rest are captured o
     { severity: 'trivial', fileName: 'd.rs', comment: 'whitespace' },
     { severity: 'info', fileName: 'e.rs', comment: 'fyi' },
   ]
-  const blocking = surface.coderabbitBlockingItems(findings)
+  const blocking = surface.reviewBlockingItems('CodeRabbit', findings)
   assert.equal(blocking.length, 2)
   assert.match(blocking[0], /^CodeRabbit \(critical\) a\.rs: UB on empty input/)
   assert.match(blocking[1], /^CodeRabbit \(major\) b\.rs: guard the index/)
@@ -486,7 +485,7 @@ test('CodeRabbit findings are captured to the JSONL sink and the run aggregate',
   const sink = path.join(dir, 'coderabbit-findings.jsonl')
   const surface = await loadAssessmentSurface({ coderabbitFindingsFile: sink })
 
-  await surface.recordCoderabbitReview('1.2.3 r1', {
+  await surface.recordHostReview('1.2.3 r1', {
     reviewer: 'coderabbit',
     outcome: 'findings',
     attempts: 1,
@@ -498,10 +497,10 @@ test('CodeRabbit findings are captured to the JSONL sink and the run aggregate',
     ],
     detail: '',
   })
-  await surface.recordCoderabbitReview('1.2.3 r2', { reviewer: 'coderabbit', outcome: 'rate-limited', attempts: 3, elapsedMs: 1, errorCategory: 'deferred', findings: [], detail: 'Review limit reached' })
+  await surface.recordHostReview('1.2.3 r2', { reviewer: 'coderabbit', outcome: 'rate-limited', attempts: 3, elapsedMs: 1, errorCategory: 'deferred', findings: [], detail: 'Review limit reached' })
 
   assert.deepEqual(
-    { ...surface.coderabbitCapture, bySeverity: { ...surface.coderabbitCapture.bySeverity } },
+    { ...surface.hostReviewMetrics, bySeverity: { ...surface.hostReviewMetrics.bySeverity } },
     {
       runs: 0,
       findings: 2,
@@ -907,6 +906,20 @@ test('the Dakar preflight requires a non-empty OPENAI_API_KEY and skips CodeRabb
     assert.equal(unavailablePiFailures[0].tool, 'dakar')
     assert.equal(unavailablePiFailures[0].command, 'pi --version')
     assert.match(unavailablePiFailures[0].detail, /Not logged in/)
+  } finally {
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = previousKey
+  }
+})
+
+test('Dakar preflight preserves quoted fixed command arguments', async () => {
+  const previousKey = process.env.OPENAI_API_KEY
+  process.env.OPENAI_API_KEY = 'sk-test-key'
+  const fakes = makeAuthBin()
+  try {
+    const failures = await runPreflightWithFakes({ dakarCommand: 'dakar-review "--fixed argument"' }, fakes)
+    assert.deepEqual(failures, [])
+    assert.ok(fakes.calls().some((line) => line === 'dakar-review --fixed argument --version'))
   } finally {
     if (previousKey === undefined) delete process.env.OPENAI_API_KEY
     else process.env.OPENAI_API_KEY = previousKey

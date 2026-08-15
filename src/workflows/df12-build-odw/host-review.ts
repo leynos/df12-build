@@ -69,6 +69,35 @@ export interface HostReviewResult {
   detail: string
 }
 
+/** Structured recovery record for a host review that could not complete. */
+export interface HostReviewDeferral {
+  /** Stable discriminator for addendum recovery policy. */
+  kind: 'host-review-deferral'
+  /** Adapter that deferred or failed. */
+  reviewer: HostReviewResult['reviewer']
+  /** Terminal result that prevented a definitive review. */
+  outcome: Extract<ReviewOutcome, 'rate-limited' | 'error'>
+  /** Bounded error category for recovery decisions. */
+  errorCategory: ReviewErrorCategory
+  /** Attempt count retained for operator context. */
+  attempts: number
+  /** Bounded diagnostic retained without parsing vendor wire text. */
+  detail: string
+}
+
+/** Project a terminal deferred host-review result into recovery policy data. */
+export function hostReviewDeferral(review: HostReviewResult): HostReviewDeferral | null {
+  if (review.outcome !== 'rate-limited' && review.outcome !== 'error') return null
+  return {
+    kind: 'host-review-deferral',
+    reviewer: review.reviewer,
+    outcome: review.outcome,
+    errorCategory: review.errorCategory,
+    attempts: review.attempts,
+    detail: boundedTail(review.detail),
+  }
+}
+
 /** Public compatibility aliases for integrations compiled against older names. */
 export type CoderabbitFinding = ReviewFinding
 /** Compatibility alias for the former CodeRabbit-specific outcome type. */
@@ -101,6 +130,13 @@ export interface HostReviewDeps {
   sleep?: (minutes: number) => Promise<void>
   /** Recursive Dakar state-root cleanup seam. */
   removeDakarStateRoot?: (stateRoot: string, options: { recursive: true; force: true }) => void
+  /** State-root lifecycle service; injected so filesystem faults are testable. */
+  dakarStateRoots?: {
+    /** Create the fresh state root for one Dakar attempt. */
+    create: () => string
+    /** Remove a state root after the corresponding attempt settles. */
+    remove: (stateRoot: string, options: { recursive: true; force: true }) => void
+  }
   /** Monotonic-enough millisecond clock used only for bounded telemetry. */
   nowMs?: () => number
 }
@@ -113,6 +149,8 @@ export interface HostReviewConfig {
   reviewTool: 'dakar' | 'coderabbit'
   /** Dakar executable plus optional fixed prefix arguments. */
   dakarCommand: string
+  /** Parsed Dakar invocation shared with preflight when the entrypoint binds it. */
+  dakarInvocation?: readonly string[]
   /** Parent execution timeout shared by both reviewer adapters. */
   reviewTimeoutSeconds: number
   /** Dakar budget in GBP; zero omits the argument and uses Dakar's default. */
@@ -185,17 +223,38 @@ function boundedTail(text: unknown, limit = 2000): string {
 
 /** Locate Dakar's terminal JSON object despite leading progress noise. */
 export function parseDakarDocument(stdout: unknown): DakarDocument | null {
+  // Dakar's verdict is terminal. Walk backwards once to find the matching
+  // opening brace of its last JSON object, rather than repeatedly parsing every
+  // earlier brace in untrusted progress output.
   const text = String(stdout || '')
-  for (
-    let start = text.lastIndexOf('{');
-    start !== -1;
-    start = start === 0 ? -1 : text.lastIndexOf('{', start - 1)
-  ) {
-    try {
-      const doc = JSON.parse(text.slice(start))
-      if (doc && typeof doc === 'object' && !Array.isArray(doc)) return doc as DakarDocument
-    } catch {
-      // A brace in progress noise or a nested object is not the terminal document root.
+  const terminalEnd = text.lastIndexOf('}')
+  if (terminalEnd === -1) return null
+  let depth = 0
+  let inString = false
+  for (let index = terminalEnd; index >= 0; index--) {
+    const character = text[index]
+    if (character === '"') {
+      let slashes = 0
+      for (let cursor = index - 1; cursor >= 0 && text[cursor] === '\\'; cursor--) slashes += 1
+      if (slashes % 2 === 0) inString = !inString
+      continue
+    }
+    if (inString) continue
+    if (character === '}') depth += 1
+    if (character === '{') {
+      depth -= 1
+      if (depth !== 0) continue
+      let preceding = index - 1
+      while (preceding >= 0 && /\s/.test(text[preceding])) preceding -= 1
+      if (text[preceding] === '[') return null
+      const document = text.slice(index, terminalEnd + 1)
+      if (document.length > 64_000) return null
+      try {
+        const parsed = JSON.parse(document)
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as DakarDocument : null
+      } catch {
+        return null
+      }
     }
   }
   return null
@@ -240,7 +299,7 @@ function validateChangesRequestedFindings(raw: unknown):
       }
     }
     const item = finding as Record<string, unknown>
-    if (typeof item.severity !== 'string' || !DAKAR_SEVERITIES.has(item.severity)) {
+    if (typeof item.severity !== 'string' || !DAKAR_SEVERITIES.has(item.severity.toLowerCase())) {
       return {
         ok: false,
         detail: boundedTail(`Dakar returned an invalid finding at index ${index}; unsupported severity`, 2000),
@@ -574,9 +633,9 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
     csCheck,
     csCheckCommand,
   } = config
-  const dakarInvocation = shellCommandWords(dakarCommand) || []
-  const dakarExecutable = dakarInvocation[0] || 'dakar-review'
-  const dakarPrefixArgs = dakarInvocation.slice(1)
+  const resolvedDakarInvocation = config.dakarInvocation || shellCommandWords(dakarCommand) || []
+  const dakarExecutable = resolvedDakarInvocation[0] || 'dakar-review'
+  const dakarPrefixArgs = resolvedDakarInvocation.slice(1)
   let findingsSinkTail = Promise.resolve()
 
   // Deterministic jitter in [low, high] minutes: Math.random() is banned for
@@ -619,11 +678,25 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
   // ephemeral state root per attempt keeps the gate stateless — Dakar otherwise
   // records reviewed heads and would skip already-seen commits across runs, so a
   // shared state root would silently turn re-reviews into no-ops.
-  async function runDakarAttempt(worktree: string, exec: NonNullable<HostReviewDeps['exec']>, removeStateRoot?: HostReviewDeps['removeDakarStateRoot']): Promise<{ outcome: ReviewOutcome; findings: ReviewFinding[]; detail: string; errorCategory: ReviewErrorCategory }> {
+  async function runDakarAttempt(worktree: string, exec: NonNullable<HostReviewDeps['exec']>, deps: HostReviewDeps): Promise<{ outcome: ReviewOutcome; findings: ReviewFinding[]; detail: string; errorCategory: ReviewErrorCategory }> {
     const fs = process.getBuiltinModule('node:fs')
     const os = process.getBuiltinModule('node:os')
     const path = process.getBuiltinModule('node:path')
-    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'df12-dakar-state-'))
+    const stateRoots = deps.dakarStateRoots || {
+      create: () => fs.mkdtempSync(path.join(os.tmpdir(), 'df12-dakar-state-')),
+      remove: deps.removeDakarStateRoot || fs.rmSync,
+    }
+    let stateRoot: string
+    try {
+      stateRoot = stateRoots.create()
+    } catch (error) {
+      return {
+        outcome: 'error',
+        findings: [],
+        detail: boundedTail((error as Error | null)?.message || String(error)),
+        errorCategory: 'execution',
+      }
+    }
     const commandArgs = [
       '--repo-root', worktree,
       '--base', base,
@@ -639,8 +712,7 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
       return classifyDakarReview(result)
     } finally {
       try {
-        const cleanup = removeStateRoot || fs.rmSync
-        cleanup(stateRoot, { recursive: true, force: true })
+        stateRoots.remove(stateRoot, { recursive: true, force: true })
       } catch (error) {
         const detail = boundedTail((error as Error | null)?.message || String(error), 500)
         log(`[Dakar] could not remove temporary state root: ${detail}`)
@@ -669,7 +741,7 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
         terminalAttempt = attempt
         log(`[${boundedLabel}] ${reviewerName} host review attempt ${attempt} of ${coderabbitAttempts}`)
         const single = reviewer === 'dakar'
-          ? await runDakarAttempt(worktree, exec, deps.removeDakarStateRoot)
+          ? await runDakarAttempt(worktree, exec, deps)
           : await runCoderabbitAttempt(worktree, exec)
         if (single.outcome === 'rate-limited' && attempt < coderabbitAttempts) {
           const minutes = reviewBackoffMinutes(`${boundedLabel}#${attempt}`)

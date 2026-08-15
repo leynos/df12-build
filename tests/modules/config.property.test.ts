@@ -6,12 +6,16 @@ import fc from 'fast-check'
 import { makeConfig } from '../../src/workflows/df12-build-odw/config.ts'
 
 const numericInput = fc.oneof(
-  fc.integer({ min: -100_000, max: 100_000 }),
-  fc.integer({ min: -100_000, max: 100_000 }).map(String),
+  fc.double({ noNaN: true, noDefaultInfinity: true, min: -100_000, max: 100_000 }),
+  fc.double({ noNaN: true, noDefaultInfinity: true, min: -100_000, max: 100_000 }).map(String),
 )
 const timeoutInput = fc.oneof(
   numericInput,
   fc.string().filter((value) => Number.isNaN(Number(value))),
+)
+const budgetInput = fc.oneof(
+  numericInput,
+  fc.constantFrom(Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 'not-a-budget', '£1'),
 )
 
 describe('Dakar configuration clamp properties', () => {
@@ -27,10 +31,11 @@ describe('Dakar configuration clamp properties', () => {
     )
   })
 
-  test('budget maps every numeric input into the 0..10 GBP band', () => {
+  test('budget maps finite input into the 0..10 GBP band and rejects non-finite input', () => {
     fc.assert(
-      fc.property(numericInput, (input) => {
-        const expected = Math.min(10, Math.max(0, Number(input)))
+      fc.property(budgetInput, (input) => {
+        const numeric = Number(input)
+        const expected = Number.isFinite(numeric) ? Math.min(10, Math.max(0, numeric)) : 0
         expect(makeConfig({ dakarBudgetGbp: input }).DAKAR_BUDGET_GBP)
           .toBe(expected)
       }),

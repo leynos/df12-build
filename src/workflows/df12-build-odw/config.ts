@@ -159,6 +159,13 @@ export interface RawWorkflowArgs {
   commitGates?: unknown
 }
 
+/** Supported host-review adapters after configuration normalization. */
+export type ReviewTool = 'dakar' | 'coderabbit'
+const REVIEW_TOOLS = ['dakar', 'coderabbit'] as const
+
+function isReviewTool(value: string): value is ReviewTool {
+  return REVIEW_TOOLS.some((tool) => tool === value)
+}
 /**
  * Fully resolved run configuration: documented fields normalised, defaults
  * applied, explicitly coerced or bounded fields handled, and derived guidance
@@ -271,7 +278,7 @@ export interface WorkflowConfig {
   /** De-duplicated, lower-cased set of adapters whose CLI auth must be verified. */
   AUTH_REQUIRED_ADAPTERS: Set<string>
   /** Selected host-review adapter. */
-  REVIEW_TOOL: 'dakar' | 'coderabbit'
+  REVIEW_TOOL: ReviewTool
   /** Dakar CLI invocation. */
   DAKAR_COMMAND: string
   /** Host-review timeout in seconds. */
@@ -422,10 +429,11 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   // selectable for the retained NDJSON wire contract. An unrecognized value
   // throws rather than silently defaulting because it controls both CLI and
   // authentication dependencies.
-  const REVIEW_TOOL = String(cfg.reviewTool || 'dakar').toLowerCase()
-  if (!['dakar', 'coderabbit'].includes(REVIEW_TOOL)) {
-    throw new Error(`Unsupported reviewTool: ${REVIEW_TOOL} (use "dakar" or "coderabbit")`)
+  const reviewToolInput = String(cfg.reviewTool || 'dakar').toLowerCase()
+  if (!isReviewTool(reviewToolInput)) {
+    throw new Error(`Unsupported reviewTool: ${reviewToolInput} (use "dakar" or "coderabbit")`)
   }
+  const REVIEW_TOOL = reviewToolInput
   const DAKAR_COMMAND = String(cfg.dakarCommand || 'dakar-review')
   const REVIEW_TIMEOUT_SECONDS = Math.min(7200, Math.max(60, Math.trunc(Number(cfg.reviewTimeoutSeconds ?? cfg.dakarTimeoutSeconds) || 3600)))
   const DAKAR_BUDGET_GBP_RAW = Number(cfg.dakarBudgetGbp)
@@ -560,7 +568,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     ASSESSMENT_MODEL,
     ASSESSMENT_ESCALATION_MODEL,
     AUTH_REQUIRED_ADAPTERS,
-    REVIEW_TOOL: REVIEW_TOOL as 'dakar' | 'coderabbit',
+    REVIEW_TOOL,
     DAKAR_COMMAND,
     REVIEW_TIMEOUT_SECONDS,
     DAKAR_BUDGET_GBP,

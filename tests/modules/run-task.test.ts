@@ -341,6 +341,35 @@ describe('runTask', () => {
     expect(runFaultMetrics.authFaults).toBe(1)
   })
 
+  test('a between-item host-review auth failure increments authFaults', async () => {
+    const worktree = makeWorktree()
+    prepareSingleWorkItem(worktree)
+    scriptAgent((label, prompt) => label.startsWith('implement:') ? completeSingleWorkItem(worktree) : happyScript()(label, prompt))
+
+    const outcome = await subject(worktree, {
+      PER_WORK_ITEM_BUILD: true,
+      HOST_REVIEW_ENABLED: true,
+      HOST_REVIEW_BETWEEN_WORK_ITEMS: true,
+      runHostReview: async () => hostReviewResult({ outcome: 'auth', errorCategory: 'auth', detail: 'login required' }),
+    }).runTask(task, null)
+
+    expect(outcome.status).toBe('fatal-auth')
+    expect(faultMetrics.authFaults).toBe(1)
+  })
+
+  test('a dual-review host-review auth failure increments authFaults', async () => {
+    const worktree = makeWorktree()
+    scriptAgent(happyScript())
+
+    const outcome = await subject(worktree, {
+      HOST_REVIEW_ENABLED: true,
+      runHostReview: async () => hostReviewResult({ outcome: 'auth', errorCategory: 'auth', detail: 'login required' }),
+    }).runTask(task, null)
+
+    expect(outcome.status).toBe('fatal-auth')
+    expect(faultMetrics.authFaults).toBe(1)
+  })
+
   test('an addendum implementation auth failure increments authFaults', async () => {
     const worktree = makeWorktree()
     const addendum = { ...task, isAddendum: true, subtasks: ['1.2.3.1'] }
@@ -355,41 +384,18 @@ describe('runTask', () => {
     expect(runFaultMetrics.authFaults).toBe(1)
   })
 
-  test.each([
-    {
-      name: 'between-item',
-      prepare: (worktree: string) => {
-        prepareSingleWorkItem(worktree)
-        scriptAgent((label, prompt) => label.startsWith('implement:') ? completeSingleWorkItem(worktree) : happyScript()(label, prompt))
-      },
-      overrides: { PER_WORK_ITEM_BUILD: true, CODERABBIT_BETWEEN_WORK_ITEMS: true },
-      taskData: task,
-    },
-    {
-      name: 'dual-review',
-      prepare: () => scriptAgent(happyScript()),
-      overrides: {},
-      taskData: task,
-    },
-    {
-      name: 'addendum',
-      prepare: () => scriptAgent((label) => {
-        if (label.startsWith('addendum:')) return greenAddendum
-        throw new Error(`unscripted label: ${label}`)
-      }),
-      overrides: {},
-      taskData: { ...task, isAddendum: true, subtasks: ['1.2.3.1'] as string[] },
-    },
-  ])('$name CodeRabbit auth failure increments authFaults', async ({ prepare, overrides, taskData }) => {
+  test('an addendum host-review auth failure increments authFaults', async () => {
     const worktree = makeWorktree()
-    prepare(worktree)
-    const authReview = async () => ({ outcome: 'auth' as const, attempts: 1, findings: [], detail: 'login required' })
+    const addendum = { ...task, isAddendum: true, subtasks: ['1.2.3.1'] }
+    scriptAgent((label) => {
+      if (label.startsWith('addendum:')) return greenAddendum
+      throw new Error(`unscripted label: ${label}`)
+    })
 
     const outcome = await subject(worktree, {
-      CODERABBIT_HOST_REVIEW: true,
-      runCoderabbitHostReview: authReview,
-      ...overrides,
-    }).runTask(taskData, null)
+      HOST_REVIEW_ENABLED: true,
+      runHostReview: async () => hostReviewResult({ outcome: 'auth', errorCategory: 'auth', detail: 'login required' }),
+    }).runTask(addendum, null)
 
     expect(outcome.status).toBe('fatal-auth')
     expect(runFaultMetrics.authFaults).toBe(1)
@@ -475,7 +481,7 @@ describe('runTask', () => {
     expect(fallbackIndex).toBeGreaterThanOrEqual(0)
     expect(fallbackIndex).toBeLessThan(integrationIndex)
     expect(outcome.openIssues).toEqual([
-      'Dakar review deferred (stage: deferred) — budget exhausted',
+      'Dakar review deferred (rate-limited after 3 attempt(s), deferred): Dakar review deferred (stage: deferred) — budget exhausted',
     ])
   })
 

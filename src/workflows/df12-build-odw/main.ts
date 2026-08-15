@@ -331,16 +331,14 @@ const HOST_REVIEW_BETWEEN_WORK_ITEMS = CODERABBIT_BETWEEN_WORK_ITEMS
 const HOST_REVIEW_ATTEMPTS = CODERABBIT_ATTEMPTS
 const HOST_REVIEW_BACKOFF_MINUTES = CODERABBIT_BACKOFF_MINUTES
 const HOST_REVIEW_FINDINGS_FILE = CODERABBIT_FINDINGS_FILE
-const {
-  reviewBackoffMinutes,
-  runHostReview,
-  recordHostReview,
-  runHostCommitGates,
-  runCodeSceneCheck,
-} = makeHostReview({
+// Parse the operator-configured command once so preflight probes and review
+// execution preserve the same quoted fixed arguments.
+const DAKAR_INVOCATION = tokenizeShellCommand(DAKAR_COMMAND)?.words.map((word) => word.value) || []
+const hostReview = makeHostReview({
   base: BASE,
   reviewTool: REVIEW_TOOL,
   dakarCommand: DAKAR_COMMAND,
+  dakarInvocation: DAKAR_INVOCATION,
   reviewTimeoutSeconds: REVIEW_TIMEOUT_SECONDS,
   dakarBudgetGbp: DAKAR_BUDGET_GBP,
   coderabbitAttempts: HOST_REVIEW_ATTEMPTS,
@@ -351,14 +349,13 @@ const {
   csCheck: CS_CHECK,
   csCheckCommand: CS_CHECK_COMMAND,
 })
-
-// Compatibility names remain available to external artefact-surface probes;
-// the task pipeline and result policy below use only the neutral contract.
-const coderabbitBackoffMinutes = reviewBackoffMinutes
-const runCoderabbitHostReview = runHostReview
-const recordCoderabbitReview = recordHostReview
-const coderabbitCapture = hostReviewMetrics
-const coderabbitBlockingItems = (findings: Parameters<typeof reviewBlockingItems>[1]) => reviewBlockingItems('CodeRabbit', findings)
+const {
+  reviewBackoffMinutes,
+  runHostReview,
+  recordHostReview,
+  runHostCommitGates,
+  runCodeSceneCheck,
+} = hostReview
 
 // ---------------------------------------------------------------------------
 // Deterministic roadmap selection
@@ -397,10 +394,9 @@ async function runAuthPreflight() {
   // non-empty string rather than a CLI auth-status probe.
   if (REQUIRE_CODERABBIT_AUTH) {
     if (REVIEW_TOOL === 'dakar') {
-      const dakarInvocation = DAKAR_COMMAND.trim().split(/\s+/).filter(Boolean)
-      const dakarExecutable = dakarInvocation[0] || 'dakar-review'
-      const dakarArgs = [...dakarInvocation.slice(1), '--version']
-      const dakarProbeCommand = [...dakarInvocation, '--version'].join(' ').slice(0, 200) || 'dakar-review --version'
+      const dakarExecutable = DAKAR_INVOCATION[0] || 'dakar-review'
+      const dakarArgs = [...DAKAR_INVOCATION.slice(1), '--version']
+      const dakarProbeCommand = [...DAKAR_INVOCATION, '--version'].join(' ').slice(0, 200) || 'dakar-review --version'
       const dakar = await execFileStatus(dakarExecutable, dakarArgs)
       const dakarOutput = [dakar.stdout, dakar.stderr, dakar.message].filter(Boolean).join('\n').trim().slice(-2_000)
       if (!dakar.ok) {

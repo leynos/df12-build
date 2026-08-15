@@ -29,8 +29,8 @@ import {
   hasOnlyDeferredReviewIssues,
   implementationAuthFailureDetail,
 } from './assessment.ts'
-import { reviewBlockingItems } from './host-review.ts'
-import type { HostReviewResult, HostGateRun } from './host-review.ts'
+import { hostReviewDeferral, reviewBlockingItems } from './host-review.ts'
+import type { HostReviewDeferral, HostReviewResult, HostGateRun } from './host-review.ts'
 import { readExecplanState } from './recovery-discovery.ts'
 import {
   DESIGN_VERDICT_SCHEMA,
@@ -1192,6 +1192,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
       }
       const proposals: Array<Record<string, unknown>> = []
       const addendumOpenIssues: string[] = []
+      const addendumDeferredReviews: HostReviewDeferral[] = []
       // Host-verified gates: addenda have no review rounds, so a gatesGreen
       // claim the host cannot reproduce fails here, before any review spend.
       if (HOST_COMMIT_GATES) {
@@ -1224,19 +1225,16 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         if (blockingFindings.length) {
           return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: `${reviewerDisplayName} host review found blocking issue(s): ${blockingFindings.join('; ')}`, impl, worktree, proposals, kind: 'addendum' })
         }
-        if (hostReview.outcome === 'rate-limited' || hostReview.outcome === 'error') {
-          const deferredIssue = HOST_REVIEWER === 'dakar'
-            && hostReview.outcome === 'rate-limited'
-            && hostReview.detail
-            ? hostReview.detail
-            : `${reviewerDisplayName} review deferred (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`
-          addendumOpenIssues.push(deferredIssue)
+        const deferredReview = hostReviewDeferral(hostReview)
+        if (deferredReview) {
+          addendumDeferredReviews.push(deferredReview)
+          addendumOpenIssues.push(`${reviewerDisplayName} review deferred (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`)
           log(`[task ${tag}] ${reviewerDisplayName} host review deferred for the addendum: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`)
         }
       }
       let addendumReview: StageReview | null = null
       const needsFallbackReview = onlyDeferredReviewIssues
-        || hasOnlyDeferredReviewIssues(addendumOpenIssues)
+        || addendumDeferredReviews.length > 0
       if (needsFallbackReview) {
         phase('Code Review')
         addendumReview = (await withInfraRetry(() => agent(addendumReviewPrompt(task, worktree, impl), reviewAgentOptions({ phase: 'Code Review', label: `addendum-review:${tag}`, schema: REVIEW_SCHEMA })), `addendum-review:${tag}`)) as StageReview | null

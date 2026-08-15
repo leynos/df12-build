@@ -6,6 +6,7 @@ import path from 'node:path'
 
 import {
   classifyCoderabbitOutcome,
+  csCheckMetrics,
   reviewBlockingItems,
   hostReviewMetrics,
   hostGateLogPath,
@@ -62,6 +63,10 @@ describe('parseDakarDocument', () => {
     expect(parseDakarDocument('no document')).toBeNull()
     expect(parseDakarDocument('{not json}')).toBeNull()
     expect(parseDakarDocument('[{"ok":true}]')).toBeNull()
+  })
+
+  test('rejects oversized nested malformed noise without retrying every brace', () => {
+    expect(parseDakarDocument(`${'{'.repeat(64_001)}${'}'.repeat(64_001)}`)).toBeNull()
   })
 })
 
@@ -178,6 +183,21 @@ describe('runDakarHostReview', () => {
     expect(cleanupCalls).toEqual([{ stateRoot, options: { recursive: true, force: true } }])
   })
 
+  test('a state-root creation failure becomes a terminal host-review error', async () => {
+    let removed = false
+    const { runHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+    const review = await runHostReview('/work/tree', 'label', {
+      dakarStateRoots: {
+        create: () => { throw new Error('temporary directory unavailable') },
+        remove: () => { removed = true },
+      },
+    })
+    expect(review.outcome).toBe('error')
+    expect(review.errorCategory).toBe('execution')
+    expect(review.detail).toContain('temporary directory unavailable')
+    expect(removed).toBe(false)
+  })
+
   test('a cleanup failure does not replace a successful review result', async () => {
     const logs: string[] = []
     g.log = (message: unknown) => logs.push(String(message))
@@ -252,6 +272,13 @@ describe('runDakarHostReview', () => {
     const review = await runCoderabbitHostReview('/w', 'l', { exec })
     expect(review.outcome).toBe('error')
     expect(review.detail).toContain('changes-requested')
+  })
+
+  test('normalizes an uppercase Dakar severity before validating it', async () => {
+    const { exec } = recordingExec({ stdout: dakarJson({ ok: true, verdict: 'changes-requested', findings: [{ severity: 'HIGH', path: 'a.ts', title: 't', detail: 'd', evidence: 'e' }] }) })
+    const review = await hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 }).runHostReview('/w', 'l', { exec })
+    expect(review.outcome).toBe('findings')
+    expect(review.findings[0]?.severity).toBe('major')
   })
 
   for (const [name, malformed] of [
@@ -529,12 +556,16 @@ describe('runCodeSceneCheck', () => {
   })
 
   test('a clean check reports clean and not skipped', async () => {
+    const before = { runs: csCheckMetrics.runs, failures: csCheckMetrics.failures, skipped: csCheckMetrics.skipped }
     const dir = tmp('cs-clean-')
     // A command that exists and exits 0 stands in for a clean cs-check-changed.
     const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: 'true' })
     const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
     expect(result.clean).toBe(true)
     expect(result.skipped).toBe(false)
+    expect(csCheckMetrics.runs - before.runs).toBe(1)
+    expect(csCheckMetrics.failures - before.failures).toBe(0)
+    expect(csCheckMetrics.skipped - before.skipped).toBe(0)
     junk.push(result.logFile)
   })
 
@@ -579,6 +610,7 @@ describe('runCodeSceneCheck', () => {
   })
 
   test('a non-zero exit reports a code-health regression with the log tail', async () => {
+    const before = { runs: csCheckMetrics.runs, failures: csCheckMetrics.failures }
     const dir = tmp('cs-dirty-')
     const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: 'sh -c "echo Complex Method in foo; exit 1"' })
     const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
@@ -586,16 +618,22 @@ describe('runCodeSceneCheck', () => {
     expect(result.skipped).toBe(false)
     expect(result.detail).toMatch(/Complex Method/)
     expect(result.detail).toContain(result.logFile)
+    expect(csCheckMetrics.runs - before.runs).toBe(1)
+    expect(csCheckMetrics.failures - before.failures).toBe(1)
     junk.push(result.logFile)
   })
 
   test('an absent binary skips gracefully (clean, skipped) instead of failing', async () => {
+    const before = { runs: csCheckMetrics.runs, failures: csCheckMetrics.failures, skipped: csCheckMetrics.skipped }
     const dir = tmp('cs-absent-')
     const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: 'df12-cs-not-installed-xyz' })
     const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
     expect(result.clean).toBe(true)
     expect(result.skipped).toBe(true)
     expect(result.detail).toMatch(/not on PATH/)
+    expect(csCheckMetrics.runs - before.runs).toBe(0)
+    expect(csCheckMetrics.failures - before.failures).toBe(0)
+    expect(csCheckMetrics.skipped - before.skipped).toBe(1)
   })
 
   test('csCheck disabled skips without probing', async () => {

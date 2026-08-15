@@ -17,6 +17,7 @@ import {
 } from './faults.ts'
 import { collectAssessmentEvidence } from './git-evidence.ts'
 import type { AssessmentEvidence } from './git-evidence.ts'
+import type { HostReviewDeferral } from './host-review.ts'
 import { salvageTaskArtefacts } from './execplan-durability.ts'
 import type { SalvageOutcome } from './execplan-durability.ts'
 import type { RecoveryCandidate } from './types.ts'
@@ -308,6 +309,12 @@ function isInfraFaultResult(result: AssessableResult | null | undefined): boolea
  * @returns True when the text names a host reviewer alongside a specific deferral marker.
  */
 export function isDeferredReviewIssue(issue: unknown): boolean {
+  if (
+    issue !== null
+    && typeof issue === 'object'
+    && (issue as Partial<HostReviewDeferral>).kind === 'host-review-deferral'
+    && ((issue as Partial<HostReviewDeferral>).outcome === 'rate-limited' || (issue as Partial<HostReviewDeferral>).outcome === 'error')
+  ) return true
   const text = String(issue || '').toLowerCase()
   const coderabbitDeferredMarkers = [
     'rate limit',

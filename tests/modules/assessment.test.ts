@@ -105,6 +105,17 @@ describe('deferred-review classification', () => {
     expect(hasOnlyDeferredReviewIssues(['coderabbit 429 rate limit'])).toBe(true)
     expect(hasOnlyDeferredReviewIssues(['coderabbit 429 rate limit', 'tests failing'])).toBe(false)
   })
+
+  test('recognizes structured host-review deferrals without parsing vendor detail', () => {
+    expect(isDeferredReviewIssue({
+      kind: 'host-review-deferral',
+      reviewer: 'dakar',
+      outcome: 'rate-limited',
+      errorCategory: 'deferred',
+      attempts: 3,
+      detail: 'unrelated operator wording',
+    })).toBe(true)
+  })
 })
 
 describe('manual-merge handoff guard', () => {

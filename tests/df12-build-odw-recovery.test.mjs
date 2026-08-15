@@ -63,7 +63,7 @@ function assertPromptGolden(name, sanitized) {
 }
 
 
-async function loadRecoverySurface(args = {}, agentImpl = async () => null) {
+async function loadRecoverySurface(args = {}, agentImpl = async () => null, useWorkflowDefaults = false) {
   let source = await readFile(WORKFLOW_PATH, 'utf8')
   source = source.replace(/^export const meta\s*=/m, 'const meta =')
   const markerIndex = source.indexOf(CONTROL_LOOP_MARKER)
@@ -117,7 +117,12 @@ return {
     // the host review would exec the REAL coderabbit CLI on PATH (burning
     // review quota), host gates would run `make all` in Makefile-less
     // fixtures, and the build loop expects agents to tick Progress items.
-    { reviewTool: 'coderabbit', coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...args },
+    {
+      ...(useWorkflowDefaults
+        ? { hostCommitGates: false, perWorkItemBuild: false }
+        : { reviewTool: 'coderabbit', coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false }),
+      ...args,
+    },
     () => {},
     () => {},
     agentImpl,
@@ -1491,7 +1496,7 @@ test('host-run CodeRabbit findings drive a fix round through the real CLI seam',
   assert.equal(outcome.openIssues, undefined, 'no deferred-review issue on a clean pass')
 })
 
-test('default Dakar review retries through a fake CLI with isolated state roots', async () => {
+test('generated workflow defaults to Dakar and retries through a fake CLI with isolated state roots', async () => {
   const repo = makeRecoveryRepo({ parserExecplanStatus: 'COMPLETE' })
   const worktree = repo.parserWorktree
   const bin = mkdtempSync(path.join(tmpdir(), 'df12-dakar-bin-'))
@@ -1518,10 +1523,7 @@ test('default Dakar review retries through a fake CLI with isolated state roots'
   ].join('\n'))
   chmodSync(path.join(bin, 'dakar-review'), 0o755)
 
-  const surface = await loadRecoverySurface({
-    reviewTool: 'dakar',
-    coderabbitAttempts: 2,
-  })
+  const surface = await loadRecoverySurface({ coderabbitAttempts: 2 }, undefined, true)
   const previousPath = process.env.PATH
   process.env.PATH = `${bin}:${previousPath}`
   try {
