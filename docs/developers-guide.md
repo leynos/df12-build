@@ -343,8 +343,30 @@ errors, authentication failures, and JSONL sink failures. Finding severity
 counts also use a fixed vocabulary; task ids and error strings never become
 metric keys. JSONL writes remain serialized through a promise tail.
 
-Host-run CodeRabbit review (`coderabbitHostReview`, default on) moves the CLI
-invocation from agent prompts to the control loop:
+### Dakar host review (`reviewTool: 'dakar'`, the default)
+
+Dakar is always host-run. The workflow invokes `dakar-review` against the
+committed diff, with a fresh temporary state root for each attempt, and uses
+`dakarBudgetGbp` for optional bounded admission spending. A deferred Dakar
+review is retried in host wall-clock without agent tokens; in a dual-review
+round it falls through to the reviewer agents, while a deferred between-item
+review halts the task for assessment. Blocking Dakar findings short-circuit
+the reviewer agents and enter the bounded fix loop.
+
+With the default host gates enabled, each review point therefore runs the
+deterministic commit gates, then CodeScene, then Dakar, and only then the
+token-spending reviewer agents. `tests/modules/host-review.test.ts` covers the
+Dakar command line, temporary-state cleanup, budget flag, and outcome mapping;
+`tests/df12-build-odw-assessment.test.mjs` covers the Dakar authentication
+preflight and its independence from the legacy CodeRabbit flag.
+
+### CodeRabbit host review (`reviewTool: 'coderabbit'` only)
+
+> The workflow defaults to Dakar. The execution, quota, gate-order, and test
+> details in this subsection apply only when CodeRabbit is selected explicitly.
+
+Host-run CodeRabbit review (`coderabbitHostReview`, default on in CodeRabbit
+mode) moves the CLI invocation from agent prompts to the control loop:
 `coderabbit review --agent --type committed --base <base>` (a FIXED host
 invocation; the `coderabbitReviewCommand` knob applies only to the legacy
 agent-run mode and does NOT override it) runs BETWEEN each per-work-item build
