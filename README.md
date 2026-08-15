@@ -119,10 +119,10 @@ flowchart TD
     lane -->|no| plan[Plan]
     plan --> design[Design review]
     design -->|not satisfied| plan
-    design -->|approved| build[Implement<br/>one work item per turn]
-    build --> between["Selected host reviewer<br/>between each work item<br/>(Dakar default)"]
+    design -->|approved| build[Implement<br/>one work item per turn<br/>then host review]
+    build --> between["Selected host reviewer<br/>between each work item<br/>(Dakar default;<br/>CodeRabbit via reviewTool)"]
     between -->|blocking| build
-    between --> review[Dual review +<br/>host gates + selected reviewer]
+    between --> review["Dual review +<br/>host gates + selected host reviewer<br/>(Dakar default;<br/>CodeRabbit via reviewTool)"]
     review -->|blocking| fix[Fix round]
     fix --> review
 
