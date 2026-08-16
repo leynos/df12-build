@@ -868,10 +868,10 @@ host gates and host review in the review rounds and addendum lane), and
 114 artefact tests (18 new upstream suites included), 231 module tests, and
 `make all` green; the branch was then rebased onto `origin/main`.
 
-2026-08-16 (documentation follow-up): reconciled the user guide with the
+2026-08-16 (documentation follow-up): reconciled the user's guide with the
 durable top-level `codeScene` result, including its redacted command and the
 separate `runs`, `failures`, `probeFailures`, and `skipped` metrics. The
-developers guide now records the non-evaluating `shell-command.ts` abstraction,
+developers' guide now records the non-evaluating `shell-command.ts` abstraction,
 host-gate process-group handling, the TypeDoc zero-tolerance and Markdown gate
 requirements, and the complete development-tool inventory. The obsolete 80%
 docstring-coverage warning was skipped: this repository's `docs-check` uses

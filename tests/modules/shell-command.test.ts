@@ -59,6 +59,14 @@ describe('tokenizeShellCommand', () => {
     expect(tokenizeShellCommand('TOKEN="secret value" cs-check-changed')?.leadingAssignments).toHaveLength(1)
   })
 
+  test('collects assignments following a bare env invocation', () => {
+    const command = 'env TOKEN=secret OTHER=value cs-check-changed --changed'
+    const tokens = tokenizeShellCommand(command)
+
+    expect(tokens?.leadingAssignments.map((assignment) => assignment.name)).toEqual(['TOKEN', 'OTHER'])
+    expect(tokens?.words[tokens.executableWordIndex]?.value).toBe('cs-check-changed')
+  })
+
   test('preserves every generated literal assignment span', () => {
     const names = fc.constantFrom('A', 'TOKEN', 'DF12_CS_MARKER')
     const values = fc.array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789'), { maxLength: 12 })
@@ -73,7 +81,9 @@ describe('tokenizeShellCommand', () => {
         expect(tokens).not.toBeNull()
         expect(tokens?.leadingAssignments.map((assignment) => assignment.name)).toEqual(assignments.map(([name]) => name))
         for (const [index, assignment] of (tokens?.leadingAssignments || []).entries()) {
-          const [name, value] = assignments[index]
+          const pair = assignments[index]
+          expect(pair).toBeDefined()
+          const [name, value] = pair as [string, string]
           expect(command.slice(assignment.start, assignment.end)).toBe(`${name}=${value}`)
         }
       },

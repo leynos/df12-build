@@ -13,7 +13,7 @@ import {
   summarizeFixReport,
   summarizeReviewVerdict,
 } from '../../src/workflows/df12-build-odw/run-task.ts'
-import { faultMetrics } from '../../src/workflows/df12-build-odw/faults.ts'
+import type { FaultMetrics } from '../../src/workflows/df12-build-odw/types.ts'
 
 const globals = globalThis as Record<string, unknown>
 
@@ -47,6 +47,7 @@ const task = { id: '1.2.3', title: 'Implement the parser', requires: [], rationa
 
 type Script = (label: string, prompt: string) => unknown
 let labels: string[] = []
+let runFaultMetrics: FaultMetrics
 
 function scriptAgent(script: Script) {
   globals.agent = async (prompt: string, opts: Record<string, unknown> = {}) => {
@@ -58,6 +59,7 @@ function scriptAgent(script: Script) {
 
 function subject(worktree: string, overrides: Record<string, unknown> = {}) {
   return makeTaskPipeline({
+    faultMetrics: runFaultMetrics,
     MAX_DESIGN_ROUNDS: 2,
     MAX_REVIEW_ROUNDS: 2,
     // The upstream defaults for these are ON, but the module tests drive the
@@ -105,10 +107,7 @@ function subject(worktree: string, overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   labels = []
-  faultMetrics.infraRetries = 0
-  faultMetrics.infraFaults = 0
-  faultMetrics.providerFaults = 0
-  faultMetrics.authFaults = 0
+  runFaultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 }
   globals.log = () => {}
   globals.phase = () => {}
   globals.parallel = async (thunks: Array<() => Promise<unknown>>) =>
@@ -304,7 +303,7 @@ describe('runTask', () => {
     const outcome = await subject(worktree).runTask(task, null)
     expect(outcome.status).toBe('fatal-auth')
     expect(outcome.assessed).toBeUndefined()
-    expect(faultMetrics.authFaults).toBe(1)
+    expect(runFaultMetrics.authFaults).toBe(1)
   })
 
   test('a per-work-item implementation auth failure increments authFaults', async () => {
@@ -318,7 +317,7 @@ describe('runTask', () => {
     const outcome = await subject(worktree, { PER_WORK_ITEM_BUILD: true }).runTask(task, null)
 
     expect(outcome.status).toBe('fatal-auth')
-    expect(faultMetrics.authFaults).toBe(1)
+    expect(runFaultMetrics.authFaults).toBe(1)
   })
 
   test('an addendum implementation auth failure increments authFaults', async () => {
@@ -332,7 +331,7 @@ describe('runTask', () => {
     const outcome = await subject(worktree).runTask(addendum, null)
 
     expect(outcome.status).toBe('fatal-auth')
-    expect(faultMetrics.authFaults).toBe(1)
+    expect(runFaultMetrics.authFaults).toBe(1)
   })
 
   test.each([
@@ -372,7 +371,7 @@ describe('runTask', () => {
     }).runTask(taskData, null)
 
     expect(outcome.status).toBe('fatal-auth')
-    expect(faultMetrics.authFaults).toBe(1)
+    expect(runFaultMetrics.authFaults).toBe(1)
   })
 
   test('green implementation with a dirty worktree fails the durability gate', async () => {

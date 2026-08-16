@@ -595,7 +595,10 @@ async function fileState(pathValue, baseDir = process.cwd()) {
 }
 
 // src/workflows/df12-build-odw/faults.ts
-var faultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 };
+function createFaultMetrics() {
+  return { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 };
+}
+var faultMetrics = createFaultMetrics();
 function authFailureDetail(value) {
   const text = String(value || "");
   const patterns = [
@@ -638,7 +641,7 @@ function infrastructureFailureDetail(value) {
   ];
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
 }
-function makeWithInfraRetry(attempts) {
+function makeWithInfraRetry(attempts, metrics = faultMetrics) {
   return async function withInfraRetry2(run, label) {
     for (let attempt = 1; ; attempt++) {
       try {
@@ -653,16 +656,16 @@ function makeWithInfraRetry(attempts) {
           }
           throw error;
         }
-        faultMetrics.infraRetries += 1;
+        metrics.infraRetries += 1;
         log(`[${label}] infrastructure fault (${message}); retrying the stage agent (attempt ${attempt + 1} of ${attempts})`);
       }
     }
   };
 }
-function resultFromUnhandledAgentError(id, detail, extra = {}) {
+function resultFromUnhandledAgentError(id, detail, extra = {}, metrics = faultMetrics) {
   const authDetail = authFailureDetail(detail);
   if (authDetail) {
-    faultMetrics.authFaults += 1;
+    metrics.authFaults += 1;
     return {
       id,
       status: "fatal-auth",
@@ -674,7 +677,7 @@ function resultFromUnhandledAgentError(id, detail, extra = {}) {
   }
   const providerDetail = providerFailureDetail(detail);
   if (providerDetail) {
-    faultMetrics.providerFaults += 1;
+    metrics.providerFaults += 1;
     return {
       id,
       status: "provider-fault",
@@ -686,7 +689,7 @@ function resultFromUnhandledAgentError(id, detail, extra = {}) {
   }
   const infraDetail = infrastructureFailureDetail(detail);
   if (infraDetail) {
-    faultMetrics.infraFaults += 1;
+    metrics.infraFaults += 1;
     return {
       id,
       status: "infra-fault",
@@ -950,6 +953,138 @@ async function syntheticRecoveryImpl(candidate, evidence, residualRisk = []) {
   };
 }
 
+// src/workflows/df12-build-odw/shell-command.ts
+function commandSubstitutionEnd(command, start) {
+  let cursor = start + 2;
+  let quote = "";
+  let depth = 1;
+  while (cursor < command.length) {
+    const character = command[cursor];
+    if (character === "\\" && quote !== "'") {
+      cursor += 2;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = "";
+      cursor += 1;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      cursor += 1;
+      continue;
+    }
+    if (character === "$" && command[cursor + 1] === "(") {
+      depth += 1;
+      cursor += 2;
+      continue;
+    }
+    if (character === ")") {
+      depth -= 1;
+      cursor += 1;
+      if (!depth) return cursor;
+      continue;
+    }
+    cursor += 1;
+  }
+  return null;
+}
+function assignmentName(command, word) {
+  let cursor = word.start;
+  let name = "";
+  while (cursor < word.end) {
+    const character = command[cursor];
+    if (character === "=") return name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : null;
+    if (!/[A-Za-z0-9_]/.test(character)) return null;
+    name += character;
+    cursor += 1;
+  }
+  return null;
+}
+function tokenizeShellCommand(command) {
+  const words = [];
+  let cursor = 0;
+  let hasUnquotedControlOperator = false;
+  while (cursor < command.length) {
+    while (cursor < command.length && /\s/.test(command[cursor])) {
+      if (command[cursor] === "\n") hasUnquotedControlOperator = true;
+      cursor += 1;
+    }
+    if (cursor >= command.length) break;
+    const start = cursor;
+    let value = "";
+    let quote = "";
+    let hasWord = false;
+    while (cursor < command.length) {
+      const character = command[cursor];
+      if (!quote && /\s/.test(character)) break;
+      if (!quote && (character === ";" || character === "&" || character === "|")) {
+        hasUnquotedControlOperator = true;
+      }
+      if (!quote && (character === "'" || character === '"')) {
+        quote = character;
+        hasWord = true;
+        cursor += 1;
+        continue;
+      }
+      if (quote && character === quote) {
+        quote = "";
+        cursor += 1;
+        continue;
+      }
+      if (character === "$" && command[cursor + 1] === "(" && quote !== "'") {
+        const end = commandSubstitutionEnd(command, cursor);
+        if (end === null) return null;
+        value += command.slice(cursor, end);
+        hasWord = true;
+        cursor = end;
+        continue;
+      }
+      if (!quote && (character === "`" || character === "$" && command[cursor + 1] === "{")) return null;
+      if (character === "\\" && quote !== "'") {
+        cursor += 1;
+        if (cursor >= command.length) return null;
+        value += command[cursor];
+        hasWord = true;
+        cursor += 1;
+        continue;
+      }
+      value += character;
+      hasWord = true;
+      cursor += 1;
+    }
+    if (quote || !hasWord) return null;
+    words.push({ value, start, end: cursor });
+  }
+  const leadingAssignments = [];
+  let executableWordIndex = 0;
+  for (; executableWordIndex < words.length; executableWordIndex++) {
+    const word = words[executableWordIndex];
+    const name = assignmentName(command, word);
+    if (!name) break;
+    leadingAssignments.push({ name, start: word.start, end: word.end });
+  }
+  if (words[executableWordIndex]?.value === "env") {
+    executableWordIndex += 1;
+    for (; executableWordIndex < words.length; executableWordIndex++) {
+      const word = words[executableWordIndex];
+      const name = assignmentName(command, word);
+      if (!name) break;
+      leadingAssignments.push({ name, start: word.start, end: word.end });
+    }
+  }
+  return { words, leadingAssignments, executableWordIndex, hasUnquotedControlOperator };
+}
+function redactedShellCommand(command) {
+  const tokens = tokenizeShellCommand(command);
+  if (!tokens || tokens.hasUnquotedControlOperator) return "<redacted command>";
+  let redacted = command;
+  for (const assignment of tokens.leadingAssignments.toReversed()) {
+    redacted = `${redacted.slice(0, assignment.start)}${assignment.name}=<redacted>${redacted.slice(assignment.end)}`;
+  }
+  return redacted;
+}
+
 // src/workflows/df12-build-odw/config.ts
 function makeConfig(rawArgs) {
   const cfg = rawArgs || {};
@@ -1038,8 +1173,9 @@ function makeConfig(rawArgs) {
   const COMMIT_GATE_GUIDANCE2 = `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT2}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well \u2014 NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.${HOST_COMMIT_GATES2 ? " The workflow host independently re-runs the configured gates against your committed HEAD before review and integration; a gatesGreen claim the host cannot reproduce fails the stage with the host gate log as evidence." : ""}`;
   const CS_CHECK2 = cfg.csCheck !== false;
   const CS_CHECK_COMMAND2 = String(cfg.csCheckCommand || "cs-check-changed");
+  const REDACTED_CS_CHECK_COMMAND = redactedShellCommand(CS_CHECK_COMMAND2);
   const CS_CHECK_GUIDANCE2 = CS_CHECK2 ? [
-    `A deterministic CodeScene code-health check (\`${CS_CHECK_COMMAND2}\`) runs on your committed changed files AFTER the commit gates and BEFORE CodeRabbit. Clear a flagged code-health regression by refactoring the code. ONLY when further refinement would genuinely be deleterious to clarity or correctness, suppress a specific smell with a \`@codescene(disable:"Complex Method")\` comment (combine several as \`@codescene(disable:"Complex Method", disable:"Bumpy Road Ahead")\`) placed immediately before the affected function or method, and precede that suppression with a plain-language comment explaining why it is justified.`,
+    `A deterministic CodeScene code-health check (\`${REDACTED_CS_CHECK_COMMAND}\`) runs on your committed changed files AFTER the commit gates and BEFORE CodeRabbit. Clear a flagged code-health regression by refactoring the code. ONLY when further refinement would genuinely be deleterious to clarity or correctness, suppress a specific smell with a \`@codescene(disable:"Complex Method")\` comment (combine several as \`@codescene(disable:"Complex Method", disable:"Bumpy Road Ahead")\`) placed immediately before the affected function or method, and precede that suppression with a plain-language comment explaining why it is justified.`,
     "What the flagged smells mean:",
     "Module smells \u2014 Low Cohesion: the module/class carries several unrelated responsibilities (measured by LCOM4), breaking the single-responsibility principle. Brain Class (God Class): a large module with many functions and at least one Brain Method, holding too much responsibility at once. Developer Congestion: the code has become a coordination bottleneck because too many people must change it in parallel. Complex code by former contributors: a low-health hotspot whose original author has left the organisation carries heightened maintenance risk. Lines of Code: the file is simply too large.",
     "Function smells \u2014 Brain Method (God Function): one complex function concentrates the module's behaviour and becomes a local hotspot. DRY violations: duplicated logic that is actually changed together in predictable patterns. Complex Method: high cyclomatic complexity from many conditionals (if/for/while). Primitive Obsession: heavy use of raw primitives (integers, strings, floats) where a domain type would encapsulate the validation and meaning of the values. Large Method: a function with too many lines to comprehend easily.",
@@ -2196,118 +2332,6 @@ function makeRemediation({ preamble: preamble2, worktreeSafetyNet: worktreeSafet
   };
 }
 
-// src/workflows/df12-build-odw/shell-command.ts
-function commandSubstitutionEnd(command, start) {
-  let cursor = start + 2;
-  let quote = "";
-  let depth = 1;
-  while (cursor < command.length) {
-    const character = command[cursor];
-    if (character === "\\" && quote !== "'") {
-      cursor += 2;
-      continue;
-    }
-    if (quote) {
-      if (character === quote) quote = "";
-      cursor += 1;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      cursor += 1;
-      continue;
-    }
-    if (character === "$" && command[cursor + 1] === "(") {
-      depth += 1;
-      cursor += 2;
-      continue;
-    }
-    if (character === ")") {
-      depth -= 1;
-      cursor += 1;
-      if (!depth) return cursor;
-      continue;
-    }
-    cursor += 1;
-  }
-  return null;
-}
-function assignmentName(command, word) {
-  let cursor = word.start;
-  let name = "";
-  while (cursor < word.end) {
-    const character = command[cursor];
-    if (character === "=") return name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : null;
-    if (!/[A-Za-z0-9_]/.test(character)) return null;
-    name += character;
-    cursor += 1;
-  }
-  return null;
-}
-function tokenizeShellCommand(command) {
-  const words = [];
-  let cursor = 0;
-  let hasUnquotedControlOperator = false;
-  while (cursor < command.length) {
-    while (cursor < command.length && /\s/.test(command[cursor])) {
-      if (command[cursor] === "\n") hasUnquotedControlOperator = true;
-      cursor += 1;
-    }
-    if (cursor >= command.length) break;
-    const start = cursor;
-    let value = "";
-    let quote = "";
-    let hasWord = false;
-    while (cursor < command.length) {
-      const character = command[cursor];
-      if (!quote && /\s/.test(character)) break;
-      if (!quote && (character === ";" || character === "&" || character === "|")) {
-        hasUnquotedControlOperator = true;
-      }
-      if (!quote && (character === "'" || character === '"')) {
-        quote = character;
-        hasWord = true;
-        cursor += 1;
-        continue;
-      }
-      if (quote && character === quote) {
-        quote = "";
-        cursor += 1;
-        continue;
-      }
-      if (character === "$" && command[cursor + 1] === "(" && quote !== "'") {
-        const end = commandSubstitutionEnd(command, cursor);
-        if (end === null) return null;
-        value += command.slice(cursor, end);
-        hasWord = true;
-        cursor = end;
-        continue;
-      }
-      if (!quote && (character === "`" || character === "$" && command[cursor + 1] === "{")) return null;
-      if (character === "\\" && quote !== "'") {
-        cursor += 1;
-        if (cursor >= command.length) return null;
-        value += command[cursor];
-        hasWord = true;
-        cursor += 1;
-        continue;
-      }
-      value += character;
-      hasWord = true;
-      cursor += 1;
-    }
-    if (quote || !hasWord) return null;
-    words.push({ value, start, end: cursor });
-  }
-  const leadingAssignments = [];
-  for (const word of words) {
-    const name = assignmentName(command, word);
-    if (!name) break;
-    leadingAssignments.push({ name, start: word.start, end: word.end });
-  }
-  return { words, leadingAssignments, hasUnquotedControlOperator };
-}
-
 // src/workflows/df12-build-odw/host-review.ts
 function parseCoderabbitAgentOutput(stdout) {
   const events = [];
@@ -2369,8 +2393,8 @@ var csCheckMetrics = {
 };
 function codeSceneExecutable(command) {
   const tokens = tokenizeShellCommand(command);
-  if (!tokens) return "";
-  return tokens.words[tokens.leadingAssignments.length]?.value || "";
+  if (!tokens) return null;
+  return tokens.words[tokens.executableWordIndex]?.value || "";
 }
 var gateLogDirCache = null;
 function gateLogRoot() {
@@ -2592,7 +2616,26 @@ ${outcome.tail}`
   }
   async function runCodeSceneCheck2(worktree, tag, label) {
     if (!csCheck) return { clean: true, skipped: true, detail: "", logFile: "" };
-    const bin = codeSceneExecutable(csCheckCommand) || "cs-check-changed";
+    const redactedCommand = redactedShellCommand(csCheckCommand);
+    const bin = codeSceneExecutable(csCheckCommand);
+    if (bin === null) {
+      csCheckMetrics.probeFailures += 1;
+      return {
+        clean: false,
+        skipped: false,
+        detail: `CodeScene availability probe for \`${redactedCommand}\` failed: command could not be parsed safely`,
+        logFile: ""
+      };
+    }
+    if (!bin) {
+      csCheckMetrics.probeFailures += 1;
+      return {
+        clean: false,
+        skipped: false,
+        detail: `CodeScene availability probe for \`${redactedCommand}\` failed: command has no executable`,
+        logFile: ""
+      };
+    }
     const missingSentinel = "__DF12_CODESCENE_BINARY_MISSING__";
     const probe = await execFileStatus(
       "sh",
@@ -2616,12 +2659,12 @@ ${outcome.tail}`
     }
     csCheckMetrics.runs += 1;
     const logFile = hostGateLogPath(await createGateLogNamespace(), tag, `cs-${label}`, 0);
-    log(`[task ${tag}] CodeScene check (${label}): ${csCheckCommand}`);
+    log(`[task ${tag}] CodeScene check (${label}): ${redactedCommand}`);
     const outcome = await streamGate(csCheckCommand, worktree, logFile);
     if (outcome.ok) return { clean: true, skipped: false, detail: "", logFile };
     csCheckMetrics.failures += 1;
     const timedOut = outcome.timedOut ? ` (killed after the ${commitGateTimeoutSeconds}s timeout)` : "";
-    return { clean: false, skipped: false, detail: `CodeScene check \`${csCheckCommand}\` reported code-health issues${timedOut}; full log: ${logFile}; output tail:
+    return { clean: false, skipped: false, detail: `CodeScene check \`${redactedCommand}\` reported code-health issues${timedOut}; full log: ${logFile}; output tail:
 ${outcome.tail}`, logFile };
   }
   return {
@@ -2680,6 +2723,7 @@ function integrationHaltDetail(integration) {
 }
 function makeTaskPipeline(deps) {
   const {
+    faultMetrics: faultMetrics2,
     MAX_DESIGN_ROUNDS: MAX_DESIGN_ROUNDS2,
     MAX_REVIEW_ROUNDS: MAX_REVIEW_ROUNDS2,
     MAX_WORK_ITEM_ROUNDS: MAX_WORK_ITEM_ROUNDS2,
@@ -2860,7 +2904,7 @@ function makeTaskPipeline(deps) {
       await recordCoderabbitReview2(`${tag} ${itemLabel} a${attempt}`, review);
       runs += 1;
       if (review.outcome === "auth") {
-        faultMetrics.authFaults += 1;
+        faultMetrics2.authFaults += 1;
         return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: `CodeRabbit host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } };
       }
       if (review.outcome === "rate-limited" || review.outcome === "error") {
@@ -2912,7 +2956,7 @@ function makeTaskPipeline(deps) {
       lastImpl = impl;
       const authDetail = implementationAuthFailureDetail(impl);
       if (authDetail) {
-        faultMetrics.authFaults += 1;
+        faultMetrics2.authFaults += 1;
         return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
       }
       if (!impl || !impl.ok || !impl.gatesGreen) {
@@ -2990,7 +3034,7 @@ function makeTaskPipeline(deps) {
     })), `implement:${tag}`));
     const authDetail = implementationAuthFailureDetail(impl);
     if (authDetail) {
-      faultMetrics.authFaults += 1;
+      faultMetrics2.authFaults += 1;
       return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
     }
     if (!impl || !impl.ok || !impl.gatesGreen) {
@@ -3051,7 +3095,7 @@ function makeTaskPipeline(deps) {
     } catch (error) {
       const message = error && error.message || String(error);
       if (!infrastructureFailureDetail(message)) throw error;
-      faultMetrics.infraFaults += 1;
+      faultMetrics2.infraFaults += 1;
       return {
         fault: {
           id: tag,
@@ -3108,7 +3152,7 @@ function makeTaskPipeline(deps) {
         const coderabbit = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} r${round}`);
         await recordCoderabbitReview2(`${tag} r${round}`, coderabbit);
         if (coderabbit.outcome === "auth") {
-          faultMetrics.authFaults += 1;
+          faultMetrics2.authFaults += 1;
           return { id: tag, status: "fatal-auth", stage: "review", detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, reviewRounds, worktree, proposals, ...kindExtra };
         }
         if (coderabbit.outcome === "rate-limited" || coderabbit.outcome === "error") {
@@ -3151,7 +3195,7 @@ function makeTaskPipeline(deps) {
         ].filter(Boolean).join(" and ");
         reviewRounds.push({ round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking: [], fix: null });
         if (reviewInfraFaults.length) {
-          faultMetrics.infraFaults += 1;
+          faultMetrics2.infraFaults += 1;
           return {
             id: tag,
             status: "infra-fault",
@@ -3257,7 +3301,7 @@ function makeTaskPipeline(deps) {
         const impl2 = await buildLock2(() => withInfraRetry2(() => agent(implementAddendumPrompt2(task, worktree), buildAgentOptions2({ phase: "Implement", label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`));
         const authDetail = implementationAuthFailureDetail(impl2);
         if (authDetail) {
-          faultMetrics.authFaults += 1;
+          faultMetrics2.authFaults += 1;
           return {
             id: tag,
             status: "fatal-auth",
@@ -3311,7 +3355,7 @@ function makeTaskPipeline(deps) {
           const coderabbit = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} addendum`);
           await recordCoderabbitReview2(`${tag} addendum`, coderabbit);
           if (coderabbit.outcome === "auth") {
-            faultMetrics.authFaults += 1;
+            faultMetrics2.authFaults += 1;
             return { id: tag, status: "fatal-auth", stage: "auth", detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, worktree, proposals, kind: "addendum" };
           }
           const blockingFindings = coderabbitBlockingItems(coderabbit.findings);
@@ -3365,7 +3409,7 @@ function makeTaskPipeline(deps) {
       return outcome;
     } catch (error) {
       const detail = `unhandled agent error: ${error && error.message || String(error)}`;
-      const result = resultFromUnhandledAgentError(tag, detail, { worktree });
+      const result = resultFromUnhandledAgentError(tag, detail, { worktree }, faultMetrics2);
       return await attachAssessment2(task, wt, result);
     }
   }
@@ -3488,7 +3532,8 @@ function modelRouting() {
     assessment: { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL }
   };
 }
-var withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS);
+var runFaultMetrics = createFaultMetrics();
+var withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS, runFaultMetrics);
 var discoverRecoveryCandidates = makeRecoveryDiscovery({
   base: BASE,
   resumeTaskId: RESUME_TASK_ID,
@@ -3703,7 +3748,7 @@ async function executeResume(task, resume, mergeLock2) {
     return await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock2, { kind: "recovery-resume" });
   } catch (error) {
     const detail = `unhandled agent error: ${error && error.message || String(error)}`;
-    return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: "recovery-resume" });
+    return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: "recovery-resume" }, runFaultMetrics);
   }
 }
 async function runRecovery(root, mergeLock2 = null) {
@@ -3780,7 +3825,7 @@ async function runRecovery(root, mergeLock2 = null) {
         });
         summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: "assessment-error" });
         if (authFailureDetail(assessed.assessmentError) || providerFailureDetail(assessed.assessmentError)) {
-          return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessed.assessmentError) };
+          return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessed.assessmentError, {}, runFaultMetrics) };
         }
         continue;
       }
@@ -3928,6 +3973,7 @@ var {
   runDualReviewAndIntegration,
   runTask
 } = makeTaskPipeline({
+  faultMetrics: runFaultMetrics,
   CS_CHECK,
   runCodeSceneCheck,
   MAX_DESIGN_ROUNDS,
@@ -4073,7 +4119,7 @@ async function fillPool() {
           return {
             id: task.id,
             task,
-            result: resultFromUnhandledAgentError(task.id, detail)
+            result: resultFromUnhandledAgentError(task.id, detail, {}, runFaultMetrics)
           };
         }
       )
@@ -4081,13 +4127,7 @@ async function fillPool() {
   }
 }
 function redactedCodeSceneCommand(command) {
-  const tokens = tokenizeShellCommand(command);
-  if (!tokens || tokens.hasUnquotedControlOperator) return "<redacted command>";
-  let redacted = command;
-  for (const assignment of tokens.leadingAssignments.toReversed()) {
-    redacted = `${redacted.slice(0, assignment.start)}${assignment.name}=<redacted>${redacted.slice(assignment.end)}`;
-  }
-  return redacted;
+  return redactedShellCommand(command);
 }
 // --- Worker-pool control loop -----------------------------------------------
 async function workflowMain() {
@@ -4245,7 +4285,7 @@ async function workflowMain() {
     // Bounded-cardinality fault metrics (fixed keys): stage retries spent on
     // infrastructure faults plus terminal fault counts per class, so operators
     // can read retry pressure straight from the result instead of the logs.
-    faultMetrics: { ...faultMetrics },
+    faultMetrics: { ...runFaultMetrics },
     // Host-run CodeRabbit review aggregate: effective configuration plus
     // bounded counters (reviews run, findings by severity, rate-limited runs,
     // deferred reviews). Per-finding detail goes to the JSONL sink when

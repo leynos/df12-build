@@ -116,6 +116,14 @@ describe('makeConfig overrides and clamps', () => {
     expect(makeConfig({ csCheckCommand: 'cs check --changed --base main' }).CS_CHECK_COMMAND).toBe('cs check --changed --base main')
   })
 
+  test('the CodeScene guidance redacts command-line environment values', () => {
+    const secret = 'do-not-expose-this-token'
+    const guidance = makeConfig({ csCheckCommand: `env TOKEN=${secret} cs-check-changed` }).CS_CHECK_GUIDANCE
+
+    expect(guidance).toContain('TOKEN=<redacted>')
+    expect(guidance).not.toContain(secret)
+  })
+
   test('the between-work-items host gates can be disabled independently', () => {
     expect(makeConfig({ hostGatesBetweenWorkItems: false }).HOST_GATES_BETWEEN_WORK_ITEMS).toBe(false)
     expect(makeConfig({ hostCommitGates: true }).HOST_GATES_BETWEEN_WORK_ITEMS).toBe(true)

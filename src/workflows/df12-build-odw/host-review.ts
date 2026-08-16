@@ -12,7 +12,7 @@
 import { execFileStatus } from './exec.ts'
 import type { ExecOptions, ExecStatus } from './exec.ts'
 import { authFailureDetail } from './faults.ts'
-import { tokenizeShellCommand } from './shell-command.ts'
+import { redactedShellCommand, tokenizeShellCommand } from './shell-command.ts'
 
 /**
  * One CodeRabbit `finding` event, kept as its raw wire object (it extends
@@ -273,10 +273,10 @@ export const csCheckMetrics = {
 }
 
 /** Resolve the executable after any leading shell environment assignments. */
-function codeSceneExecutable(command: string): string {
+function codeSceneExecutable(command: string): string | null {
   const tokens = tokenizeShellCommand(command)
-  if (!tokens) return ''
-  return tokens.words[tokens.leadingAssignments.length]?.value || ''
+  if (!tokens) return null
+  return tokens.words[tokens.executableWordIndex]?.value || ''
 }
 
 // Per-process gate-log directory, created lazily with mkdtempSync so its name
@@ -596,7 +596,26 @@ export function makeHostReview(config: HostReviewConfig, deps: HostReviewDeps = 
     logFile: string
   }> {
     if (!csCheck) return { clean: true, skipped: true, detail: '', logFile: '' }
-    const bin = codeSceneExecutable(csCheckCommand) || 'cs-check-changed'
+    const redactedCommand = redactedShellCommand(csCheckCommand)
+    const bin = codeSceneExecutable(csCheckCommand)
+    if (bin === null) {
+      csCheckMetrics.probeFailures += 1
+      return {
+        clean: false,
+        skipped: false,
+        detail: `CodeScene availability probe for \`${redactedCommand}\` failed: command could not be parsed safely`,
+        logFile: '',
+      }
+    }
+    if (!bin) {
+      csCheckMetrics.probeFailures += 1
+      return {
+        clean: false,
+        skipped: false,
+        detail: `CodeScene availability probe for \`${redactedCommand}\` failed: command has no executable`,
+        logFile: '',
+      }
+    }
     // Pass the probed name as a positional argument ($1), never interpolated
     // into the command string: csCheckCommand is operator config (a trust
     // boundary), so shell metacharacters in the name must not be interpreted.
@@ -626,12 +645,12 @@ export function makeHostReview(config: HostReviewConfig, deps: HostReviewDeps = 
     }
     csCheckMetrics.runs += 1
     const logFile = hostGateLogPath(await createGateLogNamespace(), tag, `cs-${label}`, 0)
-    log(`[task ${tag}] CodeScene check (${label}): ${csCheckCommand}`)
+    log(`[task ${tag}] CodeScene check (${label}): ${redactedCommand}`)
     const outcome = await streamGate(csCheckCommand, worktree, logFile)
     if (outcome.ok) return { clean: true, skipped: false, detail: '', logFile }
     csCheckMetrics.failures += 1
     const timedOut = outcome.timedOut ? ` (killed after the ${commitGateTimeoutSeconds}s timeout)` : ''
-    return { clean: false, skipped: false, detail: `CodeScene check \`${csCheckCommand}\` reported code-health issues${timedOut}; full log: ${logFile}; output tail:\n${outcome.tail}`, logFile }
+    return { clean: false, skipped: false, detail: `CodeScene check \`${redactedCommand}\` reported code-health issues${timedOut}; full log: ${logFile}; output tail:\n${outcome.tail}`, logFile }
   }
 
   return {

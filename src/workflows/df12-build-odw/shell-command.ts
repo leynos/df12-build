@@ -31,8 +31,10 @@ export interface ShellCommandAssignment {
 export interface ShellCommandTokens {
   /** Every shell word in command order. */
   words: ShellCommandWord[]
-  /** Leading environment assignments, preserving the original source spans. */
+  /** Environment assignments before the executed command, preserving source spans. */
   leadingAssignments: ShellCommandAssignment[]
+  /** Index of the executable word after assignments and a bare `env` command. */
+  executableWordIndex: number
   /** Whether an unquoted shell control operator makes redaction fail closed. */
   hasUnquotedControlOperator: boolean
 }
@@ -150,10 +152,32 @@ export function tokenizeShellCommand(command: string): ShellCommandTokens | null
   }
 
   const leadingAssignments: ShellCommandAssignment[] = []
-  for (const word of words) {
+  let executableWordIndex = 0
+  for (; executableWordIndex < words.length; executableWordIndex++) {
+    const word = words[executableWordIndex]
     const name = assignmentName(command, word)
     if (!name) break
     leadingAssignments.push({ name, start: word.start, end: word.end })
   }
-  return { words, leadingAssignments, hasUnquotedControlOperator }
+  if (words[executableWordIndex]?.value === 'env') {
+    executableWordIndex += 1
+    for (; executableWordIndex < words.length; executableWordIndex++) {
+      const word = words[executableWordIndex]
+      const name = assignmentName(command, word)
+      if (!name) break
+      leadingAssignments.push({ name, start: word.start, end: word.end })
+    }
+  }
+  return { words, leadingAssignments, executableWordIndex, hasUnquotedControlOperator }
+}
+
+/** Redact environment assignments without changing the command that will execute. */
+export function redactedShellCommand(command: string): string {
+  const tokens = tokenizeShellCommand(command)
+  if (!tokens || tokens.hasUnquotedControlOperator) return '<redacted command>'
+  let redacted = command
+  for (const assignment of tokens.leadingAssignments.toReversed()) {
+    redacted = `${redacted.slice(0, assignment.start)}${assignment.name}=<redacted>${redacted.slice(assignment.end)}`
+  }
+  return redacted
 }

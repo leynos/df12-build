@@ -8,6 +8,7 @@
  *
  * @module
  */
+import { redactedShellCommand } from './shell-command.ts'
 
 /**
  * Raw, caller-supplied workflow overrides before defaults and clamps are
@@ -457,9 +458,10 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   // absent, like `make verify-modules` without Dafny.
   const CS_CHECK = cfg.csCheck !== false
   const CS_CHECK_COMMAND = String(cfg.csCheckCommand || 'cs-check-changed')
+  const REDACTED_CS_CHECK_COMMAND = redactedShellCommand(CS_CHECK_COMMAND)
   const CS_CHECK_GUIDANCE = CS_CHECK
     ? [
-        `A deterministic CodeScene code-health check (\`${CS_CHECK_COMMAND}\`) runs on your committed changed files AFTER the commit gates and BEFORE CodeRabbit. Clear a flagged code-health regression by refactoring the code. ONLY when further refinement would genuinely be deleterious to clarity or correctness, suppress a specific smell with a \`@codescene(disable:"Complex Method")\` comment (combine several as \`@codescene(disable:"Complex Method", disable:"Bumpy Road Ahead")\`) placed immediately before the affected function or method, and precede that suppression with a plain-language comment explaining why it is justified.`,
+        `A deterministic CodeScene code-health check (\`${REDACTED_CS_CHECK_COMMAND}\`) runs on your committed changed files AFTER the commit gates and BEFORE CodeRabbit. Clear a flagged code-health regression by refactoring the code. ONLY when further refinement would genuinely be deleterious to clarity or correctness, suppress a specific smell with a \`@codescene(disable:"Complex Method")\` comment (combine several as \`@codescene(disable:"Complex Method", disable:"Bumpy Road Ahead")\`) placed immediately before the affected function or method, and precede that suppression with a plain-language comment explaining why it is justified.`,
         'What the flagged smells mean:',
         'Module smells — Low Cohesion: the module/class carries several unrelated responsibilities (measured by LCOM4), breaking the single-responsibility principle. Brain Class (God Class): a large module with many functions and at least one Brain Method, holding too much responsibility at once. Developer Congestion: the code has become a coordination bottleneck because too many people must change it in parallel. Complex code by former contributors: a low-health hotspot whose original author has left the organisation carries heightened maintenance risk. Lines of Code: the file is simply too large.',
         "Function smells — Brain Method (God Function): one complex function concentrates the module's behaviour and becomes a local hotspot. DRY violations: duplicated logic that is actually changed together in predictable patterns. Complex Method: high cyclomatic complexity from many conditionals (if/for/while). Primitive Obsession: heavy use of raw primitives (integers, strings, floats) where a domain type would encapsulate the validation and meaning of the values. Large Method: a function with too many lines to comprehend easily.",

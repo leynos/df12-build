@@ -14,9 +14,16 @@ import type { FaultMetrics } from './types.ts'
  * operators can see retry pressure and terminal fault classes without
  * scraping logs. Fixed keys only — never keyed by task id or error text.
  * Mutated in place by `makeWithInfraRetry` and
- * `resultFromUnhandledAgentError`; this module holds the one live instance.
+ * `resultFromUnhandledAgentError`. Each workflow run supplies its own
+ * instance; the exported default exists for standalone callers.
  */
-export const faultMetrics: FaultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 }
+/** Create independent bounded fault counters for one workflow run. */
+export function createFaultMetrics(): FaultMetrics {
+  return { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 }
+}
+
+/** Compatibility metrics for callers that do not yet bind run-scoped counters. */
+export const faultMetrics: FaultMetrics = createFaultMetrics()
 
 /**
  * Detect an authentication/authorization failure from an agent's error text.
@@ -100,7 +107,7 @@ export function infrastructureFailureDetail(value: unknown): string {
  * @param attempts Maximum number of attempts (not extra retries) before the
  *   wrapper gives up and rethrows.
  */
-export function makeWithInfraRetry(attempts: number) {
+export function makeWithInfraRetry(attempts: number, metrics: FaultMetrics = faultMetrics) {
   return async function withInfraRetry<T>(run: () => Promise<T>, label: string): Promise<T> {
     for (let attempt = 1; ; attempt++) {
       try {
@@ -117,7 +124,7 @@ export function makeWithInfraRetry(attempts: number) {
           }
           throw error
         }
-        faultMetrics.infraRetries += 1
+        metrics.infraRetries += 1
         log(`[${label}] infrastructure fault (${message}); retrying the stage agent (attempt ${attempt + 1} of ${attempts})`)
       }
     }
@@ -147,17 +154,18 @@ export interface UnhandledAgentErrorResult extends Record<string, unknown> {
  * authentication, then provider, then infrastructure patterns in that order
  * (auth failures are the most actionable and must not be masked by a
  * coincidental provider/infra pattern match) and falling back to a generic
- * `'failed'` status. Increments the matching counter in `faultMetrics` as a
- * side effect so operators can see fault pressure without scraping logs.
+ * `'failed'` status. Increments the matching counter in the supplied metrics
+ * object so operators can see fault pressure without scraping logs.
  */
 export function resultFromUnhandledAgentError(
   id: string,
   detail: string,
   extra: Record<string, unknown> = {},
+  metrics: FaultMetrics = faultMetrics,
 ): UnhandledAgentErrorResult {
   const authDetail = authFailureDetail(detail)
   if (authDetail) {
-    faultMetrics.authFaults += 1
+    metrics.authFaults += 1
     return {
       id,
       status: 'fatal-auth',
@@ -169,7 +177,7 @@ export function resultFromUnhandledAgentError(
   }
   const providerDetail = providerFailureDetail(detail)
   if (providerDetail) {
-    faultMetrics.providerFaults += 1
+    metrics.providerFaults += 1
     return {
       id,
       status: 'provider-fault',
@@ -181,7 +189,7 @@ export function resultFromUnhandledAgentError(
   }
   const infraDetail = infrastructureFailureDetail(detail)
   if (infraDetail) {
-    faultMetrics.infraFaults += 1
+    metrics.infraFaults += 1
     return {
       id,
       status: 'infra-fault',

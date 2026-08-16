@@ -77,6 +77,7 @@ describe('runCodeSceneCheck', () => {
     csCheckMetrics.skipped = 0
   })
   afterEach(() => {
+    g.log = () => {}
     for (const target of junk.splice(0)) if (target) rmSync(target, { recursive: true, force: true })
   })
 
@@ -115,6 +116,46 @@ describe('runCodeSceneCheck', () => {
     expect(result.clean).toBe(true)
     expect(result.skipped).toBe(false)
     expect(csCheckMetrics).toEqual({ runs: 1, failures: 0, probeFailures: 0, skipped: 0 })
+    junk.push(result.logFile)
+  })
+
+  test('a bare env invocation does not hide its assigned executable', async () => {
+    const dir = tmp('cs-env-')
+    const executable = path.join(dir, 'check-env')
+    writeFileSync(executable, '#!/bin/sh\ntest "$TOKEN" = expected\n')
+    chmodSync(executable, 0o755)
+    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: `env TOKEN=expected "${executable}"` })
+    const result = await runCodeSceneCheck(dir, '1.2.3', 'env')
+
+    expect(result.clean).toBe(true)
+    expect(result.skipped).toBe(false)
+    junk.push(result.logFile)
+  })
+
+  test('an unparsable command fails the availability probe without running a fallback', async () => {
+    const dir = tmp('cs-unparsable-')
+    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: 'TOKEN=`untrusted` true' })
+    const result = await runCodeSceneCheck(dir, '1.2.3', 'unparsable')
+
+    expect(result).toMatchObject({ clean: false, skipped: false, logFile: '' })
+    expect(result.detail).toContain('could not be parsed safely')
+    expect(result.detail).toContain('<redacted command>')
+    expect(csCheckMetrics).toEqual({ runs: 0, failures: 0, probeFailures: 1, skipped: 0 })
+  })
+
+  test('redacts assignment values from CodeScene logs and failure detail', async () => {
+    const dir = tmp('cs-redacted-command-')
+    const secret = 'never-log-this-token'
+    const messages: string[] = []
+    g.log = (message: unknown) => messages.push(String(message))
+    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: `env TOKEN=${secret} sh -c "exit 1"` })
+    const result = await runCodeSceneCheck(dir, '1.2.3', 'redacted')
+
+    expect(result.clean).toBe(false)
+    expect(result.detail).not.toContain(secret)
+    expect(messages.join('\n')).not.toContain(secret)
+    expect(result.detail).toContain('TOKEN=<redacted>')
+    expect(messages.join('\n')).toContain('TOKEN=<redacted>')
     junk.push(result.logFile)
   })
 

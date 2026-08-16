@@ -210,8 +210,8 @@ they never enter a diff, trip `workflow-freshness`, or affect a gate:
   durable artefacts there: `events.jsonl` (an ordered stream with
   `agent_started`/`agent_finished` per `agent()` call, tagged by adapter,
   label, and phase), `result.json` (the final return, including every
-  `reviewRounds`, `assessments`, host-gate and CodeScene result, and CodeRabbit
-  summary), and
+  `reviewRounds`, `assessments`, the host-gate result, the CodeScene result, and
+  the CodeRabbit summary), and
   `error.json`. This is entirely ODW's domain — no workflow involvement.
   Regenerate the value per run, or use a shared `~/.odw/runs` for a single
   pool; the sidecar keeps each run's logs beside its config and notes.
@@ -704,8 +704,10 @@ code-health findings),
 reason), and `skipped` (the configured binary was not found on `PATH`). The
 `command` value redacts values in leading `NAME=value` assignments, for example
 `CS_TOKEN=<redacted> cs-check-changed --base main`; the original command is
-still used for execution. A missing binary is therefore a clean skip, whereas
-`probeFailures` is a surfaced fault and is not counted as a skip.
+still used for execution. If tokenization cannot safely disambiguate malformed
+or control-operator syntax, the displayed command is `<redacted command>`
+instead of being partially redacted. A missing binary is therefore a clean
+skip, whereas `probeFailures` is a surfaced fault and is not counted as a skip.
 
 ## Recovery model
 

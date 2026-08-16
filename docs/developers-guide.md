@@ -387,8 +387,9 @@ escaping, and nested-substitution forms needed here without evaluating the
 command. Host review uses it to identify the executable after leading
 environment assignments; the final result uses the preserved assignment spans
 to redact those values in the displayed CodeScene command while executing the
-original command unchanged. Malformed input fails closed rather than being
-interpreted by this parser.
+original command unchanged. Malformed or ambiguous input, including unquoted
+control operators, records `<redacted command>` rather than partially redacting
+the display; the parser never evaluates that input.
 
 `make verify-modules` skips when Dafny is absent, so local runs stay friendly;
 CI must run `make verify-modules-strict`, which FAILS when Dafny is not on
@@ -497,6 +498,20 @@ Use en-GB Oxford spelling in prose and commit messages. Prefer `artefact`,
 `behaviour`, `configuration`, and `synchronized` spelling where those words
 appear in documentation.
 
+## Validation tooling
+
+Mermaid validation requires `merman-cli` 0.7.0 as the Nixie renderer and
+`nixie-cli` 1.1.0. Install them with `cargo` and `uv`, and ensure both tool
+directories are on `PATH`:
+
+```bash
+cargo install merman-cli --version '=0.7.0' --locked
+uv tool install --python 3.14 --managed-python 'nixie-cli==1.1.0'
+```
+
+Continuous Integration (CI) pins those versions, Bun 1.3.14, and uv 0.11.19;
+see `.github/workflows/ci.yml` when updating local tooling.
+
 ## Validation
 
 Run the repo-wide validation targets before committing workflow or
@@ -561,7 +576,7 @@ The `docs-check` target (run by `make all`, wrapping `bun run docs:check`) is
 the zero-tolerance documentation gate: TypeDoc's `notDocumented` validation
 expands the configured `src/workflows/df12-build-odw/` entry point. The
 `typedoc.json` configuration excludes declaration files, `meta.js`, and
-internal, private and protected reflections. Every included module must open
+internal, private, and protected reflections. Every included module must open
 with a `/** … @module */` block, and included reflections of the kinds listed
 in `requiredToBeDocumented` must carry a JSDoc block; validation warnings are
 errors, the run emits no documentation artefacts, and a failure prints the
