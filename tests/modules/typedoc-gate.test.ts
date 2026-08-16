@@ -87,10 +87,12 @@ describe('zero-tolerance TypeDoc gate', () => {
       cwd: REPO,
       stdout: 'pipe',
       stderr: 'pipe',
+      timeout: TYPEDOC_SPAWN_TIMEOUT_MS,
     })
 
+    expect(result.exitedDueToTimeout).toBe(false)
     expect(result.exitCode, `${result.stdout.toString()}\n${result.stderr.toString()}`).toBe(0)
-  })
+  }, TYPEDOC_TEST_TIMEOUT_MS)
 
   test('the committed configuration requires module and declaration documentation', () => {
     expect(TYPEDOC_OPTIONS.treatValidationWarningsAsErrors).toBe(true)

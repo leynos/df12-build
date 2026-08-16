@@ -658,7 +658,6 @@ Example `args.json`:
 }
 ```
 
-
 ## Default Dakar host review
 
 Dakar is the default host reviewer and always runs host-side. In each
