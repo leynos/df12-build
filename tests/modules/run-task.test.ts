@@ -481,7 +481,14 @@ describe('runTask', () => {
     expect(fallbackIndex).toBeGreaterThanOrEqual(0)
     expect(fallbackIndex).toBeLessThan(integrationIndex)
     expect(outcome.openIssues).toEqual([
-      'Dakar review deferred (rate-limited after 3 attempt(s), deferred): Dakar review deferred (stage: deferred) — budget exhausted',
+      {
+        kind: 'host-review-deferral',
+        reviewer: 'dakar',
+        outcome: 'rate-limited',
+        errorCategory: 'deferred',
+        attempts: 3,
+        detail: 'Dakar review deferred (stage: deferred) — budget exhausted',
+      },
     ])
   })
 

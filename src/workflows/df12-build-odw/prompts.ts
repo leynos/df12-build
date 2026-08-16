@@ -9,6 +9,7 @@
  */
 import type { WorkflowConfig } from './config.ts'
 import { shellQuote } from './exec.ts'
+import { reviewerDisplayName } from './host-review.ts'
 import { roadmapIdSlug } from './roadmap.ts'
 
 // The slices of task / plan / implementation records the prompts read.
@@ -120,7 +121,7 @@ export function makePrompts(config: WorkflowConfig) {
     SPARK_DELEGATION_GUIDANCE,
     SCRUTINEER_DELEGATION_GUIDANCE,
   } = config
-  const hostReviewer = REVIEW_TOOL === 'dakar' ? 'Dakar' : 'CodeRabbit'
+  const hostReviewer = reviewerDisplayName(REVIEW_TOOL)
 
   function grepaiSearchCommand(): string {
     const workspaceArg = shellQuote(GREPAI_WORKSPACE)

@@ -72,6 +72,16 @@ function redactedDakarProbeCommand(invocation: readonly string[]): string {
   return [executable, ...optionNames, '--version'].join(' ')
 }
 
+/** Remove configured Dakar argument values from an execution-status diagnostic. */
+function redactedDakarStatusDetail(status: ExecStatus, invocation: readonly string[]): string {
+  let detail = statusDetail(status)
+  for (const value of invocation.slice(1)) {
+    if (!value || /^--[A-Za-z][A-Za-z0-9-]*$/.test(value)) continue
+    detail = detail.split(value).join('[REDACTED]')
+  }
+  return boundedTail(detail)
+}
+
 /** Bind the configured auth and reviewer readiness checks to host primitives. */
 export function makeAuthPreflight(config: AuthPreflightConfig, deps: AuthPreflightDeps): () => Promise<AuthPreflightFailure[]> {
   return async function runAuthPreflight(): Promise<AuthPreflightFailure[]> {
@@ -105,7 +115,7 @@ export function makeAuthPreflight(config: AuthPreflightConfig, deps: AuthPreflig
       if (config.reviewTool === 'dakar') {
         const dakarExecutable = config.dakarInvocation[0] || 'dakar-review'
         const dakar = await deps.exec(dakarExecutable, [...config.dakarInvocation.slice(1), '--version'])
-        const dakarOutput = statusDetail(dakar)
+        const dakarOutput = redactedDakarStatusDetail(dakar, config.dakarInvocation)
         if (!dakar.ok) {
           deps.recordHostReviewAuthFailure()
           failures.push({

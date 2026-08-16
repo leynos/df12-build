@@ -35,9 +35,10 @@ describe('Dakar configuration clamp properties', () => {
     fc.assert(
       fc.property(budgetInput, (input) => {
         const numeric = Number(input)
-        const expected = Number.isFinite(numeric) ? Math.min(10, Math.max(0, numeric)) : 0
-        expect(makeConfig({ dakarBudgetGbp: input }).DAKAR_BUDGET_GBP)
-          .toBe(expected)
+        const budget = makeConfig({ dakarBudgetGbp: input }).DAKAR_BUDGET_GBP
+        if (!Number.isFinite(numeric) || numeric <= 0) expect(budget).toBe(0)
+        else if (numeric >= 10) expect(budget).toBe(10)
+        else expect(budget).toBe(numeric)
       }),
     )
   })

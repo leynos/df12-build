@@ -531,10 +531,12 @@ Common arguments:
 - `csCheckCommand`: the command the CodeScene check runs in the worktree.
   Defaults to `cs-check-changed` (an operator-provided wrapper); override it
   with the exact invocation, e.g. `cs check --changed --base main`.
-- `coderabbitBetweenWorkItems`: when `true` (the default), and when both
-  `coderabbitHostReview` and `perWorkItemBuild` are on, the host runs a
-  review after each committed work item — using Dakar by default or CodeRabbit
-  when selected — rather than only once after the whole implementation stage.
+- `coderabbitBetweenWorkItems`: when `true` (the default) and
+  `perWorkItemBuild` is on, the host runs a review after each committed work
+  item — using Dakar by default or CodeRabbit when selected — rather than only
+  once after the whole implementation stage. CodeRabbit additionally requires
+  `coderabbitHostReview`; Dakar always runs host-side and ignores that legacy
+  flag.
   Blocking findings drive a bounded fix loop; terminal deferral or errors halt
   the task for assessment instead of continuing unreviewed. Set `false` to
   review only once at the end of the implementation stage.

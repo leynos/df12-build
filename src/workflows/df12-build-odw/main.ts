@@ -74,10 +74,7 @@ import {
 import { TRIAGE_SCHEMA, makeRemediation, stepOf } from './remediation.ts'
 import {
   reviewBlockingItems,
-  hostReviewMetrics,
   classifyCoderabbitOutcome,
-  csCheckMetrics,
-  hostGateMetrics,
   makeHostReview,
   parseCoderabbitAgentOutput,
 } from './host-review.ts'
@@ -88,7 +85,6 @@ import type { ExecplanState, RecoveryAssessmentFields } from './recovery-decisio
 import type { SelectionResult } from './roadmap.ts'
 import type { StagePlan, StageResult } from './run-task.ts'
 import type { RecoveryCandidate, SelectedTask } from './types.ts'
-
 
 /**
  * df12-build-odw entry: the ODW workflow's worker-pool control loop and
@@ -354,14 +350,25 @@ const hostReview = makeHostReview({
   csCheck: CS_CHECK,
   csCheckCommand: CS_CHECK_COMMAND,
 })
+
 const {
   reviewBackoffMinutes,
   runHostReview,
   recordHostReview,
   runHostCommitGates,
   runCodeSceneCheck,
+  metrics: getHostReviewMetrics,
+  recordHostReviewAuthFailure,
 } = hostReview
-
+const {
+  reviewBackoffMinutes,
+  runHostReview,
+  recordHostReview,
+  runHostCommitGates,
+  runCodeSceneCheck,
+  metrics: getHostReviewMetrics,
+  recordHostReviewAuthFailure,
+} = hostReview
 const runAuthPreflight = makeAuthPreflight(
   {
     enabled: AUTH_PREFLIGHT,
@@ -375,7 +382,7 @@ const runAuthPreflight = makeAuthPreflight(
     environment: { get: (name) => process.env[name] },
     phase,
     log,
-    recordHostReviewAuthFailure: () => { hostReviewMetrics.authFailures += 1 },
+    recordHostReviewAuthFailure,
   },
 )
 
@@ -1189,6 +1196,7 @@ const assessments = results
 // artefacts committed (or why salvage was skipped) without opening result.json.
 // summarizeSalvages is a pure, unit-tested aggregator (see assessment.ts).
 const { salvages, summarySuffix: salvageSummarySuffix } = summarizeSalvages(results)
+const hostReviewSnapshot = getHostReviewMetrics()
 
 return {
   base: BASE,
@@ -1205,12 +1213,12 @@ return {
   hostGates: {
     enabled: HOST_COMMIT_GATES,
     timeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
-    ...hostGateMetrics,
+    ...hostReviewSnapshot.hostGates,
   },
   codeScene: {
     enabled: CS_CHECK,
     command: redactedCodeSceneCommand(CS_CHECK_COMMAND),
-    ...csCheckMetrics,
+    ...hostReviewSnapshot.codeScene,
   },
   stageAttempts: STAGE_ATTEMPTS,
   // Host-driven build loop configuration: one builder turn per unticked
@@ -1230,8 +1238,8 @@ return {
     attempts: HOST_REVIEW_ATTEMPTS,
     backoffMinutes: HOST_REVIEW_BACKOFF_MINUTES,
     findingsFile: HOST_REVIEW_FINDINGS_FILE,
-    ...hostReviewMetrics,
-    bySeverity: { ...hostReviewMetrics.bySeverity },
+    ...hostReviewSnapshot.hostReview,
+    bySeverity: { ...hostReviewSnapshot.hostReview.bySeverity },
   },
   processed,
   results,

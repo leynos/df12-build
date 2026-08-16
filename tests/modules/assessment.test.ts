@@ -115,6 +115,14 @@ describe('deferred-review classification', () => {
       attempts: 3,
       detail: 'unrelated operator wording',
     })).toBe(true)
+    expect(isDeferredReviewIssue({
+      kind: 'host-review-deferral', reviewer: 'dakar', outcome: 'error',
+      errorCategory: 'execution', attempts: 1, detail: 'unrelated detail',
+    })).toBe(true)
+    expect(isDeferredReviewIssue({
+      kind: 'host-review-deferral', reviewer: 'dakar', outcome: 'clean',
+      errorCategory: 'none', attempts: 1, detail: 'unrelated detail',
+    })).toBe(false)
   })
 })
 

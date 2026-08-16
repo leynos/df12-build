@@ -29,7 +29,7 @@ import {
   hasOnlyDeferredReviewIssues,
   implementationAuthFailureDetail,
 } from './assessment.ts'
-import { hostReviewDeferral, reviewBlockingItems } from './host-review.ts'
+import { hostReviewDeferral, reviewBlockingItems, reviewerDisplayName } from './host-review.ts'
 import type { HostReviewDeferral, HostReviewResult, HostGateRun } from './host-review.ts'
 import { readExecplanState } from './recovery-discovery.ts'
 import {
@@ -268,24 +268,49 @@ export interface FixReportSummary {
   summary: unknown
 }
 
-/** Result from a pipeline stage that either yields a product or a failure. */
-export interface PipelineStageProduct<T> {
-  /** Successful stage product, absent on failure. */
-  plan?: T
-  /** Successful implementation product, absent on failure. */
-  impl?: T
-  /** Terminal failure, absent on success. */
-  fail?: StageResult
+/** Successful plan-stage product, mutually exclusive with other variants. */
+export interface PipelinePlanProduct<T> {
+  /** Successful plan-stage product. */
+  plan: T
+  /** No terminal failure occurred. */
+  fail?: never
+  /** Implementation is unavailable at this stage. */
+  impl?: never
 }
+
+/** Successful implementation-stage product, mutually exclusive with other variants. */
+export interface PipelineImplementationProduct<T> {
+  /** Successful implementation-stage product. */
+  impl: T
+  /** No terminal failure occurred. */
+  fail?: never
+  /** Plan is unavailable at this stage. */
+  plan?: never
+}
+
+/** Terminal pipeline-stage failure, mutually exclusive with products. */
+export interface PipelineStageFailure {
+  /** Terminal stage failure. */
+  fail: StageResult
+  /** No plan product accompanies failure. */
+  plan?: never
+  /** No implementation product accompanies failure. */
+  impl?: never
+}
+
+/** Result from a pipeline stage that either yields its declared product or a failure. */
+export type PipelineStageProduct<T, Kind extends 'plan' | 'impl'> =
+  | (Kind extends 'plan' ? PipelinePlanProduct<T> : PipelineImplementationProduct<T>)
+  | PipelineStageFailure
 
 /** Stage helpers and full task entry point bound by `makeTaskPipeline`. */
 export interface TaskPipelineSurface {
   /** Run the bounded plan/design-review loop. */
-  runPlanDesignLoop: (task: SelectedTask, worktree: string, opts?: Record<string, unknown>) => Promise<PipelineStageProduct<StagePlan>>
+  runPlanDesignLoop: (task: SelectedTask, worktree: string, opts?: Record<string, unknown>) => Promise<PipelineStageProduct<StagePlan, 'plan'>>
   /** Run granular implementation work items when enabled. */
-  runWorkItemBuildLoop: (task: SelectedTask, worktree: string, plan: StagePlan, opts?: Record<string, unknown>) => Promise<PipelineStageProduct<StageImpl> | null>
+  runWorkItemBuildLoop: (task: SelectedTask, worktree: string, plan: StagePlan, opts?: Record<string, unknown>) => Promise<PipelineStageProduct<StageImpl, 'impl'> | null>
   /** Run the selected implementation strategy. */
-  runImplementationStage: (task: SelectedTask, worktree: string, plan: StagePlan, opts?: Record<string, unknown>) => Promise<PipelineStageProduct<StageImpl>>
+  runImplementationStage: (task: SelectedTask, worktree: string, plan: StagePlan, opts?: Record<string, unknown>) => Promise<PipelineStageProduct<StageImpl, 'impl'>>
   /** Run host and agent review followed by integration. */
   runDualReviewAndIntegration: (task: SelectedTask, worktree: string, plan: StagePlan, impl: StageImpl, mergeLock: MergeLock, options?: Record<string, unknown>) => Promise<StageResult>
   /** Run the complete task pipeline. */
@@ -439,9 +464,9 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     runHostReview,
     recordHostReview,
   } = deps
-  const reviewerDisplayName = HOST_REVIEWER === 'dakar' ? 'Dakar' : 'CodeRabbit'
+  const hostReviewerDisplayName = reviewerDisplayName(HOST_REVIEWER)
 
-  async function runPlanDesignLoop(task: SelectedTask, worktree: string, opts: Record<string, unknown> = {}): Promise<{ plan?: StagePlan; fail?: StageResult }> {
+  async function runPlanDesignLoop(task: SelectedTask, worktree: string, opts: Record<string, unknown> = {}): Promise<PipelineStageProduct<StagePlan, 'plan'>> {
     const tag = task.id
     const extra = (opts.extra as Record<string, unknown>) || {}
     let plan: StagePlan | null = null
@@ -652,26 +677,26 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
       runs += 1
       if (review.outcome === 'auth') {
         faultMetrics.authFaults += 1
-        return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: `${reviewerDisplayName} host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } }
+        return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: `${hostReviewerDisplayName} host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } }
       }
       if (review.outcome === 'rate-limited' || review.outcome === 'error') {
-        return { fail: { id: tag, status: 'halted', stage: 'code-review', detail: `${reviewerDisplayName} between-item review could not complete for ${itemLabel} (${review.outcome} after ${review.attempts} attempt(s), ${review.errorCategory}): ${review.detail}; the work is committed but unreviewed — resolve the host-review fault and relaunch with resumeMode: "continue"`, worktree, proposals: [], ...extra } }
+        return { fail: { id: tag, status: 'halted', stage: 'code-review', detail: `${hostReviewerDisplayName} between-item review could not complete for ${itemLabel} (${review.outcome} after ${review.attempts} attempt(s), ${review.errorCategory}): ${review.detail}; the work is committed but unreviewed — resolve the host-review fault and relaunch with resumeMode: "continue"`, worktree, proposals: [], ...extra } }
       }
-      const blocking = reviewBlockingItems(reviewerDisplayName, review.findings)
-      log(`[task ${tag}] between-item ${reviewerDisplayName} ${itemLabel} attempt ${attempt}: ${review.findings.length} finding(s), ${blocking.length} blocking`)
+      const blocking = reviewBlockingItems(hostReviewerDisplayName, review.findings)
+      log(`[task ${tag}] between-item ${hostReviewerDisplayName} ${itemLabel} attempt ${attempt}: ${review.findings.length} finding(s), ${blocking.length} blocking`)
       if (!blocking.length) return { ok: true, hostReviewRuns: runs }
       if (attempt === MAX_REVIEW_ROUNDS) {
-        return { fail: { id: tag, status: 'failed', stage: 'code-review', detail: `${reviewerDisplayName} between-item review left blocking finding(s) unresolved after ${MAX_REVIEW_ROUNDS} fix attempt(s) on ${itemLabel}: ${blocking.join('; ')}`, worktree, proposals: [], ...extra } }
+        return { fail: { id: tag, status: 'failed', stage: 'code-review', detail: `${hostReviewerDisplayName} between-item review left blocking finding(s) unresolved after ${MAX_REVIEW_ROUNDS} fix attempt(s) on ${itemLabel}: ${blocking.join('; ')}`, worktree, proposals: [], ...extra } }
       }
       const { dirtyDetail } = await dispatchFixAndVerify(task, worktree, plan, blocking, `fix:${tag} ${itemLabel} a${attempt}`, attempt)
       if (dirtyDetail) {
-        return { fail: { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the ${reviewerDisplayName} host-review fix for ${itemLabel} left uncommitted state (${dirtyDetail}); every fix must be committed before re-review`, worktree, proposals: [], ...extra } }
+        return { fail: { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the ${hostReviewerDisplayName} host-review fix for ${itemLabel} left uncommitted state (${dirtyDetail}); every fix must be committed before re-review`, worktree, proposals: [], ...extra } }
       }
     }
     return { ok: true, hostReviewRuns: runs }
   }
 
-  async function runWorkItemBuildLoop(task: SelectedTask, worktree: string, plan: StagePlan, opts: Record<string, unknown> = {}): Promise<{ impl?: StageImpl; fail?: StageResult } | null> {
+  async function runWorkItemBuildLoop(task: SelectedTask, worktree: string, plan: StagePlan, opts: Record<string, unknown> = {}): Promise<PipelineStageProduct<StageImpl, 'impl'> | null> {
     const tag = task.id
     const extra = (opts.extra as Record<string, unknown>) || {}
     const fail = (detail: string, openIssues: string[] = []) => ({ fail: { id: tag, status: 'failed', stage: 'implement', detail, openIssues, worktree, proposals: [], ...extra } })
@@ -772,7 +797,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     }
   }
 
-  async function runImplementationStage(task: SelectedTask, worktree: string, plan: StagePlan, opts: Record<string, unknown> = {}): Promise<{ impl?: StageImpl; fail?: StageResult }> {
+  async function runImplementationStage(task: SelectedTask, worktree: string, plan: StagePlan, opts: Record<string, unknown> = {}): Promise<PipelineStageProduct<StageImpl, 'impl'>> {
     const tag = task.id
     const extra = (opts.extra as Record<string, unknown>) || {}
     phase('Implement')
@@ -815,7 +840,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
 
   // Shared tail of the implementation stage: the committed-worktree durability
   // gate and the plan-status advisory, identical for both build modes.
-  async function finishImplementationStage(task: SelectedTask, worktree: string, plan: StagePlan, impl: StageImpl, extra: Record<string, unknown>): Promise<{ impl?: StageImpl; fail?: StageResult }> {
+  async function finishImplementationStage(task: SelectedTask, worktree: string, plan: StagePlan, impl: StageImpl, extra: Record<string, unknown>): Promise<PipelineStageProduct<StageImpl, 'impl'>> {
     const tag = task.id
     // Host-verified durability gate: ok=true with a dirty worktree is a
     // contract violation — uncommitted work is unreviewable and would be lost
@@ -905,7 +930,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     const proposals: Array<Record<string, unknown>> = []
     const reviewRounds: Array<Record<string, unknown>> = []
     let reviewsPass = false
-    const deferredHostReviews: string[] = []
+    const deferredHostReviews: HostReviewDeferral[] = []
     for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
       // Host-verified gates FIRST: deterministic, zero tokens, and a red
       // branch must not spend reviewer agents. A red gate goes straight to a
@@ -958,16 +983,17 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         await recordHostReview(`${tag} r${round}`, hostReview)
         if (hostReview.outcome === 'auth') {
           faultMetrics.authFaults += 1
-          return { id: tag, status: 'fatal-auth', stage: 'review', detail: `${reviewerDisplayName} host review is not authenticated: ${hostReview.detail}`, reviewRounds, worktree, proposals, ...kindExtra }
+          return { id: tag, status: 'fatal-auth', stage: 'review', detail: `${hostReviewerDisplayName} host review is not authenticated: ${hostReview.detail}`, reviewRounds, worktree, proposals, ...kindExtra }
         }
         if (hostReview.outcome === 'rate-limited' || hostReview.outcome === 'error') {
           // Deferred: the host reviewer could not complete, so fall through to the
           // reviewer agents — they remain the decisive review.
-          deferredHostReviews.push(`${reviewerDisplayName} review deferred in round ${round} (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`)
-          log(`[task ${tag}] ${reviewerDisplayName} host review deferred in round ${round}: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`)
+          const deferral = hostReviewDeferral(hostReview)
+          if (deferral) deferredHostReviews.push(deferral)
+          log(`[task ${tag}] ${hostReviewerDisplayName} host review deferred in round ${round}: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`)
         } else {
-          const hostReviewBlocking = reviewBlockingItems(reviewerDisplayName, hostReview.findings)
-          log(`[task ${tag}] ${reviewerDisplayName} host review round ${round}: ${hostReview.findings.length} finding(s), ${hostReviewBlocking.length} blocking`)
+          const hostReviewBlocking = reviewBlockingItems(hostReviewerDisplayName, hostReview.findings)
+          log(`[task ${tag}] ${hostReviewerDisplayName} host review round ${round}: ${hostReview.findings.length} finding(s), ${hostReviewBlocking.length} blocking`)
           if (hostReviewBlocking.length) {
             // Short-circuit before the reviewer agents: fix the host-review
             // blockers first, spending zero agent tokens this round.
@@ -976,7 +1002,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
             const hostReviewFix = await dispatchFixAndVerify(task, worktree, plan, hostReviewBlocking, `fix:${tag} r${round}`, round)
             reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(hostReviewFix.report)
             if (hostReviewFix.dirtyDetail) {
-              return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the ${reviewerDisplayName} host-review fix round left uncommitted state (${hostReviewFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
+              return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the ${hostReviewerDisplayName} host-review fix round left uncommitted state (${hostReviewFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
             }
             continue
           }
@@ -1191,7 +1217,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: `addendum implementation returned ok but left uncommitted state in the worktree (${committed.detail}); every sub-task must be committed before returning`, openIssues, worktree, proposals: [], kind: 'addendum' })
       }
       const proposals: Array<Record<string, unknown>> = []
-      const addendumOpenIssues: string[] = []
+      const addendumOpenIssues: HostReviewDeferral[] = []
       const addendumDeferredReviews: HostReviewDeferral[] = []
       // Host-verified gates: addenda have no review rounds, so a gatesGreen
       // claim the host cannot reproduce fails here, before any review spend.
@@ -1219,17 +1245,17 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         await recordHostReview(`${tag} addendum`, hostReview)
         if (hostReview.outcome === 'auth') {
           faultMetrics.authFaults += 1
-          return { id: tag, status: 'fatal-auth', stage: 'auth', detail: `${reviewerDisplayName} host review is not authenticated: ${hostReview.detail}`, worktree, proposals, kind: 'addendum' }
+          return { id: tag, status: 'fatal-auth', stage: 'auth', detail: `${hostReviewerDisplayName} host review is not authenticated: ${hostReview.detail}`, worktree, proposals, kind: 'addendum' }
         }
-        const blockingFindings = reviewBlockingItems(reviewerDisplayName, hostReview.findings)
+        const blockingFindings = reviewBlockingItems(hostReviewerDisplayName, hostReview.findings)
         if (blockingFindings.length) {
-          return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: `${reviewerDisplayName} host review found blocking issue(s): ${blockingFindings.join('; ')}`, impl, worktree, proposals, kind: 'addendum' })
+          return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: `${hostReviewerDisplayName} host review found blocking issue(s): ${blockingFindings.join('; ')}`, impl, worktree, proposals, kind: 'addendum' })
         }
         const deferredReview = hostReviewDeferral(hostReview)
         if (deferredReview) {
           addendumDeferredReviews.push(deferredReview)
-          addendumOpenIssues.push(`${reviewerDisplayName} review deferred (${hostReview.outcome} after ${hostReview.attempts} attempt(s), ${hostReview.errorCategory}): ${hostReview.detail}`)
-          log(`[task ${tag}] ${reviewerDisplayName} host review deferred for the addendum: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`)
+          addendumOpenIssues.push(deferredReview)
+          log(`[task ${tag}] ${hostReviewerDisplayName} host review deferred for the addendum: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`)
         }
       }
       let addendumReview: StageReview | null = null
@@ -1245,7 +1271,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         if (!addendumReview || addendumReview.verdict !== 'pass' || blocking.length > 0) {
           return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: blocking.join('; ') || addendumReview?.summary || 'addendum fallback review did not pass', impl, addendumReview, worktree, proposals, kind: 'addendum' })
         }
-        log(`[task ${tag}] addendum fallback review passed after deferred ${reviewerDisplayName} review`)
+        log(`[task ${tag}] addendum fallback review passed after deferred ${hostReviewerDisplayName} review`)
       }
       let integration: StageIntegration | null = null
       if (AUTO_MERGE) {

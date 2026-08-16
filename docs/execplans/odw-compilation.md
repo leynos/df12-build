@@ -883,9 +883,10 @@ follow-up.
 default reviewer while retaining CodeRabbit behind `reviewTool: 'coderabbit'`.
 The Dakar adapter parses and validates the terminal verdict, maps findings onto
 the established blocking contract, and uses a fresh, finally-cleaned state root
-for every bounded attempt. The external timeout and budget remain Dakar-named
-configuration for operator compatibility, while the shared internal timeout is
-tool-neutral. Both adapters now normalize into `HostReviewResult` and
+for every bounded attempt. The canonical external timeout is tool-neutral
+`reviewTimeoutSeconds`; `dakarTimeoutSeconds` remains its backward-compatible
+input alias, while `dakarBudgetGbp` remains Dakar-specific. Both adapters now
+normalize into `HostReviewResult` and
 `ReviewOutcome` before workflow policy consumes their output. The runner,
 recorder, blocking helper, capture aggregate, labels, and result summary use
 tool-neutral names; the old CodeRabbit-named exports remain compatibility

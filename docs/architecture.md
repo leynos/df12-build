@@ -249,8 +249,10 @@ review. Severity mapping preserves the blocking rule: Dakar `critical` and
 the NDJSON CodeRabbit invocation.
 
 Auth preflight is adapter-aware. The workflow always checks Codex auth because
-build-side stages depend on it, checks `dakar-review` and `pi` on `PATH` plus
-`OPENAI_API_KEY` for Dakar or CodeRabbit CLI auth for CodeRabbit when
+build-side stages depend on it, checks the executable selected by
+`dakarCommand` (default `dakar-review`) and `pi` on `PATH` plus
+`OPENAI_API_KEY` for the default Dakar reviewer, or CodeRabbit CLI auth for
+the opt-in CodeRabbit reviewer when
 implementation can run, and checks Claude auth
 whenever any configured stage uses the `claude` adapter. Auth failures are
 terminal workflow failures rather than ordinary task failures or partial-branch

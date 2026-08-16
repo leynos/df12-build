@@ -301,8 +301,9 @@ advisory risk is instead carried forward into the resumed code-review,
 expert-review, and integration prompts as a non-blocking section.
 
 The host review tool is selected by `reviewTool`, which defaults to `dakar`.
-Dakar requires `dakar-review` and `pi` on `PATH` plus a non-empty
-`OPENAI_API_KEY`. It runs `dakar-review` (overridable with `dakarCommand`)
+Dakar requires the executable selected by `dakarCommand` (default
+`dakar-review`) and `pi` on `PATH` plus a non-empty `OPENAI_API_KEY`. It runs
+that configured executable
 against the committed diff, parses one JSON document, and maps its verdict onto
 the same review contract described below: clean, findings (`critical`/`major`
 blocking), a deferred backoff, or an error. Dakar uses an OpenAI-backed model,

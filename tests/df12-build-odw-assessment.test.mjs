@@ -55,7 +55,7 @@ return {
   COMMIT_GATE_TIMEOUT_SECONDS,
   COMMIT_GATE_GUIDANCE,
   runHostCommitGates,
-  hostGateMetrics,
+  hostGateMetrics: () => getHostReviewMetrics().hostGates,
   CODERABBIT_HOST_REVIEW,
   CODERABBIT_ATTEMPTS,
   CODERABBIT_BACKOFF_MINUTES,
@@ -65,7 +65,7 @@ return {
   runHostReview,
   recordHostReview,
   reviewBlockingItems,
-  hostReviewMetrics,
+  hostReviewMetrics: () => getHostReviewMetrics().hostReview,
   implementPrompt,
   fixPrompt,
   resultFromUnhandledAgentError,
@@ -500,7 +500,7 @@ test('CodeRabbit findings are captured to the JSONL sink and the run aggregate',
   await surface.recordHostReview('1.2.3 r2', { reviewer: 'coderabbit', outcome: 'rate-limited', attempts: 3, elapsedMs: 1, errorCategory: 'deferred', findings: [], detail: 'Review limit reached' })
 
   assert.deepEqual(
-    { ...surface.hostReviewMetrics, bySeverity: { ...surface.hostReviewMetrics.bySeverity } },
+    { ...surface.hostReviewMetrics(), bySeverity: { ...surface.hostReviewMetrics().bySeverity } },
     {
       runs: 0,
       findings: 2,
@@ -583,7 +583,7 @@ test('host gates run the configured commands sequentially and tee logs to /tmp',
   assert.equal(green.results.length, 2)
   assert.ok(green.results.every((entry) => entry.ok))
   assert.match(readFileSync(green.results[0].logFile, 'utf8'), /hello ok/)
-  assert.deepEqual({ ...surface.hostGateMetrics }, { runs: 2, failures: 0 })
+  assert.deepEqual(surface.hostGateMetrics(), { runs: 2, failures: 0 })
 })
 
 test('a red host gate stops the sequence and carries the log evidence', async () => {
@@ -597,7 +597,7 @@ test('a red host gate stops the sequence and carries the log evidence', async ()
   assert.match(red.detail, /host gate `echo boom; exit 3` failed/)
   assert.match(red.detail, /boom/)
   assert.match(red.detail, new RegExp(red.results[1].logFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-  assert.deepEqual({ ...surface.hostGateMetrics }, { runs: 2, failures: 1 })
+  assert.deepEqual(surface.hostGateMetrics(), { runs: 2, failures: 1 })
 })
 
 test('a hung host gate is killed at the configured timeout', async () => {
@@ -778,12 +778,14 @@ test('commit gates default to make all and honour operator overrides', async () 
 function makeAuthBin({ codexOk = true, claudeOk = true, coderabbitOk = true, dakarOk = true, piOk = true } = {}) {
   const bin = mkdtempSync(path.join(tmpdir(), 'df12-auth-bin-'))
   const logFile = path.join(bin, 'calls.log')
+  const countFile = path.join(bin, 'argument-counts.log')
   writeFileSync(logFile, '')
+  writeFileSync(countFile, '')
   const fake = (name, ok) => {
     const file = path.join(bin, name)
     const body = ok
-      ? `#!/bin/sh\necho "${name} $@" >> "${logFile}"\necho "Session healthy"\nexit 0\n`
-      : `#!/bin/sh\necho "${name} $@" >> "${logFile}"\necho "Not logged in"\nexit 1\n`
+      ? `#!/bin/sh\necho "${name} $@" >> "${logFile}"\nprintf '%s|%s\\n' '${name}' "$#" >> "${countFile}"\necho "Session healthy"\nexit 0\n`
+      : `#!/bin/sh\necho "${name} $@" >> "${logFile}"\nprintf '%s|%s\\n' '${name}' "$#" >> "${countFile}"\necho "Not logged in"\nexit 1\n`
     writeFileSync(file, body)
     chmodSync(file, 0o755)
   }
@@ -792,7 +794,11 @@ function makeAuthBin({ codexOk = true, claudeOk = true, coderabbitOk = true, dak
   fake('coderabbit', coderabbitOk)
   fake('dakar-review', dakarOk)
   fake('pi', piOk)
-  return { bin, calls: () => readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean) }
+  return {
+    bin,
+    calls: () => readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean),
+    argumentCounts: () => readFileSync(countFile, 'utf8').trim().split('\n').filter(Boolean),
+  }
 }
 
 async function runPreflightWithFakes(args, fakes) {
@@ -927,6 +933,7 @@ test('Dakar preflight preserves quoted fixed command arguments', async () => {
     const failures = await runPreflightWithFakes({ dakarCommand: 'dakar-review "--fixed argument"' }, fakes)
     assert.deepEqual(failures, [])
     assert.ok(fakes.calls().some((line) => line === 'dakar-review --fixed argument --version'))
+    assert.ok(fakes.argumentCounts().includes('dakar-review|2'))
   } finally {
     if (previousKey === undefined) delete process.env.OPENAI_API_KEY
     else process.env.OPENAI_API_KEY = previousKey
