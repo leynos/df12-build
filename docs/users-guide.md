@@ -224,8 +224,9 @@ they never enter a diff, trip `workflow-freshness`, or affect a gate:
   write: a bad path or full disk degrades logging with a warning, reports the
   sink failure through `hostReview`, and never fails a task. In the default
   Dakar mode, the sink carries Dakar findings with severities mapped onto the
-  CodeRabbit scale (`critical`/`high` become `critical`/`major`); the field name
-  keeps its historical spelling.
+  CodeRabbit scale (`critical` becomes `critical`, `high` becomes `major`,
+  `medium` becomes `minor`, and `low` becomes `trivial`); the field name keeps
+  its historical spelling.
 
 Patch the sidecar copy only to recover or tune a live workshop. Record the
 patch in `operator-notes.md`, validate it there, then promote the proven change
