@@ -7,7 +7,7 @@
  * @module
  */
 import { execFileStatus } from './exec.ts'
-import { tokenizeShellCommand } from './shell-command.ts'
+import { redactedShellCommand, tokenizeShellCommand } from './shell-command.ts'
 import {
   boundedTail,
   type CodeSceneCheckResult,
@@ -31,10 +31,10 @@ export interface HostGateConfig {
 }
 
 /** Return the executable word of a safely tokenized configured command. */
-export function codeSceneExecutable(command: string): string {
+export function codeSceneExecutable(command: string): string | null {
   const tokens = tokenizeShellCommand(command)
-  if (!tokens || tokens.hasUnquotedControlOperator) return ''
-  return tokens.words.slice(tokens.leadingAssignments.length)[0]?.value || ''
+  if (!tokens || tokens.hasUnquotedControlOperator) return null
+  return tokens.words[tokens.executableWordIndex]?.value || ''
 }
 
 /** Create an isolated sanitized gate-log path service for one caller. */
@@ -144,23 +144,42 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
   /** Execute or skip CodeScene using the same secure streaming gate path. */
   async function runCodeSceneCheck(worktree: string, tag: string, label: string): Promise<CodeSceneCheckResult> {
     if (!config.csCheck) return { clean: true, skipped: true, detail: '', logFile: '' }
-    const bin = codeSceneExecutable(config.csCheckCommand) || 'cs-check-changed'
+    const redactedCommand = redactedShellCommand(config.csCheckCommand)
+    const bin = codeSceneExecutable(config.csCheckCommand)
+    if (bin === null) {
+      metrics.codeScene.probeFailures += 1
+      return {
+        clean: false,
+        skipped: false,
+        detail: `CodeScene command could not be parsed safely: ${redactedCommand}`,
+        logFile: '',
+      }
+    }
+    if (!bin) {
+      metrics.codeScene.probeFailures += 1
+      return {
+        clean: false,
+        skipped: false,
+        detail: `CodeScene command has no executable: ${redactedCommand}`,
+        logFile: '',
+      }
+    }
     const missing = '__DF12_CODESCENE_BINARY_MISSING__'
     const probe = await execFileStatus('sh', ['-c', 'command -v "$1" >/dev/null 2>&1 || { printf "%s\\n" "$2"; exit 127; }', 'sh', bin, missing], { cwd: worktree })
     if (!probe.ok) {
       if (probe.stdout.trim() === missing) { metrics.codeScene.skipped += 1; log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`); return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: '' } }
       metrics.codeScene.probeFailures += 1
       const fault = [probe.message, probe.stderr, probe.signal ? `signal ${probe.signal}` : '', probe.killed ? 'probe killed' : ''].map((part) => String(part || '').trim()).filter(Boolean).join('; ')
-      return { clean: false, skipped: false, detail: `CodeScene availability probe for \`${bin}\` failed: ${boundedTail(fault) || 'unknown probe failure'}`, logFile: '' }
+      return { clean: false, skipped: false, detail: `CodeScene availability probe for \`${redactedCommand}\` failed: ${boundedTail(fault) || 'unknown probe failure'}`, logFile: '' }
     }
     metrics.codeScene.runs += 1
     const logFile = logPath(tag, `cs-${label}`, 0)
-    log(`[task ${tag}] CodeScene check (${label}): ${config.csCheckCommand}`)
+    log(`[task ${tag}] CodeScene check (${label}): ${redactedCommand}`)
     const outcome = await streamGate(config.csCheckCommand, worktree, logFile)
     if (outcome.ok) return { clean: true, skipped: false, detail: '', logFile }
     metrics.codeScene.failures += 1
     const timeout = outcome.killed ? ` (killed after the ${config.commitGateTimeoutSeconds}s timeout)` : ''
-    return { clean: false, skipped: false, detail: `CodeScene check \`${config.csCheckCommand}\` reported code-health issues${timeout}; full log: ${logFile}; output tail:\n${outcome.tail}`, logFile }
+    return { clean: false, skipped: false, detail: `CodeScene check \`${redactedCommand}\` reported code-health issues${timeout}; full log: ${logFile}; output tail:\n${outcome.tail}`, logFile }
   }
 
   return { runHostCommitGates, runCodeSceneCheck }

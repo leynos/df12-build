@@ -15,7 +15,6 @@ import {
 } from '../../src/workflows/df12-build-odw/run-task.ts'
 import type { FaultMetrics } from '../../src/workflows/df12-build-odw/types.ts'
 
-import { faultMetrics } from '../../src/workflows/df12-build-odw/faults.ts'
 import type { HostReviewResult } from '../../src/workflows/df12-build-odw/host-review.ts'
 
 // Module tests for the per-task pipeline (decomposition milestone 9), run
@@ -354,7 +353,7 @@ describe('runTask', () => {
     }).runTask(task, null)
 
     expect(outcome.status).toBe('fatal-auth')
-    expect(faultMetrics.authFaults).toBe(1)
+    expect(runFaultMetrics.authFaults).toBe(1)
   })
 
   test('a dual-review host-review auth failure increments authFaults', async () => {
@@ -367,7 +366,7 @@ describe('runTask', () => {
     }).runTask(task, null)
 
     expect(outcome.status).toBe('fatal-auth')
-    expect(faultMetrics.authFaults).toBe(1)
+    expect(runFaultMetrics.authFaults).toBe(1)
   })
 
   test('an addendum implementation auth failure increments authFaults', async () => {

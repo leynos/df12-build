@@ -44,7 +44,7 @@ import {
 import { execFileStatus, execFileText, fileState, shellQuote } from './exec.ts'
 import {
   authFailureDetail,
-  faultMetrics,
+  createFaultMetrics,
   infrastructureFailureDetail,
   makeWithInfraRetry,
   providerFailureDetail,
@@ -79,7 +79,7 @@ import {
   parseCoderabbitAgentOutput,
 } from './host-review.ts'
 import { makeTaskPipeline, summarizeFixReport, summarizeReviewVerdict } from './run-task.ts'
-import { tokenizeShellCommand } from './shell-command.ts'
+import { redactedShellCommand, tokenizeShellCommand } from './shell-command.ts'
 import type { AssessmentEvidence } from './git-evidence.ts'
 import type { ExecplanState, RecoveryAssessmentFields } from './recovery-decision.ts'
 import type { SelectionResult } from './roadmap.ts'
@@ -263,7 +263,8 @@ function modelRouting() {
 }
 
 // Stage-agent retry with the run's attempt budget bound once (see faults.ts).
-const withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS)
+const runFaultMetrics = createFaultMetrics()
+const withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS, runFaultMetrics)
 
 // Recovery discovery with the run's limits bound once (see recovery-discovery.ts).
 const discoverRecoveryCandidates = makeRecoveryDiscovery({
@@ -351,15 +352,6 @@ const hostReview = makeHostReview({
   csCheckCommand: CS_CHECK_COMMAND,
 })
 
-const {
-  reviewBackoffMinutes,
-  runHostReview,
-  recordHostReview,
-  runHostCommitGates,
-  runCodeSceneCheck,
-  metrics: getHostReviewMetrics,
-  recordHostReviewAuthFailure,
-} = hostReview
 const {
   reviewBackoffMinutes,
   runHostReview,
@@ -517,7 +509,7 @@ async function executeResume(
     return await runDualReviewAndIntegration(task, candidate.worktreePath, plan as StagePlan, impl as AnyRecord, mergeLock, { kind: 'recovery-resume' })
   } catch (error) {
     const detail = `unhandled agent error: ${((error as Error | null) && (error as Error).message) || String(error)}`
-    return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: 'recovery-resume' })
+    return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: 'recovery-resume' }, runFaultMetrics)
   }
 }
 
@@ -622,7 +614,7 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
           // Infrastructure faults during recovery poison every later agent
           // call too — halt the run instead of pretending branches were
           // assessed.
-          return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessed.assessmentError) as TaskOutcome }
+          return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessed.assessmentError, {}, runFaultMetrics) as TaskOutcome }
         }
         continue
       }
@@ -831,6 +823,7 @@ const {
   runDualReviewAndIntegration,
   runTask,
 } = makeTaskPipeline({
+  faultMetrics: runFaultMetrics,
   CS_CHECK,
   runCodeSceneCheck,
   MAX_DESIGN_ROUNDS,
@@ -996,7 +989,7 @@ async function fillPool() {
           return {
             id: task.id,
             task,
-            result: resultFromUnhandledAgentError(task.id, detail) as TaskOutcome,
+            result: resultFromUnhandledAgentError(task.id, detail, {}, runFaultMetrics) as TaskOutcome,
           }
         },
       ),
@@ -1013,13 +1006,7 @@ async function fillPool() {
  * assignment spans into displayed evidence.
  */
 function redactedCodeSceneCommand(command: string): string {
-  const tokens = tokenizeShellCommand(command)
-  if (!tokens || tokens.hasUnquotedControlOperator) return '<redacted command>'
-  let redacted = command
-  for (const assignment of tokens.leadingAssignments.toReversed()) {
-    redacted = `${redacted.slice(0, assignment.start)}${assignment.name}=<redacted>${redacted.slice(assignment.end)}`
-  }
-  return redacted
+  return redactedShellCommand(command)
 }
 
 // --- Worker-pool control loop -----------------------------------------------
@@ -1228,7 +1215,7 @@ return {
   // Bounded-cardinality fault metrics (fixed keys): stage retries spent on
   // infrastructure faults plus terminal fault counts per class, so operators
   // can read retry pressure straight from the result instead of the logs.
-  faultMetrics: { ...faultMetrics },
+  faultMetrics: { ...runFaultMetrics },
   // Host-review aggregate: effective configuration plus bounded counters.
   // Per-finding detail goes to the JSONL sink when
   // coderabbitFindingsFile is configured.

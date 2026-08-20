@@ -1,6 +1,6 @@
 /** @file Module tests for neutral host-review adapters, telemetry, and gates. */
 import { afterEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -573,13 +573,14 @@ describe('runCodeSceneCheck', () => {
 
   test('an unparsable command fails the availability probe without running a fallback', async () => {
     const dir = tmp('cs-unparsable-')
-    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: 'TOKEN=`untrusted` true' })
+    const surface = hostReview({ csCheck: true, csCheckCommand: 'TOKEN=`untrusted` true' })
+    const { runCodeSceneCheck } = surface
     const result = await runCodeSceneCheck(dir, '1.2.3', 'unparsable')
 
     expect(result).toMatchObject({ clean: false, skipped: false, logFile: '' })
     expect(result.detail).toContain('could not be parsed safely')
     expect(result.detail).toContain('<redacted command>')
-    expect(csCheckMetrics).toEqual({ runs: 0, failures: 0, probeFailures: 1, skipped: 0 })
+    expect(surface.metrics().codeScene).toEqual({ runs: 0, failures: 0, probeFailures: 1, skipped: 0 })
   })
 
   test('redacts assignment values from CodeScene logs and failure detail', async () => {

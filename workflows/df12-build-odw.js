@@ -1590,123 +1590,11 @@ function makeDakarAttempt(config) {
   };
 }
 
-// src/workflows/df12-build-odw/shell-command.ts
-function commandSubstitutionEnd(command, start) {
-  let cursor = start + 2;
-  let quote = "";
-  let depth = 1;
-  while (cursor < command.length) {
-    const character = command[cursor];
-    if (character === "\\" && quote !== "'") {
-      cursor += 2;
-      continue;
-    }
-    if (quote) {
-      if (character === quote) quote = "";
-      cursor += 1;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      cursor += 1;
-      continue;
-    }
-    if (character === "$" && command[cursor + 1] === "(") {
-      depth += 1;
-      cursor += 2;
-      continue;
-    }
-    if (character === ")") {
-      depth -= 1;
-      cursor += 1;
-      if (!depth) return cursor;
-      continue;
-    }
-    cursor += 1;
-  }
-  return null;
-}
-function assignmentName(command, word) {
-  let cursor = word.start;
-  let name = "";
-  while (cursor < word.end) {
-    const character = command[cursor];
-    if (character === "=") return name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : null;
-    if (!/[A-Za-z0-9_]/.test(character)) return null;
-    name += character;
-    cursor += 1;
-  }
-  return null;
-}
-function tokenizeShellCommand(command) {
-  const words = [];
-  let cursor = 0;
-  let hasUnquotedControlOperator = false;
-  while (cursor < command.length) {
-    while (cursor < command.length && /\s/.test(command[cursor])) {
-      if (command[cursor] === "\n") hasUnquotedControlOperator = true;
-      cursor += 1;
-    }
-    if (cursor >= command.length) break;
-    const start = cursor;
-    let value = "";
-    let quote = "";
-    let hasWord = false;
-    while (cursor < command.length) {
-      const character = command[cursor];
-      if (!quote && /\s/.test(character)) break;
-      if (!quote && (character === ";" || character === "&" || character === "|")) {
-        hasUnquotedControlOperator = true;
-      }
-      if (!quote && (character === "'" || character === '"')) {
-        quote = character;
-        hasWord = true;
-        cursor += 1;
-        continue;
-      }
-      if (quote && character === quote) {
-        quote = "";
-        cursor += 1;
-        continue;
-      }
-      if (character === "$" && command[cursor + 1] === "(" && quote !== "'") {
-        const end = commandSubstitutionEnd(command, cursor);
-        if (end === null) return null;
-        value += command.slice(cursor, end);
-        hasWord = true;
-        cursor = end;
-        continue;
-      }
-      if (!quote && (character === "`" || character === "$" && command[cursor + 1] === "{")) return null;
-      if (character === "\\" && quote !== "'") {
-        cursor += 1;
-        if (cursor >= command.length) return null;
-        value += command[cursor];
-        hasWord = true;
-        cursor += 1;
-        continue;
-      }
-      value += character;
-      hasWord = true;
-      cursor += 1;
-    }
-    if (quote || !hasWord) return null;
-    words.push({ value, start, end: cursor });
-  }
-  const leadingAssignments = [];
-  for (const word of words) {
-    const name = assignmentName(command, word);
-    if (!name) break;
-    leadingAssignments.push({ name, start: word.start, end: word.end });
-  }
-  return { words, leadingAssignments, hasUnquotedControlOperator };
-}
-
 // src/workflows/df12-build-odw/host-gates.ts
 function codeSceneExecutable(command) {
   const tokens = tokenizeShellCommand(command);
-  if (!tokens || tokens.hasUnquotedControlOperator) return "";
-  return tokens.words.slice(tokens.leadingAssignments.length)[0]?.value || "";
+  if (!tokens || tokens.hasUnquotedControlOperator) return null;
+  return tokens.words[tokens.executableWordIndex]?.value || "";
 }
 function makeGateLogPath() {
   const fs = process.getBuiltinModule("node:fs");
@@ -1827,7 +1715,26 @@ ${outcome.tail}` };
   }
   async function runCodeSceneCheck2(worktree, tag, label) {
     if (!config.csCheck) return { clean: true, skipped: true, detail: "", logFile: "" };
-    const bin = codeSceneExecutable(config.csCheckCommand) || "cs-check-changed";
+    const redactedCommand = redactedShellCommand(config.csCheckCommand);
+    const bin = codeSceneExecutable(config.csCheckCommand);
+    if (bin === null) {
+      metrics.codeScene.probeFailures += 1;
+      return {
+        clean: false,
+        skipped: false,
+        detail: `CodeScene command could not be parsed safely: ${redactedCommand}`,
+        logFile: ""
+      };
+    }
+    if (!bin) {
+      metrics.codeScene.probeFailures += 1;
+      return {
+        clean: false,
+        skipped: false,
+        detail: `CodeScene command has no executable: ${redactedCommand}`,
+        logFile: ""
+      };
+    }
     const missing = "__DF12_CODESCENE_BINARY_MISSING__";
     const probe = await execFileStatus("sh", ["-c", 'command -v "$1" >/dev/null 2>&1 || { printf "%s\\n" "$2"; exit 127; }', "sh", bin, missing], { cwd: worktree });
     if (!probe.ok) {
@@ -1838,16 +1745,16 @@ ${outcome.tail}` };
       }
       metrics.codeScene.probeFailures += 1;
       const fault = [probe.message, probe.stderr, probe.signal ? `signal ${probe.signal}` : "", probe.killed ? "probe killed" : ""].map((part) => String(part || "").trim()).filter(Boolean).join("; ");
-      return { clean: false, skipped: false, detail: `CodeScene availability probe for \`${bin}\` failed: ${boundedTail2(fault) || "unknown probe failure"}`, logFile: "" };
+      return { clean: false, skipped: false, detail: `CodeScene availability probe for \`${redactedCommand}\` failed: ${boundedTail2(fault) || "unknown probe failure"}`, logFile: "" };
     }
     metrics.codeScene.runs += 1;
     const logFile = logPath(tag, `cs-${label}`, 0);
-    log(`[task ${tag}] CodeScene check (${label}): ${config.csCheckCommand}`);
+    log(`[task ${tag}] CodeScene check (${label}): ${redactedCommand}`);
     const outcome = await streamGate(config.csCheckCommand, worktree, logFile);
     if (outcome.ok) return { clean: true, skipped: false, detail: "", logFile };
     metrics.codeScene.failures += 1;
     const timeout = outcome.killed ? ` (killed after the ${config.commitGateTimeoutSeconds}s timeout)` : "";
-    return { clean: false, skipped: false, detail: `CodeScene check \`${config.csCheckCommand}\` reported code-health issues${timeout}; full log: ${logFile}; output tail:
+    return { clean: false, skipped: false, detail: `CodeScene check \`${redactedCommand}\` reported code-health issues${timeout}; full log: ${logFile}; output tail:
 ${outcome.tail}`, logFile };
   }
   return { runHostCommitGates: runHostCommitGates2, runCodeSceneCheck: runCodeSceneCheck2 };
@@ -3074,6 +2981,7 @@ function integrationHaltDetail(integration) {
 }
 function makeTaskPipeline(deps) {
   const {
+    faultMetrics: faultMetrics2,
     MAX_DESIGN_ROUNDS: MAX_DESIGN_ROUNDS2,
     MAX_REVIEW_ROUNDS: MAX_REVIEW_ROUNDS2,
     MAX_WORK_ITEM_ROUNDS: MAX_WORK_ITEM_ROUNDS2,
@@ -3256,7 +3164,7 @@ function makeTaskPipeline(deps) {
       await recordHostReview2(`${tag} ${itemLabel} a${attempt}`, review);
       runs += 1;
       if (review.outcome === "auth") {
-        faultMetrics.authFaults += 1;
+        faultMetrics2.authFaults += 1;
         return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: `${hostReviewerDisplayName} host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } };
       }
       if (review.outcome === "rate-limited" || review.outcome === "error") {
@@ -3307,7 +3215,7 @@ function makeTaskPipeline(deps) {
       lastImpl = impl;
       const authDetail = implementationAuthFailureDetail(impl);
       if (authDetail) {
-        faultMetrics.authFaults += 1;
+        faultMetrics2.authFaults += 1;
         return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
       }
       if (!impl || !impl.ok || !impl.gatesGreen) {
@@ -3385,7 +3293,7 @@ function makeTaskPipeline(deps) {
     })), `implement:${tag}`));
     const authDetail = implementationAuthFailureDetail(impl);
     if (authDetail) {
-      faultMetrics.authFaults += 1;
+      faultMetrics2.authFaults += 1;
       return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
     }
     if (!impl || !impl.ok || !impl.gatesGreen) {
@@ -3446,7 +3354,7 @@ function makeTaskPipeline(deps) {
     } catch (error) {
       const message = error && error.message || String(error);
       if (!infrastructureFailureDetail(message)) throw error;
-      faultMetrics.infraFaults += 1;
+      faultMetrics2.infraFaults += 1;
       return {
         fault: {
           id: tag,
@@ -3503,7 +3411,7 @@ function makeTaskPipeline(deps) {
         const hostReview2 = await runHostReview2(worktree, `host-review:${HOST_REVIEWER}:${tag} r${round}`);
         await recordHostReview2(`${tag} r${round}`, hostReview2);
         if (hostReview2.outcome === "auth") {
-          faultMetrics.authFaults += 1;
+          faultMetrics2.authFaults += 1;
           return { id: tag, status: "fatal-auth", stage: "review", detail: `${hostReviewerDisplayName} host review is not authenticated: ${hostReview2.detail}`, reviewRounds, worktree, proposals, ...kindExtra };
         }
         if (hostReview2.outcome === "rate-limited" || hostReview2.outcome === "error") {
@@ -3546,7 +3454,7 @@ function makeTaskPipeline(deps) {
         ].filter(Boolean).join(" and ");
         reviewRounds.push({ round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking: [], fix: null });
         if (reviewInfraFaults.length) {
-          faultMetrics.infraFaults += 1;
+          faultMetrics2.infraFaults += 1;
           return {
             id: tag,
             status: "infra-fault",
@@ -3652,7 +3560,7 @@ function makeTaskPipeline(deps) {
         const impl2 = await buildLock2(() => withInfraRetry2(() => agent(implementAddendumPrompt2(task, worktree), buildAgentOptions2({ phase: "Implement", label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`));
         const authDetail = implementationAuthFailureDetail(impl2);
         if (authDetail) {
-          faultMetrics.authFaults += 1;
+          faultMetrics2.authFaults += 1;
           return {
             id: tag,
             status: "fatal-auth",
@@ -3707,7 +3615,7 @@ function makeTaskPipeline(deps) {
           const hostReview2 = await runHostReview2(worktree, `host-review:${HOST_REVIEWER}:${tag} addendum`);
           await recordHostReview2(`${tag} addendum`, hostReview2);
           if (hostReview2.outcome === "auth") {
-            faultMetrics.authFaults += 1;
+            faultMetrics2.authFaults += 1;
             return { id: tag, status: "fatal-auth", stage: "auth", detail: `${hostReviewerDisplayName} host review is not authenticated: ${hostReview2.detail}`, worktree, proposals, kind: "addendum" };
           }
           const blockingFindings = reviewBlockingItems(hostReviewerDisplayName, hostReview2.findings);
@@ -3763,7 +3671,7 @@ function makeTaskPipeline(deps) {
       return outcome;
     } catch (error) {
       const detail = `unhandled agent error: ${error && error.message || String(error)}`;
-      const result = resultFromUnhandledAgentError(tag, detail, { worktree });
+      const result = resultFromUnhandledAgentError(tag, detail, { worktree }, faultMetrics2);
       return await attachAssessment2(task, wt, result);
     }
   }
@@ -3879,7 +3787,8 @@ function modelRouting() {
     assessment: { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL }
   };
 }
-var withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS);
+var runFaultMetrics = createFaultMetrics();
+var withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS, runFaultMetrics);
 var discoverRecoveryCandidates = makeRecoveryDiscovery({
   base: BASE,
   resumeTaskId: RESUME_TASK_ID,
@@ -4083,7 +3992,7 @@ async function executeResume(task, resume, mergeLock2) {
     return await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock2, { kind: "recovery-resume" });
   } catch (error) {
     const detail = `unhandled agent error: ${error && error.message || String(error)}`;
-    return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: "recovery-resume" });
+    return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: "recovery-resume" }, runFaultMetrics);
   }
 }
 async function runRecovery(root, mergeLock2 = null) {
@@ -4160,7 +4069,7 @@ async function runRecovery(root, mergeLock2 = null) {
         });
         summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: "assessment-error" });
         if (authFailureDetail(assessed.assessmentError) || providerFailureDetail(assessed.assessmentError)) {
-          return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessed.assessmentError) };
+          return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessed.assessmentError, {}, runFaultMetrics) };
         }
         continue;
       }
@@ -4308,6 +4217,7 @@ var {
   runDualReviewAndIntegration,
   runTask
 } = makeTaskPipeline({
+  faultMetrics: runFaultMetrics,
   CS_CHECK,
   runCodeSceneCheck,
   MAX_DESIGN_ROUNDS,
@@ -4454,7 +4364,7 @@ async function fillPool() {
           return {
             id: task.id,
             task,
-            result: resultFromUnhandledAgentError(task.id, detail)
+            result: resultFromUnhandledAgentError(task.id, detail, {}, runFaultMetrics)
           };
         }
       )
@@ -4462,13 +4372,7 @@ async function fillPool() {
   }
 }
 function redactedCodeSceneCommand(command) {
-  const tokens = tokenizeShellCommand(command);
-  if (!tokens || tokens.hasUnquotedControlOperator) return "<redacted command>";
-  let redacted = command;
-  for (const assignment of tokens.leadingAssignments.toReversed()) {
-    redacted = `${redacted.slice(0, assignment.start)}${assignment.name}=<redacted>${redacted.slice(assignment.end)}`;
-  }
-  return redacted;
+  return redactedShellCommand(command);
 }
 // --- Worker-pool control loop -----------------------------------------------
 async function workflowMain() {
@@ -4627,7 +4531,7 @@ async function workflowMain() {
     // Bounded-cardinality fault metrics (fixed keys): stage retries spent on
     // infrastructure faults plus terminal fault counts per class, so operators
     // can read retry pressure straight from the result instead of the logs.
-    faultMetrics: { ...faultMetrics },
+    faultMetrics: { ...runFaultMetrics },
     // Host-review aggregate: effective configuration plus bounded counters.
     // Per-finding detail goes to the JSONL sink when
     // coderabbitFindingsFile is configured.

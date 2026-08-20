@@ -19,11 +19,7 @@ import {
   verifyExecplanCommitted,
   verifyWorktreeCommitted,
 } from './execplan-durability.ts'
-import {
-  faultMetrics,
-  infrastructureFailureDetail,
-  resultFromUnhandledAgentError,
-} from './faults.ts'
+import { infrastructureFailureDetail, resultFromUnhandledAgentError } from './faults.ts'
 import {
   addendumImplementationNeedsManualMerge,
   hasOnlyDeferredReviewIssues,
@@ -40,7 +36,7 @@ import {
   PLAN_SCHEMA,
   REVIEW_SCHEMA,
 } from './schemas.ts'
-import type { SelectedTask } from './types.ts'
+import type { FaultMetrics, SelectedTask } from './types.ts'
 
 /**
  * The planning stage's product: the committed ExecPlan the design review,
@@ -136,6 +132,8 @@ type AgentOptions = (options: Record<string, unknown>) => Record<string, unknown
  * per-task functions free of ambient configuration lookups.
  */
 export interface TaskPipelineDeps {
+  /** Run-scoped bounded agent-fault counters. */
+  faultMetrics: FaultMetrics
   /** Maximum plan/design-review rounds. */
   MAX_DESIGN_ROUNDS: number
   /** Maximum review/fix rounds. */
@@ -426,6 +424,7 @@ export function integrationHaltDetail(integration: StageIntegration | null): str
  */
 export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
   const {
+    faultMetrics,
     MAX_DESIGN_ROUNDS,
     MAX_REVIEW_ROUNDS,
     MAX_WORK_ITEM_ROUNDS,
@@ -1307,7 +1306,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     return outcome
     } catch (error) {
       const detail = `unhandled agent error: ${((error as Error | null) && (error as Error).message) || String(error)}`
-      const result = resultFromUnhandledAgentError(tag, detail, { worktree })
+      const result = resultFromUnhandledAgentError(tag, detail, { worktree }, faultMetrics)
       return await attachAssessment(task, wt, result)
     }
   }
