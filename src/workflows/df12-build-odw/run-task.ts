@@ -268,6 +268,8 @@ export interface FixReportSummary {
 
 /** Successful plan-stage product, mutually exclusive with other variants. */
 export interface PipelinePlanProduct<T> {
+  /** Runtime discriminator for a successful planning stage. */
+  kind: 'plan'
   /** Successful plan-stage product. */
   plan: T
   /** No terminal failure occurred. */
@@ -278,6 +280,8 @@ export interface PipelinePlanProduct<T> {
 
 /** Successful implementation-stage product, mutually exclusive with other variants. */
 export interface PipelineImplementationProduct<T> {
+  /** Runtime discriminator for a successful implementation stage. */
+  kind: 'impl'
   /** Successful implementation-stage product. */
   impl: T
   /** No terminal failure occurred. */
@@ -288,6 +292,8 @@ export interface PipelineImplementationProduct<T> {
 
 /** Terminal pipeline-stage failure, mutually exclusive with products. */
 export interface PipelineStageFailure {
+  /** Runtime discriminator for a terminal stage failure. */
+  kind: 'failure'
   /** Terminal stage failure. */
   fail: StageResult
   /** No plan product accompanies failure. */
@@ -477,19 +483,20 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         label: `plan:${tag} r${round}`,
         schema: PLAN_SCHEMA,
       })), `plan:${tag} r${round}`))) as StagePlan | null
-      if (!plan) return { fail: { id: tag, status: 'failed', stage: 'plan', detail: 'planner returned nothing', worktree, proposals: [], ...extra } }
+      if (!plan) return { kind: 'failure', fail: { id: tag, status: 'failed', stage: 'plan', detail: 'planner returned nothing', worktree, proposals: [], ...extra } }
       // Containment before any filesystem access: the planner's path is
       // untrusted data, and an escape fails the task closed.
       const contained = execplanRelPath(worktree, plan.execplanPath)
       if (!contained.ok) {
-        return { fail: { id: tag, status: 'failed', stage: 'plan', detail: `planner returned an unusable ExecPlan path: ${contained.detail}`, plan, worktree, proposals: [], ...extra } }
+        return { kind: 'failure', fail: { id: tag, status: 'failed', stage: 'plan', detail: `planner returned an unusable ExecPlan path: ${contained.detail}`, plan, worktree, proposals: [], ...extra } }
       }
       const planFile = await fileState(contained.relPath, worktree)
       if (!planFile.ok) {
-        return { fail: { id: tag, status: 'failed', stage: 'plan', detail: `could not verify the ExecPlan path: ${planFile.detail}`, plan, worktree, proposals: [], ...extra } }
+        return { kind: 'failure', fail: { id: tag, status: 'failed', stage: 'plan', detail: `could not verify the ExecPlan path: ${planFile.detail}`, plan, worktree, proposals: [], ...extra } }
       }
       if (!planFile.exists) {
         return {
+          kind: 'failure',
           fail: {
             id: tag,
             status: 'failed',
@@ -543,6 +550,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         const approved = await commitExecplanApproval(worktree, plan.execplanPath, tag)
         if (!approved.ok) {
           return {
+            kind: 'failure',
             fail: {
               id: tag,
               status: 'failed',
@@ -555,11 +563,12 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
             },
           }
         }
-        return { plan }
+        return { kind: 'plan', plan }
       }
       log(`[task ${tag}] design round ${round}: ${(designVerdict?.blocking || []).length} blocking point(s)`)
     }
     return {
+      kind: 'failure',
       fail: {
         id: tag,
         status: 'halted',
@@ -698,7 +707,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
   async function runWorkItemBuildLoop(task: SelectedTask, worktree: string, plan: StagePlan, opts: Record<string, unknown> = {}): Promise<PipelineStageProduct<StageImpl, 'impl'> | null> {
     const tag = task.id
     const extra = (opts.extra as Record<string, unknown>) || {}
-    const fail = (detail: string, openIssues: string[] = []) => ({ fail: { id: tag, status: 'failed', stage: 'implement', detail, openIssues, worktree, proposals: [], ...extra } })
+    const fail = (detail: string, openIssues: string[] = []) => ({ kind: 'failure' as const, fail: { id: tag, status: 'failed', stage: 'implement', detail, openIssues, worktree, proposals: [], ...extra } })
     const contained = execplanRelPath(worktree, plan.execplanPath)
     if (!contained.ok) return fail(contained.detail)
     const planRef = { worktreePath: worktree, execplanPath: contained.relPath }
@@ -728,7 +737,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
       const authDetail = implementationAuthFailureDetail(impl)
       if (authDetail) {
         faultMetrics.authFaults += 1
-        return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
+        return { kind: 'failure', fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
       }
       if (!impl || !impl.ok || !impl.gatesGreen) {
         return fail(impl?.summary || `work item did not reach a green state: ${item.text}`, impl?.openIssues || [])
@@ -765,11 +774,11 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         // so csCheck runs here even when the between-item commit gates are off.
         if ((HOST_COMMIT_GATES && HOST_GATES_BETWEEN_WORK_ITEMS) || CS_CHECK) {
           const gate = await runBetweenItemGates(task, worktree, plan, `wi${round}`, extra)
-          if ('fail' in gate) return gate
+          if ('fail' in gate) return { kind: 'failure', fail: gate.fail }
         }
         if (HOST_REVIEW_ENABLED && HOST_REVIEW_BETWEEN_WORK_ITEMS) {
           const gate = await runBetweenItemReview(task, worktree, plan, `wi${round}`, extra)
-          if ('fail' in gate) return gate
+          if ('fail' in gate) return { kind: 'failure', fail: gate.fail }
           hostReviewRuns += gate.hostReviewRuns
         }
       }
@@ -782,6 +791,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
       return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0].text}`, openIssues)
     }
     return {
+      kind: 'impl',
       impl: {
         ok: true,
         gatesGreen: true,
@@ -805,8 +815,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
       // null means the plan carries no Progress checklist: fall back to the
       // single-turn whole-task build below.
       if (itemised) {
-        if (itemised.fail) return itemised
-        return finishImplementationStage(task, worktree, plan, itemised.impl as StageImpl, extra)
+        if (itemised.kind === 'failure') return itemised
+        return finishImplementationStage(task, worktree, plan, itemised.impl, extra)
       }
       log(`[task ${tag}] the committed ExecPlan has no Progress checklist; falling back to the single-turn build`)
     }
@@ -818,10 +828,11 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     const authDetail = implementationAuthFailureDetail(impl)
     if (authDetail) {
       faultMetrics.authFaults += 1
-      return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
+      return { kind: 'failure', fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } }
     }
     if (!impl || !impl.ok || !impl.gatesGreen) {
       return {
+        kind: 'failure',
         fail: {
           id: tag,
           status: 'failed',
@@ -847,6 +858,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     const committed = await verifyWorktreeCommitted(worktree)
     if (!committed.ok) {
       return {
+        kind: 'failure',
         fail: {
           id: tag,
           status: 'failed',
@@ -872,7 +884,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         }
       }
     }
-    return { impl }
+    return { kind: 'impl', impl }
   }
 
   // One integration implementation for the normal pipeline and the addendum
@@ -1288,15 +1300,15 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
 
     // --- Plan <-> Design review (adversarial loop) --------------------------
     const planned = await runPlanDesignLoop(task, worktree)
-    if (planned.fail) return await attachAssessment(task, wt, planned.fail)
-    const plan = planned.plan as StagePlan
+    if (planned.kind === 'failure') return await attachAssessment(task, wt, planned.fail)
+    const plan = planned.plan
 
     // --- Implement ----------------------------------------------------------
     const built = await runImplementationStage(task, worktree, plan)
-    if (built.fail) {
+    if (built.kind === 'failure') {
       return built.fail.status === 'fatal-auth' ? built.fail : await attachAssessment(task, wt, built.fail)
     }
-    const impl = built.impl as StageImpl
+    const impl = built.impl
 
     // --- Dual review + integration (shared with review-mode recovery resume) --
     const outcome = await runDualReviewAndIntegration(task, worktree, plan, impl, mergeLock)

@@ -485,7 +485,7 @@ async function executeResume(
     let impl: AnyRecord | undefined
     if (stage === 'plan') {
       const planned = await runPlanDesignLoop(task, worktree, { resume: true, extra })
-      if (planned.fail) return planned.fail
+      if (planned.kind === 'failure') return planned.fail
       plan = planned.plan
     } else if (stage === 'implement') {
       plan = {
@@ -496,7 +496,7 @@ async function executeResume(
     }
     if (stage === 'plan' || stage === 'implement') {
       const built = await runImplementationStage(task, worktree, plan as StagePlan, { resume: stage === 'implement', extra })
-      if (built.fail) return built.fail
+      if (built.kind === 'failure') return built.fail
       impl = built.impl
     } else {
       // Carry the ADR 002 assessment's advisory residual risk forward into the

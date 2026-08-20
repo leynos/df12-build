@@ -180,7 +180,7 @@ export function classifyDakarReview(execResult: ExecStatus): HostReviewAttempt {
 }
 
 /** Bind one Dakar attempt to configuration while leaving host seams injectable. */
-export function makeDakarAttempt(config: Pick<HostReviewConfig, 'base' | 'dakarInvocation' | 'dakarCommand' | 'reviewTimeoutSeconds' | 'dakarBudgetGbp'>): (worktree: string, exec: NonNullable<HostReviewDeps['exec']>, deps: HostReviewDeps) => Promise<HostReviewAttempt> {
+export function makeDakarAttempt(config: Pick<HostReviewConfig, 'base' | 'dakarInvocation' | 'reviewTimeoutSeconds' | 'dakarBudgetGbp'>): (worktree: string, exec: NonNullable<HostReviewDeps['exec']>, deps: HostReviewDeps) => Promise<HostReviewAttempt> {
   const invocation = config.dakarInvocation || []
   const executable = invocation[0] || 'dakar-review'
   const prefixArgs = invocation.slice(1)

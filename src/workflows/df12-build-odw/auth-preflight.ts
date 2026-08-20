@@ -76,6 +76,12 @@ function redactedDakarProbeCommand(invocation: readonly string[]): string {
 function redactedDakarStatusDetail(status: ExecStatus, invocation: readonly string[]): string {
   let detail = statusDetail(status)
   for (const value of invocation.slice(1)) {
+    const inlineOption = /^(--[A-Za-z][A-Za-z0-9-]*)=(.+)$/.exec(value)
+    if (inlineOption) {
+      detail = detail.split(value).join('[REDACTED]')
+      detail = detail.split(inlineOption[2]).join('[REDACTED]')
+      continue
+    }
     if (!value || /^--[A-Za-z][A-Za-z0-9-]*$/.test(value)) continue
     detail = detail.split(value).join('[REDACTED]')
   }

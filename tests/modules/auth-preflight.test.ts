@@ -74,4 +74,30 @@ describe('makeAuthPreflight', () => {
     expect(failures[0].detail).not.toContain('super-secret')
     expect(failures[0].detail).not.toContain('private-profile')
   })
+
+  test('redacts an inline Dakar option value when probe output omits its option name', async () => {
+    const run = makeAuthPreflight(
+      {
+        enabled: true,
+        requireHostReviewAuth: true,
+        requiredAdapters: new Set(),
+        reviewTool: 'dakar',
+        dakarInvocation: ['dakar-review', '--api-key=super-secret'],
+      },
+      {
+        exec: async (command) => command === 'dakar-review'
+          ? status({ ok: false, message: 'credential rejected: super-secret' })
+          : status(),
+        environment: { get: () => 'test-key' },
+        phase: () => {},
+        log: () => {},
+        recordHostReviewAuthFailure: () => {},
+      },
+    )
+
+    const failures = await run()
+
+    expect(failures).toHaveLength(1)
+    expect(failures[0].detail).toBe('credential rejected: [REDACTED]')
+  })
 })

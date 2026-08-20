@@ -11,6 +11,7 @@ import {
   makeHostReview,
   parseCoderabbitAgentOutput,
   parseDakarDocument,
+  reviewerDisplayName,
 } from '../../src/workflows/df12-build-odw/host-review.ts'
 import type { ReviewOutcome } from '../../src/workflows/df12-build-odw/host-review.ts'
 import type { ExecOptions } from '../../src/workflows/df12-build-odw/exec.ts'
@@ -71,6 +72,11 @@ describe('parseDakarDocument', () => {
 
 const g = globalThis as Record<string, unknown>
 g.log = () => {}
+
+test('reviewer display names cover every supported host reviewer', () => {
+  expect(reviewerDisplayName('dakar')).toBe('Dakar')
+  expect(reviewerDisplayName('coderabbit')).toBe('CodeRabbit')
+})
 
 function hostReview(overrides: Partial<Parameters<typeof makeHostReview>[0]> = {}) {
   return makeHostReview({

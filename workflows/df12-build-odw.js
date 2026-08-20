@@ -1321,6 +1321,12 @@ function redactedDakarProbeCommand(invocation) {
 function redactedDakarStatusDetail(status, invocation) {
   let detail = statusDetail(status);
   for (const value of invocation.slice(1)) {
+    const inlineOption = /^(--[A-Za-z][A-Za-z0-9-]*)=(.+)$/.exec(value);
+    if (inlineOption) {
+      detail = detail.split(value).join("[REDACTED]");
+      detail = detail.split(inlineOption[2]).join("[REDACTED]");
+      continue;
+    }
     if (!value || /^--[A-Za-z][A-Za-z0-9-]*$/.test(value)) continue;
     detail = detail.split(value).join("[REDACTED]");
   }
@@ -1415,6 +1421,10 @@ function reviewerDisplayName(reviewer) {
       return "Dakar";
     case "coderabbit":
       return "CodeRabbit";
+    default: {
+      const unmatched = reviewer;
+      throw new Error(`Unknown host reviewer: ${unmatched}`);
+    }
   }
 }
 function hostReviewDeferral(review) {
@@ -3033,17 +3043,18 @@ function makeTaskPipeline(deps) {
         label: `plan:${tag} r${round}`,
         schema: PLAN_SCHEMA
       })), `plan:${tag} r${round}`));
-      if (!plan) return { fail: { id: tag, status: "failed", stage: "plan", detail: "planner returned nothing", worktree, proposals: [], ...extra } };
+      if (!plan) return { kind: "failure", fail: { id: tag, status: "failed", stage: "plan", detail: "planner returned nothing", worktree, proposals: [], ...extra } };
       const contained = execplanRelPath(worktree, plan.execplanPath);
       if (!contained.ok) {
-        return { fail: { id: tag, status: "failed", stage: "plan", detail: `planner returned an unusable ExecPlan path: ${contained.detail}`, plan, worktree, proposals: [], ...extra } };
+        return { kind: "failure", fail: { id: tag, status: "failed", stage: "plan", detail: `planner returned an unusable ExecPlan path: ${contained.detail}`, plan, worktree, proposals: [], ...extra } };
       }
       const planFile = await fileState(contained.relPath, worktree);
       if (!planFile.ok) {
-        return { fail: { id: tag, status: "failed", stage: "plan", detail: `could not verify the ExecPlan path: ${planFile.detail}`, plan, worktree, proposals: [], ...extra } };
+        return { kind: "failure", fail: { id: tag, status: "failed", stage: "plan", detail: `could not verify the ExecPlan path: ${planFile.detail}`, plan, worktree, proposals: [], ...extra } };
       }
       if (!planFile.exists) {
         return {
+          kind: "failure",
           fail: {
             id: tag,
             status: "failed",
@@ -3088,6 +3099,7 @@ function makeTaskPipeline(deps) {
         const approved = await commitExecplanApproval(worktree, plan.execplanPath, tag);
         if (!approved.ok) {
           return {
+            kind: "failure",
             fail: {
               id: tag,
               status: "failed",
@@ -3100,11 +3112,12 @@ function makeTaskPipeline(deps) {
             }
           };
         }
-        return { plan };
+        return { kind: "plan", plan };
       }
       log(`[task ${tag}] design round ${round}: ${(designVerdict?.blocking || []).length} blocking point(s)`);
     }
     return {
+      kind: "failure",
       fail: {
         id: tag,
         status: "halted",
@@ -3186,7 +3199,7 @@ function makeTaskPipeline(deps) {
   async function runWorkItemBuildLoop2(task, worktree, plan, opts = {}) {
     const tag = task.id;
     const extra = opts.extra || {};
-    const fail = (detail, openIssues2 = []) => ({ fail: { id: tag, status: "failed", stage: "implement", detail, openIssues: openIssues2, worktree, proposals: [], ...extra } });
+    const fail = (detail, openIssues2 = []) => ({ kind: "failure", fail: { id: tag, status: "failed", stage: "implement", detail, openIssues: openIssues2, worktree, proposals: [], ...extra } });
     const contained = execplanRelPath(worktree, plan.execplanPath);
     if (!contained.ok) return fail(contained.detail);
     const planRef = { worktreePath: worktree, execplanPath: contained.relPath };
@@ -3216,7 +3229,7 @@ function makeTaskPipeline(deps) {
       const authDetail = implementationAuthFailureDetail(impl);
       if (authDetail) {
         faultMetrics2.authFaults += 1;
-        return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
+        return { kind: "failure", fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
       }
       if (!impl || !impl.ok || !impl.gatesGreen) {
         return fail(impl?.summary || `work item did not reach a green state: ${item.text}`, impl?.openIssues || []);
@@ -3244,11 +3257,11 @@ function makeTaskPipeline(deps) {
         log(`[task ${tag}] work-item round ${round}: ${after.ticked}/${after.ticked + after.unticked} Progress item(s) committed`);
         if (HOST_COMMIT_GATES2 && HOST_GATES_BETWEEN_WORK_ITEMS2 || CS_CHECK2) {
           const gate = await runBetweenItemGates(task, worktree, plan, `wi${round}`, extra);
-          if ("fail" in gate) return gate;
+          if ("fail" in gate) return { kind: "failure", fail: gate.fail };
         }
         if (HOST_REVIEW_ENABLED2 && HOST_REVIEW_BETWEEN_WORK_ITEMS2) {
           const gate = await runBetweenItemReview(task, worktree, plan, `wi${round}`, extra);
-          if ("fail" in gate) return gate;
+          if ("fail" in gate) return { kind: "failure", fail: gate.fail };
           hostReviewRuns += gate.hostReviewRuns;
         }
       }
@@ -3261,6 +3274,7 @@ function makeTaskPipeline(deps) {
       return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS2}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0].text}`, openIssues);
     }
     return {
+      kind: "impl",
       impl: {
         ok: true,
         gatesGreen: true,
@@ -3281,7 +3295,7 @@ function makeTaskPipeline(deps) {
     if (PER_WORK_ITEM_BUILD2) {
       const itemised = await runWorkItemBuildLoop2(task, worktree, plan, opts);
       if (itemised) {
-        if (itemised.fail) return itemised;
+        if (itemised.kind === "failure") return itemised;
         return finishImplementationStage(task, worktree, plan, itemised.impl, extra);
       }
       log(`[task ${tag}] the committed ExecPlan has no Progress checklist; falling back to the single-turn build`);
@@ -3294,10 +3308,11 @@ function makeTaskPipeline(deps) {
     const authDetail = implementationAuthFailureDetail(impl);
     if (authDetail) {
       faultMetrics2.authFaults += 1;
-      return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
+      return { kind: "failure", fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
     }
     if (!impl || !impl.ok || !impl.gatesGreen) {
       return {
+        kind: "failure",
         fail: {
           id: tag,
           status: "failed",
@@ -3317,6 +3332,7 @@ function makeTaskPipeline(deps) {
     const committed = await verifyWorktreeCommitted(worktree);
     if (!committed.ok) {
       return {
+        kind: "failure",
         fail: {
           id: tag,
           status: "failed",
@@ -3340,7 +3356,7 @@ function makeTaskPipeline(deps) {
         }
       }
     }
-    return { impl };
+    return { kind: "impl", impl };
   }
   async function integrateTask(task, mergeLock2, context) {
     const { worktree, proposals, kindExtra, impl } = context;
@@ -3657,10 +3673,10 @@ function makeTaskPipeline(deps) {
         return { id: tag, status: "done", impl: impl2, addendumReview, integration, worktree, proposals, ...addendumOpenIssues.length ? { openIssues: addendumOpenIssues } : {}, kind: "addendum" };
       }
       const planned = await runPlanDesignLoop2(task, worktree);
-      if (planned.fail) return await attachAssessment2(task, wt, planned.fail);
+      if (planned.kind === "failure") return await attachAssessment2(task, wt, planned.fail);
       const plan = planned.plan;
       const built = await runImplementationStage2(task, worktree, plan);
-      if (built.fail) {
+      if (built.kind === "failure") {
         return built.fail.status === "fatal-auth" ? built.fail : await attachAssessment2(task, wt, built.fail);
       }
       const impl = built.impl;
@@ -3971,7 +3987,7 @@ async function executeResume(task, resume, mergeLock2) {
     let impl;
     if (stage === "plan") {
       const planned = await runPlanDesignLoop(task, worktree, { resume: true, extra });
-      if (planned.fail) return planned.fail;
+      if (planned.kind === "failure") return planned.fail;
       plan = planned.plan;
     } else if (stage === "implement") {
       plan = {
@@ -3982,7 +3998,7 @@ async function executeResume(task, resume, mergeLock2) {
     }
     if (stage === "plan" || stage === "implement") {
       const built = await runImplementationStage(task, worktree, plan, { resume: stage === "implement", extra });
-      if (built.fail) return built.fail;
+      if (built.kind === "failure") return built.fail;
       impl = built.impl;
     } else {
       const synthetic = await syntheticRecoveryImpl(enriched, evidence, residualRisk);

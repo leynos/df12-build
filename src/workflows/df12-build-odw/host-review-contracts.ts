@@ -215,6 +215,10 @@ export function reviewerDisplayName(reviewer: HostReviewResult['reviewer']): str
   switch (reviewer) {
     case 'dakar': return 'Dakar'
     case 'coderabbit': return 'CodeRabbit'
+    default: {
+      const unmatched: never = reviewer
+      throw new Error(`Unknown host reviewer: ${unmatched}`)
+    }
   }
 }
 
