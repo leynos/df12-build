@@ -12,6 +12,7 @@ import {
   boundedTail,
   type CodeSceneCheckResult,
   type CodeSceneMetrics,
+  type HostGateLogRoot,
   type HostGateMetrics,
   type HostGateRun,
 } from './host-review-contracts.ts'
@@ -28,7 +29,12 @@ export interface HostGateConfig {
   csCheckCommand: string
   /** Optional isolated log-path service used by deterministic tests. */
   gateLogPath?: (tag: string, roundLabel: string, index: number) => string
+  /** Optional gate-log root lifecycle used by the host execution boundary. */
+  gateLogRoot?: HostGateLogRoot
 }
+
+/** Maximum retained unterminated output while a gate continues streaming to disk. */
+export const GATE_CARRY_LIMIT = 16_384
 
 /** Return the executable word of a safely tokenized configured command. */
 export function codeSceneExecutable(command: string): string | null {
@@ -37,20 +43,35 @@ export function codeSceneExecutable(command: string): string | null {
   return tokens.words[tokens.executableWordIndex]?.value || ''
 }
 
-/** Create an isolated sanitized gate-log path service for one caller. */
-function makeGateLogPath(): (tag: string, roundLabel: string, index: number) => string {
+/** Build a run-scoped gate-log service that owns its temporary-root lifecycle. */
+function makeGateLogPaths(lifecycle?: HostGateLogRoot): { path: (tag: string, roundLabel: string, index: number) => string; dispose: () => void } {
   const fs = process.getBuiltinModule('node:fs')
   const os = process.getBuiltinModule('node:os')
   const path = process.getBuiltinModule('node:path')
-  const gateLogRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'df12-gates-'))
-  /** Normalize untrusted labels before incorporating them in a file name. */
-  const slug = (value: unknown) => String(value).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
-  return (tag, roundLabel, index) => path.join(gateLogRoot, `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`)
+  let gateLogRoot = ''
+  const root = () => {
+    if (!gateLogRoot) gateLogRoot = lifecycle?.create() || fs.mkdtempSync(path.join(os.tmpdir(), 'df12-gates-'))
+    return gateLogRoot
+  }
+  return {
+    path: (tag, roundLabel, index) => hostGateLogPath(root(), tag, roundLabel, index),
+    dispose: () => {
+      if (!gateLogRoot) return
+      try {
+        (lifecycle?.remove || fs.rmSync)(gateLogRoot, { recursive: true, force: true })
+      } catch (error) {
+        log(`[host gates] could not remove temporary log root: ${boundedTail((error as Error | null)?.message || String(error), 500)}`)
+      }
+      gateLogRoot = ''
+    },
+  }
 }
 
-/** Build a sanitized private gate-log path for direct compatibility callers. */
-export function hostGateLogPath(tag: string, roundLabel: string, index: number): string {
-  return makeGateLogPath()(tag, roundLabel, index)
+/** Calculate a sanitized private gate-log path within a caller-owned root. */
+export function hostGateLogPath(root: string, tag: string, roundLabel: string, index: number): string {
+  const slug = (value: unknown) => String(value).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
+  const path = process.getBuiltinModule('node:path')
+  return path.join(root, `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`)
 }
 
 /** Bind secure gate execution to run-scoped metrics and configuration. */
@@ -59,9 +80,12 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
   runHostCommitGates: (worktree: string, tag: string, roundLabel: string) => Promise<HostGateRun>
   /** Run CodeScene after commit gates when configured. */
   runCodeSceneCheck: (worktree: string, tag: string, label: string) => Promise<CodeSceneCheckResult>
+  /** Remove any temporary root allocated by this gate surface. */
+  disposeHostGateLogs: () => void
 } {
   const fs = process.getBuiltinModule('node:fs')
-  const logPath = config.gateLogPath || makeGateLogPath()
+  const generatedLogPaths = makeGateLogPaths(config.gateLogRoot)
+  const logPath = config.gateLogPath || generatedLogPaths.path
 
   /** Stream one shell gate to its secure log and return its bounded terminal tail. */
   function streamGate(command: string, cwd: string, logFile: string): Promise<{ ok: boolean; killed: boolean; tail: string }> {
@@ -85,6 +109,7 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
         carry += chunk.toString('utf8')
         const lines = carry.split(/\r?\n/)
         carry = lines.pop() || ''
+        if (carry.length > GATE_CARRY_LIMIT) carry = carry.slice(-GATE_CARRY_LIMIT)
         for (const line of lines) { tail.push(line); if (tail.length > 12) tail.shift() }
       }
       /** Resolve exactly once after flushing the secure output stream. */
@@ -182,5 +207,5 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
     return { clean: false, skipped: false, detail: `CodeScene check \`${redactedCommand}\` reported code-health issues${timeout}; full log: ${logFile}; output tail:\n${outcome.tail}`, logFile }
   }
 
-  return { runHostCommitGates, runCodeSceneCheck }
+  return { runHostCommitGates, runCodeSceneCheck, disposeHostGateLogs: generatedLogPaths.dispose }
 }

@@ -100,4 +100,34 @@ describe('makeAuthPreflight', () => {
     expect(failures).toHaveLength(1)
     expect(failures[0].detail).toBe('credential rejected: [REDACTED]')
   })
+
+  test('redacts a leading Dakar environment assignment and its bare echoed value', async () => {
+    const messages: string[] = []
+    const secret = 'super-secret'
+    const run = makeAuthPreflight(
+      {
+        enabled: true,
+        requireHostReviewAuth: true,
+        requiredAdapters: new Set(),
+        reviewTool: 'dakar',
+        dakarInvocation: [`TOKEN=${secret}`, 'dakar-review'],
+      },
+      {
+        exec: async (command) => command === 'dakar-review'
+          ? status({ ok: false, message: `probe failed with ${secret}` })
+          : status(),
+        environment: { get: () => 'test-key' },
+        phase: () => {},
+        log: (message) => messages.push(message),
+        recordHostReviewAuthFailure: () => {},
+      },
+    )
+
+    const failures = await run()
+
+    expect(failures).toHaveLength(1)
+    expect(failures[0].command).not.toContain(secret)
+    expect(failures[0].detail).toBe('probe failed with [REDACTED]')
+    expect(messages.join('\n')).not.toContain(secret)
+  })
 })

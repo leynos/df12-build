@@ -61,11 +61,13 @@ function statusDetail(status: ExecStatus): string {
   return boundedTail([status.stdout, status.stderr, status.message].filter(Boolean).join('\n'))
 }
 
+const ENVIRONMENT_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=(.+)$/
+
 // Fixed arguments may carry API tokens or paths. Retain only conventional
 // long-option names so the failure record proves which binary was checked
 // without retaining secret values.
 function redactedDakarProbeCommand(invocation: readonly string[]): string {
-  const executable = invocation[0] || 'dakar-review'
+  const executable = invocation.find((argument) => !ENVIRONMENT_ASSIGNMENT.test(argument)) || 'dakar-review'
   const optionNames = invocation.slice(1)
     .filter((argument) => /^--[A-Za-z][A-Za-z0-9-]*$/.test(argument))
     .slice(0, 12)
@@ -75,13 +77,20 @@ function redactedDakarProbeCommand(invocation: readonly string[]): string {
 /** Remove configured Dakar argument values from an execution-status diagnostic. */
 function redactedDakarStatusDetail(status: ExecStatus, invocation: readonly string[]): string {
   let detail = statusDetail(status)
-  for (const value of invocation.slice(1)) {
+  for (const [index, value] of invocation.entries()) {
     const inlineOption = /^(--[A-Za-z][A-Za-z0-9-]*)=(.+)$/.exec(value)
     if (inlineOption) {
       detail = detail.split(value).join('[REDACTED]')
       detail = detail.split(inlineOption[2]).join('[REDACTED]')
       continue
     }
+    const assignment = ENVIRONMENT_ASSIGNMENT.exec(value)
+    if (assignment) {
+      detail = detail.split(value).join('[REDACTED]')
+      detail = detail.split(assignment[1]).join('[REDACTED]')
+      continue
+    }
+    if (index === 0) continue
     if (!value || /^--[A-Za-z][A-Za-z0-9-]*$/.test(value)) continue
     detail = detail.split(value).join('[REDACTED]')
   }
@@ -119,8 +128,9 @@ export function makeAuthPreflight(config: AuthPreflightConfig, deps: AuthPreflig
 
     if (config.requireHostReviewAuth) {
       if (config.reviewTool === 'dakar') {
-        const dakarExecutable = config.dakarInvocation[0] || 'dakar-review'
-        const dakar = await deps.exec(dakarExecutable, [...config.dakarInvocation.slice(1), '--version'])
+        const dakarWords = config.dakarInvocation.filter((argument) => !ENVIRONMENT_ASSIGNMENT.test(argument))
+        const dakarExecutable = dakarWords[0] || 'dakar-review'
+        const dakar = await deps.exec(dakarExecutable, [...dakarWords.slice(1), '--version'])
         const dakarOutput = redactedDakarStatusDetail(dakar, config.dakarInvocation)
         if (!dakar.ok) {
           deps.recordHostReviewAuthFailure()

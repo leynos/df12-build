@@ -1,6 +1,6 @@
 /** @file Module tests for neutral host-review adapters, telemetry, and gates. */
 import { afterEach, describe, expect, test } from 'bun:test'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -684,7 +684,7 @@ describe('runHostCommitGates streaming', () => {
     // Plant a symlink where the gate will write; the exclusive no-follow open
     // must refuse it (fail the gate) rather than following it and clobbering
     // the target, and must not crash the run.
-    const logPath = hostGateLogPath('1.2.3', 'r1', 0)
+    const logPath = hostGateLogPath(tmp('gate-log-root-'), '1.2.3', 'r1', 0)
     junk.push(logPath)
     symlinkSync(victim, logPath)
     const { runHostCommitGates } = hostReview({
@@ -710,6 +710,45 @@ describe('runHostCommitGates streaming', () => {
     expect(result.green).toBe(false)
     expect(result.detail).toMatch(/killed after the 1s gate timeout/)
   }, 20000)
+
+  test('caps an unterminated output segment while preserving the complete secure log', async () => {
+    const dir = tmp('gate-stream-single-line-')
+    const { runHostCommitGates } = hostReview({
+      commitGates: [`${process.execPath} -e "process.stdout.write('x'.repeat(65536)); process.exit(1)"`],
+      commitGateTimeoutSeconds: 10,
+    })
+
+    const result = await runHostCommitGates(dir, '1.2.3', 'single-line')
+    junk.push(result.results[0]?.logFile)
+
+    expect(result.green).toBe(false)
+    expect(readFileSync(result.results[0].logFile, 'utf8')).toHaveLength(65536)
+    expect(result.detail.length).toBeLessThan(20_000)
+  })
+
+  test('allocates gate-log roots lazily and releases them after the workflow boundary', async () => {
+    const dir = tmp('gate-log-lifecycle-')
+    const root = path.join(dir, 'gate-logs')
+    let allocations = 0
+    let removals = 0
+    const surface = hostReview({
+      commitGates: ['echo green'],
+      gateLogRoot: {
+        create: () => { allocations += 1; mkdirSync(root); return root },
+        remove: (target, options) => { removals += 1; rmSync(target, options) },
+      },
+    })
+
+    expect(allocations).toBe(0)
+    const result = await surface.runHostCommitGates(dir, '1.2.3', 'lifecycle')
+    expect(result.green).toBe(true)
+    expect(allocations).toBe(1)
+    expect(existsSync(root)).toBe(true)
+
+    surface.disposeHostGateLogs()
+    expect(removals).toBe(1)
+    expect(existsSync(root)).toBe(false)
+  })
 
   test('a hung gate is killed at the timeout', async () => {
     const dir = tmp('gate-stream-hang-')

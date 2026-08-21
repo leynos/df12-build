@@ -12,9 +12,9 @@ import {
   boundedTail,
   type HostReviewConfig,
   type HostReviewDeps,
+  type HostReviewAttempt,
   type ReviewErrorCategory,
   type ReviewFinding,
-  type ReviewOutcome,
 } from './host-review-contracts.ts'
 
 /** One untrusted finding from Dakar's compatibility projection. */
@@ -57,16 +57,20 @@ export const DAKAR_SEVERITY_MAP: Record<string, string> = {
 const DAKAR_SEVERITIES = new Set(Object.keys(DAKAR_SEVERITY_MAP))
 const DAKAR_REQUIRED_FINDING_FIELDS = ['path', 'title', 'detail', 'evidence'] as const
 
-/** Result shape produced by one validated reviewer attempt. */
-export interface HostReviewAttempt {
-  /** Tool-neutral terminal outcome. */
-  outcome: ReviewOutcome
-  /** Validated and normalized findings. */
-  findings: ReviewFinding[]
-  /** Bounded operator-facing diagnostic. */
-  detail: string
-  /** Bounded telemetry category. */
-  errorCategory: ReviewErrorCategory
+/** Dakar-only state-root lifecycle used by one isolated reviewer attempt. */
+export interface DakarAttemptDeps {
+  /** Optional state-root allocation service used by deterministic tests. */
+  dakarStateRoots?: DakarStateRoots
+  /** Deprecated cleanup seam retained for compatibility with older callers. */
+  removeDakarStateRoot?: (stateRoot: string, options: { recursive: true; force: true }) => void
+}
+
+/** Fresh Dakar state-root service, injectable for filesystem-failure tests. */
+export interface DakarStateRoots {
+  /** Create the fresh state root for one Dakar attempt. */
+  create: () => string
+  /** Remove a state root after the corresponding attempt settles. */
+  remove: (stateRoot: string, options: { recursive: true; force: true }) => void
 }
 
 /** Validated Dakar findings suitable for severity mapping. */
@@ -180,7 +184,7 @@ export function classifyDakarReview(execResult: ExecStatus): HostReviewAttempt {
 }
 
 /** Bind one Dakar attempt to configuration while leaving host seams injectable. */
-export function makeDakarAttempt(config: Pick<HostReviewConfig, 'base' | 'dakarInvocation' | 'reviewTimeoutSeconds' | 'dakarBudgetGbp'>): (worktree: string, exec: NonNullable<HostReviewDeps['exec']>, deps: HostReviewDeps) => Promise<HostReviewAttempt> {
+export function makeDakarAttempt(config: Pick<HostReviewConfig, 'base' | 'dakarInvocation' | 'reviewTimeoutSeconds' | 'dakarBudgetGbp'>): (worktree: string, exec: NonNullable<HostReviewDeps['exec']>, deps: DakarAttemptDeps) => Promise<HostReviewAttempt> {
   const invocation = config.dakarInvocation || []
   const executable = invocation[0] || 'dakar-review'
   const prefixArgs = invocation.slice(1)

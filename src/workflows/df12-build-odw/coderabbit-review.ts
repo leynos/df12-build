@@ -12,11 +12,11 @@ import {
   boundedTail,
   type HostReviewConfig,
   type HostReviewDeps,
+  type HostReviewAttempt,
   type ReviewErrorCategory,
   type ReviewFinding,
   type ReviewOutcome,
 } from './host-review-contracts.ts'
-import type { HostReviewAttempt } from './dakar-review.ts'
 
 /** Terminal CodeRabbit error event retained for outcome classification. */
 export interface CoderabbitError extends Record<string, unknown> {

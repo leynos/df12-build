@@ -30,6 +30,18 @@ export type ReviewOutcome = 'clean' | 'findings' | 'rate-limited' | 'auth' | 'er
 /** Bounded reason attached to terminal host-review telemetry. */
 export type ReviewErrorCategory = 'none' | 'deferred' | 'timeout' | 'auth' | 'invalid-output' | 'execution'
 
+/** Validated result produced by exactly one reviewer adapter attempt. */
+export interface HostReviewAttempt {
+  /** Tool-neutral terminal outcome. */
+  outcome: ReviewOutcome
+  /** Validated and normalized findings. */
+  findings: ReviewFinding[]
+  /** Bounded operator-facing diagnostic. */
+  detail: string
+  /** Bounded telemetry category. */
+  errorCategory: ReviewErrorCategory
+}
+
 /** One completed host-review result after bounded retries. */
 export interface HostReviewResult {
   /** Bounded machine identifier for the adapter that ran. */
@@ -96,26 +108,22 @@ export interface CodeSceneCheckResult {
   logFile: string
 }
 
-/** Fresh Dakar state-root service, injectable for filesystem-failure tests. */
-export interface DakarStateRoots {
-  /** Create the fresh state root for one Dakar attempt. */
-  create: () => string
-  /** Remove a state root after the corresponding attempt settles. */
-  remove: (stateRoot: string, options: { recursive: true; force: true }) => void
-}
-
-/** Injectable execution, sleep, and Dakar cleanup seams for deterministic tests. */
+/** Injectable execution, sleep, and clock seams shared by all reviewer adapters. */
 export interface HostReviewDeps {
   /** Process runner used by both reviewer adapters. */
   exec?: (command: string, commandArgs: readonly string[], options?: ExecOptions) => Promise<ExecStatus>
   /** Host-side backoff seam measured in minutes. */
   sleep?: (minutes: number) => Promise<void>
-  /** Recursive Dakar state-root cleanup seam. */
-  removeDakarStateRoot?: (stateRoot: string, options: { recursive: true; force: true }) => void
-  /** State-root lifecycle service; injected so filesystem faults are testable. */
-  dakarStateRoots?: DakarStateRoots
   /** Monotonic-enough millisecond clock used only for bounded telemetry. */
   nowMs?: () => number
+}
+
+/** Run-scoped gate-log root lifecycle, injected where filesystem ownership matters. */
+export interface HostGateLogRoot {
+  /** Allocate the private directory used for this workflow's gate logs. */
+  create: () => string
+  /** Recursively remove the allocated private directory when the workflow ends. */
+  remove: (root: string, options: { recursive: true; force: true }) => void
 }
 
 /** Bound configuration shared by reviewer adapters and host gates. */
@@ -148,6 +156,8 @@ export interface HostReviewConfig {
   csCheckCommand: string
   /** Optional per-surface secure gate-log naming seam for deterministic tests. */
   gateLogPath?: (tag: string, roundLabel: string, index: number) => string
+  /** Optional gate-log allocation lifecycle used by host-gate boundaries. */
+  gateLogRoot?: HostGateLogRoot
 }
 
 /** Metric aggregate maintained per composed host-review surface. */

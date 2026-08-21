@@ -332,8 +332,8 @@ const HOST_REVIEW_FINDINGS_FILE = CODERABBIT_FINDINGS_FILE
 // Parse the operator-configured command once so preflight probes and review
 // execution preserve the same quoted fixed arguments.
 const parsedDakarInvocation = tokenizeShellCommand(DAKAR_COMMAND)
-if (!parsedDakarInvocation || parsedDakarInvocation.words.length === 0) {
-  throw new Error('Invalid dakarCommand: expected a non-empty command with balanced shell quoting')
+if (!parsedDakarInvocation || parsedDakarInvocation.words.length === 0 || parsedDakarInvocation.leadingAssignments.length > 0) {
+  throw new Error('Invalid dakarCommand: expected a non-empty command with balanced shell quoting and no environment assignments')
 }
 const DAKAR_INVOCATION = parsedDakarInvocation.words.map((word) => word.value)
 const hostReview = makeHostReview({
@@ -358,6 +358,7 @@ const {
   recordHostReview,
   runHostCommitGates,
   runCodeSceneCheck,
+  disposeHostGateLogs,
   metrics: getHostReviewMetrics,
   recordHostReviewAuthFailure,
 } = hostReview
@@ -1010,7 +1011,7 @@ function redactedCodeSceneCommand(command: string): string {
 }
 
 // --- Worker-pool control loop -----------------------------------------------
-async function workflowMain() {
+async function runWorkflowMain() {
 // Fill the pool, then await whichever task finishes first (Promise.race),
 // record it, and refill — re-running select the instant any flow completes. A
 // failed task stops new work but lets in-flight siblings drain. Audits and
@@ -1020,6 +1021,7 @@ const authPreflight = await runAuthPreflight()
 if (authPreflight.length) {
   halted = `fatal auth preflight failed: ${authPreflight.map((failure) => `${failure.tool} (${failure.command})`).join(', ')}`
 }
+
 let stop = Boolean(halted)
 let providerFaultHalt = false
 
@@ -1256,4 +1258,13 @@ return {
     (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : '') +
     (halted ? ` | halted: ${halted}` : ' | clean stop (no more unblocked tasks).'),
 }
+}
+
+/** Run the workflow and release temporary host-gate logs after every terminal path. */
+async function workflowMain() {
+  try {
+    return await runWorkflowMain()
+  } finally {
+    disposeHostGateLogs()
+  }
 }

@@ -9,7 +9,7 @@
  */
 import { execFileStatus } from './exec.ts'
 import { makeCoderabbitAttempt, parseCoderabbitAgentOutput, classifyCoderabbitOutcome, type CoderabbitError, type CoderabbitParsedOutput, CODERABBIT_SUCCESS_STATUSES } from './coderabbit-review.ts'
-import { makeDakarAttempt, parseDakarDocument, mapDakarFinding, validateChangesRequestedFindings, validateCleanDakarFindings, classifyDakarReview, DAKAR_SEVERITY_MAP, type DakarDocument, type DakarFinding, type DakarFindingValidation, type DakarFindingValidationFailure, type HostReviewAttempt } from './dakar-review.ts'
+import { makeDakarAttempt, parseDakarDocument, mapDakarFinding, validateChangesRequestedFindings, validateCleanDakarFindings, classifyDakarReview, DAKAR_SEVERITY_MAP, type DakarAttemptDeps, type DakarDocument, type DakarFinding, type DakarFindingValidation, type DakarFindingValidationFailure, type DakarStateRoots } from './dakar-review.ts'
 import { makeHostGates, hostGateLogPath, codeSceneExecutable } from './host-gates.ts'
 import { tokenizeShellCommand } from './shell-command.ts'
 import {
@@ -21,7 +21,7 @@ import {
   reviewerDisplayName,
   type CodeSceneCheckResult,
   type CodeSceneMetrics,
-  type DakarStateRoots,
+  type HostReviewAttempt,
   type HostGateMetrics,
   type HostGateResult,
   type HostGateRun,
@@ -56,6 +56,7 @@ export {
 }
 export type {
   CodeSceneCheckResult,
+  DakarAttemptDeps,
   DakarStateRoots,
   CoderabbitError,
   CoderabbitParsedOutput,
@@ -68,6 +69,7 @@ export type {
   HostReviewConfig,
   HostReviewDeferral,
   HostReviewDeps,
+  HostReviewAttempt,
   HostReviewResult,
   ReviewErrorCategory,
   ReviewFinding,
@@ -96,13 +98,15 @@ export interface HostReviewSurface {
   /** Compute deterministic retry backoff for a label. */
   reviewBackoffMinutes: (seed: unknown) => number
   /** Run the selected reviewer through the neutral adapter boundary. */
-  runHostReview: (worktree: string, label: string, deps?: HostReviewDeps) => Promise<HostReviewResult>
+  runHostReview: (worktree: string, label: string, deps?: HostReviewDeps & DakarAttemptDeps) => Promise<HostReviewResult>
   /** Serialize one terminal review and its findings to the configured sink. */
   recordHostReview: (label: string, review: HostReviewResult) => Promise<void>
   /** Execute configured deterministic commit gates. */
   runHostCommitGates: (worktree: string, tag: string, roundLabel: string) => Promise<HostGateRun>
   /** Execute the optional CodeScene health check. */
   runCodeSceneCheck: (worktree: string, tag: string, label: string) => Promise<CodeSceneCheckResult>
+  /** Release private host-gate log roots after all workflow work has settled. */
+  disposeHostGateLogs: () => void
   /** Return a read-only snapshot of this surface's bounded counters. */
   metrics: () => HostReviewMetricsSnapshot
   /** Record an auth failure discovered by entrypoint preflight. */
@@ -110,7 +114,7 @@ export interface HostReviewSurface {
   /** Compatibility alias for `reviewBackoffMinutes`. */
   coderabbitBackoffMinutes: (seed: unknown) => number
   /** Compatibility alias for `runHostReview`. */
-  runCoderabbitHostReview: (worktree: string, label: string, deps?: HostReviewDeps) => Promise<HostReviewResult>
+  runCoderabbitHostReview: (worktree: string, label: string, deps?: HostReviewDeps & DakarAttemptDeps) => Promise<HostReviewResult>
   /** Compatibility alias for `recordHostReview`. */
   recordCoderabbitReview: (label: string, review: HostReviewResult) => Promise<void>
 }
@@ -135,7 +139,7 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
   }
 
   /** Run one selected host reviewer through the common retry envelope. */
-  async function runHostReview(worktree: string, label: string, deps: HostReviewDeps = {}): Promise<HostReviewResult> {
+  async function runHostReview(worktree: string, label: string, deps: HostReviewDeps & DakarAttemptDeps = {}): Promise<HostReviewResult> {
     const exec = deps.exec || execFileStatus
     const sleep = deps.sleep || hostSleepMinutes
     const nowMs = deps.nowMs || (() => Number(process.hrtime.bigint() / 1_000_000n))
@@ -222,6 +226,7 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
     recordHostReview,
     runHostCommitGates: gates.runHostCommitGates,
     runCodeSceneCheck: gates.runCodeSceneCheck,
+    disposeHostGateLogs: gates.disposeHostGateLogs,
     metrics,
     recordHostReviewAuthFailure,
     coderabbitBackoffMinutes: reviewBackoffMinutes,

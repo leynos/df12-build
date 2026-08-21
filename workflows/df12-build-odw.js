@@ -1313,20 +1313,28 @@ function boundedTail(value, limit = 2e3) {
 function statusDetail(status) {
   return boundedTail([status.stdout, status.stderr, status.message].filter(Boolean).join("\n"));
 }
+var ENVIRONMENT_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=(.+)$/;
 function redactedDakarProbeCommand(invocation) {
-  const executable = invocation[0] || "dakar-review";
+  const executable = invocation.find((argument) => !ENVIRONMENT_ASSIGNMENT.test(argument)) || "dakar-review";
   const optionNames = invocation.slice(1).filter((argument) => /^--[A-Za-z][A-Za-z0-9-]*$/.test(argument)).slice(0, 12);
   return [executable, ...optionNames, "--version"].join(" ");
 }
 function redactedDakarStatusDetail(status, invocation) {
   let detail = statusDetail(status);
-  for (const value of invocation.slice(1)) {
+  for (const [index, value] of invocation.entries()) {
     const inlineOption = /^(--[A-Za-z][A-Za-z0-9-]*)=(.+)$/.exec(value);
     if (inlineOption) {
       detail = detail.split(value).join("[REDACTED]");
       detail = detail.split(inlineOption[2]).join("[REDACTED]");
       continue;
     }
+    const assignment = ENVIRONMENT_ASSIGNMENT.exec(value);
+    if (assignment) {
+      detail = detail.split(value).join("[REDACTED]");
+      detail = detail.split(assignment[1]).join("[REDACTED]");
+      continue;
+    }
+    if (index === 0) continue;
     if (!value || /^--[A-Za-z][A-Za-z0-9-]*$/.test(value)) continue;
     detail = detail.split(value).join("[REDACTED]");
   }
@@ -1359,8 +1367,9 @@ function makeAuthPreflight(config, deps) {
     }
     if (config.requireHostReviewAuth) {
       if (config.reviewTool === "dakar") {
-        const dakarExecutable = config.dakarInvocation[0] || "dakar-review";
-        const dakar = await deps.exec(dakarExecutable, [...config.dakarInvocation.slice(1), "--version"]);
+        const dakarWords = config.dakarInvocation.filter((argument) => !ENVIRONMENT_ASSIGNMENT.test(argument));
+        const dakarExecutable = dakarWords[0] || "dakar-review";
+        const dakar = await deps.exec(dakarExecutable, [...dakarWords.slice(1), "--version"]);
         const dakarOutput = redactedDakarStatusDetail(dakar, config.dakarInvocation);
         if (!dakar.ok) {
           deps.recordHostReviewAuthFailure();
@@ -1601,25 +1610,43 @@ function makeDakarAttempt(config) {
 }
 
 // src/workflows/df12-build-odw/host-gates.ts
+var GATE_CARRY_LIMIT = 16384;
 function codeSceneExecutable(command) {
   const tokens = tokenizeShellCommand(command);
   if (!tokens || tokens.hasUnquotedControlOperator) return null;
   return tokens.words[tokens.executableWordIndex]?.value || "";
 }
-function makeGateLogPath() {
+function makeGateLogPaths(lifecycle) {
   const fs = process.getBuiltinModule("node:fs");
   const os = process.getBuiltinModule("node:os");
   const path = process.getBuiltinModule("node:path");
-  const gateLogRoot = fs.mkdtempSync(path.join(os.tmpdir(), "df12-gates-"));
-  const slug = (value) => String(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
-  return (tag, roundLabel, index) => path.join(gateLogRoot, `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`);
+  let gateLogRoot = "";
+  const root = () => {
+    if (!gateLogRoot) gateLogRoot = lifecycle?.create() || fs.mkdtempSync(path.join(os.tmpdir(), "df12-gates-"));
+    return gateLogRoot;
+  };
+  return {
+    path: (tag, roundLabel, index) => hostGateLogPath(root(), tag, roundLabel, index),
+    dispose: () => {
+      if (!gateLogRoot) return;
+      try {
+        (lifecycle?.remove || fs.rmSync)(gateLogRoot, { recursive: true, force: true });
+      } catch (error) {
+        log(`[host gates] could not remove temporary log root: ${boundedTail2(error?.message || String(error), 500)}`);
+      }
+      gateLogRoot = "";
+    }
+  };
 }
-function hostGateLogPath(tag, roundLabel, index) {
-  return makeGateLogPath()(tag, roundLabel, index);
+function hostGateLogPath(root, tag, roundLabel, index) {
+  const slug = (value) => String(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+  const path = process.getBuiltinModule("node:path");
+  return path.join(root, `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`);
 }
 function makeHostGates(config, metrics) {
   const fs = process.getBuiltinModule("node:fs");
-  const logPath = config.gateLogPath || makeGateLogPath();
+  const generatedLogPaths = makeGateLogPaths(config.gateLogRoot);
+  const logPath = config.gateLogPath || generatedLogPaths.path;
   function streamGate(command, cwd, logFile) {
     const { spawn } = process.getBuiltinModule("node:child_process");
     return new Promise((resolve) => {
@@ -1648,6 +1675,7 @@ function makeHostGates(config, metrics) {
         carry += chunk.toString("utf8");
         const lines = carry.split(/\r?\n/);
         carry = lines.pop() || "";
+        if (carry.length > GATE_CARRY_LIMIT) carry = carry.slice(-GATE_CARRY_LIMIT);
         for (const line of lines) {
           tail.push(line);
           if (tail.length > 12) tail.shift();
@@ -1767,7 +1795,7 @@ ${outcome.tail}` };
     return { clean: false, skipped: false, detail: `CodeScene check \`${redactedCommand}\` reported code-health issues${timeout}; full log: ${logFile}; output tail:
 ${outcome.tail}`, logFile };
   }
-  return { runHostCommitGates: runHostCommitGates2, runCodeSceneCheck: runCodeSceneCheck2 };
+  return { runHostCommitGates: runHostCommitGates2, runCodeSceneCheck: runCodeSceneCheck2, disposeHostGateLogs: generatedLogPaths.dispose };
 }
 
 // src/workflows/df12-build-odw/host-review.ts
@@ -1873,6 +1901,7 @@ function makeHostReview(config) {
     recordHostReview: recordHostReview2,
     runHostCommitGates: gates.runHostCommitGates,
     runCodeSceneCheck: gates.runCodeSceneCheck,
+    disposeHostGateLogs: gates.disposeHostGateLogs,
     metrics,
     recordHostReviewAuthFailure: recordHostReviewAuthFailure2,
     coderabbitBackoffMinutes: reviewBackoffMinutes2,
@@ -3856,8 +3885,8 @@ var HOST_REVIEW_ATTEMPTS = CODERABBIT_ATTEMPTS;
 var HOST_REVIEW_BACKOFF_MINUTES = CODERABBIT_BACKOFF_MINUTES;
 var HOST_REVIEW_FINDINGS_FILE = CODERABBIT_FINDINGS_FILE;
 var parsedDakarInvocation = tokenizeShellCommand(DAKAR_COMMAND);
-if (!parsedDakarInvocation || parsedDakarInvocation.words.length === 0) {
-  throw new Error("Invalid dakarCommand: expected a non-empty command with balanced shell quoting");
+if (!parsedDakarInvocation || parsedDakarInvocation.words.length === 0 || parsedDakarInvocation.leadingAssignments.length > 0) {
+  throw new Error("Invalid dakarCommand: expected a non-empty command with balanced shell quoting and no environment assignments");
 }
 var DAKAR_INVOCATION = parsedDakarInvocation.words.map((word) => word.value);
 var hostReview = makeHostReview({
@@ -3881,6 +3910,7 @@ var {
   recordHostReview,
   runHostCommitGates,
   runCodeSceneCheck,
+  disposeHostGateLogs,
   metrics: getHostReviewMetrics,
   recordHostReviewAuthFailure
 } = hostReview;
@@ -4390,8 +4420,7 @@ async function fillPool() {
 function redactedCodeSceneCommand(command) {
   return redactedShellCommand(command);
 }
-// --- Worker-pool control loop -----------------------------------------------
-async function workflowMain() {
+async function runWorkflowMain() {
   const authPreflight = await runAuthPreflight();
   if (authPreflight.length) {
     halted = `fatal auth preflight failed: ${authPreflight.map((failure) => `${failure.tool} (${failure.command})`).join(", ")}`;
@@ -4581,6 +4610,14 @@ async function workflowMain() {
     halted,
     summary: `Processed ${processed.length} roadmap task(s) (pool width ${MAX_PARALLEL}): ` + results.map((r) => `${r.id}=${r.status}`).join(", ") + (recovery.enabled ? ` | recovery(${recovery.mode}): ${recovery.assessed} assessed, ${recovery.resumed} resumed, ${recovery.skipped.length} skipped` : "") + (assessments.length ? ` | assessed ${assessments.length} failed/halted branch(es)` : "") + salvageSummarySuffix + (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : "") + (halted ? ` | halted: ${halted}` : " | clean stop (no more unblocked tasks).")
   };
+}
+// --- Worker-pool control loop -----------------------------------------------
+async function workflowMain() {
+  try {
+    return await runWorkflowMain();
+  } finally {
+    disposeHostGateLogs();
+  }
 }
 
 // --- Entry (generated footer) ------------------------------------------------
