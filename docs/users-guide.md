@@ -709,6 +709,10 @@ or control-operator syntax, the displayed command is `<redacted command>`
 instead of being partially redacted. A missing binary is therefore a clean
 skip, whereas `probeFailures` is a surfaced fault and is not counted as a skip.
 
+`env` options (for example, `-i`) are unsupported and fail closed at the
+availability probe without executing the configured command; a bare `env`
+prefix with assignments remains supported.
+
 ## Recovery model
 
 Do not try to resume a failed workflow from transient cache state. Treat
