@@ -394,7 +394,8 @@ the display; the parser never evaluates that input.
 `make verify-modules` skips when Dafny is absent, so local runs stay friendly;
 CI must run `make verify-modules-strict`, which FAILS when Dafny is not on
 `PATH`, so the LemmaScript/Dafny proof is a real PR gate rather than advisory.
-The CI job installs Dafny (see the toolchain notes).
+The CI job uses the official pinned Dafny release bundle because verification
+requires its matching bundled Z3 4.12.1 solver.
 
 The per-work-item build loop (`perWorkItemBuild`, default on) makes the
 committed ExecPlan's `## Progress` checklist the build's control surface:

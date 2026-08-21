@@ -48,10 +48,26 @@ jobs:
       - name: Install Dafny
         run: |
           set -euo pipefail
-          dotnet tool install --global dafny --version "${DAFNY_VERSION}"
-          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
-          export PATH="$HOME/.dotnet/tools:$PATH"
-          dafny --version
+          DAFNY_ARCHIVE="${RUNNER_TEMP}/dafny-${DAFNY_VERSION}-x64-ubuntu-20.04.zip"
+          DAFNY_ROOT="$(mktemp -d "${RUNNER_TEMP}/dafny-${DAFNY_VERSION}.XXXXXX")"
+          curl --fail --location \
+            "https://github.com/dafny-lang/dafny/releases/download/v${DAFNY_VERSION}/dafny-${DAFNY_VERSION}-x64-ubuntu-20.04.zip" \
+            --output "$DAFNY_ARCHIVE"
+          unzip -q "$DAFNY_ARCHIVE" -d "$DAFNY_ROOT"
+          echo "$DAFNY_ROOT/dafny" >> "$GITHUB_PATH"
+          export PATH="$DAFNY_ROOT/dafny:$PATH"
+          command -v dafny
+          dafny --version | grep -F "$DAFNY_VERSION"
+          test -x "$DAFNY_ROOT/dafny/z3/bin/z3-4.12.1"
+          DAFNY_SMOKE="$(mktemp --suffix=.dfy "${RUNNER_TEMP}/dafny-smoke.XXXXXX")"
+          trap 'rm -f "$DAFNY_SMOKE"' EXIT
+          cat > "$DAFNY_SMOKE" <<'EOF'
+          method Main() {
+          }
+          EOF
+          dafny verify "$DAFNY_SMOKE"
+          rm -f "$DAFNY_SMOKE"
+          trap - EXIT
       - name: Run commit gates
         run: make all
       # make all uses the lenient verify-modules (it skips without Dafny so
