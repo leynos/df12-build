@@ -8,7 +8,7 @@
 import { describe, expect, test } from 'bun:test'
 import fc from 'fast-check'
 
-import { tokenizeShellCommand } from '../../src/workflows/df12-build-odw/shell-command.ts'
+import { redactedShellCommand, tokenizeShellCommand } from '../../src/workflows/df12-build-odw/shell-command.ts'
 
 describe('tokenizeShellCommand', () => {
   test.each([
@@ -104,5 +104,17 @@ describe('tokenizeShellCommand', () => {
     fc.assert(fc.property(malformed, (command) => {
       expect(tokenizeShellCommand(command)).toBeNull()
     }), { numRuns: 100 })
+  })
+
+  test('redacts many leading assignments in one ordered projection', () => {
+    const assignments = Array.from({ length: 1_000 }, (_, index) => `TOKEN_${index}=secret-${index}`)
+    const command = `${assignments.join(' ')} cs-check-changed --changed`
+    const redacted = redactedShellCommand(command)
+
+    expect(redacted).not.toContain('secret-0')
+    expect(redacted).not.toContain('secret-999')
+    expect(redacted).toContain('TOKEN_0=<redacted>')
+    expect(redacted).toContain('TOKEN_999=<redacted>')
+    expect(redacted).toEndWith('cs-check-changed --changed')
   })
 })

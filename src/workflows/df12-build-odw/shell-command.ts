@@ -188,9 +188,12 @@ export function tokenizeShellCommand(command: string): ShellCommandTokens | null
 export function redactedShellCommand(command: string): string {
   const tokens = tokenizeShellCommand(command)
   if (!tokens || tokens.hasUnquotedControlOperator) return '<redacted command>'
-  let redacted = command
-  for (const assignment of tokens.leadingAssignments.toReversed()) {
-    redacted = `${redacted.slice(0, assignment.start)}${assignment.name}=<redacted>${redacted.slice(assignment.end)}`
+  const parts: string[] = []
+  let cursor = 0
+  for (const assignment of tokens.leadingAssignments) {
+    parts.push(command.slice(cursor, assignment.start), `${assignment.name}=<redacted>`)
+    cursor = assignment.end
   }
-  return redacted
+  parts.push(command.slice(cursor))
+  return parts.join('')
 }

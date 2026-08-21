@@ -1104,11 +1104,14 @@ function tokenizeShellCommand(command) {
 function redactedShellCommand(command) {
   const tokens = tokenizeShellCommand(command);
   if (!tokens || tokens.hasUnquotedControlOperator) return "<redacted command>";
-  let redacted = command;
-  for (const assignment of tokens.leadingAssignments.toReversed()) {
-    redacted = `${redacted.slice(0, assignment.start)}${assignment.name}=<redacted>${redacted.slice(assignment.end)}`;
+  const parts = [];
+  let cursor = 0;
+  for (const assignment of tokens.leadingAssignments) {
+    parts.push(command.slice(cursor, assignment.start), `${assignment.name}=<redacted>`);
+    cursor = assignment.end;
   }
-  return redacted;
+  parts.push(command.slice(cursor));
+  return parts.join("");
 }
 
 // src/workflows/df12-build-odw/config.ts
