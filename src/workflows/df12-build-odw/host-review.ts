@@ -275,7 +275,7 @@ export const csCheckMetrics = {
 /** Resolve the executable after any leading shell environment assignments. */
 function codeSceneExecutable(command: string): string | null {
   const tokens = tokenizeShellCommand(command)
-  if (!tokens) return null
+  if (!tokens || tokens.hasUnquotedControlOperator) return null
   return tokens.words[tokens.executableWordIndex]?.value || ''
 }
 

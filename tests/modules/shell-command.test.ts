@@ -67,6 +67,10 @@ describe('tokenizeShellCommand', () => {
     expect(tokens?.words[tokens.executableWordIndex]?.value).toBe('cs-check-changed')
   })
 
+  test('fails closed for env options rather than treating them as executables', () => {
+    expect(tokenizeShellCommand('env -i TOKEN=secret cs-check-changed')).toBeNull()
+  })
+
   test('preserves every generated literal assignment span', () => {
     const names = fc.constantFrom('A', 'TOKEN', 'DF12_CS_MARKER')
     const values = fc.array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789'), { maxLength: 12 })
@@ -82,8 +86,8 @@ describe('tokenizeShellCommand', () => {
         expect(tokens?.leadingAssignments.map((assignment) => assignment.name)).toEqual(assignments.map(([name]) => name))
         for (const [index, assignment] of (tokens?.leadingAssignments || []).entries()) {
           const pair = assignments[index]
-          expect(pair).toBeDefined()
-          const [name, value] = pair as [string, string]
+          if (!pair) throw new Error(`Expected generated assignment at index ${index}`)
+          const [name, value] = pair
           expect(command.slice(assignment.start, assignment.end)).toBe(`${name}=${value}`)
         }
       },

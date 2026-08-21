@@ -161,6 +161,10 @@ export function tokenizeShellCommand(command: string): ShellCommandTokens | null
   }
   if (words[executableWordIndex]?.value === 'env') {
     executableWordIndex += 1
+    // `env` accepts options that alter its assignment and command semantics.
+    // This limited parser deliberately supports only the bare invocation, so
+    // an option cannot become an unredacted executable or probe target.
+    if (words[executableWordIndex]?.value.startsWith('-')) return null
     for (; executableWordIndex < words.length; executableWordIndex++) {
       const word = words[executableWordIndex]
       const name = assignmentName(command, word)

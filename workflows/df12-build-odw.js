@@ -1066,6 +1066,7 @@ function tokenizeShellCommand(command) {
   }
   if (words[executableWordIndex]?.value === "env") {
     executableWordIndex += 1;
+    if (words[executableWordIndex]?.value.startsWith("-")) return null;
     for (; executableWordIndex < words.length; executableWordIndex++) {
       const word = words[executableWordIndex];
       const name = assignmentName(command, word);
@@ -2393,7 +2394,7 @@ var csCheckMetrics = {
 };
 function codeSceneExecutable(command) {
   const tokens = tokenizeShellCommand(command);
-  if (!tokens) return null;
+  if (!tokens || tokens.hasUnquotedControlOperator) return null;
   return tokens.words[tokens.executableWordIndex]?.value || "";
 }
 var gateLogDirCache = null;

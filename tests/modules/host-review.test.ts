@@ -143,6 +143,28 @@ describe('runCodeSceneCheck', () => {
     expect(csCheckMetrics).toEqual({ runs: 0, failures: 0, probeFailures: 1, skipped: 0 })
   })
 
+  test('an env option fails the availability probe without exposing its value', async () => {
+    const dir = tmp('cs-env-option-')
+    const secret = 'do-not-probe-or-expose-this-token'
+    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: `env -i TOKEN=${secret} true` })
+    const result = await runCodeSceneCheck(dir, '1.2.3', 'env-option')
+
+    expect(result).toMatchObject({ clean: false, skipped: false, logFile: '' })
+    expect(result.detail).toContain('<redacted command>')
+    expect(result.detail).not.toContain(secret)
+    expect(csCheckMetrics).toEqual({ runs: 0, failures: 0, probeFailures: 1, skipped: 0 })
+  })
+
+  test('an unquoted control operator fails the availability probe without running', async () => {
+    const dir = tmp('cs-control-operator-')
+    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: 'true ; true' })
+    const result = await runCodeSceneCheck(dir, '1.2.3', 'control-operator')
+
+    expect(result).toMatchObject({ clean: false, skipped: false, logFile: '' })
+    expect(result.detail).toContain('<redacted command>')
+    expect(csCheckMetrics).toEqual({ runs: 0, failures: 0, probeFailures: 1, skipped: 0 })
+  })
+
   test('redacts assignment values from CodeScene logs and failure detail', async () => {
     const dir = tmp('cs-redacted-command-')
     const secret = 'never-log-this-token'
