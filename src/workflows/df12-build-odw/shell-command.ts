@@ -46,6 +46,7 @@ function commandSubstitutionEnd(command: string, start: number): number | null {
   let depth = 1
   while (cursor < command.length) {
     const character = command[cursor]
+    if (character === undefined) return null
     if (character === '\\' && quote !== "'") {
       cursor += 2
       continue
@@ -82,6 +83,7 @@ function assignmentName(command: string, word: ShellCommandWord): string | null 
   let name = ''
   while (cursor < word.end) {
     const character = command[cursor]
+    if (character === undefined) return null
     if (character === '=') return name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : null
     if (!/[A-Za-z0-9_]/.test(character)) return null
     name += character
@@ -100,8 +102,10 @@ export function tokenizeShellCommand(command: string): ShellCommandTokens | null
   let cursor = 0
   let hasUnquotedControlOperator = false
   while (cursor < command.length) {
-    while (cursor < command.length && /\s/.test(command[cursor])) {
-      if (command[cursor] === '\n') hasUnquotedControlOperator = true
+    while (cursor < command.length) {
+      const whitespace = command[cursor]
+      if (whitespace === undefined || !/\s/.test(whitespace)) break
+      if (whitespace === '\n') hasUnquotedControlOperator = true
       cursor += 1
     }
     if (cursor >= command.length) break
@@ -111,6 +115,7 @@ export function tokenizeShellCommand(command: string): ShellCommandTokens | null
     let hasWord = false
     while (cursor < command.length) {
       const character = command[cursor]
+      if (character === undefined) return null
       if (!quote && /\s/.test(character)) break
       if (!quote && (character === ';' || character === '&' || character === '|')) {
         hasUnquotedControlOperator = true
@@ -138,7 +143,9 @@ export function tokenizeShellCommand(command: string): ShellCommandTokens | null
       if (character === '\\' && quote !== "'") {
         cursor += 1
         if (cursor >= command.length) return null
-        value += command[cursor]
+        const escaped = command[cursor]
+        if (escaped === undefined) return null
+        value += escaped
         hasWord = true
         cursor += 1
         continue
@@ -155,6 +162,7 @@ export function tokenizeShellCommand(command: string): ShellCommandTokens | null
   let executableWordIndex = 0
   for (; executableWordIndex < words.length; executableWordIndex++) {
     const word = words[executableWordIndex]
+    if (!word) return null
     const name = assignmentName(command, word)
     if (!name) break
     leadingAssignments.push({ name, start: word.start, end: word.end })
@@ -167,6 +175,7 @@ export function tokenizeShellCommand(command: string): ShellCommandTokens | null
     if (words[executableWordIndex]?.value.startsWith('-')) return null
     for (; executableWordIndex < words.length; executableWordIndex++) {
       const word = words[executableWordIndex]
+      if (!word) return null
       const name = assignmentName(command, word)
       if (!name) break
       leadingAssignments.push({ name, start: word.start, end: word.end })

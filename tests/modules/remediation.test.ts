@@ -77,7 +77,9 @@ describe('dedupeProposals', () => {
       }),
     ])
     expect(second).toHaveLength(1)
-    expect(second[0].sources).toEqual(['audit:1.2.3', 'review:1.2.4', 'expert:1.2.5'])
+    const merged = second[0]
+    if (!merged) throw new Error('Expected merged proposal')
+    expect(merged.sources).toEqual(['audit:1.2.3', 'review:1.2.4', 'expert:1.2.5'])
   })
 
   test('is idempotent, preserves first-title order, and unions every source', () => {
@@ -211,11 +213,13 @@ describe('makeRemediation', () => {
     }
     const { runTriage } = subject()
     const outcome = await runTriage('1.2', proposals)
+    const call = calls[0]
+    if (!call) throw new Error('Expected triage agent call')
     expect(outcome).toEqual({ ok: true, decisions: [], summary: 'triaged' })
     expect(calls).toHaveLength(1)
-    expect(calls[0].opts.label).toBe('triage:1.2')
-    expect(calls[0].opts.phase).toBe('Remediation')
-    expect(calls[0].opts.schema).toBe(TRIAGE_SCHEMA)
-    expect(calls[0].opts.adapter).toBe('codex')
+    expect(call.opts.label).toBe('triage:1.2')
+    expect(call.opts.phase).toBe('Remediation')
+    expect(call.opts.schema).toBe(TRIAGE_SCHEMA)
+    expect(call.opts.adapter).toBe('codex')
   })
 })

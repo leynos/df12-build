@@ -40,7 +40,9 @@ var TASK_BRANCH_RE = /^roadmap-((?:\d+-)*\d+)(-addendum)?$/;
 function branchToRoadmapId(branch) {
   const match = TASK_BRANCH_RE.exec(String(branch || ""));
   if (!match) return null;
-  return { id: match[1].replace(/-/g, "."), isAddendum: Boolean(match[2]) };
+  const id = match[1];
+  if (id === void 0) return null;
+  return { id: id.replace(/-/g, "."), isAddendum: Boolean(match[2]) };
 }
 function parseWorktreeList(output) {
   const entries = [];
@@ -120,7 +122,7 @@ function parseExecplanState(text) {
   const source = String(text || "");
   let status = "unknown";
   const statusMatch = source.match(/^Status:\s*([A-Za-z ]+?)\s*$/m);
-  if (statusMatch) {
+  if (statusMatch?.[1] !== void 0) {
     const value = statusMatch[1].trim().toLowerCase().replace(/\s+/g, " ");
     status = EXECPLAN_STATUS_MAP[value] || "unknown";
   }
@@ -131,10 +133,13 @@ function parseExecplanState(text) {
   for (const line of progressSection.split(/\r?\n/)) {
     const match = line.match(/^\s*-\s+\[([ xX])\]\s*(.*)$/);
     if (!match) continue;
-    const isTicked = match[1] !== " ";
+    const checked = match[1];
+    const text2 = match[2];
+    if (checked === void 0 || text2 === void 0) continue;
+    const isTicked = checked !== " ";
     if (isTicked) ticked += 1;
     else unticked += 1;
-    items.push({ text: match[2].trim(), ticked: isTicked });
+    items.push({ text: text2.trim(), ticked: isTicked });
   }
   return { status, ticked, unticked, items };
 }
@@ -352,10 +357,13 @@ function isComplete(task) {
 function extractRoadmapIds(text) {
   const ids = new Set([...text.matchAll(ROADMAP_ID_RE)].map((match) => match[0]));
   for (const match of text.matchAll(STEP_RANGE_RE)) {
-    const expanded = expandStepRange(match[1], match[2]);
+    const start = match[1];
+    const end = match[2];
+    if (start === void 0 || end === void 0) continue;
+    const expanded = expandStepRange(start, end);
     if (expanded.length) {
-      ids.delete(match[1]);
-      ids.delete(match[2]);
+      ids.delete(start);
+      ids.delete(end);
       for (const id of expanded) ids.add(id);
     }
   }
@@ -364,11 +372,14 @@ function extractRoadmapIds(text) {
 function expandStepRange(start, end) {
   const MAX_STEP_RANGE_LENGTH = 1e3;
   if (!/^\d+\.\d+$/.test(start) || !/^\d+\.\d+$/.test(end)) return [];
-  const startParts = start.split(".").map(Number);
-  const endParts = end.split(".").map(Number);
-  if (startParts.length !== 2 || endParts.length !== 2 || startParts[0] !== endParts[0]) return [];
-  const [phaseId, firstStep] = startParts;
-  const lastStep = endParts[1];
+  const [startPhase, startStep] = start.split(".");
+  const [endPhase, endStep] = end.split(".");
+  if (startPhase === void 0 || startStep === void 0 || endPhase === void 0 || endStep === void 0) return [];
+  const phaseId = Number(startPhase);
+  const firstStep = Number(startStep);
+  const endPhaseId = Number(endPhase);
+  const lastStep = Number(endStep);
+  if (phaseId !== endPhaseId) return [];
   if (!Number.isSafeInteger(phaseId) || !Number.isSafeInteger(firstStep) || !Number.isSafeInteger(lastStep) || firstStep > lastStep) return [];
   const rangeLength = lastStep - firstStep + 1;
   if (rangeLength > MAX_STEP_RANGE_LENGTH) return [];
@@ -381,7 +392,11 @@ function parseRoadmap(text) {
   for (const [index, line] of text.split(/\r?\n/).entries()) {
     const taskMatch = line.match(TASK_LINE_RE);
     if (taskMatch) {
-      const [, indent, checked, id, rawTitle] = taskMatch;
+      const indent = taskMatch[1];
+      const checked = taskMatch[2];
+      const id = taskMatch[3];
+      const rawTitle = taskMatch[4];
+      if (indent === void 0 || checked === void 0 || id === void 0 || rawTitle === void 0) continue;
       const task = {
         id,
         checked,
@@ -404,8 +419,9 @@ function parseRoadmap(text) {
       continue;
     }
     const requiresMatch = line.match(REQUIRES_LINE_RE);
-    if (requiresMatch && currentTask) {
-      currentTask.requires.push(...extractRoadmapIds(requiresMatch[1]));
+    const requires = requiresMatch?.[1];
+    if (requires !== void 0 && currentTask) {
+      currentTask.requires.push(...extractRoadmapIds(requires));
     }
   }
   for (const task of byId.values()) {
@@ -712,7 +728,7 @@ function resultFromUnhandledAgentError(id, detail, extra = {}, metrics = faultMe
 // src/workflows/df12-build-odw/git-evidence.ts
 function parseNameStatus(output) {
   return String(output || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-    const [status, firstPath, secondPath] = line.split(/\t+/);
+    const [status = "", firstPath, secondPath] = line.split(/\t+/);
     return secondPath ? { status, path: secondPath, oldPath: firstPath } : { status, path: firstPath || "" };
   }).filter((entry) => entry.path);
 }
@@ -960,6 +976,7 @@ function commandSubstitutionEnd(command, start) {
   let depth = 1;
   while (cursor < command.length) {
     const character = command[cursor];
+    if (character === void 0) return null;
     if (character === "\\" && quote !== "'") {
       cursor += 2;
       continue;
@@ -994,6 +1011,7 @@ function assignmentName(command, word) {
   let name = "";
   while (cursor < word.end) {
     const character = command[cursor];
+    if (character === void 0) return null;
     if (character === "=") return name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : null;
     if (!/[A-Za-z0-9_]/.test(character)) return null;
     name += character;
@@ -1006,8 +1024,10 @@ function tokenizeShellCommand(command) {
   let cursor = 0;
   let hasUnquotedControlOperator = false;
   while (cursor < command.length) {
-    while (cursor < command.length && /\s/.test(command[cursor])) {
-      if (command[cursor] === "\n") hasUnquotedControlOperator = true;
+    while (cursor < command.length) {
+      const whitespace = command[cursor];
+      if (whitespace === void 0 || !/\s/.test(whitespace)) break;
+      if (whitespace === "\n") hasUnquotedControlOperator = true;
       cursor += 1;
     }
     if (cursor >= command.length) break;
@@ -1017,6 +1037,7 @@ function tokenizeShellCommand(command) {
     let hasWord = false;
     while (cursor < command.length) {
       const character = command[cursor];
+      if (character === void 0) return null;
       if (!quote && /\s/.test(character)) break;
       if (!quote && (character === ";" || character === "&" || character === "|")) {
         hasUnquotedControlOperator = true;
@@ -1044,7 +1065,9 @@ function tokenizeShellCommand(command) {
       if (character === "\\" && quote !== "'") {
         cursor += 1;
         if (cursor >= command.length) return null;
-        value += command[cursor];
+        const escaped = command[cursor];
+        if (escaped === void 0) return null;
+        value += escaped;
         hasWord = true;
         cursor += 1;
         continue;
@@ -1060,6 +1083,7 @@ function tokenizeShellCommand(command) {
   let executableWordIndex = 0;
   for (; executableWordIndex < words.length; executableWordIndex++) {
     const word = words[executableWordIndex];
+    if (!word) return null;
     const name = assignmentName(command, word);
     if (!name) break;
     leadingAssignments.push({ name, start: word.start, end: word.end });
@@ -1069,6 +1093,7 @@ function tokenizeShellCommand(command) {
     if (words[executableWordIndex]?.value.startsWith("-")) return null;
     for (; executableWordIndex < words.length; executableWordIndex++) {
       const word = words[executableWordIndex];
+      if (!word) return null;
       const name = assignmentName(command, word);
       if (!name) break;
       leadingAssignments.push({ name, start: word.start, end: word.end });
@@ -2999,8 +3024,9 @@ function makeTaskPipeline(deps) {
     if (final.status === "unreadable") return fail(`could not read the committed ExecPlan after the build: ${final.error}`, openIssues);
     if (final.status === "missing") return fail(`the committed ExecPlan is absent after the build: ${contained.relPath}`, openIssues);
     const remaining = (final.items || []).filter((entry) => !entry.ticked);
-    if (remaining.length) {
-      return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS2}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0].text}`, openIssues);
+    const firstRemaining = remaining[0];
+    if (firstRemaining) {
+      return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS2}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${firstRemaining.text}`, openIssues);
     }
     return {
       impl: {
@@ -3127,7 +3153,8 @@ function makeTaskPipeline(deps) {
           reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: gateBlocking, hostGates: hostGates.results, fix: null });
           if (round === MAX_REVIEW_ROUNDS2) break;
           const gateFix = await dispatchFixAndVerify(task, worktree, plan, gateBlocking, `fix:${tag} r${round}`, round);
-          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(gateFix.report);
+          const gateRound = reviewRounds.at(-1);
+          if (gateRound) gateRound.fix = summarizeFixReport(gateFix.report);
           if (gateFix.dirtyDetail) {
             return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the gate-fix round left uncommitted state (${gateFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
           }
@@ -3142,7 +3169,8 @@ function makeTaskPipeline(deps) {
           reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: csBlocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null });
           if (round === MAX_REVIEW_ROUNDS2) break;
           const csFix = await dispatchFixAndVerify(task, worktree, plan, csBlocking, `fix:${tag} cs r${round}`, round);
-          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(csFix.report);
+          const codeSceneRound = reviewRounds.at(-1);
+          if (codeSceneRound) codeSceneRound.fix = summarizeFixReport(csFix.report);
           if (csFix.dirtyDetail) {
             return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeScene-fix round left uncommitted state (${csFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
           }
@@ -3167,7 +3195,8 @@ function makeTaskPipeline(deps) {
             reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: coderabbitBlocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null });
             if (round === MAX_REVIEW_ROUNDS2) break;
             const crFix = await dispatchFixAndVerify(task, worktree, plan, coderabbitBlocking, `fix:${tag} r${round}`, round);
-            reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(crFix.report);
+            const codeRabbitRound = reviewRounds.at(-1);
+            if (codeRabbitRound) codeRabbitRound.fix = summarizeFixReport(crFix.report);
             if (crFix.dirtyDetail) {
               return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeRabbit-fix round left uncommitted state (${crFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
             }

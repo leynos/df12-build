@@ -206,7 +206,9 @@ export function branchToRoadmapId(branch: unknown): {
 } | null {
   const match = TASK_BRANCH_RE.exec(String(branch || ''))
   if (!match) return null
-  return { id: match[1].replace(/-/g, '.'), isAddendum: Boolean(match[2]) }
+  const id = match[1]
+  if (id === undefined) return null
+  return { id: id.replace(/-/g, '.'), isAddendum: Boolean(match[2]) }
 }
 
 /**
@@ -384,7 +386,7 @@ export function parseExecplanState(text: unknown): ExecplanState {
   const source = String(text || '')
   let status: ExecplanStatus = 'unknown'
   const statusMatch = source.match(/^Status:\s*([A-Za-z ]+?)\s*$/m)
-  if (statusMatch) {
+  if (statusMatch?.[1] !== undefined) {
     const value = statusMatch[1].trim().toLowerCase().replace(/\s+/g, ' ')
     status = EXECPLAN_STATUS_MAP[value] || 'unknown'
   }
@@ -395,10 +397,13 @@ export function parseExecplanState(text: unknown): ExecplanState {
   for (const line of progressSection.split(/\r?\n/)) {
     const match = line.match(/^\s*-\s+\[([ xX])\]\s*(.*)$/)
     if (!match) continue
-    const isTicked = match[1] !== ' '
+    const checked = match[1]
+    const text = match[2]
+    if (checked === undefined || text === undefined) continue
+    const isTicked = checked !== ' '
     if (isTicked) ticked += 1
     else unticked += 1
-    items.push({ text: match[2].trim(), ticked: isTicked })
+    items.push({ text: text.trim(), ticked: isTicked })
   }
   return { status, ticked, unticked, items }
 }

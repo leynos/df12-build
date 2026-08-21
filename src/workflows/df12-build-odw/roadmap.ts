@@ -58,10 +58,13 @@ export function isComplete(task: { checked?: string } | null | undefined): boole
 export function extractRoadmapIds(text: string): string[] {
   const ids = new Set([...text.matchAll(ROADMAP_ID_RE)].map((match) => match[0]))
   for (const match of text.matchAll(STEP_RANGE_RE)) {
-    const expanded = expandStepRange(match[1], match[2])
+    const start = match[1]
+    const end = match[2]
+    if (start === undefined || end === undefined) continue
+    const expanded = expandStepRange(start, end)
     if (expanded.length) {
-      ids.delete(match[1])
-      ids.delete(match[2])
+      ids.delete(start)
+      ids.delete(end)
       for (const id of expanded) ids.add(id)
     }
   }
@@ -77,11 +80,14 @@ export function extractRoadmapIds(text: string): string[] {
 export function expandStepRange(start: string, end: string): string[] {
   const MAX_STEP_RANGE_LENGTH = 1_000
   if (!/^\d+\.\d+$/.test(start) || !/^\d+\.\d+$/.test(end)) return []
-  const startParts = start.split('.').map(Number)
-  const endParts = end.split('.').map(Number)
-  if (startParts.length !== 2 || endParts.length !== 2 || startParts[0] !== endParts[0]) return []
-  const [phaseId, firstStep] = startParts
-  const lastStep = endParts[1]
+  const [startPhase, startStep] = start.split('.')
+  const [endPhase, endStep] = end.split('.')
+  if (startPhase === undefined || startStep === undefined || endPhase === undefined || endStep === undefined) return []
+  const phaseId = Number(startPhase)
+  const firstStep = Number(startStep)
+  const endPhaseId = Number(endPhase)
+  const lastStep = Number(endStep)
+  if (phaseId !== endPhaseId) return []
   if (!Number.isSafeInteger(phaseId) || !Number.isSafeInteger(firstStep) || !Number.isSafeInteger(lastStep) || firstStep > lastStep) return []
   const rangeLength = lastStep - firstStep + 1
   if (rangeLength > MAX_STEP_RANGE_LENGTH) return []
@@ -108,7 +114,11 @@ export function parseRoadmap(text: string): {
   for (const [index, line] of text.split(/\r?\n/).entries()) {
     const taskMatch = line.match(TASK_LINE_RE)
     if (taskMatch) {
-      const [, indent, checked, id, rawTitle] = taskMatch
+      const indent = taskMatch[1]
+      const checked = taskMatch[2]
+      const id = taskMatch[3]
+      const rawTitle = taskMatch[4]
+      if (indent === undefined || checked === undefined || id === undefined || rawTitle === undefined) continue
       const task: RoadmapTask = {
         id,
         checked,
@@ -132,8 +142,9 @@ export function parseRoadmap(text: string): {
     }
 
     const requiresMatch = line.match(REQUIRES_LINE_RE)
-    if (requiresMatch && currentTask) {
-      currentTask.requires.push(...extractRoadmapIds(requiresMatch[1]))
+    const requires = requiresMatch?.[1]
+    if (requires !== undefined && currentTask) {
+      currentTask.requires.push(...extractRoadmapIds(requires))
     }
   }
 

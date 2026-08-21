@@ -244,21 +244,25 @@ describe('runHostCommitGates streaming', () => {
       commitGateTimeoutSeconds: 30,
     })
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
-    junk.push(result.results[0]?.logFile)
+    const gate = result.results[0]
+    if (!gate) throw new Error('Expected streamed gate result')
+    junk.push(gate.logFile)
     expect(result.green).toBe(true)
-    expect(result.results[0].ok).toBe(true)
+    expect(gate.ok).toBe(true)
     // The log file holds the full stream, not a truncated buffer.
-    expect(readFileSync(result.results[0].logFile, 'utf8').length).toBeGreaterThan(40000000)
+    expect(readFileSync(gate.logFile, 'utf8').length).toBeGreaterThan(40000000)
   }, 45_000)
 
   test('a red gate carries the streamed tail and the log path', async () => {
     const dir = tmp('gate-stream-red-')
     const { runHostCommitGates } = hostReview({ commitGates: ['echo working; echo boom; exit 2'] })
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
-    junk.push(result.results[0]?.logFile)
+    const gate = result.results[0]
+    if (!gate) throw new Error('Expected failed gate result')
+    junk.push(gate.logFile)
     expect(result.green).toBe(false)
     expect(result.detail).toMatch(/boom/)
-    expect(result.detail).toContain(result.results[0].logFile)
+    expect(result.detail).toContain(gate.logFile)
   })
 
   test('repeated gate executions allocate distinct logs for the same tag and round', async () => {
@@ -275,8 +279,9 @@ describe('runHostCommitGates streaming', () => {
     expect(first.results).toHaveLength(1)
     expect(second.results).toHaveLength(1)
     expect(firstLog).not.toBe(secondLog)
-    expect(readFileSync(firstLog as string, 'utf8')).toContain('repeated-gate-output')
-    expect(readFileSync(secondLog as string, 'utf8')).toContain('repeated-gate-output')
+    if (!firstLog || !secondLog) throw new Error('Expected both gate log paths')
+    expect(readFileSync(firstLog, 'utf8')).toContain('repeated-gate-output')
+    expect(readFileSync(secondLog, 'utf8')).toContain('repeated-gate-output')
   })
 
   test('a planted symlink reaps its spawned gate without clobbering the target', async () => {
@@ -348,7 +353,9 @@ describe('runHostCommitGates streaming', () => {
     const dir = tmp('gate-stream-hang-')
     const { runHostCommitGates } = hostReview({ commitGates: [`${process.execPath} -e "setInterval(()=>{},50)"`], commitGateTimeoutSeconds: 2 })
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
-    junk.push(result.results[0]?.logFile)
+    const gate = result.results[0]
+    if (!gate) throw new Error('Expected timed-out gate result')
+    junk.push(gate.logFile)
     expect(result.green).toBe(false)
     expect(result.detail).toMatch(/killed after the 2s gate timeout/)
   })

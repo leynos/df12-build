@@ -259,8 +259,10 @@ describe('salvageTaskArtefacts', () => {
   test('rejects an artefact-shaped path that escapes the worktree', async () => {
     const dir = makeWorktree()
     const outcome = await salvageTaskArtefacts(dir, ['docs/execplans/../../../etc/passwd.md'], '1.2.3')
+    const skipped = outcome.skipped[0]
+    if (!skipped) throw new Error('Expected rejected escaped artefact')
     expect(outcome.committed).toEqual([])
-    expect(outcome.skipped[0].reason).toMatch(/escapes the assigned worktree/)
+    expect(skipped.reason).toMatch(/escapes the assigned worktree/)
     expect(git(dir, 'log', '-1', '--format=%s')).toBe('Commit plan')
   })
 
@@ -279,9 +281,11 @@ describe('salvageTaskArtefacts', () => {
     // salvage commit.
     writeFileSync(path.join(dir, 'README.md'), '# top-level readme\n')
     const outcome = await salvageTaskArtefacts(dir, ['docs/execplans/../../README.md'], '1.2.3')
+    const skipped = outcome.skipped[0]
+    if (!skipped) throw new Error('Expected rejected out-of-scope artefact')
     expect(outcome.committed).toEqual([])
     expect(outcome.detail).toMatch(/nothing to salvage/)
-    expect(outcome.skipped[0].reason).toMatch(/outside the task-scoped docs\/execplans\/\*\.md scope/)
+    expect(skipped.reason).toMatch(/outside the task-scoped docs\/execplans\/\*\.md scope/)
     // README.md is left dirty — the normalized path was never committed.
     expect(git(dir, 'status', '--porcelain=v1')).toBe('?? README.md')
     expect(git(dir, 'log', '-1', '--format=%s')).toBe('Commit plan')

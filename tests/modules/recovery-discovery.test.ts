@@ -25,8 +25,10 @@ describe('makeRecoveryDiscovery', () => {
       const { candidates, skipped, errors } = await discover(RECOVERY_ROADMAP, repo.dir)
       expect(errors).toEqual([])
       expect(candidates.map((candidate) => candidate.taskId)).toEqual(['1.2.3'])
-      expect(candidates[0].worktreePath).toBe(repo.parserWorktree)
-      expect(candidates[0].baseCommit).toBe(repo.baseSha)
+      const candidate = candidates[0]
+      if (!candidate) throw new Error('Expected parser recovery candidate')
+      expect(candidate.worktreePath).toBe(repo.parserWorktree)
+      expect(candidate.baseCommit).toBe(repo.baseSha)
       const reasonByBranch = new Map(skipped.map((entry) => [entry.branchName, entry.reason]))
       expect(reasonByBranch.get('roadmap-1-2-4')).toBe('missing-worktree')
       expect(reasonByBranch.get('roadmap-2-1-1')).toBe('already-complete')

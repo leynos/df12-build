@@ -99,7 +99,9 @@ describe('parseRoadmap', () => {
         const parsed = parseRoadmap(text)
         expect(parsed.tasks.map((task) => task.id)).toEqual(tasks.map((row) => `${row.phase}.${row.step}`))
         for (const [index, task] of parsed.tasks.entries()) {
-          expect(isTaskFullyComplete(task)).toBe(tasks[index].done)
+          const sourceTask = tasks[index]
+          if (!sourceTask) throw new Error(`Expected generated task at index ${index}`)
+          expect(isTaskFullyComplete(task)).toBe(sourceTask.done)
           expect(task.line).toBeGreaterThan(0)
         }
       }),
@@ -129,8 +131,10 @@ describe('parseRoadmap', () => {
       '  - Requires: 1.1',
     ].join('\n')
     const { tasks, completed } = parseRoadmap(text)
+    const parent = tasks[0]
+    if (!parent) throw new Error('Expected completed parent task')
 
-    expect(isTaskFullyComplete(tasks[0])).toBe(false)
+    expect(isTaskFullyComplete(parent)).toBe(false)
     expect(completed.has('1.1')).toBe(false)
     expect(completed.has('1.1.1')).toBe(false)
     expect(completed.has('1')).toBe(false)
@@ -183,9 +187,11 @@ describe('selectRoadmapTask invariants', () => {
             (row) => !row.done && !taken.normal.includes(`${row.phase}.${row.step}`),
           )
           if (selection.hasTask && selection.task) {
+            const firstOpen = open[0]
+            if (!firstOpen) throw new Error('Expected an open task for the selected result')
             expect(taken.normal).not.toContain(selection.task.id)
             expect(open.map((row) => `${row.phase}.${row.step}`)).toContain(selection.task.id)
-            expect(selection.task.id).toBe(`${open[0].phase}.${open[0].step}`)
+            expect(selection.task.id).toBe(`${firstOpen.phase}.${firstOpen.step}`)
           } else {
             expect(open).toHaveLength(0)
           }

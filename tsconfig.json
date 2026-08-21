@@ -6,6 +6,7 @@
     "allowImportingTsExtensions": true,
     "types": ["bun"],
     "strict": true,
+    "noUncheckedIndexedAccess": true,
     "noEmit": true,
     "allowJs": true,
     "checkJs": false,

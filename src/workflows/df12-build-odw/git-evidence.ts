@@ -71,7 +71,7 @@ export function parseNameStatus(output: unknown): NameStatusEntry[] {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const [status, firstPath, secondPath] = line.split(/\t+/)
+      const [status = '', firstPath, secondPath] = line.split(/\t+/)
       return secondPath
         ? { status, path: secondPath, oldPath: firstPath }
         : { status, path: firstPath || '' }

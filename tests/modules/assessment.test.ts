@@ -421,9 +421,11 @@ describe('summarizeSalvages', () => {
 
   test('a skipped attempt is a row but not a salvaged branch and adds no suffix', () => {
     const out = summarizeSalvages([skipped('1.2.3'), noSalvage('1.2.4')])
+    const salvage = out.salvages[0]
+    if (!salvage) throw new Error('Expected skipped salvage')
     expect(out.salvages).toHaveLength(1)
-    expect(out.salvages[0]).toMatchObject({ id: '1.2.3', classification: 'infra-fault', committed: [], skipped: 0 })
-    expect(out.salvages[0].detail).toMatch(/salvage skipped: no worktree path/)
+    expect(salvage).toMatchObject({ id: '1.2.3', classification: 'infra-fault', committed: [], skipped: 0 })
+    expect(salvage.detail).toMatch(/salvage skipped: no worktree path/)
     expect(out.salvagedBranches).toBe(0)
     expect(out.summarySuffix).toBe('')
   })
@@ -443,7 +445,9 @@ describe('summarizeSalvages', () => {
       id: '1.2.3',
       salvage: { classification: 'adopt-partial', committed: ['docs/execplans/1-2-3.md'], skipped: [{ path: 'src/x.ts', reason: 'not a task-scoped docs/execplans/*.md artefact' }], sha: 'b'.repeat(40), detail: '' },
     }])
-    expect(out.salvages[0].skipped).toBe(1)
+    const salvage = out.salvages[0]
+    if (!salvage) throw new Error('Expected committed salvage')
+    expect(salvage.skipped).toBe(1)
     expect(out.salvagedBranches).toBe(1)
     expect(out.summarySuffix).toBe(' | salvaged artefacts on 1 branch(es)')
   })

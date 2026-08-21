@@ -725,8 +725,9 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
     if (final.status === 'unreadable') return fail(`could not read the committed ExecPlan after the build: ${final.error}`, openIssues)
     if (final.status === 'missing') return fail(`the committed ExecPlan is absent after the build: ${contained.relPath}`, openIssues)
     const remaining = (final.items || []).filter((entry) => !entry.ticked)
-    if (remaining.length) {
-      return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0].text}`, openIssues)
+    const firstRemaining = remaining[0]
+    if (firstRemaining) {
+      return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${firstRemaining.text}`, openIssues)
     }
     return {
       impl: {
@@ -898,7 +899,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
           // the squash merge, so the next round's gates/reviews and any
           // integration would judge state the host never verified.
           const gateFix = await dispatchFixAndVerify(task, worktree, plan, gateBlocking, `fix:${tag} r${round}`, round)
-          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(gateFix.report)
+          const gateRound = reviewRounds.at(-1)
+          if (gateRound) gateRound.fix = summarizeFixReport(gateFix.report)
           if (gateFix.dirtyDetail) {
             return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the gate-fix round left uncommitted state (${gateFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
           }
@@ -918,7 +920,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
           reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: csBlocking, ...(hostGates ? { hostGates: hostGates.results } : {}), fix: null })
           if (round === MAX_REVIEW_ROUNDS) break
           const csFix = await dispatchFixAndVerify(task, worktree, plan, csBlocking, `fix:${tag} cs r${round}`, round)
-          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(csFix.report)
+          const codeSceneRound = reviewRounds.at(-1)
+          if (codeSceneRound) codeSceneRound.fix = summarizeFixReport(csFix.report)
           if (csFix.dirtyDetail) {
             return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the CodeScene-fix round left uncommitted state (${csFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
           }
@@ -952,7 +955,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps) {
             reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: coderabbitBlocking, ...(hostGates ? { hostGates: hostGates.results } : {}), fix: null })
             if (round === MAX_REVIEW_ROUNDS) break
             const crFix = await dispatchFixAndVerify(task, worktree, plan, coderabbitBlocking, `fix:${tag} r${round}`, round)
-            reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(crFix.report)
+            const codeRabbitRound = reviewRounds.at(-1)
+            if (codeRabbitRound) codeRabbitRound.fix = summarizeFixReport(crFix.report)
             if (crFix.dirtyDetail) {
               return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the CodeRabbit-fix round left uncommitted state (${crFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
             }

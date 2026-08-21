@@ -155,7 +155,9 @@ describe('schema versioning', () => {
 
   test('the envelope pins schemaVersion to the constant 1', () => {
     const properties = contextSchema.properties as Record<string, { const?: number }>
-    expect(properties.schemaVersion.const).toBe(1)
+    const schemaVersion = properties.schemaVersion
+    if (!schemaVersion) throw new Error('Expected schemaVersion property')
+    expect(schemaVersion.const).toBe(1)
     expect(contextSchema.required as string[]).toContain('schemaVersion')
     expect(contextSchema.required as string[]).toContain('correlationId')
   })
