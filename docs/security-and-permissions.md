@@ -2,9 +2,9 @@
 
 `df12-build` is not a passive documentation tool. A normal ODW/Codex workshop
 can create branches, create worktrees, edit source, run commands, commit, push,
-request CodeRabbit review, write audit files, and update roadmap state in
-another repository. Do not run it with credentials or filesystem access that
-would not be granted to an autonomous engineer working on that target project.
+request host review, write audit files, and update roadmap state in another
+repository. Do not run it with credentials or filesystem access that would not
+be granted to an autonomous engineer working on that target project.
 
 The workflow's prompts are part of the control system, but they are not a
 sandbox. Runtime permissions, GitHub rights, branch protection, repository
@@ -52,7 +52,10 @@ Network access:
 - Access to the configured code-search backend: GrepAI when
   `searchBackend=grepai`, or the Memtrace MCP server when
   `searchBackend=memtrace`.
-- Access to CodeRabbit for `coderabbit review --agent`.
+- Access to the selected host reviewer. Dakar is the default and requires
+  `dakar-review` (or the configured `dakarCommand`) and `pi` on `PATH`, plus a
+  non-empty `OPENAI_API_KEY`. CodeRabbit is an opt-in alternative selected with
+  `reviewTool: "coderabbit"` and requires CodeRabbit CLI authentication.
 - Access to package registries needed by the target project's gates.
 - Access to Firecrawl or official documentation sources only when a plan or
   review explicitly requires external-library verification.
@@ -63,7 +66,7 @@ GitHub access:
 - Branch push permission for task and integration branches.
 - Permission to create or update pull requests if the operator uses PR-based
   recovery.
-- Permission to read review comments and CodeRabbit output.
+- Permission to read review comments and selected host-review output.
 - Permission to comment on PRs only when the operator intentionally enables a
   tool or sub-agent that writes comments.
 
@@ -74,7 +77,8 @@ Workshops may contact:
 - GitHub or the configured Git hosting service.
 - ODW adapter providers named in `odw.config.json`.
 - GrepAI semantic search.
-- CodeRabbit.
+- The selected host reviewer: Dakar by default, or CodeRabbit when
+  `reviewTool: "coderabbit"` is selected explicitly.
 - Package registries used by the target project's gates.
 - Documentation fetch services such as Firecrawl, when the task asks for
   external verification.
@@ -163,7 +167,10 @@ Manual-merge profile:
 Trusted workshop profile:
 
 - Allow sidecar writes, sibling worktree writes, normal build caches, package
-  registries, GitHub, selected model providers, GrepAI, and CodeRabbit.
+  registries, GitHub, selected model providers, GrepAI, and the selected host
+  reviewer. The default Dakar reviewer additionally needs `dakar-review` and
+  `pi` on `PATH` plus a non-empty `OPENAI_API_KEY`; CodeRabbit needs its CLI
+  authentication only when `reviewTool: "coderabbit"` is selected.
 - Verify early that a planner can write `docs/execplans/<branch-leaf>.md` in
   the assigned task worktree; a missing ExecPlan after planning is a sandbox or
   workflow launch fault, not a roadmap design decision.

@@ -235,9 +235,10 @@ in the result so the operator can inspect it.
 
 When `acceptedPlanMode="build"` and the checks pass, the workflow constructs a
 normal plan object from the ExecPlan metadata and enters the existing
-implementation path. Implementation, CodeRabbit, expert review, integration,
-roadmap marking, and audit remain unchanged. The accepted plan only skips the
-planner and design reviewer; it does not weaken implementation or review gates.
+implementation path. Implementation, selected host review, expert review,
+integration, roadmap marking, and audit remain unchanged. The accepted plan
+only skips the planner and design reviewer; it does not weaken implementation
+or review gates.
 
 The durable acceptance marker should be small and machine-readable. A later
 implementation task should settle the exact syntax, but the minimum information
@@ -282,7 +283,7 @@ construct a synthetic implementation result from durable evidence:
   workItemsCompleted: 0,
   workItemsTotal: 0,
   commits: ["<recent branch commit subjects>"],
-  coderabbitRuns: 0,
+  hostReviewRuns: 0,
   openIssues: ["recovered branch requires fresh review"],
   residualRisk: ["<advisory caveat from assessment>"],
   summary: "Recovered adopt-complete branch from durable git state."
@@ -290,8 +291,14 @@ construct a synthetic implementation result from durable evidence:
 ```
 
 The synthetic result is only a bridge into review. It is not proof that the
-branch is shippable. The existing code review, expert review, CodeRabbit, gate,
-and integration requirements remain decisive.
+branch is shippable. The existing code review, expert review, selected host
+review, gate, and integration requirements remain decisive.
+
+`hostReviewRuns` counts runs of the selected host reviewer: Dakar by default,
+or CodeRabbit when `reviewTool: "coderabbit"` is selected explicitly. The
+synthetic bridge has performed no host review, so it reports zero. The older
+`coderabbitRuns` name remains a deprecated compatibility alias in the agent
+schema; new results and documentation should use `hostReviewRuns`.
 
 ## Continue-mode resume path
 
