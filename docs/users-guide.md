@@ -313,6 +313,14 @@ sha. So audit and triage always inspect the current `origin/<base>` and can
 never silently root on a stale local base. If an audit or triage agent reports
 a "based on a stale commit" style failure, that sequence is where to look.
 
+Remediation proposals must carry a non-blank `title`. Before the triage agent
+is charged, the host trims and normalises titles to collapse exact duplicates,
+preserving first-seen order. It also unions the proposals' origin tags in
+`sources`; the stamped `source` field is canonical, while `rationale` is only a
+legacy fallback. A proposal raised by more than one audit or review source can
+therefore trigger the stronger triage model, and no origin is lost when a
+proposal passes through more than one de-duplication pass.
+
 ## Roadmap format
 
 `df12-build` expects the target roadmap to follow the df12-house GIST shape:
@@ -695,6 +703,11 @@ in the failure evidence. A command that exceeds `commitGateTimeoutSeconds` is
 killed and reported as a failure. The run result's `hostGates` object reports
 the configuration and bounded counters (gate runs, failures); per-round
 pass/fail detail appears in each failed task's `reviewRounds[].hostGates`.
+
+On POSIX, each gate child runs in its own process group. A timeout or log-write
+failure terminates that group, falling back to the direct child where group
+signalling is unavailable. The host resumes any paused output pipes before
+termination so a full log buffer cannot prevent the child from being reaped.
 
 The run result's top-level `codeScene` object durably records the effective
 setting and command, plus bounded counters: `runs` (checks executed, excluding

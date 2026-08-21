@@ -391,6 +391,13 @@ original command unchanged. Malformed or ambiguous input, including unquoted
 control operators, records `<redacted command>` rather than partially redacting
 the display; the parser never evaluates that input.
 
+The availability probe fails closed for unsafe or ambiguous syntax, including
+unquoted control operators, and for unsupported `env` options such as `-i`.
+Those cases increment `codeScene.probeFailures`, return a failed check, and do
+not execute the configured command. Infrastructure faults from the probe are
+handled the same way. Only a successfully parsed command whose executable is
+absent from `PATH` is a clean skip.
+
 `make verify-modules` skips when Dafny is absent, so local runs stay friendly;
 CI must run `make verify-modules-strict`, which FAILS when Dafny is not on
 `PATH`, so the LemmaScript/Dafny proof is a real PR gate rather than advisory.
@@ -439,6 +446,14 @@ adopt candidate escalates to `ASSESSMENT_ESCALATION_MODEL` (defaulting to
 (`gpt-5.6-sol`) after a deterministic dedup pre-pass. Complex sets select
 `TRIAGE_ESCALATION_MODEL`, which defaults to the same Sol model. Each
 escalation model remains independently overridable.
+
+The remediation pre-pass requires every proposal to have a non-blank `title`.
+It trims and normalises that title for exact duplicate detection, preserves the
+first-seen proposal order, and unions origin tags in `sources`. `source` is the
+canonical tag stamped by the task pipeline; `rationale` remains a legacy
+fallback for older proposal records. The escalation predicate counts distinct
+audit/review origin tags across the aggregated proposals, so repeated
+de-duplication does not discard provenance.
 
 ## Sidecar tooling contract
 
