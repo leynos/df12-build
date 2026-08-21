@@ -128,7 +128,7 @@ the probe succeeds, CodeScene output is an ordinary gate result and its log or
 failure detail is retained for the operator.
 
 Remediation triage rejects proposals with blank titles before dispatch. It
-normalises titles for exact duplicate removal, preserves first-seen order, and
+normalizes titles for exact duplicate removal, preserves first-seen order, and
 aggregates all audit/review origin tags in `sources` (using the stamped
 `source`, with `rationale` as a legacy fallback). The host uses the distinct
 aggregated sources to decide whether the triage set needs escalation.

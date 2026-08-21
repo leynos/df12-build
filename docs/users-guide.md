@@ -314,7 +314,7 @@ never silently root on a stale local base. If an audit or triage agent reports
 a "based on a stale commit" style failure, that sequence is where to look.
 
 Remediation proposals must carry a non-blank `title`. Before the triage agent
-is charged, the host trims and normalises titles to collapse exact duplicates,
+is charged, the host trims and normalizes titles to collapse exact duplicates,
 preserving first-seen order. It also unions the proposals' origin tags in
 `sources`; the stamped `source` field is canonical, while `rationale` is only a
 legacy fallback. A proposal raised by more than one audit or review source can

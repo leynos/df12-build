@@ -448,7 +448,7 @@ adopt candidate escalates to `ASSESSMENT_ESCALATION_MODEL` (defaulting to
 escalation model remains independently overridable.
 
 The remediation pre-pass requires every proposal to have a non-blank `title`.
-It trims and normalises that title for exact duplicate detection, preserves the
+It trims and normalizes that title for exact duplicate detection, preserves the
 first-seen proposal order, and unions origin tags in `sources`. `source` is the
 canonical tag stamped by the task pipeline; `rationale` remains a legacy
 fallback for older proposal records. The escalation predicate counts distinct
