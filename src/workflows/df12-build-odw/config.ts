@@ -434,6 +434,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     throw new Error(`Unsupported reviewTool: ${reviewToolInput} (use "dakar" or "coderabbit")`)
   }
   const REVIEW_TOOL = reviewToolInput
+  const HOST_REVIEWER_NAME = REVIEW_TOOL === 'dakar' ? 'Dakar' : 'CodeRabbit'
   const DAKAR_COMMAND = String(cfg.dakarCommand || 'dakar-review')
   const REVIEW_TIMEOUT_SECONDS = Math.min(7200, Math.max(60, Math.trunc(Number(cfg.reviewTimeoutSeconds ?? cfg.dakarTimeoutSeconds) || 3600)))
   const DAKAR_BUDGET_GBP_RAW = Number(cfg.dakarBudgetGbp)
@@ -454,11 +455,20 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   // review and the per-work-item build are on. coderabbitBetweenWorkItems=false
   // restores end-of-stage-only host review.
   const CODERABBIT_BETWEEN_WORK_ITEMS = cfg.coderabbitBetweenWorkItems !== false
-  const CODERABBIT_ATTEMPTS = Math.max(1, Math.trunc(Number(cfg.coderabbitAttempts) || 3)) // total attempts per host review when rate limited
+  const attemptsInput = Number(cfg.coderabbitAttempts)
+  if (!Number.isFinite(attemptsInput) && !Number.isNaN(attemptsInput)) {
+    throw new Error('coderabbitAttempts must be finite')
+  }
+  const CODERABBIT_ATTEMPTS = Math.min(10, Math.max(1, Math.trunc(attemptsInput || 3))) // total attempts per host review when rate limited
   const CODERABBIT_BACKOFF_MINUTES: [number, number] = (() => {
     const range = Array.isArray(cfg.coderabbitBackoffMinutes) ? cfg.coderabbitBackoffMinutes : []
-    const low = Math.max(1, Math.trunc(Number(range[0]) || 45))
-    const high = Math.max(low, Math.trunc(Number(range[1]) || 90))
+    const lowerInput = Number(range[0])
+    const upperInput = Number(range[1])
+    if ((!Number.isFinite(lowerInput) && !Number.isNaN(lowerInput)) || (!Number.isFinite(upperInput) && !Number.isNaN(upperInput))) {
+      throw new Error('coderabbitBackoffMinutes values must be finite')
+    }
+    const low = Math.min(1440, Math.max(1, Math.trunc(lowerInput || 45)))
+    const high = Math.min(1440, Math.max(low, Math.trunc(upperInput || 90)))
     return [low, high]
   })()
   // Optional durable JSONL sink for every CodeRabbit finding, so recurring
@@ -498,7 +508,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   const REDACTED_CS_CHECK_COMMAND = redactedShellCommand(CS_CHECK_COMMAND)
   const CS_CHECK_GUIDANCE = CS_CHECK
     ? [
-        `A deterministic CodeScene code-health check (\`${REDACTED_CS_CHECK_COMMAND}\`) runs on your committed changed files AFTER the commit gates and BEFORE CodeRabbit. Clear a flagged code-health regression by refactoring the code. ONLY when further refinement would genuinely be deleterious to clarity or correctness, suppress a specific smell with a \`@codescene(disable:"Complex Method")\` comment (combine several as \`@codescene(disable:"Complex Method", disable:"Bumpy Road Ahead")\`) placed immediately before the affected function or method, and precede that suppression with a plain-language comment explaining why it is justified.`,
+        `A deterministic CodeScene code-health check (\`${REDACTED_CS_CHECK_COMMAND}\`) runs on your committed changed files AFTER the commit gates and BEFORE ${HOST_REVIEWER_NAME}. Clear a flagged code-health regression by refactoring the code. ONLY when further refinement would genuinely be deleterious to clarity or correctness, suppress a specific smell with a \`@codescene(disable:"Complex Method")\` comment (combine several as \`@codescene(disable:"Complex Method", disable:"Bumpy Road Ahead")\`) placed immediately before the affected function or method, and precede that suppression with a plain-language comment explaining why it is justified.`,
         'What the flagged smells mean:',
         'Module smells — Low Cohesion: the module/class carries several unrelated responsibilities (measured by LCOM4), breaking the single-responsibility principle. Brain Class (God Class): a large module with many functions and at least one Brain Method, holding too much responsibility at once. Developer Congestion: the code has become a coordination bottleneck because too many people must change it in parallel. Complex code by former contributors: a low-health hotspot whose original author has left the organisation carries heightened maintenance risk. Lines of Code: the file is simply too large.',
         "Function smells — Brain Method (God Function): one complex function concentrates the module's behaviour and becomes a local hotspot. DRY violations: duplicated logic that is actually changed together in predictable patterns. Complex Method: high cyclomatic complexity from many conditionals (if/for/while). Primitive Obsession: heavy use of raw primitives (integers, strings, floats) where a domain type would encapsulate the validation and meaning of the values. Large Method: a function with too many lines to comprehend easily.",
@@ -506,8 +516,8 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
       ].join('\n')
     : ''
   const HOST_REVIEW_GUIDANCE = REVIEW_TOOL === 'dakar'
-    ? 'Do NOT run Dakar yourself: the workflow host runs Dakar against your COMMITTED work after the stage returns, absorbs any deferral backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work — only committed changes reach the host review.'
-    : 'Do NOT run coderabbit yourself and do not spend context waiting on its rate limits: the workflow host runs `coderabbit review --agent` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work — only committed changes reach the host review.'
+    ? `Do NOT run ${HOST_REVIEWER_NAME} yourself: the workflow host runs ${HOST_REVIEWER_NAME} against your COMMITTED work after the stage returns, absorbs any deferral backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work — only committed changes reach the host review.`
+    : `Do NOT run ${HOST_REVIEWER_NAME.toLowerCase()} yourself and do not spend context waiting on its rate limits: the workflow host runs \`coderabbit review --agent\` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work — only committed changes reach the host review.`
   const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW
     ? HOST_REVIEW_GUIDANCE
     : `Use \`coderabbit review --agent\` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the \`vsleep\` command) for \`$(shuf -i ${CODERABBIT_BACKOFF_MINUTES[0]}-${CODERABBIT_BACKOFF_MINUTES[1]} -n 1)\` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.`

@@ -25,8 +25,8 @@ import {
   hasOnlyDeferredReviewIssues,
   implementationAuthFailureDetail,
 } from './assessment.ts'
-import { hostReviewDeferral, reviewBlockingItems, reviewerDisplayName } from './host-review.ts'
-import type { HostReviewDeferral, HostReviewResult, HostGateRun } from './host-review.ts'
+import { hostReviewDeferral, reviewBlockingItems, reviewerDisplayName } from './host-review-contracts.ts'
+import type { HostReviewDeferral, HostReviewResult, HostGateRun } from './host-review-contracts.ts'
 import { readExecplanState } from './recovery-discovery.ts'
 import {
   DESIGN_VERDICT_SCHEMA,
@@ -788,7 +788,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     if (final.status === 'missing') return fail(`the committed ExecPlan is absent after the build: ${contained.relPath}`, openIssues)
     const remaining = (final.items || []).filter((entry) => !entry.ticked)
     if (remaining.length) {
-      return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0].text}`, openIssues)
+      return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0]?.text ?? 'unknown'}`, openIssues)
     }
     return {
       kind: 'impl',
@@ -958,7 +958,9 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
           // the squash merge, so the next round's gates/reviews and any
           // integration would judge state the host never verified.
           const gateFix = await dispatchFixAndVerify(task, worktree, plan, gateBlocking, `fix:${tag} r${round}`, round)
-          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(gateFix.report)
+          const gateRound = reviewRounds.at(-1)
+          if (!gateRound) return { id: tag, status: 'failed', stage: 'review', detail: 'host gate review record was unexpectedly absent', reviewRounds, worktree, proposals, ...kindExtra }
+          gateRound.fix = summarizeFixReport(gateFix.report)
           if (gateFix.dirtyDetail) {
             return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the gate-fix round left uncommitted state (${gateFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
           }
@@ -978,7 +980,9 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
           reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: csBlocking, ...(hostGates ? { hostGates: hostGates.results } : {}), fix: null })
           if (round === MAX_REVIEW_ROUNDS) break
           const csFix = await dispatchFixAndVerify(task, worktree, plan, csBlocking, `fix:${tag} cs r${round}`, round)
-          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(csFix.report)
+          const csRound = reviewRounds.at(-1)
+          if (!csRound) return { id: tag, status: 'failed', stage: 'review', detail: 'CodeScene review record was unexpectedly absent', reviewRounds, worktree, proposals, ...kindExtra }
+          csRound.fix = summarizeFixReport(csFix.report)
           if (csFix.dirtyDetail) {
             return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the CodeScene-fix round left uncommitted state (${csFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
           }
@@ -1011,7 +1015,9 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
             reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: hostReviewBlocking, ...(hostGates ? { hostGates: hostGates.results } : {}), fix: null })
             if (round === MAX_REVIEW_ROUNDS) break
             const hostReviewFix = await dispatchFixAndVerify(task, worktree, plan, hostReviewBlocking, `fix:${tag} r${round}`, round)
-            reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(hostReviewFix.report)
+            const hostReviewRound = reviewRounds.at(-1)
+            if (!hostReviewRound) return { id: tag, status: 'failed', stage: 'review', detail: 'host-review record was unexpectedly absent', reviewRounds, worktree, proposals, ...kindExtra }
+            hostReviewRound.fix = summarizeFixReport(hostReviewFix.report)
             if (hostReviewFix.dirtyDetail) {
               return { id: tag, status: 'failed', stage: 'implement', detail: `FIX DURABILITY: the ${hostReviewerDisplayName} host-review fix round left uncommitted state (${hostReviewFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra }
             }
@@ -1121,10 +1127,10 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         return { id: tag, status: 'halted', stage: 'integrate', detail: integrationHaltDetail(integration), worktree, proposals, ...kindExtra }
       }
     } else {
-      return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals, ...(deferredHostReviews.length ? { openIssues: deferredHostReviews } : {}), ...kindExtra }
+      return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals, ...(deferredHostReviews.length ? { deferredHostReviews } : {}), ...kindExtra }
     }
 
-    return { id: tag, status: 'done', plan, impl, integration, worktree, proposals, ...(deferredHostReviews.length ? { openIssues: deferredHostReviews } : {}), ...kindExtra }
+    return { id: tag, status: 'done', plan, impl, integration, worktree, proposals, ...(deferredHostReviews.length ? { deferredHostReviews } : {}), ...kindExtra }
   }
 
   async function runTask(task: SelectedTask, mergeLock: MergeLock): Promise<StageResult> {
@@ -1228,7 +1234,6 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: `addendum implementation returned ok but left uncommitted state in the worktree (${committed.detail}); every sub-task must be committed before returning`, openIssues, worktree, proposals: [], kind: 'addendum' })
       }
       const proposals: Array<Record<string, unknown>> = []
-      const addendumOpenIssues: HostReviewDeferral[] = []
       const addendumDeferredReviews: HostReviewDeferral[] = []
       // Host-verified gates: addenda have no review rounds, so a gatesGreen
       // claim the host cannot reproduce fails here, before any review spend.
@@ -1265,7 +1270,6 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         const deferredReview = hostReviewDeferral(hostReview)
         if (deferredReview) {
           addendumDeferredReviews.push(deferredReview)
-          addendumOpenIssues.push(deferredReview)
           log(`[task ${tag}] ${hostReviewerDisplayName} host review deferred for the addendum: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`)
         }
       }
@@ -1293,9 +1297,9 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
           return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'integrate', detail: integrationHaltDetail(integration), worktree, proposals, kind: 'addendum' })
         }
       } else {
-        return { id: tag, status: 'manual-merge-ready', impl, addendumReview, integration, worktree, proposals, ...(addendumOpenIssues.length ? { openIssues: addendumOpenIssues } : {}), kind: 'addendum' }
+        return { id: tag, status: 'manual-merge-ready', impl, addendumReview, integration, worktree, proposals, ...(addendumDeferredReviews.length ? { deferredHostReviews: addendumDeferredReviews } : {}), kind: 'addendum' }
       }
-      return { id: tag, status: 'done', impl, addendumReview, integration, worktree, proposals, ...(addendumOpenIssues.length ? { openIssues: addendumOpenIssues } : {}), kind: 'addendum' }
+      return { id: tag, status: 'done', impl, addendumReview, integration, worktree, proposals, ...(addendumDeferredReviews.length ? { deferredHostReviews: addendumDeferredReviews } : {}), kind: 'addendum' }
     }
 
     // --- Plan <-> Design review (adversarial loop) --------------------------

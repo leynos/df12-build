@@ -9,7 +9,7 @@
  */
 import type { WorkflowConfig } from './config.ts'
 import { shellQuote } from './exec.ts'
-import { reviewerDisplayName } from './host-review.ts'
+import { reviewerDisplayName } from './host-review-contracts.ts'
 import { roadmapIdSlug } from './roadmap.ts'
 
 // The slices of task / plan / implementation records the prompts read.

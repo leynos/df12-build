@@ -75,24 +75,29 @@ function redactedDakarProbeCommand(invocation: readonly string[]): string {
 }
 
 /** Remove configured Dakar argument values from an execution-status diagnostic. */
-function redactedDakarStatusDetail(status: ExecStatus, invocation: readonly string[]): string {
+function redactedDakarStatusDetail(status: ExecStatus, invocation: readonly string[], sensitiveValues: readonly string[] = []): string {
   let detail = statusDetail(status)
   for (const [index, value] of invocation.entries()) {
     const inlineOption = /^(--[A-Za-z][A-Za-z0-9-]*)=(.+)$/.exec(value)
-    if (inlineOption) {
+    const inlineValue = inlineOption?.[2]
+    if (inlineOption && inlineValue !== undefined) {
       detail = detail.split(value).join('[REDACTED]')
-      detail = detail.split(inlineOption[2]).join('[REDACTED]')
+      detail = detail.split(inlineValue).join('[REDACTED]')
       continue
     }
     const assignment = ENVIRONMENT_ASSIGNMENT.exec(value)
-    if (assignment) {
+    const assignmentValue = assignment?.[1]
+    if (assignment && assignmentValue !== undefined) {
       detail = detail.split(value).join('[REDACTED]')
-      detail = detail.split(assignment[1]).join('[REDACTED]')
+      detail = detail.split(assignmentValue).join('[REDACTED]')
       continue
     }
     if (index === 0) continue
     if (!value || /^--[A-Za-z][A-Za-z0-9-]*$/.test(value)) continue
     detail = detail.split(value).join('[REDACTED]')
+  }
+  for (const value of sensitiveValues) {
+    if (value) detail = detail.split(value).join('[REDACTED]')
   }
   return boundedTail(detail)
 }
@@ -128,10 +133,11 @@ export function makeAuthPreflight(config: AuthPreflightConfig, deps: AuthPreflig
 
     if (config.requireHostReviewAuth) {
       if (config.reviewTool === 'dakar') {
+        const openaiKey = deps.environment.get('OPENAI_API_KEY')
         const dakarWords = config.dakarInvocation.filter((argument) => !ENVIRONMENT_ASSIGNMENT.test(argument))
         const dakarExecutable = dakarWords[0] || 'dakar-review'
         const dakar = await deps.exec(dakarExecutable, [...dakarWords.slice(1), '--version'])
-        const dakarOutput = redactedDakarStatusDetail(dakar, config.dakarInvocation)
+        const dakarOutput = redactedDakarStatusDetail(dakar, config.dakarInvocation, typeof openaiKey === 'string' ? [openaiKey] : [])
         if (!dakar.ok) {
           deps.recordHostReviewAuthFailure()
           failures.push({
@@ -146,7 +152,6 @@ export function makeAuthPreflight(config: AuthPreflightConfig, deps: AuthPreflig
           deps.recordHostReviewAuthFailure()
           failures.push({ tool: 'dakar', command: 'pi --version', detail: piOutput || 'pi is unavailable or its version probe failed' })
         }
-        const openaiKey = deps.environment.get('OPENAI_API_KEY')
         if (typeof openaiKey !== 'string' || openaiKey.trim() === '') {
           deps.recordHostReviewAuthFailure()
           failures.push({
@@ -174,7 +179,10 @@ export function makeAuthPreflight(config: AuthPreflightConfig, deps: AuthPreflig
     } else {
       const passed = ['Codex']
       if (config.requiredAdapters.has('claude')) passed.push('Claude')
-      if (config.requireHostReviewAuth) passed.push(config.reviewTool === 'dakar' ? 'Dakar (dakar-review, pi, OPENAI_API_KEY)' : 'CodeRabbit')
+      if (config.requireHostReviewAuth) {
+        const dakarExecutable = config.dakarInvocation.find((argument) => !ENVIRONMENT_ASSIGNMENT.test(argument)) || 'dakar-review'
+        passed.push(config.reviewTool === 'dakar' ? `Dakar (${dakarExecutable}, pi, OPENAI_API_KEY)` : 'CodeRabbit')
+      }
       deps.log(`[auth] preflight passed for ${passed.join(', ')}`)
     }
     return failures

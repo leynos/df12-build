@@ -594,7 +594,7 @@ test('a red host gate stops the sequence and carries the log evidence', async ()
   assert.equal(red.green, false)
   assert.equal(red.results.length, 2, 'later gates never run after a failure')
   assert.equal(red.results[1].ok, false)
-  assert.match(red.detail, /host gate `echo boom; exit 3` failed/)
+  assert.match(red.detail, /host gate `<redacted command>` failed/)
   assert.match(red.detail, /boom/)
   assert.match(red.detail, new RegExp(red.results[1].logFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   assert.deepEqual(surface.hostGateMetrics(), { runs: 2, failures: 1 })
@@ -927,9 +927,9 @@ test('the Dakar preflight requires a non-empty OPENAI_API_KEY and skips CodeRabb
 
 test('Dakar preflight preserves quoted fixed command arguments', async () => {
   const previousKey = process.env.OPENAI_API_KEY
-  process.env.OPENAI_API_KEY = 'sk-test-key'
-  const fakes = makeAuthBin()
   try {
+    process.env.OPENAI_API_KEY = 'sk-test-key'
+    const fakes = makeAuthBin()
     const failures = await runPreflightWithFakes({ dakarCommand: 'dakar-review "--fixed argument"' }, fakes)
     assert.deepEqual(failures, [])
     assert.ok(fakes.calls().some((line) => line === 'dakar-review --fixed argument --version'))

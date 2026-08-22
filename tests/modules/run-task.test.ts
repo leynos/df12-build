@@ -15,7 +15,7 @@ import {
 } from '../../src/workflows/df12-build-odw/run-task.ts'
 import type { FaultMetrics } from '../../src/workflows/df12-build-odw/types.ts'
 
-import type { HostReviewResult } from '../../src/workflows/df12-build-odw/host-review.ts'
+import type { HostReviewResult } from '../../src/workflows/df12-build-odw/host-review-contracts.ts'
 
 // Module tests for the per-task pipeline (decomposition milestone 9), run
 // with scripted primitives keyed on stable agent labels — mirroring the
@@ -66,6 +66,7 @@ const task = { id: '1.2.3', title: 'Implement the parser', requires: [], rationa
 
 type Script = (label: string, prompt: string) => unknown
 let labels: string[] = []
+let recordedReviews: string[] = []
 let runFaultMetrics: FaultMetrics
 
 function scriptAgent(script: Script) {
@@ -120,13 +121,14 @@ function subject(worktree: string, overrides: Record<string, unknown> = {}) {
     runHostCommitGates: async () => ({ green: true, results: [], detail: '' }),
     runCodeSceneCheck: async () => ({ clean: true, skipped: true, detail: '', logFile: '' }),
     runHostReview: async () => hostReviewResult(),
-    recordHostReview: async () => {},
+    recordHostReview: async (label) => { recordedReviews.push(label) },
     ...overrides,
   })
 }
 
 beforeEach(() => {
   labels = []
+  recordedReviews = []
   runFaultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 }
   globals.log = () => {}
   globals.phase = () => {}
@@ -479,7 +481,7 @@ describe('runTask', () => {
     const integrationIndex = labels.findIndex((label) => label.startsWith('integrate:'))
     expect(fallbackIndex).toBeGreaterThanOrEqual(0)
     expect(fallbackIndex).toBeLessThan(integrationIndex)
-    expect(outcome.openIssues).toEqual([
+    expect(outcome.deferredHostReviews).toEqual([
       {
         kind: 'host-review-deferral',
         reviewer: 'dakar',
@@ -489,6 +491,7 @@ describe('runTask', () => {
         detail: 'Dakar review deferred (stage: deferred) — budget exhausted',
       },
     ])
+    expect(recordedReviews).toEqual(['1.2.3 addendum'])
   })
 
   test('per-work-item build fails when the committed plan disappears mid-build', async () => {

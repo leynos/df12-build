@@ -17,6 +17,7 @@ const budgetInput = fc.oneof(
   numericInput,
   fc.constantFrom(Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 'not-a-budget', '£1'),
 )
+const retryInput = numericInput
 
 describe('Dakar configuration clamp properties', () => {
   test('timeout maps every numeric input into the 60..7200-second band', () => {
@@ -39,6 +40,19 @@ describe('Dakar configuration clamp properties', () => {
         if (!Number.isFinite(numeric) || numeric <= 0) expect(budget).toBe(0)
         else if (numeric >= 10) expect(budget).toBe(10)
         else expect(budget).toBe(numeric)
+      }),
+    )
+  })
+
+  test('retry counts and backoff endpoints always remain finite bounded values', () => {
+    fc.assert(
+      fc.property(retryInput, retryInput, (attempts, backoff) => {
+        const config = makeConfig({ coderabbitAttempts: attempts, coderabbitBackoffMinutes: [backoff, backoff] })
+        expect(Number.isInteger(config.CODERABBIT_ATTEMPTS)).toBe(true)
+        expect(config.CODERABBIT_ATTEMPTS).toBeGreaterThanOrEqual(1)
+        expect(config.CODERABBIT_ATTEMPTS).toBeLessThanOrEqual(10)
+        expect(config.CODERABBIT_BACKOFF_MINUTES[0]).toBeGreaterThanOrEqual(1)
+        expect(config.CODERABBIT_BACKOFF_MINUTES[1]).toBeLessThanOrEqual(1440)
       }),
     )
   })

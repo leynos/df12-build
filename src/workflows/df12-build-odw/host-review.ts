@@ -30,6 +30,7 @@ import {
   type HostReviewDeps,
   type HostReviewMetrics,
   type HostReviewMetricsSnapshot,
+  type HostReviewRecordingDeps,
   type HostReviewResult,
   type ReviewErrorCategory,
   type ReviewFinding,
@@ -69,6 +70,7 @@ export type {
   HostReviewConfig,
   HostReviewDeferral,
   HostReviewDeps,
+  HostReviewRecordingDeps,
   HostReviewAttempt,
   HostReviewResult,
   ReviewErrorCategory,
@@ -100,7 +102,7 @@ export interface HostReviewSurface {
   /** Run the selected reviewer through the neutral adapter boundary. */
   runHostReview: (worktree: string, label: string, deps?: HostReviewDeps & DakarAttemptDeps) => Promise<HostReviewResult>
   /** Serialize one terminal review and its findings to the configured sink. */
-  recordHostReview: (label: string, review: HostReviewResult) => Promise<void>
+  recordHostReview: (label: string, review: HostReviewResult, deps?: HostReviewRecordingDeps) => Promise<void>
   /** Execute configured deterministic commit gates. */
   runHostCommitGates: (worktree: string, tag: string, roundLabel: string) => Promise<HostGateRun>
   /** Execute the optional CodeScene health check. */
@@ -116,12 +118,16 @@ export interface HostReviewSurface {
   /** Compatibility alias for `runHostReview`. */
   runCoderabbitHostReview: (worktree: string, label: string, deps?: HostReviewDeps & DakarAttemptDeps) => Promise<HostReviewResult>
   /** Compatibility alias for `recordHostReview`. */
-  recordCoderabbitReview: (label: string, review: HostReviewResult) => Promise<void>
+  recordCoderabbitReview: (label: string, review: HostReviewResult, deps?: HostReviewRecordingDeps) => Promise<void>
 }
 
 /** Bind reviewer dispatch, retry, findings recording, and host-gate execution. */
 export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
-  const parsed = config.dakarInvocation || tokenizeShellCommand(config.dakarCommand)?.words.map((word) => word.value) || []
+  const dakarTokens = tokenizeShellCommand(config.dakarCommand)
+  if (!dakarTokens || dakarTokens.hasUnquotedControlOperator || dakarTokens.words.length === 0) {
+    throw new Error('Invalid dakarCommand: expected a non-empty command without unquoted control operators')
+  }
+  const parsed = config.dakarInvocation || dakarTokens.words.map((word) => word.value)
   const dakarAttempt = makeDakarAttempt({ ...config, dakarInvocation: parsed })
   const coderabbitAttempt = makeCoderabbitAttempt(config)
   const hostReviewMetrics: HostReviewMetrics = makeHostReviewMetrics()
@@ -180,7 +186,7 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
   }
 
   /** Serialize findings, preserving review success when the durable sink fails. */
-  async function recordHostReview(label: string, review: HostReviewResult): Promise<void> {
+  async function recordHostReview(label: string, review: HostReviewResult, deps: HostReviewRecordingDeps = {}): Promise<void> {
     for (const finding of review.findings) {
       hostReviewMetrics.findings += 1
       const rawSeverity = String(finding.severity || 'unknown').toLowerCase()
@@ -189,12 +195,18 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
     }
     if (!config.coderabbitFindingsFile || !review.findings.length) return
     const append = async () => {
-      const stamp = await execFileStatus('date', ['-u', '+%Y-%m-%dT%H:%M:%SZ'])
-      const ts = stamp.ok ? stamp.stdout.trim() : ''
+      const timestamp = deps.timestamp || (async () => {
+        const stamp = await execFileStatus('date', ['-u', '+%Y-%m-%dT%H:%M:%SZ'])
+        return stamp.ok ? stamp.stdout.trim() : ''
+      })
+      const ts = await timestamp()
       const lines = review.findings.map((finding) => JSON.stringify({ ts, label, severity: String(finding.severity || ''), file: String(finding.fileName || ''), comment: String(finding.comment || '').slice(0, 2000), codegenInstructions: String(finding.codegenInstructions || '').slice(0, 2000), suggestions: Array.isArray(finding.suggestions) ? finding.suggestions.length : 0 }))
       try {
-        const fs = process.getBuiltinModule('node:fs/promises')
-        await fs.appendFile(config.coderabbitFindingsFile, `${lines.join('\n')}\n`, 'utf8')
+        const appendFile = deps.append || (async (path: string, data: string) => {
+          const fs = process.getBuiltinModule('node:fs/promises')
+          await fs.appendFile(path, data, 'utf8')
+        })
+        await appendFile(config.coderabbitFindingsFile, `${lines.join('\n')}\n`)
       } catch (error) {
         hostReviewMetrics.sinkFailures += 1
         hostReviewMetrics.sinkError = boundedTail((error as Error | null)?.message || String(error), 500)

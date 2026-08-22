@@ -99,6 +99,7 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
       let carry = ''
       let killed = false
       let settled = false
+      let streamFailure = ''
       let sigterm: ReturnType<typeof setTimeout> | undefined
       let sigkill: ReturnType<typeof setTimeout> | undefined
       let forcedSettle: ReturnType<typeof setTimeout> | undefined
@@ -130,7 +131,24 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
         }
         child.kill(signal)
       }
-      stream.on('error', (error) => finish(false, `gate log write failed: ${(error as Error).message}`))
+      /** Cancel timeout escalation once the gate has reached a terminal event. */
+      const clearTimers = () => { if (sigterm) clearTimeout(sigterm); if (sigkill) clearTimeout(sigkill); if (forcedSettle) clearTimeout(forcedSettle) }
+      /** Reap the whole group after a sink fault before resolving the failed gate. */
+      const abortForStreamFailure = (error: Error) => {
+        if (settled) return
+        streamFailure = `gate log write failed: ${error.message}`
+        clearTimers()
+        killed = true
+        child.stdout?.resume(); child.stderr?.resume()
+        terminateGroup('SIGTERM')
+        sigkill = setTimeout(() => {
+          terminateGroup('SIGKILL')
+          forcedSettle = setTimeout(() => finish(false, streamFailure, true), 1000)
+          forcedSettle.unref()
+        }, 2000)
+        sigkill.unref()
+      }
+      stream.on('error', (error) => abortForStreamFailure(error as Error))
       stream.on('drain', () => { child.stdout?.resume(); child.stderr?.resume() })
       child.stdout.on('data', record)
       child.stderr.on('data', record)
@@ -141,10 +159,8 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
         sigkill = setTimeout(() => { terminateGroup('SIGKILL'); forcedSettle = setTimeout(() => finish(false, 'gate process group did not close after SIGKILL', true), 1000); forcedSettle.unref() }, 2000)
         sigkill.unref()
       }, config.commitGateTimeoutSeconds * 1000)
-      /** Cancel timeout escalation once the gate has reached a terminal event. */
-      const clearTimers = () => { if (sigterm) clearTimeout(sigterm); if (sigkill) clearTimeout(sigkill); if (forcedSettle) clearTimeout(forcedSettle) }
-      child.on('close', (code) => { clearTimers(); finish(code === 0 && !killed) })
-      child.on('error', (error) => { clearTimers(); finish(false, `spawn failed: ${(error as Error).message}`) })
+      child.on('close', (code) => { clearTimers(); finish(code === 0 && !killed, streamFailure) })
+      child.on('error', (error) => { clearTimers(); finish(false, streamFailure || `spawn failed: ${(error as Error).message}`) })
     })
   }
 
@@ -152,15 +168,16 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
   async function runHostCommitGates(worktree: string, tag: string, roundLabel: string): Promise<HostGateRun> {
     const results: HostGateRun['results'] = []
     for (const [index, command] of config.commitGates.entries()) {
+      const displayedCommand = redactedShellCommand(command)
       metrics.hostGates.runs += 1
-      log(`[task ${tag}] host gate ${index + 1}/${config.commitGates.length} (${roundLabel}): ${command}`)
+      log(`[task ${tag}] host gate ${index + 1}/${config.commitGates.length} (${roundLabel}): ${displayedCommand}`)
       const logFile = logPath(tag, roundLabel, index)
       const outcome = await streamGate(command, worktree, logFile)
-      results.push({ command, ok: outcome.ok, logFile })
+      results.push({ command: displayedCommand, ok: outcome.ok, logFile })
       if (!outcome.ok) {
         metrics.hostGates.failures += 1
         const timeout = outcome.killed ? ` (killed after the ${config.commitGateTimeoutSeconds}s gate timeout)` : ''
-        return { green: false, results, detail: `host gate \`${command}\` failed${timeout}; full log: ${logFile}; output tail:\n${outcome.tail}` }
+        return { green: false, results, detail: `host gate \`${displayedCommand}\` failed${timeout}; full log: ${logFile}; output tail:\n${outcome.tail}` }
       }
     }
     return { green: true, results, detail: '' }

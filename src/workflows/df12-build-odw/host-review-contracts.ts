@@ -118,6 +118,14 @@ export interface HostReviewDeps {
   nowMs?: () => number
 }
 
+/** Injectable persistence seams for the serialized findings sink. */
+export interface HostReviewRecordingDeps {
+  /** Produce the UTC timestamp written with persisted findings. */
+  timestamp?: () => Promise<string>
+  /** Append one already-formatted JSONL batch to the configured sink. */
+  append?: (path: string, data: string) => Promise<void>
+}
+
 /** Run-scoped gate-log root lifecycle, injected where filesystem ownership matters. */
 export interface HostGateLogRoot {
   /** Allocate the private directory used for this workflow's gate logs. */

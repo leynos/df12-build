@@ -130,6 +130,13 @@ describe('makeConfig review-tool selection', () => {
     expect(makeConfig({ dakarBudgetGbp: -1 }).DAKAR_BUDGET_GBP).toBe(0)
     expect(makeConfig({ dakarBudgetGbp: 50 }).DAKAR_BUDGET_GBP).toBe(10)
   })
+
+  test('host-review retry and backoff settings are finite and bounded', () => {
+    expect(() => makeConfig({ coderabbitAttempts: Number.POSITIVE_INFINITY })).toThrow(/coderabbitAttempts must be finite/)
+    expect(() => makeConfig({ coderabbitBackoffMinutes: [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY] })).toThrow(/coderabbitBackoffMinutes values must be finite/)
+    expect(makeConfig({ coderabbitAttempts: 999, coderabbitBackoffMinutes: [9999, 10000] }).CODERABBIT_ATTEMPTS).toBe(10)
+    expect(makeConfig({ coderabbitBackoffMinutes: [9999, 10000] }).CODERABBIT_BACKOFF_MINUTES).toEqual([1440, 1440])
+  })
 })
 
 describe('makeConfig overrides and clamps', () => {

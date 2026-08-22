@@ -16,6 +16,12 @@ import {
 import type { ReviewOutcome } from '../../src/workflows/df12-build-odw/host-review.ts'
 import type { ExecOptions } from '../../src/workflows/df12-build-odw/exec.ts'
 
+/** Return a test fixture value after making absence explicit to TypeScript. */
+function required<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error('expected fixture value')
+  return value
+}
+
 describe('classifyCoderabbitOutcome terminal completion', () => {
   test('both observed success statuses (review_completed, reviewed) are clean', () => {
     for (const status of ['review_completed', 'reviewed']) {
@@ -126,7 +132,7 @@ describe('runDakarHostReview', () => {
     let stateRoot = ''
     const exec = async (command: string, args: readonly string[], options: ExecOptions = {}) => {
       calls.push({ command, args: [...args], options })
-      stateRoot = args[args.indexOf('--state-root') + 1]
+      stateRoot = required(args[args.indexOf('--state-root') + 1])
       expect(existsSync(stateRoot)).toBe(true)
       return { ok: true, stdout: dakarJson({ ok: true, verdict: 'pass', findings: [] }), stderr: '' }
     }
@@ -139,12 +145,12 @@ describe('runDakarHostReview', () => {
       },
     })
     expect(review.outcome).toBe('clean')
-    const { command, args, options } = calls[0]
+    const { command, args, options } = required(calls[0])
     expect(command).toBe('dakar-review')
-    expect(args[args.indexOf('--repo-root') + 1]).toBe('/work/tree')
-    expect(args[args.indexOf('--base') + 1]).toBe('main')
-    expect(args[args.indexOf('--timeout') + 1]).toBe('3600')
-    expect(options).toEqual({ cwd: '/work/tree', timeoutMs: 3_600_000 })
+    expect(required(args[args.indexOf('--repo-root') + 1])).toBe('/work/tree')
+    expect(required(args[args.indexOf('--base') + 1])).toBe('main')
+    expect(required(args[args.indexOf('--timeout') + 1])).toBe('3600')
+    expect(options).toEqual({ cwd: '/work/tree', timeoutMs: 3_605_000 })
     expect(stateRoot.startsWith(path.join(tmpdir(), 'df12-dakar-state-'))).toBe(true)
     expect(existsSync(stateRoot)).toBe(false)
     expect(cleanupCalls).toEqual([{ stateRoot, options: { recursive: true, force: true } }])
@@ -161,16 +167,16 @@ describe('runDakarHostReview', () => {
       reviewTimeoutSeconds: 120,
     })
     await runCoderabbitHostReview('/work/tree', 'label', { exec })
-    expect(calls[0].command).toBe('uv')
-    expect(calls[0].args.slice(0, 2)).toEqual(['run', 'dakar-review'])
-    expect(calls[0].options.timeoutMs).toBe(120_000)
+    expect(required(calls[0]).command).toBe('uv')
+    expect(required(calls[0]).args.slice(0, 2)).toEqual(['run', 'dakar-review'])
+    expect(required(calls[0]).options.timeoutMs).toBe(125_000)
   })
 
   test('the state root is removed when reviewer execution throws', async () => {
     const cleanupCalls: Array<{ stateRoot: string; options: { recursive: true; force: true } }> = []
     let stateRoot = ''
     const exec = async (_command: string, args: readonly string[]) => {
-      stateRoot = args[args.indexOf('--state-root') + 1]
+      stateRoot = required(args[args.indexOf('--state-root') + 1])
       expect(existsSync(stateRoot)).toBe(true)
       throw new Error('Dakar execution failed')
     }
@@ -185,6 +191,11 @@ describe('runDakarHostReview', () => {
     })).rejects.toThrow('Dakar execution failed')
     expect(existsSync(stateRoot)).toBe(false)
     expect(cleanupCalls).toEqual([{ stateRoot, options: { recursive: true, force: true } }])
+  })
+
+  test('rejects an unquoted control operator in the configured Dakar command', () => {
+    expect(() => hostReview({ reviewTool: 'dakar', dakarCommand: 'dakar-review; echo unsafe' }))
+      .toThrow(/unquoted control operators/)
   })
 
   test('a state-root creation failure becomes a terminal host-review error', async () => {
@@ -220,13 +231,30 @@ describe('runDakarHostReview', () => {
     expect(cleanupLog.length).toBeLessThanOrEqual(550)
   })
 
+  test('redacts an inherited OpenAI key echoed by Dakar', async () => {
+    const previousKey = process.env.OPENAI_API_KEY
+    const secret = 'openai-key-that-must-not-escape-review'
+    process.env.OPENAI_API_KEY = secret
+    try {
+      const { exec } = recordingExec({
+        stdout: dakarJson({ ok: false, stage: 'review', error: `Dakar echoed ${secret}` }),
+      })
+      const review = await hostReview({ reviewTool: 'dakar' }).runHostReview('/work/tree', 'redacted', { exec })
+      expect(review.detail).toContain('[REDACTED]')
+      expect(review.detail).not.toContain(secret)
+    } finally {
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY
+      else process.env.OPENAI_API_KEY = previousKey
+    }
+  })
+
   test('a configured budget adds the --budget-gbp flag', async () => {
     const { calls, exec } = recordingExec({ stdout: dakarJson({ ok: true, verdict: 'pass', findings: [] }) })
     const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', dakarBudgetGbp: 3 })
     await runCoderabbitHostReview('/work/tree', 'label', { exec })
-    const { args } = calls[0]
-    expect(args[args.indexOf('--budget-gbp') + 1]).toBe('3')
-    junk.push(args[args.indexOf('--state-root') + 1])
+    const { args } = required(calls[0])
+    expect(required(args[args.indexOf('--budget-gbp') + 1])).toBe('3')
+    junk.push(required(args[args.indexOf('--state-root') + 1]))
   })
 
   // The outcome-mapping table: each Dakar document maps to exactly one
@@ -333,7 +361,7 @@ describe('runDakarHostReview', () => {
     const stateRoots: string[] = []
     const exec = async (_command: string, args: readonly string[]) => {
       attempts += 1
-      const stateRoot = args[args.indexOf('--state-root') + 1]
+      const stateRoot = required(args[args.indexOf('--state-root') + 1])
       stateRoots.push(stateRoot)
       junk.push(stateRoot)
       expect(existsSync(stateRoot)).toBe(true)
@@ -454,6 +482,21 @@ describe('runDakarHostReview', () => {
     expect(surface.metrics().hostReview.sinkError.length).toBeLessThanOrEqual(500)
   })
 
+  test('the findings sink accepts injected timestamp and append seams', async () => {
+    const calls: Array<{ path: string; data: string }> = []
+    const surface = hostReview({ coderabbitFindingsFile: '/virtual/findings.jsonl' })
+    await surface.recordHostReview('injected sink', {
+      reviewer: 'dakar', outcome: 'findings', attempts: 1, elapsedMs: 1,
+      errorCategory: 'none', findings: [{ severity: 'major', fileName: 'src/a.ts', comment: 'finding' }], detail: '',
+    }, {
+      timestamp: async () => '2026-08-22T00:00:00Z',
+      append: async (path, data) => { calls.push({ path, data }) },
+    })
+    expect(calls).toHaveLength(1)
+    expect(required(calls[0]).path).toBe('/virtual/findings.jsonl')
+    expect(required(calls[0]).data).toContain('2026-08-22T00:00:00Z')
+  })
+
   test('prototype-named severities count as unknown', async () => {
     const surface = hostReview()
     const before = surface.metrics().hostReview.bySeverity.unknown
@@ -485,7 +528,7 @@ describe('reviewTool dispatch', () => {
     const { runCoderabbitHostReview } = hostReview({ reviewTool: 'coderabbit' })
     const review = await runCoderabbitHostReview('/w', 'l', { exec })
     expect(review.outcome).toBe('clean')
-    expect(calls[0]).toEqual({
+    expect(calls.at(0)).toEqual({
       command: 'coderabbit',
       options: { cwd: '/w', timeoutMs: 3_600_000 },
     })
@@ -660,21 +703,35 @@ describe('runHostCommitGates streaming', () => {
       commitGateTimeoutSeconds: 60,
     })
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
-    junk.push(result.results[0]?.logFile)
+    junk.push(required(result.results[0]).logFile)
     expect(result.green).toBe(true)
-    expect(result.results[0].ok).toBe(true)
+    expect(required(result.results[0]).ok).toBe(true)
     // The log file holds the full stream, not a truncated buffer.
-    expect(readFileSync(result.results[0].logFile, 'utf8').length).toBeGreaterThan(40000000)
+    expect(readFileSync(required(result.results[0]).logFile, 'utf8').length).toBeGreaterThan(40000000)
   })
 
   test('a red gate carries the streamed tail and the log path', async () => {
     const dir = tmp('gate-stream-red-')
     const { runHostCommitGates } = hostReview({ commitGates: ['echo working; echo boom; exit 2'] })
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
-    junk.push(result.results[0]?.logFile)
+    junk.push(required(result.results[0]).logFile)
     expect(result.green).toBe(false)
     expect(result.detail).toMatch(/boom/)
-    expect(result.detail).toContain(result.results[0].logFile)
+    expect(result.detail).toContain(required(result.results[0]).logFile)
+  })
+
+  test('redacts host-gate environment assignments from results and logs', async () => {
+    const dir = tmp('gate-redacted-command-')
+    const secret = 'never-persist-this-gate-token'
+    const messages: string[] = []
+    g.log = (message: unknown) => messages.push(String(message))
+    const { runHostCommitGates } = hostReview({ commitGates: [`TOKEN=${secret} sh -c "exit 1"`] })
+    const result = await runHostCommitGates(dir, '1.2.3', 'redacted')
+    junk.push(required(result.results[0]).logFile)
+    expect(result.green).toBe(false)
+    expect(result.results[0]?.command).toBe('TOKEN=<redacted> sh -c "exit 1"')
+    expect(result.detail).not.toContain(secret)
+    expect(messages.join('\n')).not.toContain(secret)
   })
 
   test('a planted symlink at the log path cannot clobber its target (O_NOFOLLOW|O_EXCL)', async () => {
@@ -706,7 +763,8 @@ describe('runHostCommitGates streaming', () => {
     // own timeout fails it.
     const { runHostCommitGates } = hostReview({ commitGates: ['yes really-long-line-of-gate-output-xxxxxxxxxxxxxxxxxxxx'], commitGateTimeoutSeconds: 1 })
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
-    if (result.results[0]?.logFile) junk.push(result.results[0].logFile)
+    const backpressuredGate = required(result.results[0])
+    if (backpressuredGate.logFile) junk.push(backpressuredGate.logFile)
     expect(result.green).toBe(false)
     expect(result.detail).toMatch(/killed after the 1s gate timeout/)
   }, 20000)
@@ -719,10 +777,10 @@ describe('runHostCommitGates streaming', () => {
     })
 
     const result = await runHostCommitGates(dir, '1.2.3', 'single-line')
-    junk.push(result.results[0]?.logFile)
+    junk.push(required(result.results[0]).logFile)
 
     expect(result.green).toBe(false)
-    expect(readFileSync(result.results[0].logFile, 'utf8')).toHaveLength(65536)
+    expect(readFileSync(required(result.results[0]).logFile, 'utf8')).toHaveLength(65536)
     expect(result.detail.length).toBeLessThan(20_000)
   })
 
@@ -754,7 +812,7 @@ describe('runHostCommitGates streaming', () => {
     const dir = tmp('gate-stream-hang-')
     const { runHostCommitGates } = hostReview({ commitGates: [`${process.execPath} -e "setInterval(()=>{},50)"`], commitGateTimeoutSeconds: 2 })
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
-    junk.push(result.results[0]?.logFile)
+    junk.push(required(result.results[0]).logFile)
     expect(result.green).toBe(false)
     expect(result.detail).toMatch(/killed after the 2s gate timeout/)
   })
@@ -766,7 +824,8 @@ describe('runHostCommitGates streaming', () => {
     const { runHostCommitGates } = hostReview({ commitGates: [command], commitGateTimeoutSeconds: 1 })
 
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
-    if (result.results[0]?.logFile) junk.push(result.results[0].logFile)
+    const descendantGate = required(result.results[0])
+    if (descendantGate.logFile) junk.push(descendantGate.logFile)
 
     expect(result.green).toBe(false)
     expect(result.detail).toMatch(/killed after the 1s gate timeout/)

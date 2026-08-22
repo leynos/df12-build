@@ -56,6 +56,13 @@ export const DAKAR_SEVERITY_MAP: Record<string, string> = {
 
 const DAKAR_SEVERITIES = new Set(Object.keys(DAKAR_SEVERITY_MAP))
 const DAKAR_REQUIRED_FINDING_FIELDS = ['path', 'title', 'detail', 'evidence'] as const
+const DAKAR_PARENT_TIMEOUT_GRACE_MS = 5_000
+
+/** Redact the inherited OpenAI key if an untrusted Dakar diagnostic echoes it. */
+function redactDakarDetail(detail: string): string {
+  const key = process.env.OPENAI_API_KEY
+  return key ? detail.split(key).join('[REDACTED]') : detail
+}
 
 /** Dakar-only state-root lifecycle used by one isolated reviewer attempt. */
 export interface DakarAttemptDeps {
@@ -110,8 +117,8 @@ export function parseDakarDocument(stdout: unknown): DakarDocument | null {
     depth -= 1
     if (depth !== 0) continue
     let preceding = index - 1
-    while (preceding >= 0 && /\s/.test(text[preceding])) preceding -= 1
-    if (text[preceding] === '[') return null
+    while (preceding >= 0 && /\s/.test(text[preceding] ?? '')) preceding -= 1
+    if ((text[preceding] ?? '') === '[') return null
     const document = text.slice(index, terminalEnd + 1)
     if (document.length > 64_000) return null
     try {
@@ -127,10 +134,10 @@ export function parseDakarDocument(stdout: unknown): DakarDocument | null {
 /** Map one validated Dakar finding onto the retained findings contract. */
 export function mapDakarFinding(finding: DakarFinding): ReviewFinding {
   const severity = DAKAR_SEVERITY_MAP[String(finding.severity || '').toLowerCase()] || 'info'
-  const filePath = String(finding.path || '')
-  const title = String(finding.title || '')
-  const detail = String(finding.detail || '')
-  const evidence = String(finding.evidence || '')
+  const filePath = redactDakarDetail(String(finding.path || ''))
+  const title = redactDakarDetail(String(finding.title || ''))
+  const detail = redactDakarDetail(String(finding.detail || ''))
+  const evidence = redactDakarDetail(String(finding.evidence || ''))
   const hasLine = finding.line !== undefined && finding.line !== null && String(finding.line) !== ''
   const locator = hasLine ? ` (${filePath}:${finding.line})` : ''
   return { type: 'finding', severity, fileName: filePath, comment: `${title} — ${detail}${locator}`.slice(0, 2000), codegenInstructions: `${detail}\nEvidence: ${evidence}`.slice(0, 2000), suggestions: [] }
@@ -201,7 +208,11 @@ export function makeDakarAttempt(config: Pick<HostReviewConfig, 'base' | 'dakarI
     }
     const args = ['--repo-root', worktree, '--base', config.base, '--state-root', stateRoot, '--timeout', String(config.reviewTimeoutSeconds), ...(config.dakarBudgetGbp > 0 ? ['--budget-gbp', String(config.dakarBudgetGbp)] : [])]
     try {
-      return classifyDakarReview(await exec(executable, [...prefixArgs, ...args], { cwd: worktree, timeoutMs: config.reviewTimeoutSeconds * 1000 }))
+      const review = classifyDakarReview(await exec(executable, [...prefixArgs, ...args], {
+        cwd: worktree,
+        timeoutMs: config.reviewTimeoutSeconds * 1000 + DAKAR_PARENT_TIMEOUT_GRACE_MS,
+      }))
+      return { ...review, detail: redactDakarDetail(review.detail) }
     } finally {
       try {
         stateRoots.remove(stateRoot, { recursive: true, force: true })

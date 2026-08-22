@@ -332,8 +332,8 @@ const HOST_REVIEW_FINDINGS_FILE = CODERABBIT_FINDINGS_FILE
 // Parse the operator-configured command once so preflight probes and review
 // execution preserve the same quoted fixed arguments.
 const parsedDakarInvocation = tokenizeShellCommand(DAKAR_COMMAND)
-if (!parsedDakarInvocation || parsedDakarInvocation.words.length === 0 || parsedDakarInvocation.leadingAssignments.length > 0) {
-  throw new Error('Invalid dakarCommand: expected a non-empty command with balanced shell quoting and no environment assignments')
+if (!parsedDakarInvocation || parsedDakarInvocation.hasUnquotedControlOperator || parsedDakarInvocation.words.length === 0 || parsedDakarInvocation.leadingAssignments.length > 0) {
+  throw new Error('Invalid dakarCommand: expected a non-empty command with balanced shell quoting, no environment assignments, and no unquoted control operators')
 }
 const DAKAR_INVOCATION = parsedDakarInvocation.words.map((word) => word.value)
 const hostReview = makeHostReview({
@@ -1265,6 +1265,10 @@ async function workflowMain() {
   try {
     return await runWorkflowMain()
   } finally {
-    disposeHostGateLogs()
+    try {
+      disposeHostGateLogs()
+    } catch (error) {
+      log(`[host gates] could not dispose temporary log roots: ${String((error as Error | null)?.message || error).slice(-500)}`)
+    }
   }
 }
