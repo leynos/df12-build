@@ -879,7 +879,7 @@ TypeDoc `notDocumented` validation with zero tolerance, not a percentage
 threshold. No matching roadmap checkbox exists for this documentation-only
 follow-up.
 
-2026-08-03 (post-completion): the host-review subsystem gained Dakar as the
+2026-08-21 (post-completion): the host-review subsystem gained Dakar as the
 default reviewer while retaining CodeRabbit behind `reviewTool: 'coderabbit'`.
 The Dakar adapter parses and validates the terminal verdict, maps findings onto
 the established blocking contract, and uses a fresh, finally-cleaned state root
