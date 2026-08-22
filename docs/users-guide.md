@@ -542,10 +542,11 @@ Common arguments:
   the task for assessment instead of continuing unreviewed. Set `false` to
   review only once at the end of the implementation stage.
 - `coderabbitAttempts`: total host-review attempts when Dakar defers or
-  CodeRabbit rate limits the review. Defaults to `3`.
+  CodeRabbit rate limits the review. Defaults to `3` and is clamped to `1–10`.
 - `coderabbitBackoffMinutes`: `[low, high]` range for the deterministic
   backoff wait after a Dakar deferral or CodeRabbit rate limit. Defaults to
-  `[45, 90]`.
+  `[45, 90]`; each endpoint is clamped to `1–1440` minutes, with `high` never
+  below `low`.
 - `coderabbitFindingsFile`: optional absolute path to an append-only JSONL file
   recording every host-review finding (timestamp, task, severity, file,
   comment). The historical field name is shared by Dakar and CodeRabbit.

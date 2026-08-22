@@ -321,6 +321,11 @@ Dakar attempt creates a fresh `--state-root` below the host temporary directory
 and removes it in a `finally` block after execution and classification settle.
 Retries therefore share no Dakar state and leave no persistent cache tree.
 
+The shared host-review retry settings retain their historical CodeRabbit names:
+`coderabbitAttempts` defaults to `3` and is clamped to `1–10`, while each
+`coderabbitBackoffMinutes` endpoint is clamped to `1–1440` minutes (the default
+range is `[45, 90]`, and the upper endpoint cannot be below the lower one).
+
 `host-review.ts` exports `parseDakarDocument` and `classifyDakarReview` as the
 Dakar adapter boundary tested directly by the module suite. Both Dakar and
 CodeRabbit then produce the neutral `HostReviewResult` and `ReviewOutcome`
