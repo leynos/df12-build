@@ -548,6 +548,7 @@ describe('runTask', () => {
     expect(outcome.status).toBe('done')
     // One between-item review per committed item, before the dual-review pass.
     expect(reviews.filter((label) => /wi1|wi2/.test(label))).toHaveLength(2)
+    expect(recordedReviews).toEqual(['1.2.3 wi1 a1', '1.2.3 wi2 a1', '1.2.3 r1'])
   })
 
   test('a committed red host gate fails the work item before CodeRabbit runs', async () => {
@@ -813,6 +814,7 @@ describe('runTask', () => {
     const firstReview = labels.findIndex((label) => label.startsWith('code-review:'))
     expect(firstFix).toBeGreaterThanOrEqual(0)
     expect(firstFix).toBeLessThan(firstReview)
+    expect(recordedReviews).toEqual(['1.2.3 r1', '1.2.3 r2'])
   })
 
   test('a CodeScene regression drives a fix before any reviewer agent runs', async () => {
