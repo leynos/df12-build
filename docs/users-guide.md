@@ -699,7 +699,8 @@ deferred outcomes, timeouts, errors, authentication failures, and sink
 failures. Terminal logs record the bounded reviewer and review label, terminal
 attempt count, elapsed milliseconds, outcome, and error category; host-side
 timeouts are classified from process metadata. When `coderabbitFindingsFile`
-is set, every finding is appended through the serialized JSONL sink. The
+is set, every finding is appended through the serialized JSONL sink. Sink
+failures are reported through `hostReview` and do not fail the task. The
 historical CodeRabbit type and runner names remain compatibility aliases only.
 
 ## Per-work-item builds
