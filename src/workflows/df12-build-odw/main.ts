@@ -1,5 +1,5 @@
 /**
- * @file df12-build-odw entry: the ODW workflow's worker-pool control loop and
+ * df12-build-odw entry: the ODW workflow's worker-pool control loop and
  * fresh-run recovery entrypoint. This module unpacks the run configuration
  * (config.ts) once, binds each subsystem factory with that configuration
  * (prompts, write preflight, assessment, remediation, host review, and the
@@ -10,6 +10,8 @@
  * The build (scripts/build-workflow.mjs) bundles this file and its imports
  * flat and wraps the whole body for the ODW loader; workflowMain() below is
  * invoked by the generated footer.
+ *
+ * @module
  */
 import {
   branchToRoadmapId,
@@ -42,7 +44,7 @@ import {
 import { execFileStatus, execFileText, fileState, shellQuote } from './exec.ts'
 import {
   authFailureDetail,
-  faultMetrics,
+  createFaultMetrics,
   infrastructureFailureDetail,
   makeWithInfraRetry,
   providerFailureDetail,
@@ -73,11 +75,13 @@ import {
   coderabbitBlockingItems,
   coderabbitCapture,
   classifyCoderabbitOutcome,
+  csCheckMetrics,
   hostGateMetrics,
   makeHostReview,
   parseCoderabbitAgentOutput,
 } from './host-review.ts'
 import { makeTaskPipeline, summarizeFixReport, summarizeReviewVerdict } from './run-task.ts'
+import { redactedShellCommand } from './shell-command.ts'
 import type { AssessmentEvidence } from './git-evidence.ts'
 import type { ExecplanState, RecoveryAssessmentFields } from './recovery-decision.ts'
 import type { SelectionResult } from './roadmap.ts'
@@ -241,7 +245,8 @@ function modelRouting() {
 }
 
 // Stage-agent retry with the run's attempt budget bound once (see faults.ts).
-const withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS)
+const runFaultMetrics = createFaultMetrics()
+const withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS, runFaultMetrics)
 
 // Recovery discovery with the run's limits bound once (see recovery-discovery.ts).
 const discoverRecoveryCandidates = makeRecoveryDiscovery({
@@ -499,7 +504,7 @@ async function executeResume(
     return await runDualReviewAndIntegration(task, candidate.worktreePath, plan as StagePlan, impl as AnyRecord, mergeLock, { kind: 'recovery-resume' })
   } catch (error) {
     const detail = `unhandled agent error: ${((error as Error | null) && (error as Error).message) || String(error)}`
-    return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: 'recovery-resume' })
+    return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: 'recovery-resume' }, runFaultMetrics)
   }
 }
 
@@ -604,7 +609,7 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
           // Infrastructure faults during recovery poison every later agent
           // call too — halt the run instead of pretending branches were
           // assessed.
-          return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessed.assessmentError) as TaskOutcome }
+          return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessed.assessmentError, {}, runFaultMetrics) as TaskOutcome }
         }
         continue
       }
@@ -813,6 +818,7 @@ const {
   runDualReviewAndIntegration,
   runTask,
 } = makeTaskPipeline({
+  faultMetrics: runFaultMetrics,
   CS_CHECK,
   runCodeSceneCheck,
   MAX_DESIGN_ROUNDS,
@@ -977,12 +983,24 @@ async function fillPool() {
           return {
             id: task.id,
             task,
-            result: resultFromUnhandledAgentError(task.id, detail) as TaskOutcome,
+            result: resultFromUnhandledAgentError(task.id, detail, {}, runFaultMetrics) as TaskOutcome,
           }
         },
       ),
     )
   }
+}
+
+/**
+ * Redact leading shell environment-assignment values before command
+ * configuration reaches durable workflow output. The original command remains
+ * the host-gate input, so operator behaviour is unchanged while result.json
+ * cannot expose a token embedded in `NAME=value` syntax. Shared tokenization
+ * also identifies the host's executable; this function only projects its
+ * assignment spans into displayed evidence.
+ */
+function redactedCodeSceneCommand(command: string): string {
+  return redactedShellCommand(command)
 }
 
 // --- Worker-pool control loop -----------------------------------------------
@@ -1177,6 +1195,11 @@ return {
     timeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
     ...hostGateMetrics,
   },
+  codeScene: {
+    enabled: CS_CHECK,
+    command: redactedCodeSceneCommand(CS_CHECK_COMMAND),
+    ...csCheckMetrics,
+  },
   stageAttempts: STAGE_ATTEMPTS,
   // Host-driven build loop configuration: one builder turn per unticked
   // ExecPlan Progress item when enabled, with committed progress verified
@@ -1185,7 +1208,7 @@ return {
   // Bounded-cardinality fault metrics (fixed keys): stage retries spent on
   // infrastructure faults plus terminal fault counts per class, so operators
   // can read retry pressure straight from the result instead of the logs.
-  faultMetrics: { ...faultMetrics },
+  faultMetrics: { ...runFaultMetrics },
   // Host-run CodeRabbit review aggregate: effective configuration plus
   // bounded counters (reviews run, findings by severity, rate-limited runs,
   // deferred reviews). Per-finding detail goes to the JSONL sink when

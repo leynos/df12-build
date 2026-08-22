@@ -4,6 +4,7 @@
 // hand-picked fixtures.
 import { describe, expect, test } from 'bun:test'
 import fc from 'fast-check'
+import type { RoadmapTask } from '../../src/workflows/df12-build-odw/types.ts'
 
 import {
   completedIds,
@@ -33,6 +34,29 @@ describe('expandStepRange', () => {
         expect(expandStepRange(`${phase}.${step}`, `${phase + 1}.${step}`)).toEqual([])
       }),
     )
+  })
+
+  test('rejects malformed step ids before numeric conversion', () => {
+    const invalid = ['', '-1.2', '1.-2', '1', '1.', '.2', '1.2.3', ' 1.2', '1.2 ', '0x1.2', '1e2.3']
+    for (const value of invalid) {
+      expect(expandStepRange(value, '1.3')).toEqual([])
+      expect(expandStepRange('1.1', value)).toEqual([])
+    }
+  })
+
+  test('rejects unsafe integer components', () => {
+    const unsafeInteger = String(Number.MAX_SAFE_INTEGER + 1)
+
+    expect(expandStepRange(`${unsafeInteger}.1`, `${unsafeInteger}.2`)).toEqual([])
+    expect(expandStepRange(`1.${unsafeInteger}`, `1.${unsafeInteger}`)).toEqual([])
+  })
+
+  test('accepts the maximum range length and rejects the first oversized range', () => {
+    const maximum = expandStepRange('1.1', '1.1000')
+    expect(maximum).toHaveLength(1_000)
+    expect(maximum[0]).toBe('1.1')
+    expect(maximum[999]).toBe('1.1000')
+    expect(expandStepRange('1.1', '1.1001')).toEqual([])
   })
 })
 
@@ -75,7 +99,9 @@ describe('parseRoadmap', () => {
         const parsed = parseRoadmap(text)
         expect(parsed.tasks.map((task) => task.id)).toEqual(tasks.map((row) => `${row.phase}.${row.step}`))
         for (const [index, task] of parsed.tasks.entries()) {
-          expect(isTaskFullyComplete(task)).toBe(tasks[index].done)
+          const sourceTask = tasks[index]
+          if (!sourceTask) throw new Error(`Expected generated task at index ${index}`)
+          expect(isTaskFullyComplete(task)).toBe(sourceTask.done)
           expect(task.line).toBeGreaterThan(0)
         }
       }),
@@ -95,6 +121,57 @@ describe('parseRoadmap', () => {
       }),
     )
   })
+
+  test('does not complete an addendum ancestry with an open nested descendant', () => {
+    const text = [
+      '- [x] 1.1. Completed parent.',
+      '  - [x] 1.1.1. Completed direct addendum.',
+      '    - [ ] 1.1.1.1. Open nested addendum.',
+      '- [ ] 1.2. Depends on the completed parent.',
+      '  - Requires: 1.1',
+    ].join('\n')
+    const { tasks, completed } = parseRoadmap(text)
+    const parent = tasks[0]
+    if (!parent) throw new Error('Expected completed parent task')
+
+    expect(isTaskFullyComplete(parent)).toBe(false)
+    expect(completed.has('1.1')).toBe(false)
+    expect(completed.has('1.1.1')).toBe(false)
+    expect(completed.has('1')).toBe(false)
+    expect(selectRoadmapTask(text, { normal: [], addendum: [] }, null)).toMatchObject({
+      hasTask: true,
+      task: { id: '1.1', isAddendum: true },
+    })
+  })
+
+  test('handles a deeply nested addendum chain without recursive recomputation', () => {
+    const root: RoadmapTask = {
+      id: '1.1',
+      checked: 'x',
+      title: 'Root task',
+      requires: [],
+      line: 1,
+      indent: 0,
+      subtasks: [],
+    }
+    let parent = root
+    for (let index = 1; index <= 10_000; index += 1) {
+      const child: RoadmapTask = {
+        id: `1.${index + 1}`,
+        checked: 'x',
+        title: `Addendum ${index}`,
+        requires: [],
+        line: index + 1,
+        indent: index,
+        subtasks: [],
+      }
+      parent.subtasks.push(child)
+      parent = child
+    }
+
+    expect(isTaskFullyComplete(root)).toBe(true)
+    expect(completedIds([root]).has(root.id)).toBe(true)
+  })
 })
 
 describe('selectRoadmapTask invariants', () => {
@@ -110,9 +187,11 @@ describe('selectRoadmapTask invariants', () => {
             (row) => !row.done && !taken.normal.includes(`${row.phase}.${row.step}`),
           )
           if (selection.hasTask && selection.task) {
+            const firstOpen = open[0]
+            if (!firstOpen) throw new Error('Expected an open task for the selected result')
             expect(taken.normal).not.toContain(selection.task.id)
             expect(open.map((row) => `${row.phase}.${row.step}`)).toContain(selection.task.id)
-            expect(selection.task.id).toBe(`${open[0].phase}.${open[0].step}`)
+            expect(selection.task.id).toBe(`${firstOpen.phase}.${firstOpen.step}`)
           } else {
             expect(open).toHaveLength(0)
           }

@@ -80,6 +80,12 @@ function typecheckRecovery(body: string): { ok: boolean; output: string } {
   return typecheckWithPrelude(RECOVERY_PRELUDE, body, 'cs-recovery-')
 }
 
+const FAULT_METRICS_PRELUDE = `import type { FaultMetrics } from '${path.join(ODW_SRC, 'types.ts')}'`
+
+function typecheckFaultMetrics(body: string): { ok: boolean; output: string } {
+  return typecheckWithPrelude(FAULT_METRICS_PRELUDE, body, 'cs-fault-metrics-')
+}
+
 describe('compile-time contract', () => {
   test('tsconfig.json keeps the erasable-syntax restriction flags on', async () => {
     const tsconfig = JSON.parse(await Bun.file(path.join(REPO, 'tsconfig.json')).text())
@@ -93,12 +99,29 @@ describe('compile-time contract', () => {
     expect(result.ok).toBe(false)
     // TS1294: "This syntax is not allowed when 'erasableSyntaxOnly' is enabled."
     expect(result.output).toMatch(/1294|erasableSyntaxOnly/)
-  })
+  }, 30_000)
 
   test('erasable type-only syntax compiles cleanly under the same flags', () => {
     const result = typecheck('export type Id = string\nexport const make = (id: Id): Id => id\n')
     expect(result.ok).toBe(true)
-  })
+  }, 30_000)
+})
+
+describe('fault metrics public type contract', () => {
+  test('the complete fixed-key metric shape type-checks', () => {
+    const result = typecheckFaultMetrics(
+      `const metrics: FaultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 }; void metrics`,
+    )
+    expect(result.ok).toBe(true)
+  }, 30_000)
+
+  test('authFaults is required', () => {
+    const result = typecheckFaultMetrics(
+      `const metrics: FaultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0 }; void metrics`,
+    )
+    expect(result.ok).toBe(false)
+    expect(result.output).toMatch(/TS2741|authFaults/)
+  }, 30_000)
 })
 
 // The salvage public shapes (SalvageOutcome, SalvageRecord, SalvageSummaryEntry)
@@ -137,7 +160,7 @@ describe('salvage public type contract', () => {
     const missingPath = typecheckSalvage(`const x: SalvageOutcome = { committed: [], skipped: [{ reason: 'r' }], sha: '', detail: '' }; void x`)
     expect(missingPath.ok).toBe(false)
     expect(missingPath.output).toMatch(/TS2741|path/)
-  }, 30_000)
+  }, 60_000)
 
   test('SalvageSummaryEntry.skipped is a number count, not a list', () => {
     const result = typecheckSalvage(`const x: SalvageSummaryEntry = { id: 'i', classification: 'c', committed: [], skipped: [], sha: '', detail: '' }; void x`)

@@ -47,7 +47,7 @@ return {
   infrastructureFailureDetail,
   withInfraRetry,
   STAGE_ATTEMPTS,
-  faultMetrics,
+  runFaultMetrics,
   fileState,
   readExecplanState,
   execplanRelPath,
@@ -262,7 +262,7 @@ test('withInfraRetry retries infrastructure faults only, within the attempt cap'
 
 test('fault metrics count retries and terminal fault classes with fixed keys', async () => {
   const surface = await loadAssessmentSurface()
-  assert.deepEqual(surface.faultMetrics, { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 })
+  assert.deepEqual(surface.runFaultMetrics, { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 })
 
   let calls = 0
   await surface.withInfraRetry(async () => {
@@ -270,16 +270,16 @@ test('fault metrics count retries and terminal fault classes with fixed keys', a
     if (calls === 1) throw new Error("adapter 'claude' timed out")
     return { ok: true }
   }, 'plan:metrics r1')
-  assert.equal(surface.faultMetrics.infraRetries, 1)
+  assert.equal(surface.runFaultMetrics.infraRetries, 1)
 
-  surface.resultFromUnhandledAgentError('1.1.1', "adapter 'claude' timed out")
-  surface.resultFromUnhandledAgentError('1.1.1', 'API Error: 529 Overloaded, temporarily unavailable')
-  surface.resultFromUnhandledAgentError('1.1.1', 'CodeRabbit auth failed')
-  surface.resultFromUnhandledAgentError('1.1.1', 'make test failed: 3 assertions')
-  assert.deepEqual(surface.faultMetrics, { infraRetries: 1, infraFaults: 1, providerFaults: 1, authFaults: 1 })
+  surface.resultFromUnhandledAgentError('1.1.1', "adapter 'claude' timed out", {}, surface.runFaultMetrics)
+  surface.resultFromUnhandledAgentError('1.1.1', 'API Error: 529 Overloaded, temporarily unavailable', {}, surface.runFaultMetrics)
+  surface.resultFromUnhandledAgentError('1.1.1', 'CodeRabbit auth failed', {}, surface.runFaultMetrics)
+  surface.resultFromUnhandledAgentError('1.1.1', 'make test failed: 3 assertions', {}, surface.runFaultMetrics)
+  assert.deepEqual(surface.runFaultMetrics, { infraRetries: 1, infraFaults: 1, providerFaults: 1, authFaults: 1 })
 })
 
-test('ExecPlan paths are contained within the worktree before any filesystem access', async () => {
+test('ExecPlan paths are task-scoped within the worktree before any filesystem access', async () => {
   const surface = await loadAssessmentSurface()
   const worktree = '/work/tree'
 
@@ -288,13 +288,11 @@ test('ExecPlan paths are contained within the worktree before any filesystem acc
     relPath: 'docs/execplans/roadmap-1-2-3.md',
     detail: '',
   })
-  assert.deepEqual(surface.execplanRelPath(worktree, '/work/tree/docs/plan.md'), {
+  assert.deepEqual(surface.execplanRelPath(worktree, '/work/tree/docs/execplans/plan.md'), {
     ok: true,
-    relPath: 'docs/plan.md',
+    relPath: 'docs/execplans/plan.md',
     detail: '',
   })
-  // A leading-dots FILENAME is not an escape.
-  assert.equal(surface.execplanRelPath(worktree, '..plan.md').ok, true)
 
   const escapes = [
     '../outside.md',
@@ -310,6 +308,14 @@ test('ExecPlan paths are contained within the worktree before any filesystem acc
     assert.equal(contained.ok, false, JSON.stringify(escape))
     assert.equal(contained.relPath, '')
     assert.match(contained.detail, /escapes the assigned worktree/)
+  }
+
+  const outsideTaskScope = ['docs/plan.md', 'docs/execplans/../../README.md', '..plan.md']
+  for (const planPath of outsideTaskScope) {
+    const contained = surface.execplanRelPath(worktree, planPath)
+    assert.equal(contained.ok, false, JSON.stringify(planPath))
+    assert.equal(contained.relPath, '')
+    assert.match(contained.detail, /outside the task-scoped docs\/execplans\/\*\.md scope/)
   }
 })
 

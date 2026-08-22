@@ -2,6 +2,7 @@
 // grouping key, the lane contract in the triage schema, and the prompt/agent
 // wiring for a settled step's proposals.
 import { beforeEach, describe, expect, test } from 'bun:test'
+import fc from 'fast-check'
 
 import {
   TRIAGE_SCHEMA,
@@ -10,6 +11,7 @@ import {
   stepOf,
   triageNeedsEscalation,
 } from '../../src/workflows/df12-build-odw/remediation.ts'
+import type { RemediationProposal } from '../../src/workflows/df12-build-odw/remediation.ts'
 
 const globals = globalThis as Record<string, unknown>
 globals.log = () => {}
@@ -30,6 +32,10 @@ function subject() {
     triageAgentOptions: (options) => ({ adapter: 'codex', ...options }),
     triageEscalationModel: 'gpt-5.5@high',
   })
+}
+
+function proposal(overrides: Partial<RemediationProposal> = {}): RemediationProposal {
+  return { title: 'Fix flaky teardown', rationale: 'audit:1.2.3', ...overrides }
 }
 
 describe('stepOf', () => {
@@ -53,8 +59,54 @@ describe('dedupeProposals', () => {
     expect((flaky as { sources?: string[] }).sources?.sort()).toEqual(['audit:1.2.3', 'review:1.2.4'])
   })
 
-  test('drops titleless proposals', () => {
-    expect(dedupeProposals([{ rationale: 'audit:1.1.1' }])).toHaveLength(0)
+  test('rejects titleless proposals explicitly', () => {
+    expect(() => dedupeProposals([proposal({ title: '' })])).toThrow(/non-blank string/)
+  })
+
+  test('preserves aggregated sources across repeated deduplication', () => {
+    const first = dedupeProposals([
+      proposal({ source: 'audit:1.2.3' }),
+      proposal({ title: 'fix flaky teardown', source: 'review:1.2.4' }),
+    ])
+    const second = dedupeProposals([
+      ...first,
+      proposal({
+        title: ' FIX FLAKY TEARDOWN ',
+        sources: ['audit:1.2.3', 'expert:1.2.5'],
+        source: 'review:1.2.4',
+      }),
+    ])
+    expect(second).toHaveLength(1)
+    const merged = second[0]
+    if (!merged) throw new Error('Expected merged proposal')
+    expect(merged.sources).toEqual(['audit:1.2.3', 'review:1.2.4', 'expert:1.2.5'])
+  })
+
+  test('is idempotent, preserves first-title order, and unions every source', () => {
+    const title = fc.constantFrom('Fix flaky teardown', 'Harden the queue', 'Repair docs')
+    const source = fc.constantFrom('audit:1.2.3', 'review:1.2.4', 'expert:1.2.5')
+    const proposals = fc.array(fc.record({
+      title,
+      source,
+      sources: fc.array(source, { maxLength: 3 }),
+    }), { minLength: 1, maxLength: 20 })
+    fc.assert(fc.property(proposals, (items) => {
+      const deduped = dedupeProposals(items)
+      const key = (value: string) => value.trim().toLowerCase().replace(/\s+/g, ' ')
+      const expectedKeys = [...new Set(items.map((item) => key(item.title)))]
+
+      expect(dedupeProposals(deduped)).toEqual(deduped)
+      expect(deduped.map((item) => key(item.title))).toEqual(expectedKeys)
+      for (const item of deduped) {
+        const expectedSources: string[] = []
+        for (const input of items.filter((candidate) => key(candidate.title) === key(item.title))) {
+          for (const candidateSource of [...input.sources, input.source]) {
+            if (!expectedSources.includes(candidateSource)) expectedSources.push(candidateSource)
+          }
+        }
+        expect(item.sources).toEqual(expectedSources)
+      }
+    }), { numRuns: 100 })
   })
 })
 
@@ -93,7 +145,7 @@ describe('runTriage tiering', () => {
     expect(models[1]).toBe('gpt-5.5@high')
   })
 
-  test('an all-duplicate set is dropped deterministically with no agent call', async () => {
+  test('an invalid set is rejected explicitly with no agent call', async () => {
     let called = false
     globals.agent = async () => {
       called = true
@@ -107,9 +159,9 @@ describe('runTriage tiering', () => {
       triageAgentOptions: (options: Record<string, unknown>) => options,
       triageEscalationModel: 'gpt-5.5@high',
     })
-    const outcome = await runTriage('1.2', [{ rationale: 'audit:1.2.3' }, { title: '', rationale: 'x' }])
+    const outcome = runTriage('1.2', [{ title: '', rationale: 'audit:1.2.3' }])
     expect(called).toBe(false)
-    expect((outcome as { decisions: unknown[] }).decisions).toEqual([])
+    await expect(outcome).rejects.toThrow(/non-blank string/)
   })
 })
 
@@ -161,11 +213,13 @@ describe('makeRemediation', () => {
     }
     const { runTriage } = subject()
     const outcome = await runTriage('1.2', proposals)
+    const call = calls[0]
+    if (!call) throw new Error('Expected triage agent call')
     expect(outcome).toEqual({ ok: true, decisions: [], summary: 'triaged' })
     expect(calls).toHaveLength(1)
-    expect(calls[0].opts.label).toBe('triage:1.2')
-    expect(calls[0].opts.phase).toBe('Remediation')
-    expect(calls[0].opts.schema).toBe(TRIAGE_SCHEMA)
-    expect(calls[0].opts.adapter).toBe('codex')
+    expect(call.opts.label).toBe('triage:1.2')
+    expect(call.opts.phase).toBe('Remediation')
+    expect(call.opts.schema).toBe(TRIAGE_SCHEMA)
+    expect(call.opts.adapter).toBe('codex')
   })
 })

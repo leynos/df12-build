@@ -40,7 +40,9 @@ var TASK_BRANCH_RE = /^roadmap-((?:\d+-)*\d+)(-addendum)?$/;
 function branchToRoadmapId(branch) {
   const match = TASK_BRANCH_RE.exec(String(branch || ""));
   if (!match) return null;
-  return { id: match[1].replace(/-/g, "."), isAddendum: Boolean(match[2]) };
+  const id = match[1];
+  if (id === void 0) return null;
+  return { id: id.replace(/-/g, "."), isAddendum: Boolean(match[2]) };
 }
 function parseWorktreeList(output) {
   const entries = [];
@@ -120,7 +122,7 @@ function parseExecplanState(text) {
   const source = String(text || "");
   let status = "unknown";
   const statusMatch = source.match(/^Status:\s*([A-Za-z ]+?)\s*$/m);
-  if (statusMatch) {
+  if (statusMatch?.[1] !== void 0) {
     const value = statusMatch[1].trim().toLowerCase().replace(/\s+/g, " ");
     status = EXECPLAN_STATUS_MAP[value] || "unknown";
   }
@@ -131,10 +133,13 @@ function parseExecplanState(text) {
   for (const line of progressSection.split(/\r?\n/)) {
     const match = line.match(/^\s*-\s+\[([ xX])\]\s*(.*)$/);
     if (!match) continue;
-    const isTicked = match[1] !== " ";
+    const checked = match[1];
+    const text2 = match[2];
+    if (checked === void 0 || text2 === void 0) continue;
+    const isTicked = checked !== " ";
     if (isTicked) ticked += 1;
     else unticked += 1;
-    items.push({ text: match[2].trim(), ticked: isTicked });
+    items.push({ text: text2.trim(), ticked: isTicked });
   }
   return { status, ticked, unticked, items };
 }
@@ -352,23 +357,33 @@ function isComplete(task) {
 function extractRoadmapIds(text) {
   const ids = new Set([...text.matchAll(ROADMAP_ID_RE)].map((match) => match[0]));
   for (const match of text.matchAll(STEP_RANGE_RE)) {
-    const expanded = expandStepRange(match[1], match[2]);
+    const start = match[1];
+    const end = match[2];
+    if (start === void 0 || end === void 0) continue;
+    const expanded = expandStepRange(start, end);
     if (expanded.length) {
-      ids.delete(match[1]);
-      ids.delete(match[2]);
+      ids.delete(start);
+      ids.delete(end);
       for (const id of expanded) ids.add(id);
     }
   }
   return [...ids];
 }
 function expandStepRange(start, end) {
-  const startParts = start.split(".").map(Number);
-  const endParts = end.split(".").map(Number);
-  if (startParts.length !== 2 || endParts.length !== 2 || startParts[0] !== endParts[0]) return [];
-  const [phaseId, firstStep] = startParts;
-  const lastStep = endParts[1];
-  if (!Number.isInteger(phaseId) || !Number.isInteger(firstStep) || !Number.isInteger(lastStep) || firstStep > lastStep) return [];
-  return Array.from({ length: lastStep - firstStep + 1 }, (_, index) => `${phaseId}.${firstStep + index}`);
+  const MAX_STEP_RANGE_LENGTH = 1e3;
+  if (!/^\d+\.\d+$/.test(start) || !/^\d+\.\d+$/.test(end)) return [];
+  const [startPhase, startStep] = start.split(".");
+  const [endPhase, endStep] = end.split(".");
+  if (startPhase === void 0 || startStep === void 0 || endPhase === void 0 || endStep === void 0) return [];
+  const phaseId = Number(startPhase);
+  const firstStep = Number(startStep);
+  const endPhaseId = Number(endPhase);
+  const lastStep = Number(endStep);
+  if (phaseId !== endPhaseId) return [];
+  if (!Number.isSafeInteger(phaseId) || !Number.isSafeInteger(firstStep) || !Number.isSafeInteger(lastStep) || firstStep > lastStep) return [];
+  const rangeLength = lastStep - firstStep + 1;
+  if (rangeLength > MAX_STEP_RANGE_LENGTH) return [];
+  return Array.from({ length: rangeLength }, (_, index) => `${phaseId}.${firstStep + index}`);
 }
 function parseRoadmap(text) {
   const tasks = [];
@@ -377,7 +392,11 @@ function parseRoadmap(text) {
   for (const [index, line] of text.split(/\r?\n/).entries()) {
     const taskMatch = line.match(TASK_LINE_RE);
     if (taskMatch) {
-      const [, indent, checked, id, rawTitle] = taskMatch;
+      const indent = taskMatch[1];
+      const checked = taskMatch[2];
+      const id = taskMatch[3];
+      const rawTitle = taskMatch[4];
+      if (indent === void 0 || checked === void 0 || id === void 0 || rawTitle === void 0) continue;
       const task = {
         id,
         checked,
@@ -400,8 +419,9 @@ function parseRoadmap(text) {
       continue;
     }
     const requiresMatch = line.match(REQUIRES_LINE_RE);
-    if (requiresMatch && currentTask) {
-      currentTask.requires.push(...extractRoadmapIds(requiresMatch[1]));
+    const requires = requiresMatch?.[1];
+    if (requires !== void 0 && currentTask) {
+      currentTask.requires.push(...extractRoadmapIds(requires));
     }
   }
   for (const task of byId.values()) {
@@ -415,11 +435,27 @@ function parseRoadmap(text) {
 function completedIds(tasks) {
   const completed = /* @__PURE__ */ new Set();
   const prefixes = /* @__PURE__ */ new Map();
-  for (const task of tasks) {
-    if (isTaskFullyComplete(task)) completed.add(task.id);
-    for (const subtask of task.subtasks || []) {
-      if (isComplete(subtask)) completed.add(subtask.id);
+  const completionByTask = /* @__PURE__ */ new Map();
+  const postOrder = [];
+  const pending = [...tasks];
+  while (pending.length) {
+    const task = pending.pop();
+    postOrder.push(task);
+    pending.push(...task.subtasks);
+  }
+  for (const task of postOrder.reverse()) {
+    completionByTask.set(task, isComplete(task) && task.subtasks.every((subtask) => completionByTask.get(subtask)));
+  }
+  const recordCompletedSubtasks = (task) => {
+    const pendingSubtasks = [task];
+    while (pendingSubtasks.length) {
+      const subtask = pendingSubtasks.pop();
+      if (completionByTask.get(subtask)) completed.add(subtask.id);
+      pendingSubtasks.push(...subtask.subtasks);
     }
+  };
+  for (const task of tasks) {
+    recordCompletedSubtasks(task);
     const parts = task.id.split(".");
     for (let length = 1; length < parts.length; length += 1) {
       const prefix = parts.slice(0, length).join(".");
@@ -428,12 +464,18 @@ function completedIds(tasks) {
     }
   }
   for (const [prefix, groupedTasks] of prefixes.entries()) {
-    if (groupedTasks.length && groupedTasks.every(isTaskFullyComplete)) completed.add(prefix);
+    if (groupedTasks.length && groupedTasks.every((task) => completionByTask.get(task))) completed.add(prefix);
   }
   return completed;
 }
 function isTaskFullyComplete(task) {
-  return isComplete(task) && task.subtasks.every(isComplete);
+  const pending = [task];
+  while (pending.length) {
+    const current = pending.pop();
+    if (!isComplete(current)) return false;
+    pending.push(...current.subtasks);
+  }
+  return true;
 }
 function taskMatchesOnlyTask(candidate, onlyTask) {
   if (!onlyTask) return true;
@@ -453,7 +495,7 @@ function selectRoadmapTask(roadmapText, taken, onlyTask) {
   const candidates = [];
   const blocked = [];
   for (const task of tasks) {
-    const openSubtasks = task.subtasks.filter((subtask) => !isComplete(subtask));
+    const openSubtasks = task.subtasks.filter((subtask) => !isTaskFullyComplete(subtask));
     if (isComplete(task) && openSubtasks.length && !addendumTaken.has(task.id)) {
       candidates.push({
         order: task.line,
@@ -569,7 +611,10 @@ async function fileState(pathValue, baseDir = process.cwd()) {
 }
 
 // src/workflows/df12-build-odw/faults.ts
-var faultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 };
+function createFaultMetrics() {
+  return { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 };
+}
+var faultMetrics = createFaultMetrics();
 function authFailureDetail(value) {
   const text = String(value || "");
   const patterns = [
@@ -612,7 +657,7 @@ function infrastructureFailureDetail(value) {
   ];
   return patterns.some((pattern) => pattern.test(text)) ? text.trim() : "";
 }
-function makeWithInfraRetry(attempts) {
+function makeWithInfraRetry(attempts, metrics = faultMetrics) {
   return async function withInfraRetry2(run, label) {
     for (let attempt = 1; ; attempt++) {
       try {
@@ -627,16 +672,16 @@ function makeWithInfraRetry(attempts) {
           }
           throw error;
         }
-        faultMetrics.infraRetries += 1;
+        metrics.infraRetries += 1;
         log(`[${label}] infrastructure fault (${message}); retrying the stage agent (attempt ${attempt + 1} of ${attempts})`);
       }
     }
   };
 }
-function resultFromUnhandledAgentError(id, detail, extra = {}) {
+function resultFromUnhandledAgentError(id, detail, extra = {}, metrics = faultMetrics) {
   const authDetail = authFailureDetail(detail);
   if (authDetail) {
-    faultMetrics.authFaults += 1;
+    metrics.authFaults += 1;
     return {
       id,
       status: "fatal-auth",
@@ -648,7 +693,7 @@ function resultFromUnhandledAgentError(id, detail, extra = {}) {
   }
   const providerDetail = providerFailureDetail(detail);
   if (providerDetail) {
-    faultMetrics.providerFaults += 1;
+    metrics.providerFaults += 1;
     return {
       id,
       status: "provider-fault",
@@ -660,7 +705,7 @@ function resultFromUnhandledAgentError(id, detail, extra = {}) {
   }
   const infraDetail = infrastructureFailureDetail(detail);
   if (infraDetail) {
-    faultMetrics.infraFaults += 1;
+    metrics.infraFaults += 1;
     return {
       id,
       status: "infra-fault",
@@ -683,7 +728,7 @@ function resultFromUnhandledAgentError(id, detail, extra = {}) {
 // src/workflows/df12-build-odw/git-evidence.ts
 function parseNameStatus(output) {
   return String(output || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-    const [status, firstPath, secondPath] = line.split(/\t+/);
+    const [status = "", firstPath, secondPath] = line.split(/\t+/);
     return secondPath ? { status, path: secondPath, oldPath: firstPath } : { status, path: firstPath || "" };
   }).filter((entry) => entry.path);
 }
@@ -767,8 +812,10 @@ async function readFileText(filePath, rootDir) {
       throw new Error(`ExecPlan path escapes the worktree via a parent symlink: ${filePath}`);
     }
   }
-  const handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error(`Worktree path is not a regular file: ${filePath}`);
     return await handle.readFile({ encoding: "utf8" });
   } finally {
     await handle.close();
@@ -893,22 +940,178 @@ async function recoveryExecplanPath(candidate) {
 async function syntheticRecoveryImpl(candidate, evidence, residualRisk = []) {
   const resolved = typeof candidate.execplanPath === "string" ? { execplanPath: candidate.execplanPath, error: "" } : await recoveryExecplanPath(candidate);
   return {
+    /** Always `true`: the synthetic result stands in for a successful implementation phase. */
     ok: true,
+    /** Always `true`: gate re-running is deferred to the downstream deterministic gates. */
     gatesGreen: true,
+    /** Resolved ExecPlan path, or `''` when it could not be located. */
     execplanPath: resolved.execplanPath,
+    /** Zero: no work items were executed by this synthetic bridge. */
     workItemsCompleted: 0,
+    /** Zero: no work-item plan is materialized for a recovered branch. */
     workItemsTotal: 0,
+    /**
+     * One-line summaries of commits already on the branch, carried through
+     * as the delivered work.
+     */
     commits: evidence?.recentCommits || [],
+    /** Zero: no CodeRabbit runs were performed by the bridge. */
     coderabbitRuns: 0,
+    /** Open issues forcing fresh review, plus any ExecPlan-verification fault. */
     openIssues: [
       "recovered branch requires fresh review",
       ...resolved.error ? [`could not verify the durable ExecPlan: ${resolved.error}`] : []
     ],
-    // Advisory, non-blocking caveats the assessment carried forward: surfaced to
-    // the resumed reviewer/integrator without downgrading adopt-complete (#23).
+    /** Advisory caveats carried into review and integration without blocking resume. */
     residualRisk: [...residualRisk || []],
+    /** Human-readable note that the result was reconstructed from durable git state. */
     summary: "Recovered adopt-complete branch from durable git state."
   };
+}
+
+// src/workflows/df12-build-odw/shell-command.ts
+function commandSubstitutionEnd(command, start) {
+  let cursor = start + 2;
+  let quote = "";
+  let depth = 1;
+  while (cursor < command.length) {
+    const character = command[cursor];
+    if (character === void 0) return null;
+    if (character === "\\" && quote !== "'") {
+      cursor += 2;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = "";
+      cursor += 1;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      cursor += 1;
+      continue;
+    }
+    if (character === "$" && command[cursor + 1] === "(") {
+      depth += 1;
+      cursor += 2;
+      continue;
+    }
+    if (character === ")") {
+      depth -= 1;
+      cursor += 1;
+      if (!depth) return cursor;
+      continue;
+    }
+    cursor += 1;
+  }
+  return null;
+}
+function assignmentName(command, word) {
+  let cursor = word.start;
+  let name = "";
+  while (cursor < word.end) {
+    const character = command[cursor];
+    if (character === void 0) return null;
+    if (character === "=") return name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : null;
+    if (!/[A-Za-z0-9_]/.test(character)) return null;
+    name += character;
+    cursor += 1;
+  }
+  return null;
+}
+function tokenizeShellCommand(command) {
+  const words = [];
+  let cursor = 0;
+  let hasUnquotedControlOperator = false;
+  while (cursor < command.length) {
+    while (cursor < command.length) {
+      const whitespace = command[cursor];
+      if (whitespace === void 0 || !/\s/.test(whitespace)) break;
+      if (whitespace === "\n") hasUnquotedControlOperator = true;
+      cursor += 1;
+    }
+    if (cursor >= command.length) break;
+    const start = cursor;
+    let value = "";
+    let quote = "";
+    let hasWord = false;
+    while (cursor < command.length) {
+      const character = command[cursor];
+      if (character === void 0) return null;
+      if (!quote && /\s/.test(character)) break;
+      if (!quote && (character === ";" || character === "&" || character === "|")) {
+        hasUnquotedControlOperator = true;
+      }
+      if (!quote && (character === "'" || character === '"')) {
+        quote = character;
+        hasWord = true;
+        cursor += 1;
+        continue;
+      }
+      if (quote && character === quote) {
+        quote = "";
+        cursor += 1;
+        continue;
+      }
+      if (character === "$" && command[cursor + 1] === "(" && quote !== "'") {
+        const end = commandSubstitutionEnd(command, cursor);
+        if (end === null) return null;
+        value += command.slice(cursor, end);
+        hasWord = true;
+        cursor = end;
+        continue;
+      }
+      if (!quote && (character === "`" || character === "$" && command[cursor + 1] === "{")) return null;
+      if (character === "\\" && quote !== "'") {
+        cursor += 1;
+        if (cursor >= command.length) return null;
+        const escaped = command[cursor];
+        if (escaped === void 0) return null;
+        value += escaped;
+        hasWord = true;
+        cursor += 1;
+        continue;
+      }
+      value += character;
+      hasWord = true;
+      cursor += 1;
+    }
+    if (quote || !hasWord) return null;
+    words.push({ value, start, end: cursor });
+  }
+  const leadingAssignments = [];
+  let executableWordIndex = 0;
+  for (; executableWordIndex < words.length; executableWordIndex++) {
+    const word = words[executableWordIndex];
+    if (!word) return null;
+    const name = assignmentName(command, word);
+    if (!name) break;
+    leadingAssignments.push({ name, start: word.start, end: word.end });
+  }
+  if (words[executableWordIndex]?.value === "env") {
+    executableWordIndex += 1;
+    if (words[executableWordIndex]?.value.startsWith("-")) return null;
+    for (; executableWordIndex < words.length; executableWordIndex++) {
+      const word = words[executableWordIndex];
+      if (!word) return null;
+      const name = assignmentName(command, word);
+      if (!name) break;
+      leadingAssignments.push({ name, start: word.start, end: word.end });
+    }
+  }
+  return { words, leadingAssignments, executableWordIndex, hasUnquotedControlOperator };
+}
+function redactedShellCommand(command) {
+  const tokens = tokenizeShellCommand(command);
+  if (!tokens || tokens.hasUnquotedControlOperator) return "<redacted command>";
+  const parts = [];
+  let cursor = 0;
+  for (const assignment of tokens.leadingAssignments) {
+    parts.push(command.slice(cursor, assignment.start), `${assignment.name}=<redacted>`);
+    cursor = assignment.end;
+  }
+  parts.push(command.slice(cursor));
+  return parts.join("");
 }
 
 // src/workflows/df12-build-odw/config.ts
@@ -999,8 +1202,9 @@ function makeConfig(rawArgs) {
   const COMMIT_GATE_GUIDANCE2 = `The deterministic commit gates for this run are ${COMMIT_GATE_TEXT2}. AGENTS.md is authoritative for the gate set: if AGENTS.md names different or additional gate targets (for example sequential \`make check-fmt\`, \`make typecheck\`, \`make lint\`, \`make test\`), run those named targets as well \u2014 NEVER assume \`make all\` aggregates them, and never report gates as green unless every project-required gate passed at HEAD.${HOST_COMMIT_GATES2 ? " The workflow host independently re-runs the configured gates against your committed HEAD before review and integration; a gatesGreen claim the host cannot reproduce fails the stage with the host gate log as evidence." : ""}`;
   const CS_CHECK2 = cfg.csCheck !== false;
   const CS_CHECK_COMMAND2 = String(cfg.csCheckCommand || "cs-check-changed");
+  const REDACTED_CS_CHECK_COMMAND = redactedShellCommand(CS_CHECK_COMMAND2);
   const CS_CHECK_GUIDANCE2 = CS_CHECK2 ? [
-    `A deterministic CodeScene code-health check (\`${CS_CHECK_COMMAND2}\`) runs on your committed changed files AFTER the commit gates and BEFORE CodeRabbit. Clear a flagged code-health regression by refactoring the code. ONLY when further refinement would genuinely be deleterious to clarity or correctness, suppress a specific smell with a \`@codescene(disable:"Complex Method")\` comment (combine several as \`@codescene(disable:"Complex Method", disable:"Bumpy Road Ahead")\`) placed immediately before the affected function or method, and precede that suppression with a plain-language comment explaining why it is justified.`,
+    `A deterministic CodeScene code-health check (\`${REDACTED_CS_CHECK_COMMAND}\`) runs on your committed changed files AFTER the commit gates and BEFORE CodeRabbit. Clear a flagged code-health regression by refactoring the code. ONLY when further refinement would genuinely be deleterious to clarity or correctness, suppress a specific smell with a \`@codescene(disable:"Complex Method")\` comment (combine several as \`@codescene(disable:"Complex Method", disable:"Bumpy Road Ahead")\`) placed immediately before the affected function or method, and precede that suppression with a plain-language comment explaining why it is justified.`,
     "What the flagged smells mean:",
     "Module smells \u2014 Low Cohesion: the module/class carries several unrelated responsibilities (measured by LCOM4), breaking the single-responsibility principle. Brain Class (God Class): a large module with many functions and at least one Brain Method, holding too much responsibility at once. Developer Congestion: the code has become a coordination bottleneck because too many people must change it in parallel. Complex code by former contributors: a low-health hotspot whose original author has left the organisation carries heightened maintenance risk. Lines of Code: the file is simply too large.",
     "Function smells \u2014 Brain Method (God Function): one complex function concentrates the module's behaviour and becomes a local hotspot. DRY violations: duplicated logic that is actually changed together in predictable patterns. Complex Method: high cyclomatic complexity from many conditionals (if/for/while). Primitive Obsession: heavy use of raw primitives (integers, strings, floats) where a domain type would encapsulate the validation and meaning of the values. Large Method: a function with too many lines to comprehend easily.",
@@ -1412,20 +1616,35 @@ function makePrompts(config) {
     ].join("\n");
   }
   return {
+    /** Builds the `grepai search` invocation used by {@link codeSearchGuidance}. */
     grepaiSearchCommand,
+    /** Memtrace repo-selection guidance, pinned to `MEMTRACE_REPO_ID` when configured. */
     memtraceRepoGuidance,
+    /** Selects and renders the configured code-search backend's guidance text for the preamble. */
     codeSearchGuidance: codeSearchGuidance2,
+    /** Shared standing-rules block prepended to every agent prompt. */
     preamble: preamble2,
+    /** Prompt for the planning stage (initial or revision round). */
     planPrompt: planPrompt2,
+    /** Prompt for the adversarial design review of a submitted plan. */
     designReviewPrompt: designReviewPrompt2,
+    /** Prompt for full-plan implementation (legacy multi-work-item pass). */
     implementPrompt: implementPrompt2,
+    /** Prompt for implementing exactly one work item, dispatched per builder turn. */
     implementWorkItemPrompt: implementWorkItemPrompt2,
+    /** Prompt for a fix round that addresses blocking review findings. */
     fixPrompt: fixPrompt2,
+    /** Prompt for the code-review benchmark of a completed implementation. */
     codeReviewPrompt: codeReviewPrompt2,
+    /** Prompt for the adversarial community-of-experts review. */
     expertReviewPrompt: expertReviewPrompt2,
+    /** Prompt for reviewing a completed addendum pass. */
     addendumReviewPrompt: addendumReviewPrompt2,
+    /** Prompt for implementing an addendum pass's open sub-tasks. */
     implementAddendumPrompt: implementAddendumPrompt2,
+    /** Prompt for rebasing, squash-merging, and pushing a completed task. */
     integratePrompt: integratePrompt2,
+    /** Prompt for the post-merge codebase audit. */
     auditPrompt: auditPrompt2
   };
 }
@@ -1474,7 +1693,7 @@ async function verifyWriteProbe(probeFile, token) {
   let handle = null;
   let content = null;
   try {
-    handle = await fs.open(probeFile, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await fs.open(probeFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const stat = await handle.stat();
     if (stat.isFile()) {
       content = await handle.readFile({ encoding: "utf8" });
@@ -1544,7 +1763,12 @@ function makeWritePreflight({ enabled, targets }) {
     if (!taskAgentWritePreflight) taskAgentWritePreflight = runTaskAgentWritePreflight2(worktree, tag);
     return taskAgentWritePreflight;
   }
-  return { runTaskAgentWritePreflight: runTaskAgentWritePreflight2, ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2 };
+  return {
+    /** Runs the host probe then every adapter probe once, unmemoized. */
+    runTaskAgentWritePreflight: runTaskAgentWritePreflight2,
+    /** Memoized per-run entry point: dispatches the preflight at most once and shares its result across concurrent tasks. */
+    ensureTaskAgentWriteAccess: ensureTaskAgentWriteAccess2
+  };
 }
 
 // src/workflows/df12-build-odw/execplan-durability.ts
@@ -1558,6 +1782,9 @@ function execplanRelPath(worktree, planPath) {
   const rel = path.isAbsolute(raw) ? path.relative(worktree, raw) : path.normalize(raw);
   if (!raw || !rel || rel === "." || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
     return { ok: false, relPath: "", detail: `ExecPlan path escapes the assigned worktree: ${raw || "<empty>"}` };
+  }
+  if (!isTaskArtefactPath(rel)) {
+    return { ok: false, relPath: "", detail: `ExecPlan path is outside the task-scoped docs/execplans/*.md scope: ${raw}` };
   }
   return { ok: true, relPath: rel, detail: "" };
 }
@@ -1671,10 +1898,6 @@ async function salvageTaskArtefacts(worktree, candidatePaths, tag) {
     const contained = execplanRelPath(worktree, raw);
     if (!contained.ok) {
       skipped.push({ path: raw, reason: contained.detail });
-      continue;
-    }
-    if (!isTaskArtefactPath(contained.relPath)) {
-      skipped.push({ path: raw, reason: `normalizes outside the docs/execplans/*.md artefact scope (${contained.relPath})` });
       continue;
     }
     const probe = await fileState(contained.relPath, worktree);
@@ -1929,17 +2152,45 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
     const evidence = await collectAssessmentEvidence(task, wt);
     const fast = fastAssessmentClassification(evidence);
     if (fast) {
-      return { evidence, assessment: deterministicAssessment(fast.classification, evidence, fast.reason), assessmentError: "" };
+      return {
+        /** Host-collected git evidence for the candidate branch. */
+        evidence,
+        /** The assessment object (deterministic or model), or null on failure. */
+        assessment: deterministicAssessment(fast.classification, evidence, fast.reason),
+        /** Error text when no structured assessment was produced; '' otherwise. */
+        assessmentError: ""
+      };
     }
     try {
       const label = `recover-assess:${candidate.taskId}${candidate.isAddendum ? "-addendum" : ""}`;
       const assessment = await runModelAssessment(() => recoveryAssessmentPrompt2(task, candidate, evidence), "Recovery", label, evidence);
       if (!assessment) {
-        return { evidence, assessment: null, assessmentError: "assessment agent returned no structured output" };
+        return {
+          /** Host-collected git evidence for the candidate branch. */
+          evidence,
+          /** The assessment object (deterministic or model), or null on failure. */
+          assessment: null,
+          /** Error text when no structured assessment was produced; '' otherwise. */
+          assessmentError: "assessment agent returned no structured output"
+        };
       }
-      return { evidence, assessment: { ...assessment, hostEvidence: evidence }, assessmentError: "" };
+      return {
+        /** Host-collected git evidence for the candidate branch. */
+        evidence,
+        /** The assessment object (deterministic or model), or null on failure. */
+        assessment: { ...assessment, hostEvidence: evidence },
+        /** Error text when no structured assessment was produced; '' otherwise. */
+        assessmentError: ""
+      };
     } catch (error) {
-      return { evidence, assessment: null, assessmentError: error && error.message || String(error) };
+      return {
+        /** Host-collected git evidence for the candidate branch. */
+        evidence,
+        /** The assessment object (deterministic or model), or null on failure. */
+        assessment: null,
+        /** Error text when no structured assessment was produced; '' otherwise. */
+        assessmentError: error && error.message || String(error)
+      };
     }
   }
   function shouldAssessFailure2(result, wt) {
@@ -1982,7 +2233,18 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
       };
     }
   }
-  return { assessmentPrompt: assessmentPrompt2, recoveryAssessmentPrompt: recoveryAssessmentPrompt2, assessRecoveryCandidate: assessRecoveryCandidate2, shouldAssessFailure: shouldAssessFailure2, attachAssessment: attachAssessment2 };
+  return {
+    /** Build the in-run failure-assessment prompt for a surviving branch. */
+    assessmentPrompt: assessmentPrompt2,
+    /** Build the fresh-run recovery-assessment prompt (transcript unavailable by design). */
+    recoveryAssessmentPrompt: recoveryAssessmentPrompt2,
+    /** Assess a discovered recovery candidate through the ADR 002 contract. */
+    assessRecoveryCandidate: assessRecoveryCandidate2,
+    /** The eligibility gate: whether a failed result's branch reaches model assessment. */
+    shouldAssessFailure: shouldAssessFailure2,
+    /** Attach an assessment (or infra-fault salvage) to a task result; never merges or ticks the roadmap. */
+    attachAssessment: attachAssessment2
+  };
 }
 
 // src/workflows/df12-build-odw/remediation.ts
@@ -2017,15 +2279,19 @@ var stepOf = (id) => String(id).split(".").slice(0, 2).join(".");
 function dedupeProposals(proposals) {
   const byKey = /* @__PURE__ */ new Map();
   for (const proposal of proposals || []) {
-    const key = String(proposal?.title || "").trim().toLowerCase().replace(/\s+/g, " ");
-    if (!key) continue;
-    const source = String(proposal?.source || proposal?.rationale || "");
+    const title = typeof proposal?.title === "string" ? proposal.title.trim() : "";
+    const key = title.toLowerCase().replace(/\s+/g, " ");
+    if (!key) throw new TypeError("remediation proposal title must be a non-blank string");
+    const fallback = String(proposal?.source || proposal?.rationale || "");
+    const sources = Array.isArray(proposal.sources) ? proposal.sources.map((source) => String(source)).filter(Boolean) : [];
+    if (fallback && !sources.includes(fallback)) sources.push(fallback);
+    const uniqueSources = [...new Set(sources)];
     const existing = byKey.get(key);
     if (existing) {
-      if (source && !(existing.sources || []).includes(source)) existing.sources = [...existing.sources || [], source];
+      for (const source of uniqueSources) if (!existing.sources.includes(source)) existing.sources.push(source);
       continue;
     }
-    byKey.set(key, { ...proposal, sources: source ? [source] : [] });
+    byKey.set(key, { ...proposal, title, sources: uniqueSources });
   }
   return [...byKey.values()];
 }
@@ -2083,7 +2349,16 @@ function makeRemediation({ preamble: preamble2, worktreeSafetyNet: worktreeSafet
     if (triageNeedsEscalation(deduped)) options.model = triageEscalationModel;
     return await agent(triagePrompt2(stepPrefix, deduped), triageAgentOptions2(options));
   }
-  return { triagePrompt: triagePrompt2, runTriage: runTriage2, dedupeProposals, triageNeedsEscalation };
+  return {
+    /** Builds the triage agent's prompt for one settled step's proposals. */
+    triagePrompt: triagePrompt2,
+    /** Dedupes and dispatches the triage agent, escalating model choice when warranted. */
+    runTriage: runTriage2,
+    /** Re-exported for callers that need the dedup pass without a full triage run. */
+    dedupeProposals,
+    /** Re-exported for callers that need the escalation check without a full triage run. */
+    triageNeedsEscalation
+  };
 }
 
 // src/workflows/df12-build-odw/host-review.ts
@@ -2129,8 +2404,27 @@ function coderabbitBlockingItems(findings) {
   return (findings || []).filter((finding) => CODERABBIT_BLOCKING_SEVERITIES.has(String(finding.severity || "").toLowerCase())).map((finding) => `CodeRabbit (${finding.severity}) ${finding.fileName || "unknown file"}: ${String(finding.comment || finding.codegenInstructions || "see the recorded suggestions").slice(0, 500)}`);
 }
 var coderabbitCapture = { reviews: 0, findings: 0, rateLimitedRuns: 0, deferred: 0, bySeverity: {}, sinkError: "" };
-var hostGateMetrics = { runs: 0, failures: 0 };
-var csCheckMetrics = { runs: 0, failures: 0, skipped: 0 };
+var hostGateMetrics = {
+  /** Total gate executions attempted. */
+  runs: 0,
+  /** Gate executions that failed. */
+  failures: 0
+};
+var csCheckMetrics = {
+  /** Check executions attempted (excludes skips). */
+  runs: 0,
+  /** Check executions that reported code-health issues. */
+  failures: 0,
+  /** Availability probes that failed for infrastructure reasons. */
+  probeFailures: 0,
+  /** Checks skipped because the configured binary was not on PATH. */
+  skipped: 0
+};
+function codeSceneExecutable(command) {
+  const tokens = tokenizeShellCommand(command);
+  if (!tokens || tokens.hasUnquotedControlOperator) return null;
+  return tokens.words[tokens.executableWordIndex]?.value || "";
+}
 var gateLogDirCache = null;
 function gateLogRoot() {
   if (!gateLogDirCache) {
@@ -2141,12 +2435,17 @@ function gateLogRoot() {
   }
   return gateLogDirCache;
 }
-function hostGateLogPath(tag, roundLabel, index) {
+async function createHostGateLogNamespace() {
+  const fs = process.getBuiltinModule("node:fs/promises");
+  const path = process.getBuiltinModule("node:path");
+  return fs.mkdtemp(path.join(gateLogRoot(), "run-"));
+}
+function hostGateLogPath(logNamespace, tag, roundLabel, index) {
   const slug = (value) => String(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
   const path = process.getBuiltinModule("node:path");
-  return path.join(gateLogRoot(), `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`);
+  return path.join(logNamespace, `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`);
 }
-function makeHostReview(config) {
+function makeHostReview(config, deps = {}) {
   const {
     base,
     coderabbitAttempts,
@@ -2157,15 +2456,16 @@ function makeHostReview(config) {
     csCheck,
     csCheckCommand
   } = config;
+  const createGateLogNamespace = deps.createGateLogNamespace || createHostGateLogNamespace;
   function coderabbitBackoffMinutes2(seed) {
     let hash = 5381;
     for (const ch of String(seed)) hash = (hash * 33 ^ ch.codePointAt(0)) >>> 0;
     const [low, high] = backoffRange;
     return low + hash % (high - low + 1);
   }
-  async function runCoderabbitHostReview2(worktree, label, deps = {}) {
-    const exec = deps.exec || execFileStatus;
-    const sleep = deps.sleep || hostSleepMinutes;
+  async function runCoderabbitHostReview2(worktree, label, deps2 = {}) {
+    const exec = deps2.exec || execFileStatus;
+    const sleep = deps2.sleep || hostSleepMinutes;
     const commandArgs = ["review", "--agent", "--type", "committed", "--base", base];
     for (let attempt = 1; ; attempt++) {
       log(`[${label}] CodeRabbit host review attempt ${attempt} of ${coderabbitAttempts}`);
@@ -2213,14 +2513,15 @@ function makeHostReview(config) {
   }
   async function runHostCommitGates2(worktree, tag, roundLabel) {
     const results2 = [];
+    const logNamespace = await createGateLogNamespace();
     for (const [index, command] of commitGates.entries()) {
       hostGateMetrics.runs += 1;
       log(`[task ${tag}] host gate ${index + 1}/${commitGates.length} (${roundLabel}): ${command}`);
-      const logFile = hostGateLogPath(tag, roundLabel, index);
+      const logFile = hostGateLogPath(logNamespace, tag, roundLabel, index);
       const outcome = await streamGate(command, worktree, logFile);
       if (!outcome.ok) {
         hostGateMetrics.failures += 1;
-        const timedOut = outcome.killed ? ` (killed after the ${commitGateTimeoutSeconds}s gate timeout)` : "";
+        const timedOut = outcome.timedOut ? ` (killed after the ${commitGateTimeoutSeconds}s gate timeout)` : "";
         results2.push({ command, ok: false, logFile });
         return {
           green: false,
@@ -2240,10 +2541,14 @@ ${outcome.tail}`
     return new Promise((resolve) => {
       const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
       const openFlags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
-      const stream = fs.createWriteStream(logFile, { flags: openFlags, mode: 384 });
+      const stream = deps.createGateLogStream ? deps.createGateLogStream(logFile, { flags: openFlags, mode: 384 }) : fs.createWriteStream(logFile, { flags: openFlags, mode: 384 });
       const tail = [];
       let carry = "";
       let killed = false;
+      let timedOut = false;
+      let streamFailure = "";
+      let finishing = false;
+      let completeGate = null;
       let settled = false;
       const record = (chunk) => {
         if (!stream.write(chunk) && !killed) {
@@ -2259,80 +2564,182 @@ ${outcome.tail}`
         }
       };
       const finish = (ok, extraTail) => {
-        if (settled) return;
-        settled = true;
+        if (settled || finishing) return;
+        finishing = true;
         if (carry) {
           tail.push(carry);
           if (tail.length > TAIL_LINES) tail.shift();
         }
         if (extraTail) tail.push(extraTail);
-        stream.end(() => resolve({ ok, killed, tail: tail.slice(-TAIL_LINES).join("\n").trim() }));
+        const complete = (error) => {
+          if (settled) return;
+          settled = true;
+          completeGate = null;
+          const finalFailure = streamFailure || (error ? `gate log write failed: ${error.message}` : "");
+          if (finalFailure && finalFailure !== extraTail) tail.push(finalFailure);
+          resolve({
+            ok: ok && !finalFailure,
+            killed,
+            timedOut,
+            tail: tail.slice(-TAIL_LINES).join("\n").trim()
+          });
+        };
+        completeGate = complete;
+        if (stream.destroyed) complete();
+        else stream.end(complete);
       };
-      stream.on("error", (error) => finish(false, `gate log write failed: ${error.message}`));
-      const child = spawn("sh", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn("sh", ["-c", command], {
+        cwd,
+        detached: process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe"]
+      });
       stream.on("drain", () => {
         child.stdout?.resume();
         child.stderr?.resume();
       });
       child.stdout.on("data", record);
       child.stderr.on("data", record);
-      const sigterm = setTimeout(() => {
+      const signalGateProcess = (signal) => {
+        if (process.platform !== "win32" && child.pid && child.pid > 0) {
+          try {
+            process.kill(-child.pid, signal);
+            return;
+          } catch {
+          }
+        }
+        child.kill(signal);
+      };
+      let sigterm;
+      let sigkill;
+      const clearTerminationTimeouts = () => {
+        if (sigterm) clearTimeout(sigterm);
+        if (sigkill) clearTimeout(sigkill);
+      };
+      const terminateGate = (didTimeOut) => {
+        if (killed) return;
         killed = true;
+        timedOut = didTimeOut;
         child.stdout?.resume();
         child.stderr?.resume();
-        child.kill("SIGTERM");
-        setTimeout(() => child.kill("SIGKILL"), 2e3).unref();
+        signalGateProcess("SIGTERM");
+        sigkill = setTimeout(() => signalGateProcess("SIGKILL"), 2e3);
+        sigkill.unref();
+      };
+      stream.on("error", (error) => {
+        streamFailure = `gate log write failed: ${error.message}`;
+        if (finishing) completeGate?.(error);
+        else terminateGate(false);
+      });
+      sigterm = setTimeout(() => {
+        terminateGate(true);
       }, commitGateTimeoutSeconds * 1e3);
       child.on("close", (code) => {
-        clearTimeout(sigterm);
-        finish(code === 0 && !killed);
+        clearTerminationTimeouts();
+        finish(code === 0 && !killed, streamFailure);
       });
       child.on("error", (error) => {
-        clearTimeout(sigterm);
+        clearTerminationTimeouts();
         finish(false, `spawn failed: ${error.message}`);
       });
     });
   }
   async function runCodeSceneCheck2(worktree, tag, label) {
     if (!csCheck) return { clean: true, skipped: true, detail: "", logFile: "" };
-    const bin = csCheckCommand.trim().split(/\s+/)[0] || "cs-check-changed";
-    const probe = await execFileStatus("sh", ["-c", 'command -v "$1"', "sh", bin], { cwd: worktree });
+    const redactedCommand = redactedShellCommand(csCheckCommand);
+    const bin = codeSceneExecutable(csCheckCommand);
+    if (bin === null) {
+      csCheckMetrics.probeFailures += 1;
+      return {
+        clean: false,
+        skipped: false,
+        detail: `CodeScene availability probe for \`${redactedCommand}\` failed: command could not be parsed safely`,
+        logFile: ""
+      };
+    }
+    if (!bin) {
+      csCheckMetrics.probeFailures += 1;
+      return {
+        clean: false,
+        skipped: false,
+        detail: `CodeScene availability probe for \`${redactedCommand}\` failed: command has no executable`,
+        logFile: ""
+      };
+    }
+    const missingSentinel = "__DF12_CODESCENE_BINARY_MISSING__";
+    const probe = await execFileStatus(
+      "sh",
+      ["-c", 'command -v "$1" >/dev/null 2>&1 || { printf "%s\\n" "$2"; exit 127; }', "sh", bin, missingSentinel],
+      { cwd: worktree }
+    );
     if (!probe.ok) {
-      csCheckMetrics.skipped += 1;
-      log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`);
-      return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: "" };
+      if (probe.stdout.trim() === missingSentinel) {
+        csCheckMetrics.skipped += 1;
+        log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`);
+        return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: "" };
+      }
+      csCheckMetrics.probeFailures += 1;
+      const fault = [probe.message, probe.stderr, probe.signal ? `signal ${probe.signal}` : "", probe.killed ? "probe killed" : ""].map((part) => String(part || "").trim()).filter(Boolean).join("; ");
+      return {
+        clean: false,
+        skipped: false,
+        detail: `CodeScene availability probe for \`${bin}\` failed: ${fault || "unknown probe failure"}`,
+        logFile: ""
+      };
     }
     csCheckMetrics.runs += 1;
-    const logFile = hostGateLogPath(tag, `cs-${label}`, 0);
-    log(`[task ${tag}] CodeScene check (${label}): ${csCheckCommand}`);
+    const logFile = hostGateLogPath(await createGateLogNamespace(), tag, `cs-${label}`, 0);
+    log(`[task ${tag}] CodeScene check (${label}): ${redactedCommand}`);
     const outcome = await streamGate(csCheckCommand, worktree, logFile);
     if (outcome.ok) return { clean: true, skipped: false, detail: "", logFile };
     csCheckMetrics.failures += 1;
-    const timedOut = outcome.killed ? ` (killed after the ${commitGateTimeoutSeconds}s timeout)` : "";
-    return { clean: false, skipped: false, detail: `CodeScene check \`${csCheckCommand}\` reported code-health issues${timedOut}; full log: ${logFile}; output tail:
+    const timedOut = outcome.timedOut ? ` (killed after the ${commitGateTimeoutSeconds}s timeout)` : "";
+    return { clean: false, skipped: false, detail: `CodeScene check \`${redactedCommand}\` reported code-health issues${timedOut}; full log: ${logFile}; output tail:
 ${outcome.tail}`, logFile };
   }
-  return { coderabbitBackoffMinutes: coderabbitBackoffMinutes2, runCoderabbitHostReview: runCoderabbitHostReview2, recordCoderabbitReview: recordCoderabbitReview2, runHostCommitGates: runHostCommitGates2, runCodeSceneCheck: runCodeSceneCheck2 };
+  return {
+    /** Deterministic seeded backoff jitter (minutes) for rate-limit retries. */
+    coderabbitBackoffMinutes: coderabbitBackoffMinutes2,
+    /** Run one host CodeRabbit review against committed changes; backoff is absorbed in wall-clock. */
+    runCoderabbitHostReview: runCoderabbitHostReview2,
+    /** Fold a review's findings into the capture aggregate and the durable sink. */
+    recordCoderabbitReview: recordCoderabbitReview2,
+    /** Re-run the configured commit gates against committed HEAD; host-verifies a gatesGreen claim. */
+    runHostCommitGates: runHostCommitGates2,
+    /** Run the CodeScene code-health check, skipping gracefully when its binary is absent. */
+    runCodeSceneCheck: runCodeSceneCheck2
+  };
 }
 
 // src/workflows/df12-build-odw/run-task.ts
 function summarizeReviewVerdict(review) {
   if (!review) return null;
   return {
+    /** The reviewer's verdict string (e.g. `pass`), empty when unset. */
     verdict: review.verdict || "",
+    /** Blocking items the reviewer raised; empty means nothing blocked. */
     blocking: review.blocking || [],
+    /** The reviewer's summary line, empty when unset. */
     summary: review.summary || ""
   };
 }
 function summarizeFixReport(fix) {
   if (!fix) return null;
-  if (typeof fix === "string") return { summary: fix };
+  if (typeof fix === "string") return {
+    /** Summary carried when the fix report was a bare string. */
+    summary: fix
+  };
   return {
+    /** Commit subjects the fix produced, defaulted to an empty list. */
     commits: fix.commits || [],
+    /** True only when the fix reported the literal boolean `true`. */
     gatesGreen: fix.gatesGreen === true,
+    /** Count of CodeRabbit runs the fix performed, coerced to a number. */
     coderabbitRuns: Number(fix.coderabbitRuns) || 0,
+    /** Blocking items the fix claims to have resolved. */
     resolved: fix.resolved || [],
+    /** Blocking items the fix left open. */
     openIssues: fix.openIssues || [],
+    /** The fix agent's summary line, empty when unset. */
     summary: fix.summary || ""
   };
 }
@@ -2345,6 +2752,7 @@ function integrationHaltDetail(integration) {
 }
 function makeTaskPipeline(deps) {
   const {
+    faultMetrics: faultMetrics2,
     MAX_DESIGN_ROUNDS: MAX_DESIGN_ROUNDS2,
     MAX_REVIEW_ROUNDS: MAX_REVIEW_ROUNDS2,
     MAX_WORK_ITEM_ROUNDS: MAX_WORK_ITEM_ROUNDS2,
@@ -2525,6 +2933,7 @@ function makeTaskPipeline(deps) {
       await recordCoderabbitReview2(`${tag} ${itemLabel} a${attempt}`, review);
       runs += 1;
       if (review.outcome === "auth") {
+        faultMetrics2.authFaults += 1;
         return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: `CodeRabbit host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } };
       }
       if (review.outcome === "rate-limited" || review.outcome === "error") {
@@ -2576,6 +2985,7 @@ function makeTaskPipeline(deps) {
       lastImpl = impl;
       const authDetail = implementationAuthFailureDetail(impl);
       if (authDetail) {
+        faultMetrics2.authFaults += 1;
         return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
       }
       if (!impl || !impl.ok || !impl.gatesGreen) {
@@ -2617,8 +3027,9 @@ function makeTaskPipeline(deps) {
     if (final.status === "unreadable") return fail(`could not read the committed ExecPlan after the build: ${final.error}`, openIssues);
     if (final.status === "missing") return fail(`the committed ExecPlan is absent after the build: ${contained.relPath}`, openIssues);
     const remaining = (final.items || []).filter((entry) => !entry.ticked);
-    if (remaining.length) {
-      return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS2}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0].text}`, openIssues);
+    const firstRemaining = remaining[0];
+    if (firstRemaining) {
+      return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS2}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${firstRemaining.text}`, openIssues);
     }
     return {
       impl: {
@@ -2653,6 +3064,7 @@ function makeTaskPipeline(deps) {
     })), `implement:${tag}`));
     const authDetail = implementationAuthFailureDetail(impl);
     if (authDetail) {
+      faultMetrics2.authFaults += 1;
       return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: authDetail, openIssues: impl?.openIssues || [], worktree, proposals: [], ...extra } };
     }
     if (!impl || !impl.ok || !impl.gatesGreen) {
@@ -2713,7 +3125,7 @@ function makeTaskPipeline(deps) {
     } catch (error) {
       const message = error && error.message || String(error);
       if (!infrastructureFailureDetail(message)) throw error;
-      faultMetrics.infraFaults += 1;
+      faultMetrics2.infraFaults += 1;
       return {
         fault: {
           id: tag,
@@ -2744,7 +3156,8 @@ function makeTaskPipeline(deps) {
           reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: gateBlocking, hostGates: hostGates.results, fix: null });
           if (round === MAX_REVIEW_ROUNDS2) break;
           const gateFix = await dispatchFixAndVerify(task, worktree, plan, gateBlocking, `fix:${tag} r${round}`, round);
-          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(gateFix.report);
+          const gateRound = reviewRounds.at(-1);
+          if (gateRound) gateRound.fix = summarizeFixReport(gateFix.report);
           if (gateFix.dirtyDetail) {
             return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the gate-fix round left uncommitted state (${gateFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
           }
@@ -2759,7 +3172,8 @@ function makeTaskPipeline(deps) {
           reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: csBlocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null });
           if (round === MAX_REVIEW_ROUNDS2) break;
           const csFix = await dispatchFixAndVerify(task, worktree, plan, csBlocking, `fix:${tag} cs r${round}`, round);
-          reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(csFix.report);
+          const codeSceneRound = reviewRounds.at(-1);
+          if (codeSceneRound) codeSceneRound.fix = summarizeFixReport(csFix.report);
           if (csFix.dirtyDetail) {
             return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeScene-fix round left uncommitted state (${csFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
           }
@@ -2770,6 +3184,7 @@ function makeTaskPipeline(deps) {
         const coderabbit = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} r${round}`);
         await recordCoderabbitReview2(`${tag} r${round}`, coderabbit);
         if (coderabbit.outcome === "auth") {
+          faultMetrics2.authFaults += 1;
           return { id: tag, status: "fatal-auth", stage: "review", detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, reviewRounds, worktree, proposals, ...kindExtra };
         }
         if (coderabbit.outcome === "rate-limited" || coderabbit.outcome === "error") {
@@ -2783,7 +3198,8 @@ function makeTaskPipeline(deps) {
             reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: coderabbitBlocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null });
             if (round === MAX_REVIEW_ROUNDS2) break;
             const crFix = await dispatchFixAndVerify(task, worktree, plan, coderabbitBlocking, `fix:${tag} r${round}`, round);
-            reviewRounds[reviewRounds.length - 1].fix = summarizeFixReport(crFix.report);
+            const codeRabbitRound = reviewRounds.at(-1);
+            if (codeRabbitRound) codeRabbitRound.fix = summarizeFixReport(crFix.report);
             if (crFix.dirtyDetail) {
               return { id: tag, status: "failed", stage: "implement", detail: `FIX DURABILITY: the CodeRabbit-fix round left uncommitted state (${crFix.dirtyDetail}); every fix must be committed before re-review or integration`, reviewRounds, worktree, proposals, ...kindExtra };
             }
@@ -2812,7 +3228,7 @@ function makeTaskPipeline(deps) {
         ].filter(Boolean).join(" and ");
         reviewRounds.push({ round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking: [], fix: null });
         if (reviewInfraFaults.length) {
-          faultMetrics.infraFaults += 1;
+          faultMetrics2.infraFaults += 1;
           return {
             id: tag,
             status: "infra-fault",
@@ -2918,6 +3334,7 @@ function makeTaskPipeline(deps) {
         const impl2 = await buildLock2(() => withInfraRetry2(() => agent(implementAddendumPrompt2(task, worktree), buildAgentOptions2({ phase: "Implement", label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`));
         const authDetail = implementationAuthFailureDetail(impl2);
         if (authDetail) {
+          faultMetrics2.authFaults += 1;
           return {
             id: tag,
             status: "fatal-auth",
@@ -2971,6 +3388,7 @@ function makeTaskPipeline(deps) {
           const coderabbit = await runCoderabbitHostReview2(worktree, `coderabbit:${tag} addendum`);
           await recordCoderabbitReview2(`${tag} addendum`, coderabbit);
           if (coderabbit.outcome === "auth") {
+            faultMetrics2.authFaults += 1;
             return { id: tag, status: "fatal-auth", stage: "auth", detail: `CodeRabbit host review is not authenticated: ${coderabbit.detail}`, worktree, proposals, kind: "addendum" };
           }
           const blockingFindings = coderabbitBlockingItems(coderabbit.findings);
@@ -3024,11 +3442,22 @@ function makeTaskPipeline(deps) {
       return outcome;
     } catch (error) {
       const detail = `unhandled agent error: ${error && error.message || String(error)}`;
-      const result = resultFromUnhandledAgentError(tag, detail, { worktree });
+      const result = resultFromUnhandledAgentError(tag, detail, { worktree }, faultMetrics2);
       return await attachAssessment2(task, wt, result);
     }
   }
-  return { runPlanDesignLoop: runPlanDesignLoop2, runWorkItemBuildLoop: runWorkItemBuildLoop2, runImplementationStage: runImplementationStage2, runDualReviewAndIntegration: runDualReviewAndIntegration2, runTask: runTask2 };
+  return {
+    /** Adversarial plan <-> design-review loop; the entry point for continue-mode resume. */
+    runPlanDesignLoop: runPlanDesignLoop2,
+    /** Host-driven checklist build, one turn per unticked ExecPlan Progress item. */
+    runWorkItemBuildLoop: runWorkItemBuildLoop2,
+    /** Implementation stage: work-item loop or single-turn build, then the durability gate. */
+    runImplementationStage: runImplementationStage2,
+    /** Dual review, fix rounds and integration; shared with review-mode recovery resume. */
+    runDualReviewAndIntegration: runDualReviewAndIntegration2,
+    /** Full per-task pipeline from worktree creation through integration. */
+    runTask: runTask2
+  };
 }
 
 // src/workflows/df12-build-odw/main.ts
@@ -3136,7 +3565,8 @@ function modelRouting() {
     assessment: { adapter: ASSESSMENT_ADAPTER, model: ASSESSMENT_MODEL }
   };
 }
-var withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS);
+var runFaultMetrics = createFaultMetrics();
+var withInfraRetry = makeWithInfraRetry(STAGE_ATTEMPTS, runFaultMetrics);
 var discoverRecoveryCandidates = makeRecoveryDiscovery({
   base: BASE,
   resumeTaskId: RESUME_TASK_ID,
@@ -3351,7 +3781,7 @@ async function executeResume(task, resume, mergeLock2) {
     return await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock2, { kind: "recovery-resume" });
   } catch (error) {
     const detail = `unhandled agent error: ${error && error.message || String(error)}`;
-    return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: "recovery-resume" });
+    return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: "recovery-resume" }, runFaultMetrics);
   }
 }
 async function runRecovery(root, mergeLock2 = null) {
@@ -3428,7 +3858,7 @@ async function runRecovery(root, mergeLock2 = null) {
         });
         summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: "assessment-error" });
         if (authFailureDetail(assessed.assessmentError) || providerFailureDetail(assessed.assessmentError)) {
-          return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessed.assessmentError) };
+          return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessed.assessmentError, {}, runFaultMetrics) };
         }
         continue;
       }
@@ -3576,6 +4006,7 @@ var {
   runDualReviewAndIntegration,
   runTask
 } = makeTaskPipeline({
+  faultMetrics: runFaultMetrics,
   CS_CHECK,
   runCodeSceneCheck,
   MAX_DESIGN_ROUNDS,
@@ -3721,12 +4152,15 @@ async function fillPool() {
           return {
             id: task.id,
             task,
-            result: resultFromUnhandledAgentError(task.id, detail)
+            result: resultFromUnhandledAgentError(task.id, detail, {}, runFaultMetrics)
           };
         }
       )
     );
   }
+}
+function redactedCodeSceneCommand(command) {
+  return redactedShellCommand(command);
 }
 // --- Worker-pool control loop -----------------------------------------------
 async function workflowMain() {
@@ -3871,6 +4305,11 @@ async function workflowMain() {
       timeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
       ...hostGateMetrics
     },
+    codeScene: {
+      enabled: CS_CHECK,
+      command: redactedCodeSceneCommand(CS_CHECK_COMMAND),
+      ...csCheckMetrics
+    },
     stageAttempts: STAGE_ATTEMPTS,
     // Host-driven build loop configuration: one builder turn per unticked
     // ExecPlan Progress item when enabled, with committed progress verified
@@ -3879,7 +4318,7 @@ async function workflowMain() {
     // Bounded-cardinality fault metrics (fixed keys): stage retries spent on
     // infrastructure faults plus terminal fault counts per class, so operators
     // can read retry pressure straight from the result instead of the logs.
-    faultMetrics: { ...faultMetrics },
+    faultMetrics: { ...runFaultMetrics },
     // Host-run CodeRabbit review aggregate: effective configuration plus
     // bounded counters (reviews run, findings by severity, rate-limited runs,
     // deferred reviews). Per-finding detail goes to the JSONL sink when

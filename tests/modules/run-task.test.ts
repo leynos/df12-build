@@ -13,6 +13,7 @@ import {
   summarizeFixReport,
   summarizeReviewVerdict,
 } from '../../src/workflows/df12-build-odw/run-task.ts'
+import type { FaultMetrics } from '../../src/workflows/df12-build-odw/types.ts'
 
 const globals = globalThis as Record<string, unknown>
 
@@ -46,6 +47,7 @@ const task = { id: '1.2.3', title: 'Implement the parser', requires: [], rationa
 
 type Script = (label: string, prompt: string) => unknown
 let labels: string[] = []
+let runFaultMetrics: FaultMetrics
 
 function scriptAgent(script: Script) {
   globals.agent = async (prompt: string, opts: Record<string, unknown> = {}) => {
@@ -57,6 +59,7 @@ function scriptAgent(script: Script) {
 
 function subject(worktree: string, overrides: Record<string, unknown> = {}) {
   return makeTaskPipeline({
+    faultMetrics: runFaultMetrics,
     MAX_DESIGN_ROUNDS: 2,
     MAX_REVIEW_ROUNDS: 2,
     // The upstream defaults for these are ON, but the module tests drive the
@@ -104,6 +107,7 @@ function subject(worktree: string, overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   labels = []
+  runFaultMetrics = { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 }
   globals.log = () => {}
   globals.phase = () => {}
   globals.parallel = async (thunks: Array<() => Promise<unknown>>) =>
@@ -123,6 +127,18 @@ function happyScript(): Script {
     if (label.startsWith('integrate:')) return cleanIntegration
     throw new Error(`unscripted label: ${label}`)
   }
+}
+
+function prepareSingleWorkItem(worktree: string) {
+  writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: IN PROGRESS\n\n## Progress\n\n- [ ] WI-1: only\n')
+  git(worktree, 'add', '.')
+  git(worktree, 'commit', '-m', 'Add one-item checklist')
+}
+
+function completeSingleWorkItem(worktree: string) {
+  writeFileSync(path.join(worktree, PLAN_PATH), '# ExecPlan\n\nStatus: COMPLETE\n\n## Progress\n\n- [x] WI-1: only\n')
+  git(worktree, 'commit', '-aqm', 'Complete WI-1')
+  return { ok: true, gatesGreen: true, workItemsCompleted: 1, workItemsTotal: 1, commits: ['c1'], coderabbitRuns: 0, openIssues: [], summary: 'item done' }
 }
 
 // The five booleans the host requires before a task counts as integrated. The
@@ -287,6 +303,75 @@ describe('runTask', () => {
     const outcome = await subject(worktree).runTask(task, null)
     expect(outcome.status).toBe('fatal-auth')
     expect(outcome.assessed).toBeUndefined()
+    expect(runFaultMetrics.authFaults).toBe(1)
+  })
+
+  test('a per-work-item implementation auth failure increments authFaults', async () => {
+    const worktree = makeWorktree()
+    prepareSingleWorkItem(worktree)
+    scriptAgent((label, prompt) => {
+      if (label.startsWith('implement:')) return { ok: false, gatesGreen: false, summary: 'Not logged in', openIssues: [] }
+      return happyScript()(label, prompt)
+    })
+
+    const outcome = await subject(worktree, { PER_WORK_ITEM_BUILD: true }).runTask(task, null)
+
+    expect(outcome.status).toBe('fatal-auth')
+    expect(runFaultMetrics.authFaults).toBe(1)
+  })
+
+  test('an addendum implementation auth failure increments authFaults', async () => {
+    const worktree = makeWorktree()
+    const addendum = { ...task, isAddendum: true, subtasks: ['1.2.3.1'] }
+    scriptAgent((label) => {
+      if (label.startsWith('addendum:')) return { ok: false, gatesGreen: false, summary: 'Not logged in', openIssues: [] }
+      throw new Error(`unscripted label: ${label}`)
+    })
+
+    const outcome = await subject(worktree).runTask(addendum, null)
+
+    expect(outcome.status).toBe('fatal-auth')
+    expect(runFaultMetrics.authFaults).toBe(1)
+  })
+
+  test.each([
+    {
+      name: 'between-item',
+      prepare: (worktree: string) => {
+        prepareSingleWorkItem(worktree)
+        scriptAgent((label, prompt) => label.startsWith('implement:') ? completeSingleWorkItem(worktree) : happyScript()(label, prompt))
+      },
+      overrides: { PER_WORK_ITEM_BUILD: true, CODERABBIT_BETWEEN_WORK_ITEMS: true },
+      taskData: task,
+    },
+    {
+      name: 'dual-review',
+      prepare: () => scriptAgent(happyScript()),
+      overrides: {},
+      taskData: task,
+    },
+    {
+      name: 'addendum',
+      prepare: () => scriptAgent((label) => {
+        if (label.startsWith('addendum:')) return greenAddendum
+        throw new Error(`unscripted label: ${label}`)
+      }),
+      overrides: {},
+      taskData: { ...task, isAddendum: true, subtasks: ['1.2.3.1'] as string[] },
+    },
+  ])('$name CodeRabbit auth failure increments authFaults', async ({ prepare, overrides, taskData }) => {
+    const worktree = makeWorktree()
+    prepare(worktree)
+    const authReview = async () => ({ outcome: 'auth' as const, attempts: 1, findings: [], detail: 'login required' })
+
+    const outcome = await subject(worktree, {
+      CODERABBIT_HOST_REVIEW: true,
+      runCoderabbitHostReview: authReview,
+      ...overrides,
+    }).runTask(taskData, null)
+
+    expect(outcome.status).toBe('fatal-auth')
+    expect(runFaultMetrics.authFaults).toBe(1)
   })
 
   test('green implementation with a dirty worktree fails the durability gate', async () => {

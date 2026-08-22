@@ -12,7 +12,9 @@ accepted = ["Flavored"]
 [words.corrections]
 
 [patterns]
-ignore = []
+# Preserve exact API names, enum values, and function identifiers in inline
+# code while keeping Oxford spelling enforced in prose.
+ignore = ["`[^`\\n]+`"]
 
 [files]
 exclude = []

@@ -101,9 +101,9 @@ describe('parseExecplanState', () => {
         (token, upper, pad) => {
           const rendered = upper ? token.toUpperCase() : token
           const text = `# Plan\n\nStatus: ${rendered}${' '.repeat(pad)}\n`
-          expect(parseExecplanState(text).status).toBe(
-            EXECPLAN_STATUS_MAP[token as keyof typeof EXECPLAN_STATUS_MAP],
-          )
+          const expected = EXECPLAN_STATUS_MAP[token as keyof typeof EXECPLAN_STATUS_MAP]
+          if (expected === undefined) throw new Error(`Expected mapped status for ${token}`)
+          expect(parseExecplanState(text).status).toBe(expected)
         },
       ),
     )

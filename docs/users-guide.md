@@ -210,7 +210,8 @@ they never enter a diff, trip `workflow-freshness`, or affect a gate:
   durable artefacts there: `events.jsonl` (an ordered stream with
   `agent_started`/`agent_finished` per `agent()` call, tagged by adapter,
   label, and phase), `result.json` (the final return, including every
-  `reviewRounds`, `assessments`, host-gate result, and CodeRabbit summary), and
+  `reviewRounds`, `assessments`, the host-gate result, the CodeScene result, and
+  the CodeRabbit summary), and
   `error.json`. This is entirely ODW's domain — no workflow involvement.
   Regenerate the value per run, or use a shared `~/.odw/runs` for a single
   pool; the sidecar keeps each run's logs beside its config and notes.
@@ -312,6 +313,14 @@ sha. So audit and triage always inspect the current `origin/<base>` and can
 never silently root on a stale local base. If an audit or triage agent reports
 a "based on a stale commit" style failure, that sequence is where to look.
 
+Remediation proposals must carry a non-blank `title`. Before the triage agent
+is charged, the host trims and normalizes titles to collapse exact duplicates,
+preserving first-seen order. It also unions the proposals' origin tags in
+`sources`; the stamped `source` field is canonical, while `rationale` is only a
+legacy fallback. A proposal raised by more than one audit or review source can
+therefore trigger the stronger triage model, and no origin is lost when a
+proposal passes through more than one de-duplication pass.
+
 ## Roadmap format
 
 `df12-build` expects the target roadmap to follow the df12-house GIST shape:
@@ -356,6 +365,14 @@ Step ranges are also accepted in `Requires` lines:
   - Requires steps 1.2 - 1.5.
   - Success: The integration API is documented and covered by tests.
 ```
+
+Both endpoints must use dotted numeric syntax with safe-integer components,
+belong to the same phase, and be in ascending order. A range may contain at
+most 1,000 ids. In `Requires` parsing, malformed, cross-phase, reversed,
+unsafe-integer or oversized ranges are not expanded and do not raise an error;
+any dotted endpoints remain ordinary individual references. For affected
+roadmaps, split ranges into in-phase ascending ranges of no more than 1,000
+ids and correct malformed ids.
 
 The deterministic selector treats a task as unblocked when all of these are
 true:
@@ -485,8 +502,9 @@ Common arguments:
   bounded fix round; the build agent clears it by refactoring or, only where
   refactoring would be deleterious, suppresses the specific smell with a
   justified `@codescene(disable:"...")` comment. The check skips gracefully
-  when its binary is absent, like `make verify-modules` without Dafny. Set
-  `false` to disable it.
+  only when its binary is absent from `PATH`, like `make verify-modules` without
+  Dafny; an availability-probe fault is reported as a failed check instead of
+  being treated as an absent binary. Set `false` to disable it.
 - `csCheckCommand`: the command the CodeScene check runs in the worktree.
   Defaults to `cs-check-changed` (an operator-provided wrapper); override it
   with the exact invocation, e.g. `cs check --changed --base main`.
@@ -685,6 +703,28 @@ in the failure evidence. A command that exceeds `commitGateTimeoutSeconds` is
 killed and reported as a failure. The run result's `hostGates` object reports
 the configuration and bounded counters (gate runs, failures); per-round
 pass/fail detail appears in each failed task's `reviewRounds[].hostGates`.
+
+On POSIX, each gate child runs in its own process group. A timeout or log-write
+failure terminates that group, falling back to the direct child where group
+signalling is unavailable. The host resumes any paused output pipes before
+termination so a full log buffer cannot prevent the child from being reaped.
+
+The run result's top-level `codeScene` object durably records the effective
+setting and command, plus bounded counters: `runs` (checks executed, excluding
+availability skips), `failures` (executed checks that failed, including
+code-health findings),
+`probeFailures` (availability probes that failed for another infrastructure
+reason), and `skipped` (the configured binary was not found on `PATH`). The
+`command` value redacts values in leading `NAME=value` assignments, for example
+`CS_TOKEN=<redacted> cs-check-changed --base main`; the original command is
+still used for execution. If tokenization cannot safely disambiguate malformed
+or control-operator syntax, the displayed command is `<redacted command>`
+instead of being partially redacted. A missing binary is therefore a clean
+skip, whereas `probeFailures` is a surfaced fault and is not counted as a skip.
+
+`env` options (for example, `-i`) are unsupported and fail closed at the
+availability probe without executing the configured command; a bare `env`
+prefix with assignments remains supported.
 
 ## Recovery model
 

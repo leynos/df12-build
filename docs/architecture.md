@@ -113,6 +113,26 @@ Any change that moves a contract from host enforcement into prompt text weakens
 the system. Document that deliberately, add the missing runtime permission or
 gate, or keep the contract in JavaScript.
 
+The host-gate log is an isolated evidence sink: each run gets a private
+directory, and each log is opened exclusively without following symlinks. The
+streaming runner places POSIX children in their own process group, terminates
+the group on timeout or log-write failure (falling back to the direct child
+where group signalling is unavailable), and resumes paused output pipes before
+termination so backpressure cannot prevent the child from being reaped.
+
+The CodeScene availability probe distinguishes an absent executable from a
+probe fault. A binary missing from `PATH` is a clean skip and increments
+`codeScene.skipped`; an unsafe or failed probe is a failed check, increments
+`codeScene.probeFailures`, and does not execute the configured command. Once
+the probe succeeds, CodeScene output is an ordinary gate result and its log or
+failure detail is retained for the operator.
+
+Remediation triage rejects proposals with blank titles before dispatch. It
+normalizes titles for exact duplicate removal, preserves first-seen order, and
+aggregates all audit/review origin tags in `sources` (using the stamped
+`source`, with `rationale` as a legacy fallback). The host uses the distinct
+aggregated sources to decide whether the triage set needs escalation.
+
 Figure 1 shows the host-enforced integration completeness gate from the
 Integration row. `runTask` treats the integration agent's report as a claim: it
 marks the task integrated only when `rebased` — alongside `ok`, `pushed`,
@@ -259,6 +279,7 @@ Workflow and documentation changes must at least pass:
 - `make markdownlint`
 - `make nixie`
 - `make typecheck`
+- `make docs-check`
 
 Do not start a live `odw run` as a routine documentation gate. A live run can
 spawn agents and mutate target-project state, so it is reserved for explicit
