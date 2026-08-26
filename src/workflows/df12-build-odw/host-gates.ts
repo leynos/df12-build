@@ -207,7 +207,7 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
       }
     }
     const missing = '__DF12_CODESCENE_BINARY_MISSING__'
-    const probe = await execFileStatus('sh', ['-c', 'command -v "$1" >/dev/null 2>&1 || { printf "%s\\n" "$2"; exit 127; }', 'sh', bin, missing], { cwd: worktree })
+    const probe = await execFileStatus('sh', ['-c', 'command -v "$1" >/dev/null 2>&1 || { printf "%s\\n" "$2"; exit 127; }', 'sh', bin, missing], { cwd: worktree, timeoutMs: 10_000 })
     if (!probe.ok) {
       if (probe.stdout.trim() === missing) { metrics.codeScene.skipped += 1; log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`); return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: '' } }
       metrics.codeScene.probeFailures += 1

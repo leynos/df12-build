@@ -62,6 +62,7 @@ function statusDetail(status: ExecStatus): string {
 }
 
 const ENVIRONMENT_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=(.+)$/
+const AUTH_PROBE_TIMEOUT_MS = 10_000
 
 // Fixed arguments may carry API tokens or paths. Retain only conventional
 // long-option names so the failure record proves which binary was checked
@@ -93,7 +94,7 @@ function redactedDakarStatusDetail(status: ExecStatus, invocation: readonly stri
       continue
     }
     if (index === 0) continue
-    if (!value || /^--[A-Za-z][A-Za-z0-9-]*$/.test(value)) continue
+    if (value.length < 4 || /^--[A-Za-z][A-Za-z0-9-]*$/.test(value)) continue
     detail = detail.split(value).join('[REDACTED]')
   }
   for (const value of sensitiveValues) {
@@ -109,7 +110,7 @@ export function makeAuthPreflight(config: AuthPreflightConfig, deps: AuthPreflig
     deps.phase('Auth Preflight')
     const failures: AuthPreflightFailure[] = []
 
-    const codex = await deps.exec('codex', ['login', 'status'])
+    const codex = await deps.exec('codex', ['login', 'status'], { timeoutMs: AUTH_PROBE_TIMEOUT_MS })
     const codexOutput = statusDetail(codex)
     if (!codex.ok || authFailureDetail(codexOutput)) {
       failures.push({
@@ -120,7 +121,7 @@ export function makeAuthPreflight(config: AuthPreflightConfig, deps: AuthPreflig
     }
 
     if (config.requiredAdapters.has('claude')) {
-      const claude = await deps.exec('claude', ['auth', 'status'])
+      const claude = await deps.exec('claude', ['auth', 'status'], { timeoutMs: AUTH_PROBE_TIMEOUT_MS })
       const claudeOutput = statusDetail(claude)
       if (!claude.ok || authFailureDetail(claudeOutput)) {
         failures.push({
@@ -136,7 +137,7 @@ export function makeAuthPreflight(config: AuthPreflightConfig, deps: AuthPreflig
         const openaiKey = deps.environment.get('OPENAI_API_KEY')
         const dakarWords = config.dakarInvocation.filter((argument) => !ENVIRONMENT_ASSIGNMENT.test(argument))
         const dakarExecutable = dakarWords[0] || 'dakar-review'
-        const dakar = await deps.exec(dakarExecutable, [...dakarWords.slice(1), '--version'])
+        const dakar = await deps.exec(dakarExecutable, [...dakarWords.slice(1), '--version'], { timeoutMs: AUTH_PROBE_TIMEOUT_MS })
         const dakarOutput = redactedDakarStatusDetail(dakar, config.dakarInvocation, typeof openaiKey === 'string' ? [openaiKey] : [])
         if (!dakar.ok) {
           deps.recordHostReviewAuthFailure()
@@ -146,8 +147,8 @@ export function makeAuthPreflight(config: AuthPreflightConfig, deps: AuthPreflig
             detail: dakarOutput || `${dakarExecutable} is unavailable or its version probe failed`,
           })
         }
-        const pi = await deps.exec('pi', ['--version'])
-        const piOutput = statusDetail(pi)
+        const pi = await deps.exec('pi', ['--version'], { timeoutMs: AUTH_PROBE_TIMEOUT_MS })
+        const piOutput = redactedDakarStatusDetail(pi, config.dakarInvocation, typeof openaiKey === 'string' ? [openaiKey] : [])
         if (!pi.ok) {
           deps.recordHostReviewAuthFailure()
           failures.push({ tool: 'dakar', command: 'pi --version', detail: piOutput || 'pi is unavailable or its version probe failed' })
@@ -161,7 +162,7 @@ export function makeAuthPreflight(config: AuthPreflightConfig, deps: AuthPreflig
           })
         }
       } else {
-        const coderabbit = await deps.exec('coderabbit', ['auth', 'status'])
+        const coderabbit = await deps.exec('coderabbit', ['auth', 'status'], { timeoutMs: AUTH_PROBE_TIMEOUT_MS })
         const coderabbitOutput = statusDetail(coderabbit)
         if (!coderabbit.ok || authFailureDetail(coderabbitOutput)) {
           deps.recordHostReviewAuthFailure()

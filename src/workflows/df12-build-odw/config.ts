@@ -9,6 +9,7 @@
  * @module
  */
 import { redactedShellCommand } from './shell-command.ts'
+import { reviewerDisplayName } from './host-review-contracts.ts'
 
 /**
  * Raw, caller-supplied workflow overrides before defaults and clamps are
@@ -434,7 +435,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     throw new Error(`Unsupported reviewTool: ${reviewToolInput} (use "dakar" or "coderabbit")`)
   }
   const REVIEW_TOOL = reviewToolInput
-  const HOST_REVIEWER_NAME = REVIEW_TOOL === 'dakar' ? 'Dakar' : 'CodeRabbit'
+  const HOST_REVIEWER_NAME = reviewerDisplayName(REVIEW_TOOL)
   const DAKAR_COMMAND = String(cfg.dakarCommand || 'dakar-review')
   const REVIEW_TIMEOUT_SECONDS = Math.min(7200, Math.max(60, Math.trunc(Number(cfg.reviewTimeoutSeconds ?? cfg.dakarTimeoutSeconds) || 3600)))
   const DAKAR_BUDGET_GBP_RAW = Number(cfg.dakarBudgetGbp)
@@ -456,6 +457,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   // restores end-of-stage-only host review.
   const CODERABBIT_BETWEEN_WORK_ITEMS = cfg.coderabbitBetweenWorkItems !== false
   const attemptsInput = Number(cfg.coderabbitAttempts)
+  // NaN deliberately reaches the established default fallback; only infinities reject.
   if (!Number.isFinite(attemptsInput) && !Number.isNaN(attemptsInput)) {
     throw new Error('coderabbitAttempts must be finite')
   }
@@ -464,6 +466,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     const range = Array.isArray(cfg.coderabbitBackoffMinutes) ? cfg.coderabbitBackoffMinutes : []
     const lowerInput = Number(range[0])
     const upperInput = Number(range[1])
+    // NaN deliberately reaches the established default fallback; only infinities reject.
     if ((!Number.isFinite(lowerInput) && !Number.isNaN(lowerInput)) || (!Number.isFinite(upperInput) && !Number.isNaN(upperInput))) {
       throw new Error('coderabbitBackoffMinutes values must be finite')
     }

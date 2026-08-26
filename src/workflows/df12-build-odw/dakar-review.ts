@@ -134,7 +134,7 @@ export function parseDakarDocument(stdout: unknown): DakarDocument | null {
 /** Map one validated Dakar finding onto the retained findings contract. */
 export function mapDakarFinding(finding: DakarFinding): ReviewFinding {
   const severity = DAKAR_SEVERITY_MAP[String(finding.severity || '').toLowerCase()] || 'info'
-  const filePath = redactDakarDetail(String(finding.path || ''))
+  const filePath = redactDakarDetail(String(finding.path || '')).slice(0, 2000)
   const title = redactDakarDetail(String(finding.title || ''))
   const detail = redactDakarDetail(String(finding.detail || ''))
   const evidence = redactDakarDetail(String(finding.evidence || ''))
