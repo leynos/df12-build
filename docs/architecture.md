@@ -249,14 +249,15 @@ review. Severity mapping preserves the blocking rule: Dakar `critical` and
 the NDJSON CodeRabbit invocation.
 
 Auth preflight is adapter-aware. The workflow always checks Codex auth because
-build-side stages depend on it, checks the executable selected by
-`dakarCommand` (default `dakar-review`) and `pi` on `PATH` plus
-`OPENAI_API_KEY` for the default Dakar reviewer, or CodeRabbit CLI auth for
-the opt-in CodeRabbit reviewer when
-implementation can run, and checks Claude auth
-whenever any configured stage uses the `claude` adapter. Auth failures are
-terminal workflow failures rather than ordinary task failures or partial-branch
-recovery candidates.
+build-side stages depend on it, and checks Claude auth whenever any configured
+stage uses the `claude` adapter. When `reviewTool: 'dakar'` (the default), it
+checks the executable selected by `dakarCommand` (default `dakar-review`) and
+`pi` on `PATH`, plus a non-empty `OPENAI_API_KEY`; these checks apply whenever
+the workflow can run implementation work. When
+`reviewTool: 'coderabbit'` and implementation can run, it instead checks the
+CodeRabbit CLI authentication required by the host-review path. Auth failures
+are terminal workflow failures rather than ordinary task failures or
+partial-branch recovery candidates.
 
 ODW adapter timeout is also part of the runtime contract. With the default
 host-run review, agents never wait on the review tool — the host absorbs

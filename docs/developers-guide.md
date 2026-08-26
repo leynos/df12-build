@@ -47,8 +47,11 @@ Relevant paths:
   `config.ts`, `schemas.ts`, `types.ts`, `roadmap.ts`, `exec.ts`, `faults.ts`,
   `git-evidence.ts`, `recovery-decision.ts`, `recovery-discovery.ts`,
   `prompts.ts`, `write-preflight.ts`, `execplan-durability.ts`, `assessment.ts`,
-  `remediation.ts`, `host-review.ts` (host-run Dakar/CodeRabbit
-  parsing/classification and the host commit gates), `shell-command.ts` (a
+  `remediation.ts`, `auth-preflight.ts` (adapter-aware credential and
+  executable probes), `coderabbit-review.ts` (CodeRabbit NDJSON adapter),
+  `dakar-review.ts` (Dakar JSON adapter), `host-gates.ts` (secure host gates
+  and CodeScene), `host-review-contracts.ts` (neutral review contracts), and
+  `host-review.ts` (neutral composition facade), `shell-command.ts` (a
   non-evaluating parser for configured shell-command words and assignment
   spans), and `run-task.ts`, with
   the injected ODW primitives declared in `odw-globals.d.ts`. TypeScript is
@@ -318,8 +321,10 @@ the parent process for either reviewer and is also passed to Dakar as
 `--timeout`. `dakarBudgetGbp` is clamped to 0–10; positive values become
 `--budget-gbp`, while `0` lets Dakar apply its own hard admission budget. Each
 Dakar attempt creates a fresh `--state-root` below the host temporary directory
-and removes it in a `finally` block after execution and classification settle.
-Retries therefore share no Dakar state and leave no persistent cache tree.
+and attempts to remove it in a `finally` block after execution and
+classification settle. Cleanup failures are bounded diagnostics and do not
+replace the review result. Retries therefore share no Dakar state when cleanup
+succeeds.
 
 The shared host-review retry settings retain their historical CodeRabbit names:
 `coderabbitAttempts` defaults to `3` and is clamped to `1–10`, while each
