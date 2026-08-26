@@ -14,7 +14,7 @@ import { makeHostGates, hostGateLogPath, codeSceneExecutable } from './host-gate
 import { tokenizeShellCommand } from './shell-command.ts'
 import {
   boundedTail,
-  CODERABBIT_BLOCKING_SEVERITIES,
+  HOST_REVIEW_BLOCKING_SEVERITIES,
   hostReviewDeferral,
   makeHostReviewMetrics,
   reviewBlockingItems,
@@ -39,7 +39,7 @@ import {
 
 export {
   boundedTail,
-  CODERABBIT_BLOCKING_SEVERITIES,
+  HOST_REVIEW_BLOCKING_SEVERITIES,
   hostGateLogPath,
   codeSceneExecutable,
   hostReviewDeferral,

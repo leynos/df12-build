@@ -8,6 +8,7 @@
  * @module
  */
 import type { ExecStatus } from './exec.ts'
+import { authFailureDetail } from './faults.ts'
 import {
   boundedTail,
   type HostReviewConfig,
@@ -177,7 +178,11 @@ export function classifyDakarReview(execResult: ExecStatus): HostReviewAttempt {
   if (doc.ok === false) {
     const stage = boundedTail(doc.stage ?? 'unknown', 200)
     if (String(doc.stage) === 'deferred') return { outcome: 'rate-limited', findings: [], detail: `Dakar review deferred (stage: ${stage}) — ${boundedTail(doc.error || 'no detail')}`, errorCategory: category('deferred') }
-    return { outcome: 'error', findings: [], detail: `stage: ${stage} — ${boundedTail(doc.error || 'no detail')}`, errorCategory: category('execution') }
+    const detail = `stage: ${stage} — ${boundedTail(doc.error || 'no detail')}`
+    if (authFailureDetail([doc.error, execResult.stderr, execResult.message].filter(Boolean).join('\n'))) {
+      return { outcome: 'auth', findings: [], detail, errorCategory: category('auth') }
+    }
+    return { outcome: 'error', findings: [], detail, errorCategory: category('execution') }
   }
   if (doc.ok === true && (doc.skipped === true || doc.verdict === 'pass')) {
     const invalidFindings = validateCleanDakarFindings(doc.findings)

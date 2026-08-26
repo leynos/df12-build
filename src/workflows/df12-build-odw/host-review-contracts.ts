@@ -247,13 +247,16 @@ export function hostReviewDeferral(review: HostReviewResult): HostReviewDeferral
 }
 
 /** Severities that enter the shared blocking-items gate. */
-export const CODERABBIT_BLOCKING_SEVERITIES = new Set(['critical', 'major'])
+/** Normalized severities that block the host-review integration gate. */
+export const HOST_REVIEW_BLOCKING_SEVERITIES = new Set(['critical', 'major'])
+/** @deprecated Use {@link HOST_REVIEW_BLOCKING_SEVERITIES}. */
+export const CODERABBIT_BLOCKING_SEVERITIES = HOST_REVIEW_BLOCKING_SEVERITIES
 
 /** Convert blocking normalized findings into bounded fix-round items. */
 export function reviewBlockingItems(reviewer: string, findings: readonly ReviewFinding[] | null | undefined): string[] {
   const name = boundedTail(reviewer, 40) || 'host reviewer'
   return (findings || [])
-    .filter((finding) => CODERABBIT_BLOCKING_SEVERITIES.has(String(finding.severity || '').toLowerCase()))
+    .filter((finding) => HOST_REVIEW_BLOCKING_SEVERITIES.has(String(finding.severity || '').toLowerCase()))
     .map((finding) => `${name} (${finding.severity}) ${finding.fileName || 'unknown file'}: ${String(finding.comment || finding.codegenInstructions || 'see the recorded suggestions').slice(0, 500)}`)
 }
 

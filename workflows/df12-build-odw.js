@@ -1137,10 +1137,11 @@ function hostReviewDeferral(review) {
   if (review.outcome !== "rate-limited" && review.outcome !== "error") return null;
   return { kind: "host-review-deferral", reviewer: review.reviewer, outcome: review.outcome, errorCategory: review.errorCategory, attempts: review.attempts, detail: boundedTail(review.detail) };
 }
-var CODERABBIT_BLOCKING_SEVERITIES = /* @__PURE__ */ new Set(["critical", "major"]);
+var HOST_REVIEW_BLOCKING_SEVERITIES = /* @__PURE__ */ new Set(["critical", "major"]);
+var CODERABBIT_BLOCKING_SEVERITIES = HOST_REVIEW_BLOCKING_SEVERITIES;
 function reviewBlockingItems(reviewer, findings) {
   const name = boundedTail(reviewer, 40) || "host reviewer";
-  return (findings || []).filter((finding) => CODERABBIT_BLOCKING_SEVERITIES.has(String(finding.severity || "").toLowerCase())).map((finding) => `${name} (${finding.severity}) ${finding.fileName || "unknown file"}: ${String(finding.comment || finding.codegenInstructions || "see the recorded suggestions").slice(0, 500)}`);
+  return (findings || []).filter((finding) => HOST_REVIEW_BLOCKING_SEVERITIES.has(String(finding.severity || "").toLowerCase())).map((finding) => `${name} (${finding.severity}) ${finding.fileName || "unknown file"}: ${String(finding.comment || finding.codegenInstructions || "see the recorded suggestions").slice(0, 500)}`);
 }
 function makeHostReviewMetrics() {
   return { runs: 0, findings: 0, retries: 0, deferred: 0, timeouts: 0, errors: 0, authFailures: 0, sinkFailures: 0, bySeverity: { critical: 0, major: 0, minor: 0, trivial: 0, info: 0, unknown: 0 }, sinkError: "" };
@@ -1378,7 +1379,7 @@ function redactedDakarStatusDetail(status, invocation, sensitiveValues = []) {
       continue;
     }
     if (index === 0) continue;
-    if (value.length < 4 || /^--[A-Za-z][A-Za-z0-9-]*$/.test(value)) continue;
+    if (!value || /^--[A-Za-z][A-Za-z0-9-]*$/.test(value)) continue;
     detail = detail.split(value).join("[REDACTED]");
   }
   for (const value of sensitiveValues) {
@@ -2673,7 +2674,11 @@ function classifyDakarReview(execResult) {
   if (doc.ok === false) {
     const stage = boundedTail(doc.stage ?? "unknown", 200);
     if (String(doc.stage) === "deferred") return { outcome: "rate-limited", findings: [], detail: `Dakar review deferred (stage: ${stage}) \u2014 ${boundedTail(doc.error || "no detail")}`, errorCategory: category("deferred") };
-    return { outcome: "error", findings: [], detail: `stage: ${stage} \u2014 ${boundedTail(doc.error || "no detail")}`, errorCategory: category("execution") };
+    const detail = `stage: ${stage} \u2014 ${boundedTail(doc.error || "no detail")}`;
+    if (authFailureDetail([doc.error, execResult.stderr, execResult.message].filter(Boolean).join("\n"))) {
+      return { outcome: "auth", findings: [], detail, errorCategory: category("auth") };
+    }
+    return { outcome: "error", findings: [], detail, errorCategory: category("execution") };
   }
   if (doc.ok === true && (doc.skipped === true || doc.verdict === "pass")) {
     const invalidFindings = validateCleanDakarFindings(doc.findings);

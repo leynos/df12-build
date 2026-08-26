@@ -94,7 +94,7 @@ function redactedDakarStatusDetail(status: ExecStatus, invocation: readonly stri
       continue
     }
     if (index === 0) continue
-    if (value.length < 4 || /^--[A-Za-z][A-Za-z0-9-]*$/.test(value)) continue
+    if (!value || /^--[A-Za-z][A-Za-z0-9-]*$/.test(value)) continue
     detail = detail.split(value).join('[REDACTED]')
   }
   for (const value of sensitiveValues) {
