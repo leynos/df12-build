@@ -436,7 +436,7 @@ describe('runTask', () => {
     expect(labels.some((label) => label.startsWith('addendum-review:'))).toBe(false)
   })
 
-  test('a completed addendum with only deferred review issues is manual-merge-ready', async () => {
+  test('a completed addendum with unstructured review wording is not manual-merge-ready', async () => {
     const worktree = makeWorktree()
     scriptAgent((label) => {
       if (label.startsWith('addendum:')) {
@@ -453,8 +453,7 @@ describe('runTask', () => {
     })
     const addendum = { ...task, isAddendum: true, subtasks: ['1.2.3.1'] }
     const outcome = await subject(worktree).runTask(addendum, null)
-    expect(outcome.status).toBe('manual-merge-ready')
-    expect(outcome.kind).toBe('addendum')
+    expect(outcome.status).toBe('failed')
   })
 
   test('a Dakar-deferred green addendum runs fallback review before integration', async () => {

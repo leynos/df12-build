@@ -128,8 +128,8 @@ describe('deferred-review classification', () => {
 
 describe('manual-merge handoff guard', () => {
   const base = { ok: false, gatesGreen: true, workItemsCompleted: 3, workItemsTotal: 3, openIssues: ['coderabbit 429 rate limit'] }
-  test('a complete, gate-green addendum with only deferred review issues hands off', () => {
-    expect(addendumImplementationNeedsManualMerge(base)).toBe(true)
+  test('a complete addendum requires structured deferred-review evidence', () => {
+    expect(addendumImplementationNeedsManualMerge(base)).toBe(false)
   })
   test('anything else does not', () => {
     expect(addendumImplementationNeedsManualMerge({ ...base, ok: true })).toBe(false)
