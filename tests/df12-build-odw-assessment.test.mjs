@@ -164,7 +164,7 @@ test('auth-shaped implementation issues are fatal, not deferred review', async (
 
   assert.equal(surface.isDeferredReviewIssue('CodeRabbit auth failed'), false)
   assert.equal(surface.hasOnlyDeferredReviewIssues(['CodeRabbit auth failed']), false)
-  assert.equal(surface.hasOnlyDeferredReviewIssues(['CodeRabbit rate limit retry after 10m']), true)
+  assert.equal(surface.hasOnlyDeferredReviewIssues(['CodeRabbit rate limit retry after 10m']), false)
   assert.equal(surface.implementationAuthFailureDetail(impl), 'Implementation complete\nCodeRabbit auth failed')
   assert.equal(surface.authFailureDetail('CodeRabbit browser login required'), 'CodeRabbit browser login required')
   assert.equal(surface.authFailureDetail('{"loggedIn":false}'), '{"loggedIn":false}')
@@ -642,7 +642,7 @@ test('recoverable review faults classify as deferred review issues', async () =>
     ['Second CodeRabbit review pass deferred: /tmp/coderabbit-x.out reported errorType: rate_limit, waitTime: 26 seconds, recoverable: true', true],
     ['coderabbit review returned HTTP 429; retry later', true],
     ['CodeRabbit rate-limit backoff in progress', true],
-    ['CodeRabbit temporarily unavailable', true],
+    ['CodeRabbit temporarily unavailable', false],
     ['Dakar unavailable', false],
     ['Dakar migration deferred pending approval', false],
     ['Dakar review deferred (stage: approval-pending) — awaiting approval', false],
@@ -704,7 +704,7 @@ test('green addendum implementation contract drift is manual merge ready', async
       openIssues: ['Second CodeRabbit review deferred: errorType: rate_limit, waitTime: 26 seconds'],
       summary: 'All addendum work items complete; second review pass rate limited',
     }),
-    true,
+    false,
   )
   assert.equal(
     surface.addendumImplementationNeedsManualMerge({
