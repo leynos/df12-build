@@ -554,22 +554,52 @@ test('Dakar dispatch ignores the legacy host-review disable flag', async () => {
   const surface = await loadAssessmentSurface({
     reviewTool: 'dakar',
     coderabbitHostReview: false,
-    coderabbitAttempts: 1,
+    coderabbitAttempts: 2,
+    reviewTimeoutSeconds: 120,
   })
   const calls = []
   const review = await surface.runHostReview('/tmp/wt', 'dakar:1.2.3 r1', {
     exec: async (command, commandArgs, options) => {
       calls.push({ command, commandArgs, options })
-      return { ok: true, stdout: '{"ok":true,"verdict":"pass","findings":[]}', stderr: '' }
+      const stdout = calls.length === 1
+        ? '{"ok":false,"stage":"deferred","error":"temporary capacity"}'
+        : '{"ok":true,"verdict":"pass","findings":[]}'
+      return { ok: true, stdout, stderr: '' }
     },
+    sleep: async () => {},
   })
 
   assert.equal(surface.CODERABBIT_HOST_REVIEW, true)
   assert.equal(review.outcome, 'clean')
-  assert.equal(calls.length, 1)
+  assert.equal(calls.length, 2)
   assert.equal(calls[0].command, 'dakar-review')
-  assert.ok(calls[0].commandArgs.includes('--state-root'))
-  assert.ok(!calls[0].commandArgs.includes('review'))
+  for (const { commandArgs } of calls) {
+    assert.equal(commandArgs[commandArgs.indexOf('--repo-root') + 1], '/tmp/wt')
+    assert.equal(commandArgs[commandArgs.indexOf('--base') + 1], 'main')
+    assert.equal(commandArgs[commandArgs.indexOf('--timeout') + 1], '120')
+    assert.ok(commandArgs.includes('--state-root'))
+    assert.ok(!commandArgs.includes('--budget-gbp'))
+    assert.ok(!commandArgs.includes('review'))
+  }
+  const stateRoots = calls.map(({ commandArgs }) => commandArgs[commandArgs.indexOf('--state-root') + 1])
+  assert.notEqual(stateRoots[0], stateRoots[1])
+
+  const budgetSurface = await loadAssessmentSurface({ reviewTool: 'dakar', dakarBudgetGbp: 0.25 })
+  const budgetCalls = []
+  await budgetSurface.runHostReview('/tmp/wt', 'dakar:budget', {
+    exec: async (command, commandArgs, options) => {
+      budgetCalls.push({ command, commandArgs, options })
+      return { ok: true, stdout: '{"ok":true,"verdict":"pass","findings":[]}', stderr: '' }
+    },
+  })
+  assert.equal(budgetCalls[0].commandArgs[budgetCalls[0].commandArgs.indexOf('--budget-gbp') + 1], '0.25')
+})
+
+test('Dakar configuration rejects a leading environment assignment', async () => {
+  await assert.rejects(
+    loadAssessmentSurface({ reviewTool: 'dakar', dakarCommand: 'TOKEN=secret dakar-review' }),
+    /Invalid dakarCommand/,
+  )
 })
 
 test('host gates run the configured commands sequentially and tee logs to /tmp', async () => {

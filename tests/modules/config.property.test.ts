@@ -46,13 +46,17 @@ describe('Dakar configuration clamp properties', () => {
 
   test('retry counts and backoff endpoints always remain finite bounded values', () => {
     fc.assert(
-      fc.property(retryInput, retryInput, (attempts, backoff) => {
-        const config = makeConfig({ hostReviewAttempts: attempts, hostReviewBackoffMinutes: [backoff, backoff] })
-        expect(Number.isInteger(config.HOST_REVIEW_ATTEMPTS)).toBe(true)
-        expect(config.HOST_REVIEW_ATTEMPTS).toBeGreaterThanOrEqual(1)
-        expect(config.HOST_REVIEW_ATTEMPTS).toBeLessThanOrEqual(10)
-        expect(config.HOST_REVIEW_BACKOFF_MINUTES[0]).toBeGreaterThanOrEqual(1)
-        expect(config.HOST_REVIEW_BACKOFF_MINUTES[1]).toBeLessThanOrEqual(1440)
+      fc.property(retryInput, retryInput, retryInput, (attempts, low, high) => {
+        const config = makeConfig({ coderabbitAttempts: attempts, coderabbitBackoffMinutes: [low, high] })
+        const [clampedLow, clampedHigh] = config.CODERABBIT_BACKOFF_MINUTES
+        expect(Number.isInteger(config.CODERABBIT_ATTEMPTS)).toBe(true)
+        expect(config.CODERABBIT_ATTEMPTS).toBeGreaterThanOrEqual(1)
+        expect(config.CODERABBIT_ATTEMPTS).toBeLessThanOrEqual(10)
+        expect(clampedLow).toBeGreaterThanOrEqual(1)
+        expect(clampedLow).toBeLessThanOrEqual(1440)
+        expect(clampedHigh).toBeGreaterThanOrEqual(1)
+        expect(clampedHigh).toBeLessThanOrEqual(1440)
+        expect(clampedLow).toBeLessThanOrEqual(clampedHigh)
       }),
     )
   })

@@ -1103,6 +1103,23 @@ function tokenizeShellCommand(command) {
   }
   return { words, leadingAssignments, executableWordIndex, hasUnquotedControlOperator };
 }
+var DAKAR_COMMAND_VALIDATION_ERROR = "Invalid dakarCommand: expected a non-empty command with balanced shell quoting, no environment assignments, and no unquoted control operators";
+function dakarInvocationFromCommand(command) {
+  const tokens = tokenizeShellCommand(command);
+  if (!tokens || tokens.words.length === 0 || tokens.leadingAssignments.length > 0 || tokens.executableWordIndex !== 0 || tokens.hasUnquotedControlOperator) return null;
+  return validateDakarInvocation(tokens.words.map((word) => word.value));
+}
+function validateDakarInvocation(invocation) {
+  if (!Array.isArray(invocation) || invocation.length === 0) return null;
+  const words = [];
+  for (const value of invocation) {
+    if (typeof value !== "string" || value.trim() === "" || /[\r\n;&|]/.test(value)) return null;
+    words.push(value);
+  }
+  const executable = words[0];
+  if (!executable || executable === "env" || /^[A-Za-z_][A-Za-z0-9_]*=/.test(executable)) return null;
+  return words;
+}
 function redactedShellCommand(command) {
   const tokens = tokenizeShellCommand(command);
   if (!tokens || tokens.hasUnquotedControlOperator) return "<redacted command>";
@@ -2925,12 +2942,10 @@ async function hostSleepMinutes(minutes) {
   await new Promise((resolve) => setTimeout(resolve, minutes * 6e4));
 }
 function makeHostReview(config) {
-  const dakarTokens = tokenizeShellCommand(config.dakarCommand);
-  if (!dakarTokens || dakarTokens.hasUnquotedControlOperator || dakarTokens.words.length === 0) {
-    throw new Error("Invalid dakarCommand: expected a non-empty command without unquoted control operators");
-  }
-  const parsed = config.dakarInvocation || dakarTokens.words.map((word) => word.value);
-  const dakarAttempt = makeDakarAttempt({ ...config, dakarInvocation: parsed });
+  const dakarCommandInvocation = dakarInvocationFromCommand(config.dakarCommand);
+  const dakarInvocation = config.dakarInvocation === void 0 ? dakarCommandInvocation : validateDakarInvocation(config.dakarInvocation);
+  if (!dakarCommandInvocation || !dakarInvocation) throw new Error(DAKAR_COMMAND_VALIDATION_ERROR);
+  const dakarAttempt = makeDakarAttempt({ ...config, dakarInvocation });
   const coderabbitAttempt = makeCoderabbitAttempt(config);
   const hostReviewMetrics = makeHostReviewMetrics();
   const hostGateMetrics = { runs: 0, failures: 0 };
@@ -3935,11 +3950,8 @@ var { triagePrompt, runTriage } = makeRemediation({
   triageEscalationModel: TRIAGE_ESCALATION_MODEL
 });
 var HOST_REVIEW_ENABLED = CODERABBIT_HOST_REVIEW;
-var parsedDakarInvocation = tokenizeShellCommand(DAKAR_COMMAND);
-if (!parsedDakarInvocation || parsedDakarInvocation.hasUnquotedControlOperator || parsedDakarInvocation.words.length === 0 || parsedDakarInvocation.leadingAssignments.length > 0) {
-  throw new Error("Invalid dakarCommand: expected a non-empty command with balanced shell quoting, no environment assignments, and no unquoted control operators");
-}
-var DAKAR_INVOCATION = parsedDakarInvocation.words.map((word) => word.value);
+var DAKAR_INVOCATION = dakarInvocationFromCommand(DAKAR_COMMAND);
+if (!DAKAR_INVOCATION) throw new Error(DAKAR_COMMAND_VALIDATION_ERROR);
 var hostReview = makeHostReview({
   base: BASE,
   reviewTool: REVIEW_TOOL,

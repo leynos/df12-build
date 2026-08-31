@@ -8,7 +8,12 @@
 import { describe, expect, test } from 'bun:test'
 import fc from 'fast-check'
 
-import { redactedShellCommand, tokenizeShellCommand } from '../../src/workflows/df12-build-odw/shell-command.ts'
+import {
+  dakarInvocationFromCommand,
+  redactedShellCommand,
+  tokenizeShellCommand,
+  validateDakarInvocation,
+} from '../../src/workflows/df12-build-odw/shell-command.ts'
 
 describe('tokenizeShellCommand', () => {
   test.each([
@@ -116,5 +121,32 @@ describe('tokenizeShellCommand', () => {
     expect(redacted).toContain('TOKEN_0=<redacted>')
     expect(redacted).toContain('TOKEN_999=<redacted>')
     expect(redacted).toEndWith('cs-check-changed --changed')
+  })
+})
+
+describe('Dakar command validation', () => {
+  test.each([
+    '',
+    'dakar-review "unterminated',
+    'TOKEN=secret dakar-review',
+    'env TOKEN=secret dakar-review',
+    'dakar-review; echo unsafe',
+  ])('rejects unsafe configured commands: %s', (command) => {
+    expect(dakarInvocationFromCommand(command)).toBeNull()
+  })
+
+  test('preserves quoted fixed arguments for the Dakar executable', () => {
+    expect(dakarInvocationFromCommand('dakar-review --fixed "argument with spaces"'))
+      .toEqual(['dakar-review', '--fixed', 'argument with spaces'])
+  })
+
+  test('rejects invocation arrays that can bypass command validation', () => {
+    for (const invocation of [
+      [],
+      [''],
+      ['TOKEN=secret', 'dakar-review'],
+      ['env', 'TOKEN=secret', 'dakar-review'],
+      ['dakar-review', ';'],
+    ]) expect(validateDakarInvocation(invocation)).toBeNull()
   })
 })

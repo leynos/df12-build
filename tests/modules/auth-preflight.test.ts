@@ -82,6 +82,43 @@ describe('makeAuthPreflight', () => {
     expect(failure.detail).not.toContain('private-profile')
   })
 
+  test('reports an unavailable pi dependency after the Dakar probe', async () => {
+    const calls: Array<{ command: string; args: string[] }> = []
+    const logs: string[] = []
+    let authFailures = 0
+    const run = makeAuthPreflight(
+      {
+        enabled: true,
+        requireHostReviewAuth: true,
+        requiredAdapters: new Set(),
+        reviewTool: 'dakar',
+        dakarInvocation: ['dakar-review'],
+      },
+      {
+        exec: async (command, args) => {
+          calls.push({ command, args: [...args] })
+          return command === 'pi' ? status({ ok: false, stderr: 'pi probe diagnostic' }) : status()
+        },
+        environment: { get: () => 'present' },
+        phase: () => {},
+        log: (message) => logs.push(message),
+        recordHostReviewAuthFailure: () => { authFailures += 1 },
+      },
+    )
+
+    const failures = await run()
+    expect(failures).toHaveLength(1)
+    expect(failures[0]).toMatchObject({ tool: 'dakar', command: 'pi --version' })
+    expect(failures[0]?.detail).toContain('pi probe diagnostic')
+    expect(calls).toEqual([
+      { command: 'codex', args: ['login', 'status'] },
+      { command: 'dakar-review', args: ['--version'] },
+      { command: 'pi', args: ['--version'] },
+    ])
+    expect(authFailures).toBe(1)
+    expect(logs).not.toContain('[auth] preflight passed')
+  })
+
   test('redacts an inline Dakar option value when probe output omits its option name', async () => {
     const run = makeAuthPreflight(
       {

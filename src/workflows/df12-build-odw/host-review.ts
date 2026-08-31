@@ -11,7 +11,7 @@ import { execFileStatus } from './exec.ts'
 import { makeCoderabbitAttempt, parseCoderabbitAgentOutput, classifyCoderabbitOutcome, type CoderabbitError, type CoderabbitParsedOutput, CODERABBIT_SUCCESS_STATUSES } from './coderabbit-review.ts'
 import { makeDakarAttempt, parseDakarDocument, mapDakarFinding, validateChangesRequestedFindings, validateCleanDakarFindings, classifyDakarReview, DAKAR_SEVERITY_MAP, type DakarAttemptDeps, type DakarDocument, type DakarFinding, type DakarFindingValidation, type DakarFindingValidationFailure, type DakarStateRoots } from './dakar-review.ts'
 import { makeHostGates, hostGateLogPath, codeSceneExecutable } from './host-gates.ts'
-import { tokenizeShellCommand } from './shell-command.ts'
+import { DAKAR_COMMAND_VALIDATION_ERROR, dakarInvocationFromCommand, validateDakarInvocation } from './shell-command.ts'
 import {
   boundedTail,
   HOST_REVIEW_BLOCKING_SEVERITIES,
@@ -123,12 +123,12 @@ export interface HostReviewSurface {
 
 /** Bind reviewer dispatch, retry, findings recording, and host-gate execution. */
 export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
-  const dakarTokens = tokenizeShellCommand(config.dakarCommand)
-  if (!dakarTokens || dakarTokens.hasUnquotedControlOperator || dakarTokens.words.length === 0) {
-    throw new Error('Invalid dakarCommand: expected a non-empty command without unquoted control operators')
-  }
-  const parsed = config.dakarInvocation || dakarTokens.words.map((word) => word.value)
-  const dakarAttempt = makeDakarAttempt({ ...config, dakarInvocation: parsed })
+  const dakarCommandInvocation = dakarInvocationFromCommand(config.dakarCommand)
+  const dakarInvocation = config.dakarInvocation === undefined
+    ? dakarCommandInvocation
+    : validateDakarInvocation(config.dakarInvocation)
+  if (!dakarCommandInvocation || !dakarInvocation) throw new Error(DAKAR_COMMAND_VALIDATION_ERROR)
+  const dakarAttempt = makeDakarAttempt({ ...config, dakarInvocation })
   const coderabbitAttempt = makeCoderabbitAttempt(config)
   const hostReviewMetrics: HostReviewMetrics = makeHostReviewMetrics()
   const hostGateMetrics: HostGateMetrics = { runs: 0, failures: 0 }

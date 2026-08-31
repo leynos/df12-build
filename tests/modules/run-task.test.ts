@@ -217,6 +217,8 @@ describe('summarizers', () => {
       openIssues: [],
       summary: '',
     })
+    expect(summarizeFixReport({ coderabbitRuns: 3 })?.hostReviewRuns).toBe(3)
+    expect(summarizeFixReport({ hostReviewRuns: 1, coderabbitRuns: 9 })?.hostReviewRuns).toBe(1)
   })
 })
 
