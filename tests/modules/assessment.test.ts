@@ -78,14 +78,14 @@ function subject(overrides: Record<string, unknown> = {}) {
 
 describe('deferred-review classification', () => {
   const table: Array<[string, boolean]> = [
-    ['Second CodeRabbit review pass deferred: rate_limit, waitTime 26s', true],
-    ['coderabbit review returned HTTP 429; retry later', true],
-    ['CodeRabbit temporarily unavailable', true],
+    ['Second CodeRabbit review pass deferred: rate_limit, waitTime 26s', false],
+    ['coderabbit review returned HTTP 429; retry later', false],
+    ['CodeRabbit temporarily unavailable', false],
     ['coderabbit found 3 blocking issues', false],
     ['rate limit exceeded on the build API', false],
     // Dakar deferrals use one exact prefix and must classify as recoverable
     // review faults, just like CodeRabbit rate limits.
-    ['Dakar review deferred (stage: deferred) — budget exhausted', true],
+    ['Dakar review deferred (stage: deferred) — budget exhausted', false],
     ['Dakar unavailable', false],
     ['Dakar migration deferred pending approval', false],
     ['Dakar review deferred (stage: approval-pending) — awaiting approval', false],
@@ -102,7 +102,7 @@ describe('deferred-review classification', () => {
 
   test('hasOnlyDeferredReviewIssues demands a non-empty, all-deferred list', () => {
     expect(hasOnlyDeferredReviewIssues([])).toBe(false)
-    expect(hasOnlyDeferredReviewIssues(['coderabbit 429 rate limit'])).toBe(true)
+    expect(hasOnlyDeferredReviewIssues(['coderabbit 429 rate limit'])).toBe(false)
     expect(hasOnlyDeferredReviewIssues(['coderabbit 429 rate limit', 'tests failing'])).toBe(false)
   })
 

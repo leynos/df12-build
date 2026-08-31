@@ -315,34 +315,15 @@ export function isDeferredReviewIssue(issue: unknown): boolean {
     && (issue as Partial<HostReviewDeferral>).kind === 'host-review-deferral'
     && ((issue as Partial<HostReviewDeferral>).outcome === 'rate-limited' || (issue as Partial<HostReviewDeferral>).outcome === 'error')
   ) return true
-  const text = String(issue || '').toLowerCase()
-  const coderabbitDeferredMarkers = [
-    'rate limit',
-    'rate_limit',
-    'rate-limit',
-    'ratelimit',
-    '429',
-    'retry after',
-    'waittime',
-    'wait time',
-    'deferred coderabbit review',
-    'coderabbit review deferred',
-    'unavailable',
-  ]
-  // Dakar emits one exact prefix for budget/quota deferrals. CodeRabbit has a
-  // wider historical marker set, including temporary unavailability.
-  const isDakarDeferral = text.startsWith('dakar review deferred (stage: deferred)')
-  const isCoderabbitDeferral = text.includes('coderabbit')
-    && coderabbitDeferredMarkers.some((marker) => text.includes(marker))
-  return isDakarDeferral || isCoderabbitDeferral
+  return false
 }
 
 /**
- * Whether every open issue in the list is a deferred/recoverable CodeRabbit
- * review fault (e.g. a 429), so the list carries no substantive defect.
+ * Whether every open issue is a structured deferred host-review record, so the
+ * list carries no substantive defect.
  *
  * @param openIssues The open-issue list, or null/undefined.
- * @returns True only when the list is non-empty and every entry is deferred-review.
+ * @returns True only when the list is non-empty and every entry is deferred.
  */
 export function hasOnlyDeferredReviewIssues(openIssues: readonly unknown[] | null | undefined): boolean {
   const issues = openIssues || []

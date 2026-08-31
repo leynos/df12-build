@@ -2222,23 +2222,7 @@ function isInfraFaultResult(result) {
 }
 function isDeferredReviewIssue(issue) {
   if (issue !== null && typeof issue === "object" && issue.kind === "host-review-deferral" && (issue.outcome === "rate-limited" || issue.outcome === "error")) return true;
-  const text = String(issue || "").toLowerCase();
-  const coderabbitDeferredMarkers = [
-    "rate limit",
-    "rate_limit",
-    "rate-limit",
-    "ratelimit",
-    "429",
-    "retry after",
-    "waittime",
-    "wait time",
-    "deferred coderabbit review",
-    "coderabbit review deferred",
-    "unavailable"
-  ];
-  const isDakarDeferral = text.startsWith("dakar review deferred (stage: deferred)");
-  const isCoderabbitDeferral = text.includes("coderabbit") && coderabbitDeferredMarkers.some((marker) => text.includes(marker));
-  return isDakarDeferral || isCoderabbitDeferral;
+  return false;
 }
 function hasOnlyDeferredReviewIssues(openIssues) {
   const issues = openIssues || [];

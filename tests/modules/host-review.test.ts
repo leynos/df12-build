@@ -599,11 +599,15 @@ describe('runCodeSceneCheck', () => {
     const dir = tmp('cs-clean-')
     // A command that exists and exits 0 stands in for a clean cs-check-changed.
     const surface = hostReview({ csCheck: true, csCheckCommand: 'true' })
+    const before = surface.metrics().codeScene
     const { runCodeSceneCheck } = surface
     const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
     expect(result.clean).toBe(true)
     expect(result.skipped).toBe(false)
-    expect(surface.metrics().codeScene).toMatchObject({ runs: 1, failures: 0, skipped: 0 })
+    const after = surface.metrics().codeScene
+    expect(after.runs - before.runs).toBe(1)
+    expect(after.failures - before.failures).toBe(0)
+    expect(after.skipped - before.skipped).toBe(0)
     junk.push(result.logFile)
   })
 
