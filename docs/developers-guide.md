@@ -326,10 +326,18 @@ classification settle. Cleanup failures are bounded diagnostics and do not
 replace the review result. Retries therefore share no Dakar state when cleanup
 succeeds.
 
-The shared host-review retry settings retain their historical CodeRabbit names:
-`coderabbitAttempts` defaults to `3` and is clamped to `1–10`, while each
-`coderabbitBackoffMinutes` endpoint is clamped to `1–1440` minutes (the default
-range is `[45, 90]`, and the upper endpoint cannot be below the lower one).
+The shared host-review settings use the canonical names
+`hostReviewBetweenWorkItems`, `hostReviewAttempts`,
+`hostReviewBackoffMinutes`, and `hostReviewFindingsFile`.
+`hostReviewBetweenWorkItems` defaults to `true`; `hostReviewAttempts` defaults
+to `3` and is clamped to `1–10`; and each `hostReviewBackoffMinutes` endpoint is
+clamped to `1–1440` minutes (the default range is `[45, 90]`, and the upper
+endpoint cannot be below the lower one). `hostReviewFindingsFile` is an
+optional append-only JSONL sink path. The historical
+`coderabbitBetweenWorkItems`, `coderabbitAttempts`,
+`coderabbitBackoffMinutes`, and `coderabbitFindingsFile` names remain accepted
+as deprecated compatibility aliases; canonical values take precedence when
+both forms are supplied.
 
 `host-review.ts` exports `parseDakarDocument` and `classifyDakarReview` as the
 Dakar adapter boundary tested directly by the module suite. Both Dakar and
@@ -384,7 +392,7 @@ mode) moves the CLI invocation from agent prompts to the control loop:
 `coderabbit review --agent --type committed --base <base>` (a FIXED host
 invocation; the `coderabbitReviewCommand` knob applies only to the legacy
 agent-run mode and does NOT override it) runs BETWEEN each per-work-item build
-turn (`coderabbitBetweenWorkItems`, default on) as a deterministic gate on each
+turn (`hostReviewBetweenWorkItems`, default on) as a deterministic gate on each
 committed work item, and again per dual-review round and per addendum.
 
 The review stage spends by a strict cost hierarchy — deterministic gates are

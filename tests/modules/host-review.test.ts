@@ -87,9 +87,9 @@ test('reviewer display names cover every supported host reviewer', () => {
 function hostReview(overrides: Partial<Parameters<typeof makeHostReview>[0]> = {}) {
   return makeHostReview({
     base: 'main',
-    coderabbitAttempts: 3,
-    coderabbitBackoffMinutes: [45, 90],
-    coderabbitFindingsFile: '',
+    reviewAttempts: 3,
+    reviewBackoffMinutes: [45, 90],
+    reviewFindingsFile: '',
     commitGates: ['make all'],
     commitGateTimeoutSeconds: 5,
     csCheck: false,
@@ -200,7 +200,7 @@ describe('runDakarHostReview', () => {
 
   test('a state-root creation failure becomes a terminal host-review error', async () => {
     let removed = false
-    const { runHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+    const { runHostReview } = hostReview({ reviewTool: 'dakar', reviewAttempts: 1 })
     const review = await runHostReview('/work/tree', 'label', {
       dakarStateRoots: {
         create: () => { throw new Error('temporary directory unavailable') },
@@ -269,7 +269,7 @@ describe('runDakarHostReview', () => {
   for (const scenario of cases) {
     test(scenario.name, async () => {
       const { exec } = recordingExec({ stdout: scenario.stdout ?? dakarJson(scenario.doc as Record<string, unknown>) })
-      const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+      const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', reviewAttempts: 1 })
       const review = await runCoderabbitHostReview('/w', 'l', { exec })
       expect(review.outcome).toBe(scenario.outcome)
     })
@@ -277,7 +277,7 @@ describe('runDakarHostReview', () => {
 
   test('a killed Dakar process with no document is a timeout error', async () => {
     const { exec } = recordingExec({ ok: false, killed: true, stdout: '', message: 'review timed out' })
-    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', reviewAttempts: 1 })
     const review = await runCoderabbitHostReview('/w', 'l', { exec })
     expect(review.outcome).toBe('error')
     expect(review.errorCategory).toBe('timeout')
@@ -288,7 +288,7 @@ describe('runDakarHostReview', () => {
     // whole: the detail travels into halt records and operator logs.
     const oversized = 'x'.repeat(50_000)
     const { exec } = recordingExec({ ok: false, stdout: 'total garbage, no brace', stderr: oversized, message: 'spawn failed' })
-    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', reviewAttempts: 1 })
     const review = await runCoderabbitHostReview('/w', 'l', { exec })
     expect(review.outcome).toBe('error')
     expect(review.errorCategory).toBe('invalid-output')
@@ -300,7 +300,7 @@ describe('runDakarHostReview', () => {
     // A reviewer rejection with no findings would otherwise yield zero
     // blocking items and sail through the fix-round gate as if clean.
     const { exec } = recordingExec({ ok: true, stdout: '{"ok":true,"verdict":"changes-requested","findings":[]}', stderr: '' })
-    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', reviewAttempts: 1 })
     const review = await runCoderabbitHostReview('/w', 'l', { exec })
     expect(review.outcome).toBe('error')
     expect(review.detail).toContain('changes-requested')
@@ -308,7 +308,7 @@ describe('runDakarHostReview', () => {
 
   test('normalizes an uppercase Dakar severity before validating it', async () => {
     const { exec } = recordingExec({ stdout: dakarJson({ ok: true, verdict: 'changes-requested', findings: [{ severity: 'HIGH', path: 'a.ts', title: 't', detail: 'd', evidence: 'e' }] }) })
-    const review = await hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 }).runHostReview('/w', 'l', { exec })
+    const review = await hostReview({ reviewTool: 'dakar', reviewAttempts: 1 }).runHostReview('/w', 'l', { exec })
     expect(review.outcome).toBe('findings')
     expect(review.findings[0]?.severity).toBe('major')
   })
@@ -329,7 +329,7 @@ describe('runDakarHostReview', () => {
       })
       const { runCoderabbitHostReview } = hostReview({
         reviewTool: 'dakar',
-        coderabbitAttempts: 1,
+        reviewAttempts: 1,
       })
       const review = await runCoderabbitHostReview('/w', 'l', { exec })
       expect(review.outcome).toBe('error')
@@ -346,7 +346,7 @@ describe('runDakarHostReview', () => {
     })
     const { runCoderabbitHostReview } = hostReview({
       reviewTool: 'dakar',
-      coderabbitAttempts: 1,
+      reviewAttempts: 1,
     })
     const review = await runCoderabbitHostReview('/w', 'l', { exec })
     expect(review.outcome).toBe('error')
@@ -368,7 +368,7 @@ describe('runDakarHostReview', () => {
       return { ok: false, stdout: `{"ok":false,"stage":"deferred","error":"quota"}`, stderr: '' }
     }
     const sleeps: number[] = []
-    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 3 })
+    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', reviewAttempts: 3 })
     const review = await runCoderabbitHostReview('/w', 'l', { exec, sleep: async (m: number) => { sleeps.push(m) } })
     expect(review.outcome).toBe('rate-limited')
     expect(attempts).toBe(3)
@@ -383,7 +383,7 @@ describe('runDakarHostReview', () => {
   ] as const) {
     test(`${name} fails closed when Dakar also returns findings`, async () => {
       const { exec } = recordingExec({ stdout: dakarJson(doc) })
-      const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+      const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', reviewAttempts: 1 })
       const review = await runCoderabbitHostReview('/w', 'l', { exec })
       expect(review.outcome).toBe('error')
       expect(review.findings).toEqual([])
@@ -400,7 +400,7 @@ describe('runDakarHostReview', () => {
       const { exec } = recordingExec({
         stdout: dakarJson({ ok: true, verdict: 'changes-requested', findings: [finding] }),
       })
-      const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+      const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', reviewAttempts: 1 })
       const review = await runCoderabbitHostReview('/w', 'l', { exec })
       expect(review.outcome).toBe('error')
       expect(review.findings).toEqual([])
@@ -422,7 +422,7 @@ describe('runDakarHostReview', () => {
       ],
     }
     const { exec } = recordingExec({ stdout: dakarJson(doc) })
-    const { runCoderabbitHostReview, recordCoderabbitReview } = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1, coderabbitFindingsFile: findingsFile })
+    const { runCoderabbitHostReview, recordCoderabbitReview } = hostReview({ reviewTool: 'dakar', reviewAttempts: 1, reviewFindingsFile: findingsFile })
     const review = await runCoderabbitHostReview('/w', 'l', { exec })
     // critical + high map onto CodeRabbit's blocking critical + major.
     const blocking = reviewBlockingItems(review.reviewer, review.findings)
@@ -441,7 +441,7 @@ describe('runDakarHostReview', () => {
   test('concurrent findings records keep exact counters and complete JSONL', async () => {
     const findingsFile = path.join(mkdtempSync(path.join(tmpdir(), 'dakar-concurrent-sink-')), 'findings.jsonl')
     junk.push(path.dirname(findingsFile))
-    const surface = hostReview({ coderabbitFindingsFile: findingsFile })
+    const surface = hostReview({ reviewFindingsFile: findingsFile })
     const before = surface.metrics().hostReview
     const { recordHostReview } = surface
     const records = Array.from({ length: 12 }, (_, index) => recordHostReview(`parallel-${index}`, {
@@ -466,7 +466,7 @@ describe('runDakarHostReview', () => {
   test('a sink failure increments the bounded neutral metric', async () => {
     const sinkDirectory = mkdtempSync(path.join(tmpdir(), 'dakar-failing-sink-'))
     junk.push(sinkDirectory)
-    const surface = hostReview({ coderabbitFindingsFile: sinkDirectory })
+    const surface = hostReview({ reviewFindingsFile: sinkDirectory })
     const before = surface.metrics().hostReview.sinkFailures
     const { recordHostReview } = surface
     await recordHostReview('sink-failure', {
@@ -484,7 +484,7 @@ describe('runDakarHostReview', () => {
 
   test('the findings sink accepts injected timestamp and append seams', async () => {
     const calls: Array<{ path: string; data: string }> = []
-    const surface = hostReview({ coderabbitFindingsFile: '/virtual/findings.jsonl' })
+    const surface = hostReview({ reviewFindingsFile: '/virtual/findings.jsonl' })
     await surface.recordHostReview('injected sink', {
       reviewer: 'dakar', outcome: 'findings', attempts: 1, elapsedMs: 1,
       errorCategory: 'none', findings: [{ severity: 'major', fileName: 'src/a.ts', comment: 'finding' }], detail: '',
@@ -535,12 +535,12 @@ describe('reviewTool dispatch', () => {
   })
 
   test('both adapters return the neutral result contract', async () => {
-    const dakar = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+    const dakar = hostReview({ reviewTool: 'dakar', reviewAttempts: 1 })
     const dakarResult = await dakar.runHostReview('/w', 'dakar-contract', {
       exec: recordingExec({ stdout: '{"ok":true,"verdict":"pass","findings":[]}' }).exec,
       nowMs: (() => { const values = [10, 25]; return () => values.shift() as number })(),
     })
-    const coderabbit = hostReview({ reviewTool: 'coderabbit', coderabbitAttempts: 1 })
+    const coderabbit = hostReview({ reviewTool: 'coderabbit', reviewAttempts: 1 })
     const coderabbitResult = await coderabbit.runHostReview('/w', 'coderabbit-contract', {
       exec: recordingExec({ stdout: '{"type":"complete","status":"review_completed"}' }).exec,
       nowMs: (() => { const values = [20, 45]; return () => values.shift() as number })(),
@@ -552,7 +552,7 @@ describe('reviewTool dispatch', () => {
   test('terminal telemetry classifies timeout metadata and bounds identifiers', async () => {
     const logs: string[] = []
     g.log = (message: unknown) => logs.push(String(message))
-    const surface = hostReview({ reviewTool: 'coderabbit', coderabbitAttempts: 1 })
+    const surface = hostReview({ reviewTool: 'coderabbit', reviewAttempts: 1 })
     const before = surface.metrics().hostReview
     const { runHostReview } = surface
     const values = [100, 145]
@@ -570,11 +570,11 @@ describe('reviewTool dispatch', () => {
   })
 
   test('neutral metrics count deferred and authentication outcomes', async () => {
-    const deferred = hostReview({ reviewTool: 'dakar', coderabbitAttempts: 1 })
+    const deferred = hostReview({ reviewTool: 'dakar', reviewAttempts: 1 })
     await deferred.runHostReview('/w', 'deferred', {
       exec: recordingExec({ stdout: '{"ok":false,"stage":"deferred","error":"budget"}' }).exec,
     })
-    const auth = hostReview({ reviewTool: 'coderabbit', coderabbitAttempts: 1 })
+    const auth = hostReview({ reviewTool: 'coderabbit', reviewAttempts: 1 })
     await auth.runHostReview('/w', 'auth', {
       exec: recordingExec({ ok: false, stderr: 'not authenticated; run coderabbit auth login' }).exec,
     })
@@ -595,6 +595,17 @@ describe('runCodeSceneCheck', () => {
     for (const target of junk.splice(0)) if (target) rmSync(target, { recursive: true, force: true })
   })
 
+  const expectCodeSceneDeltas = (
+    surface: ReturnType<typeof hostReview>,
+    before: ReturnType<ReturnType<typeof hostReview>['metrics']>['codeScene'],
+    expected: { readonly runs: number; readonly failures: number; readonly skipped: number },
+  ) => {
+    const after = surface.metrics().codeScene
+    expect(after.runs - before.runs).toBe(expected.runs)
+    expect(after.failures - before.failures).toBe(expected.failures)
+    expect(after.skipped - before.skipped).toBe(expected.skipped)
+  }
+
   test('a clean check reports clean and not skipped', async () => {
     const dir = tmp('cs-clean-')
     // A command that exists and exits 0 stands in for a clean cs-check-changed.
@@ -604,10 +615,7 @@ describe('runCodeSceneCheck', () => {
     const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
     expect(result.clean).toBe(true)
     expect(result.skipped).toBe(false)
-    const after = surface.metrics().codeScene
-    expect(after.runs - before.runs).toBe(1)
-    expect(after.failures - before.failures).toBe(0)
-    expect(after.skipped - before.skipped).toBe(0)
+    expectCodeSceneDeltas(surface, before, { runs: 1, failures: 0, skipped: 0 })
     junk.push(result.logFile)
   })
 
@@ -616,24 +624,28 @@ describe('runCodeSceneCheck', () => {
     const executable = path.join(dir, 'check-env')
     writeFileSync(executable, '#!/bin/sh\ntest "$TOKEN" = expected\n')
     chmodSync(executable, 0o755)
-    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: `env TOKEN=expected "${executable}"` })
+    const surface = hostReview({ csCheck: true, csCheckCommand: `env TOKEN=expected "${executable}"` })
+    const before = surface.metrics().codeScene
+    const { runCodeSceneCheck } = surface
     const result = await runCodeSceneCheck(dir, '1.2.3', 'env')
 
     expect(result.clean).toBe(true)
     expect(result.skipped).toBe(false)
+    expectCodeSceneDeltas(surface, before, { runs: 1, failures: 0, skipped: 0 })
     junk.push(result.logFile)
   })
 
   test('an unparsable command fails the availability probe without running a fallback', async () => {
     const dir = tmp('cs-unparsable-')
     const surface = hostReview({ csCheck: true, csCheckCommand: 'TOKEN=`untrusted` true' })
+    const before = surface.metrics().codeScene
     const { runCodeSceneCheck } = surface
     const result = await runCodeSceneCheck(dir, '1.2.3', 'unparsable')
 
     expect(result).toMatchObject({ clean: false, skipped: false, logFile: '' })
     expect(result.detail).toContain('could not be parsed safely')
     expect(result.detail).toContain('<redacted command>')
-    expect(surface.metrics().codeScene).toEqual({ runs: 0, failures: 0, probeFailures: 1, skipped: 0 })
+    expectCodeSceneDeltas(surface, before, { runs: 0, failures: 0, skipped: 0 })
   })
 
   test('redacts assignment values from CodeScene logs and failure detail', async () => {
@@ -641,7 +653,9 @@ describe('runCodeSceneCheck', () => {
     const secret = 'never-log-this-token'
     const messages: string[] = []
     g.log = (message: unknown) => messages.push(String(message))
-    const { runCodeSceneCheck } = hostReview({ csCheck: true, csCheckCommand: `env TOKEN=${secret} sh -c "exit 1"` })
+    const surface = hostReview({ csCheck: true, csCheckCommand: `env TOKEN=${secret} sh -c "exit 1"` })
+    const before = surface.metrics().codeScene
+    const { runCodeSceneCheck } = surface
     const result = await runCodeSceneCheck(dir, '1.2.3', 'redacted')
 
     expect(result.clean).toBe(false)
@@ -649,38 +663,44 @@ describe('runCodeSceneCheck', () => {
     expect(messages.join('\n')).not.toContain(secret)
     expect(result.detail).toContain('TOKEN=<redacted>')
     expect(messages.join('\n')).toContain('TOKEN=<redacted>')
+    expectCodeSceneDeltas(surface, before, { runs: 1, failures: 1, skipped: 0 })
     junk.push(result.logFile)
   })
 
   test('a non-zero exit reports a code-health regression with the log tail', async () => {
     const dir = tmp('cs-dirty-')
     const surface = hostReview({ csCheck: true, csCheckCommand: 'sh -c "echo Complex Method in foo; exit 1"' })
+    const before = surface.metrics().codeScene
     const { runCodeSceneCheck } = surface
     const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
     expect(result.clean).toBe(false)
     expect(result.skipped).toBe(false)
     expect(result.detail).toMatch(/Complex Method/)
     expect(result.detail).toContain(result.logFile)
-    expect(surface.metrics().codeScene).toMatchObject({ runs: 1, failures: 1 })
+    expectCodeSceneDeltas(surface, before, { runs: 1, failures: 1, skipped: 0 })
     junk.push(result.logFile)
   })
 
   test('an absent binary skips gracefully (clean, skipped) instead of failing', async () => {
     const dir = tmp('cs-absent-')
     const surface = hostReview({ csCheck: true, csCheckCommand: 'df12-cs-not-installed-xyz' })
+    const before = surface.metrics().codeScene
     const { runCodeSceneCheck } = surface
     const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
     expect(result.clean).toBe(true)
     expect(result.skipped).toBe(true)
     expect(result.detail).toMatch(/not on PATH/)
-    expect(surface.metrics().codeScene).toMatchObject({ runs: 0, failures: 0, skipped: 1 })
+    expectCodeSceneDeltas(surface, before, { runs: 0, failures: 0, skipped: 1 })
   })
 
   test('csCheck disabled skips without probing', async () => {
     const dir = tmp('cs-off-')
-    const { runCodeSceneCheck } = hostReview({ csCheck: false })
+    const surface = hostReview({ csCheck: false })
+    const before = surface.metrics().codeScene
+    const { runCodeSceneCheck } = surface
     const result = await runCodeSceneCheck(dir, '1.2.3', 'r1')
     expect(result).toEqual({ clean: true, skipped: true, detail: '', logFile: '' })
+    expectCodeSceneDeltas(surface, before, { runs: 0, failures: 0, skipped: 0 })
   })
 })
 

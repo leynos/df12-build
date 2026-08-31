@@ -138,19 +138,19 @@ export interface RawWorkflowArgs {
   coderabbitReviewCommand?: string
   /** Have the host run CodeRabbit against committed work; set false to restore the legacy agent-run flow. */
   coderabbitHostReview?: boolean
-  /** Run the host CodeRabbit review between per-work-item build turns rather than only at end of stage. */
+  /** @deprecated Use {@link hostReviewBetweenWorkItems}. */
   coderabbitBetweenWorkItems?: boolean
   /** Canonical host-review between-work-item switch. */
   hostReviewBetweenWorkItems?: boolean
-  /** Total attempts per host CodeRabbit review when rate limited. */
+  /** @deprecated Use {@link hostReviewAttempts}. */
   coderabbitAttempts?: number | string
   /** Canonical bounded host-review attempt count. */
   hostReviewAttempts?: number | string
-  /** Rate-limit backoff window in minutes as a `[low, high]` pair; sanitized into an ordered range. */
+  /** @deprecated Use {@link hostReviewBackoffMinutes}. */
   coderabbitBackoffMinutes?: unknown
   /** Canonical host-review retry backoff range. */
   hostReviewBackoffMinutes?: unknown
-  /** Optional durable JSONL sink path for every CodeRabbit finding. */
+  /** @deprecated Use {@link hostReviewFindingsFile}. */
   coderabbitFindingsFile?: string
   /** Canonical host-review findings JSONL output path. */
   hostReviewFindingsFile?: string
@@ -298,14 +298,22 @@ export interface WorkflowConfig {
   CODERABBIT_REVIEW_COMMAND: string
   /** True when the host runs CodeRabbit against committed work. */
   CODERABBIT_HOST_REVIEW: boolean
-  /** True to run the host CodeRabbit review between per-work-item build turns. */
+  /** True to run the selected host reviewer between per-work-item build turns. */
   HOST_REVIEW_BETWEEN_WORK_ITEMS: boolean
-  /** Attempts per host CodeRabbit review when rate limited; at least 1. */
+  /** @deprecated Use {@link HOST_REVIEW_BETWEEN_WORK_ITEMS}. */
+  CODERABBIT_BETWEEN_WORK_ITEMS: boolean
+  /** Attempts per host review when deferred or rate limited; at least 1. */
   HOST_REVIEW_ATTEMPTS: number
-  /** Ordered `[low, high]` rate-limit backoff window in minutes. */
+  /** @deprecated Use {@link HOST_REVIEW_ATTEMPTS}. */
+  CODERABBIT_ATTEMPTS: number
+  /** Ordered `[low, high]` host-review backoff window in minutes. */
   HOST_REVIEW_BACKOFF_MINUTES: [number, number]
-  /** JSONL sink path for CodeRabbit findings, or empty string when disabled. */
+  /** @deprecated Use {@link HOST_REVIEW_BACKOFF_MINUTES}. */
+  CODERABBIT_BACKOFF_MINUTES: [number, number]
+  /** JSONL sink path for host-review findings, or empty string when disabled. */
   HOST_REVIEW_FINDINGS_FILE: string
+  /** @deprecated Use {@link HOST_REVIEW_FINDINGS_FILE}. */
+  CODERABBIT_FINDINGS_FILE: string
   /** True when the host re-runs commit gates against committed HEAD. */
   HOST_COMMIT_GATES: boolean
   /** True when the CodeScene code-health check runs as a gate. */
@@ -467,7 +475,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   const attemptsInput = Number(cfg.hostReviewAttempts ?? cfg.coderabbitAttempts)
   // NaN deliberately reaches the established default fallback; only infinities reject.
   if (!Number.isFinite(attemptsInput) && !Number.isNaN(attemptsInput)) {
-    throw new Error('coderabbitAttempts must be finite')
+    throw new Error('hostReviewAttempts must be finite')
   }
   const HOST_REVIEW_ATTEMPTS = Math.min(10, Math.max(1, Math.trunc(attemptsInput || 3))) // total attempts per host review when rate limited
   const HOST_REVIEW_BACKOFF_MINUTES: [number, number] = (() => {
@@ -477,13 +485,13 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     const upperInput = Number(range[1])
     // NaN deliberately reaches the established default fallback; only infinities reject.
     if ((!Number.isFinite(lowerInput) && !Number.isNaN(lowerInput)) || (!Number.isFinite(upperInput) && !Number.isNaN(upperInput))) {
-      throw new Error('coderabbitBackoffMinutes values must be finite')
+      throw new Error('hostReviewBackoffMinutes values must be finite')
     }
     const low = Math.min(1440, Math.max(1, Math.trunc(lowerInput || 45)))
     const high = Math.min(1440, Math.max(low, Math.trunc(upperInput || 90)))
     return [low, high]
   })()
-  // Optional durable JSONL sink for every CodeRabbit finding, so recurring
+  // Optional durable JSONL sink for every host-review finding, so recurring
   // finding classes can be tuned into deterministic lint rules over time.
   const HOST_REVIEW_FINDINGS_FILE = String(cfg.hostReviewFindingsFile ?? cfg.coderabbitFindingsFile ?? '')
   // The deterministic commit-gate command set for the target project. `make all`
@@ -532,7 +540,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     : `Do NOT run ${HOST_REVIEWER_NAME.toLowerCase()} yourself and do not spend context waiting on its rate limits: the workflow host runs \`coderabbit review --agent\` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work — only committed changes reach the host review.`
   const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW
     ? HOST_REVIEW_GUIDANCE
-    : `Use \`coderabbit review --agent\` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the \`vsleep\` command) for \`$(shuf -i ${CODERABBIT_BACKOFF_MINUTES[0]}-${CODERABBIT_BACKOFF_MINUTES[1]} -n 1)\` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.`
+    : `Use \`coderabbit review --agent\` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the \`vsleep\` command) for \`$(shuf -i ${HOST_REVIEW_BACKOFF_MINUTES[0]}-${HOST_REVIEW_BACKOFF_MINUTES[1]} -n 1)\` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.`
   const SPARK_DELEGATION_GUIDANCE =
     "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks."
   const SCRUTINEER_DELEGATION_GUIDANCE = CODERABBIT_HOST_REVIEW
@@ -610,6 +618,10 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     COMMIT_GATE_GUIDANCE,
     CS_CHECK_GUIDANCE,
     CODERABBIT_REVIEW_GUIDANCE,
+    CODERABBIT_BETWEEN_WORK_ITEMS: HOST_REVIEW_BETWEEN_WORK_ITEMS,
+    CODERABBIT_ATTEMPTS: HOST_REVIEW_ATTEMPTS,
+    CODERABBIT_BACKOFF_MINUTES: HOST_REVIEW_BACKOFF_MINUTES,
+    CODERABBIT_FINDINGS_FILE: HOST_REVIEW_FINDINGS_FILE,
     SPARK_DELEGATION_GUIDANCE,
     SCRUTINEER_DELEGATION_GUIDANCE,
   }

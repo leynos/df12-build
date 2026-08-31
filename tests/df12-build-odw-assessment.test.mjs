@@ -57,8 +57,8 @@ return {
   runHostCommitGates,
   hostGateMetrics: () => getHostReviewMetrics().hostGates,
   CODERABBIT_HOST_REVIEW,
-  CODERABBIT_ATTEMPTS,
-  CODERABBIT_BACKOFF_MINUTES,
+  HOST_REVIEW_ATTEMPTS,
+  HOST_REVIEW_BACKOFF_MINUTES,
   parseCoderabbitAgentOutput,
   classifyCoderabbitOutcome,
   reviewBackoffMinutes,
@@ -404,7 +404,7 @@ test('CodeRabbit outcomes classify from events, never exit codes', async () => {
 
 test('CodeRabbit backoff jitter is deterministic, seeded, and range-bound', async () => {
   const surface = await loadAssessmentSurface()
-  assert.deepEqual(surface.CODERABBIT_BACKOFF_MINUTES, [45, 90])
+  assert.deepEqual(surface.HOST_REVIEW_BACKOFF_MINUTES, [45, 90])
   const first = surface.reviewBackoffMinutes('coderabbit:1.2.3 r1#1')
   assert.equal(surface.reviewBackoffMinutes('coderabbit:1.2.3 r1#1'), first, 'same seed, same wait')
   const seeds = ['a#1', 'a#2', 'b#1', 'coderabbit:9.9.9 r3#2']
@@ -422,7 +422,7 @@ test('the host review loop backs off on rate limits and stops at the attempt cap
   // now Dakar, so pin the tool to keep asserting the CodeRabbit invocation.
   const surface = await loadAssessmentSurface({ reviewTool: 'coderabbit' })
   assert.equal(surface.CODERABBIT_HOST_REVIEW, true)
-  assert.equal(surface.CODERABBIT_ATTEMPTS, 3)
+  assert.equal(surface.HOST_REVIEW_ATTEMPTS, 3)
 
   const rateLimited = { ok: true, stdout: '{"type":"error","errorType":"rate_limit","message":"Review limit reached"}', stderr: '' }
   const clean = { ok: true, stdout: '{"type":"complete","status":"reviewed","findings":0}', stderr: '' }
@@ -633,15 +633,15 @@ test('the addendum lane host-verifies gates before spending any review', async (
   assert.ok(hostReview < fallbackReview, 'host CodeRabbit review runs before the fallback review agent')
 })
 
-test('recoverable review faults classify as deferred review issues', async () => {
+test('only structured host-review records classify as deferred review issues', async () => {
   const surface = await loadAssessmentSurface()
 
-  // The live-run shape from issue #27: a CodeRabbit 429 recorded with the
-  // machine form "rate_limit" (and the log path carrying "coderabbit").
+  // Persisted vendor prose is not workflow-policy input. Current recovery
+  // consumes the neutral record emitted by the host-review boundary.
   const rows = [
-    ['Second CodeRabbit review pass deferred: /tmp/coderabbit-x.out reported errorType: rate_limit, waitTime: 26 seconds, recoverable: true', true],
-    ['coderabbit review returned HTTP 429; retry later', true],
-    ['CodeRabbit rate-limit backoff in progress', true],
+    ['Second CodeRabbit review pass deferred: /tmp/coderabbit-x.out reported errorType: rate_limit, waitTime: 26 seconds, recoverable: true', false],
+    ['coderabbit review returned HTTP 429; retry later', false],
+    ['CodeRabbit rate-limit backoff in progress', false],
     ['CodeRabbit temporarily unavailable', false],
     ['Dakar unavailable', false],
     ['Dakar migration deferred pending approval', false],
@@ -654,6 +654,10 @@ test('recoverable review faults classify as deferred review issues', async () =>
   for (const [issue, expected] of rows) {
     assert.equal(surface.isDeferredReviewIssue(issue), expected, issue)
   }
+  assert.equal(surface.isDeferredReviewIssue({
+    kind: 'host-review-deferral', reviewer: 'dakar', outcome: 'rate-limited',
+    errorCategory: 'deferred', attempts: 2, detail: 'bounded detail',
+  }), true)
 })
 
 test('green addendum implementation contract drift is manual merge ready', async () => {

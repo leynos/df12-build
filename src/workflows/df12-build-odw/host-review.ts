@@ -140,7 +140,7 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
   function reviewBackoffMinutes(seed: unknown): number {
     let hash = 5381
     for (const ch of String(seed)) hash = ((hash * 33) ^ (ch.codePointAt(0) as number)) >>> 0
-    const [low, high] = config.reviewBackoffMinutes
+    const [low, high] = config.reviewBackoffMinutes ?? config.coderabbitBackoffMinutes ?? [45, 90]
     return low + (hash % (high - low + 1))
   }
 
@@ -157,11 +157,12 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
     try {
       for (let attempt = 1; ; attempt++) {
         terminalAttempt = attempt
-        log(`[${boundedLabel}] ${displayName} host review attempt ${attempt} of ${config.reviewAttempts}`)
+        const attempts = config.reviewAttempts ?? config.coderabbitAttempts ?? 3
+        log(`[${boundedLabel}] ${displayName} host review attempt ${attempt} of ${attempts}`)
         const single: HostReviewAttempt = reviewer === 'dakar' ? await dakarAttempt(worktree, exec, deps) : await coderabbitAttempt(worktree, exec)
-        if (single.outcome === 'rate-limited' && attempt < config.reviewAttempts) {
+        if (single.outcome === 'rate-limited' && attempt < attempts) {
           const minutes = reviewBackoffMinutes(`${boundedLabel}#${attempt}`)
-          log(`[${boundedLabel}] ${displayName} rate limited/deferred; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${config.reviewAttempts} (wall-clock only, no agent tokens)`)
+          log(`[${boundedLabel}] ${displayName} rate limited/deferred; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${attempts} (wall-clock only, no agent tokens)`)
           await sleep(minutes)
           continue
         }
@@ -193,7 +194,8 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
       const severity = Object.hasOwn(hostReviewMetrics.bySeverity, rawSeverity) ? rawSeverity as keyof typeof hostReviewMetrics.bySeverity : 'unknown'
       hostReviewMetrics.bySeverity[severity] += 1
     }
-    if (!config.reviewFindingsFile || !review.findings.length) return
+    const findingsFile = config.reviewFindingsFile ?? config.coderabbitFindingsFile ?? ''
+    if (!findingsFile || !review.findings.length) return
     const append = async () => {
       const timestamp = deps.timestamp || (async () => {
         const stamp = await execFileStatus('date', ['-u', '+%Y-%m-%dT%H:%M:%SZ'])
@@ -206,11 +208,11 @@ export function makeHostReview(config: HostReviewConfig): HostReviewSurface {
           const fs = process.getBuiltinModule('node:fs/promises')
           await fs.appendFile(path, data, 'utf8')
         })
-        await appendFile(config.reviewFindingsFile, `${lines.join('\n')}\n`)
+        await appendFile(findingsFile, `${lines.join('\n')}\n`)
       } catch (error) {
         hostReviewMetrics.sinkFailures += 1
         hostReviewMetrics.sinkError = boundedTail((error as Error | null)?.message || String(error), 500)
-        log(`[${boundedTail(label, 120)}] could not append ${reviewerDisplayName(review.reviewer)} host-review findings to ${config.reviewFindingsFile}: ${hostReviewMetrics.sinkError}`)
+        log(`[${boundedTail(label, 120)}] could not append ${reviewerDisplayName(review.reviewer)} host-review findings to ${findingsFile}: ${hostReviewMetrics.sinkError}`)
       }
     }
     const pending = findingsSinkTail.then(append, append)

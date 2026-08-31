@@ -188,10 +188,13 @@ The key argument groups are:
   `dakarCommand` (default `dakar-review`), `reviewTimeoutSeconds` (default 3600,
   clamped 60–7200; `dakarTimeoutSeconds` remains an input alias), and
   `dakarBudgetGbp` (default 0, clamped 0–10),
-  `coderabbitHostReview`/
-  `coderabbitBetweenWorkItems`/`coderabbitAttempts`/`coderabbitBackoffMinutes`/
-  `coderabbitFindingsFile` (host-review enablement, between-work-item gating,
-  attempts, backoff, and findings capture; the names predate Dakar),
+  `coderabbitHostReview` (CodeRabbit host-review enablement) and the canonical
+  `hostReviewBetweenWorkItems`/`hostReviewAttempts`/`hostReviewBackoffMinutes`/
+  `hostReviewFindingsFile` (between-work-item gating, attempts, backoff, and
+  findings capture). The historical `coderabbitBetweenWorkItems`,
+  `coderabbitAttempts`, `coderabbitBackoffMinutes`, and
+  `coderabbitFindingsFile` names remain deprecated compatibility aliases
+  (canonical values take precedence when both are supplied),
   `perWorkItemBuild`/`maxWorkItemRounds` (the host-driven work-item build loop),
   and `stageAttempts` (bounded in-run retry of stage agents on infrastructure
   faults).

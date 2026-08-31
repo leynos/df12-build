@@ -47,12 +47,12 @@ describe('Dakar configuration clamp properties', () => {
   test('retry counts and backoff endpoints always remain finite bounded values', () => {
     fc.assert(
       fc.property(retryInput, retryInput, (attempts, backoff) => {
-        const config = makeConfig({ coderabbitAttempts: attempts, coderabbitBackoffMinutes: [backoff, backoff] })
-        expect(Number.isInteger(config.CODERABBIT_ATTEMPTS)).toBe(true)
-        expect(config.CODERABBIT_ATTEMPTS).toBeGreaterThanOrEqual(1)
-        expect(config.CODERABBIT_ATTEMPTS).toBeLessThanOrEqual(10)
-        expect(config.CODERABBIT_BACKOFF_MINUTES[0]).toBeGreaterThanOrEqual(1)
-        expect(config.CODERABBIT_BACKOFF_MINUTES[1]).toBeLessThanOrEqual(1440)
+        const config = makeConfig({ hostReviewAttempts: attempts, hostReviewBackoffMinutes: [backoff, backoff] })
+        expect(Number.isInteger(config.HOST_REVIEW_ATTEMPTS)).toBe(true)
+        expect(config.HOST_REVIEW_ATTEMPTS).toBeGreaterThanOrEqual(1)
+        expect(config.HOST_REVIEW_ATTEMPTS).toBeLessThanOrEqual(10)
+        expect(config.HOST_REVIEW_BACKOFF_MINUTES[0]).toBeGreaterThanOrEqual(1)
+        expect(config.HOST_REVIEW_BACKOFF_MINUTES[1]).toBeLessThanOrEqual(1440)
       }),
     )
   })

@@ -30,7 +30,7 @@ describe('makeConfig defaults', () => {
     expect(config.AUTH_PREFLIGHT).toBe(true)
     expect(config.REQUIRE_CODERABBIT_AUTH).toBe(true)
     expect(config.CODERABBIT_HOST_REVIEW).toBe(true)
-    expect(config.CODERABBIT_BETWEEN_WORK_ITEMS).toBe(true)
+    expect(config.HOST_REVIEW_BETWEEN_WORK_ITEMS).toBe(true)
     expect(config.HOST_COMMIT_GATES).toBe(true)
     expect(config.HOST_GATES_BETWEEN_WORK_ITEMS).toBe(true)
     expect(config.CS_CHECK).toBe(true)
@@ -132,10 +132,44 @@ describe('makeConfig review-tool selection', () => {
   })
 
   test('host-review retry and backoff settings are finite and bounded', () => {
-    expect(() => makeConfig({ coderabbitAttempts: Number.POSITIVE_INFINITY })).toThrow(/coderabbitAttempts must be finite/)
-    expect(() => makeConfig({ coderabbitBackoffMinutes: [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY] })).toThrow(/coderabbitBackoffMinutes values must be finite/)
-    expect(makeConfig({ coderabbitAttempts: 999, coderabbitBackoffMinutes: [9999, 10000] }).CODERABBIT_ATTEMPTS).toBe(10)
-    expect(makeConfig({ coderabbitBackoffMinutes: [9999, 10000] }).CODERABBIT_BACKOFF_MINUTES).toEqual([1440, 1440])
+    expect(() => makeConfig({ hostReviewAttempts: Number.POSITIVE_INFINITY })).toThrow(/hostReviewAttempts must be finite/)
+    expect(() => makeConfig({ hostReviewBackoffMinutes: [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY] })).toThrow(/hostReviewBackoffMinutes values must be finite/)
+    expect(makeConfig({ hostReviewAttempts: 999, hostReviewBackoffMinutes: [9999, 10000] }).HOST_REVIEW_ATTEMPTS).toBe(10)
+    expect(makeConfig({ hostReviewBackoffMinutes: [9999, 10000] }).HOST_REVIEW_BACKOFF_MINUTES).toEqual([1440, 1440])
+  })
+
+  test('legacy CodeRabbit controls remain compatibility aliases', () => {
+    const config = makeConfig({
+      coderabbitBetweenWorkItems: false,
+      coderabbitAttempts: 2,
+      coderabbitBackoffMinutes: [4, 8],
+      coderabbitFindingsFile: 'legacy-findings.jsonl',
+    })
+
+    expect(config.HOST_REVIEW_BETWEEN_WORK_ITEMS).toBe(false)
+    expect(config.HOST_REVIEW_ATTEMPTS).toBe(2)
+    expect(config.HOST_REVIEW_BACKOFF_MINUTES).toEqual([4, 8])
+    expect(config.HOST_REVIEW_FINDINGS_FILE).toBe('legacy-findings.jsonl')
+  })
+
+  test('canonical host-review controls take precedence over legacy aliases', () => {
+    const config = makeConfig({
+      hostReviewBetweenWorkItems: false,
+      coderabbitBetweenWorkItems: true,
+      hostReviewAttempts: 4,
+      coderabbitAttempts: 2,
+      hostReviewBackoffMinutes: [12, 24],
+      coderabbitBackoffMinutes: [45, 90],
+      hostReviewFindingsFile: 'host-findings.jsonl',
+      coderabbitFindingsFile: 'coderabbit-findings.jsonl',
+    })
+
+    expect(config.HOST_REVIEW_BETWEEN_WORK_ITEMS).toBe(false)
+    expect(config.HOST_REVIEW_ATTEMPTS).toBe(4)
+    expect(config.HOST_REVIEW_BACKOFF_MINUTES).toEqual([12, 24])
+    expect(config.HOST_REVIEW_FINDINGS_FILE).toBe('host-findings.jsonl')
+    expect(config.CODERABBIT_ATTEMPTS).toBe(config.HOST_REVIEW_ATTEMPTS)
+    expect(config.CODERABBIT_BACKOFF_MINUTES).toEqual(config.HOST_REVIEW_BACKOFF_MINUTES)
   })
 })
 
@@ -190,9 +224,9 @@ describe('makeConfig overrides and clamps', () => {
   })
 
   test('the between-work-items host review can be disabled independently', () => {
-    expect(makeConfig({ coderabbitBetweenWorkItems: false }).CODERABBIT_BETWEEN_WORK_ITEMS).toBe(false)
+    expect(makeConfig({ coderabbitBetweenWorkItems: false }).HOST_REVIEW_BETWEEN_WORK_ITEMS).toBe(false)
     // Still defaults on when host review is on.
-    expect(makeConfig({ coderabbitHostReview: true }).CODERABBIT_BETWEEN_WORK_ITEMS).toBe(true)
+    expect(makeConfig({ coderabbitHostReview: true }).HOST_REVIEW_BETWEEN_WORK_ITEMS).toBe(true)
   })
 
   test('dryRun waives the CodeRabbit auth requirement', () => {

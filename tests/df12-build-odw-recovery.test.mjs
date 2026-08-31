@@ -824,17 +824,16 @@ test('review-mode resume routes an eligible branch through review and integratio
   assert.equal(result.kind, 'recovery-resume')
   assert.equal(result.integration.pushed, true)
   assert.equal(result.impl.summary, 'Recovered adopt-complete branch from durable git state.')
+  assert.equal(calls[0], 'recover-assess:1.2.3')
   assert.deepEqual(
-    calls,
-    [
-      'recover-assess:1.2.3',
-      'write-probe:claude',
-      'write-probe:codex-medium',
-      'code-review:1.2.3 r1',
-      'expert-review:1.2.3 r1',
-      'integrate:1.2.3',
-    ],
-    'resume must pass the write preflight, then use the ordinary review labels and the integration agent',
+    calls.slice(1, 3).sort(),
+    ['write-probe:claude', 'write-probe:codex-medium'],
+    'the parallel write probes must complete before review begins',
+  )
+  assert.deepEqual(
+    calls.slice(3),
+    ['code-review:1.2.3 r1', 'expert-review:1.2.3 r1', 'integrate:1.2.3'],
+    'resume then uses the ordinary review labels and integration agent',
   )
 })
 

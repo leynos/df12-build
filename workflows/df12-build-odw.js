@@ -1235,7 +1235,7 @@ function makeConfig(rawArgs) {
   const HOST_REVIEW_BETWEEN_WORK_ITEMS2 = (cfg.hostReviewBetweenWorkItems ?? cfg.coderabbitBetweenWorkItems) !== false;
   const attemptsInput = Number(cfg.hostReviewAttempts ?? cfg.coderabbitAttempts);
   if (!Number.isFinite(attemptsInput) && !Number.isNaN(attemptsInput)) {
-    throw new Error("coderabbitAttempts must be finite");
+    throw new Error("hostReviewAttempts must be finite");
   }
   const HOST_REVIEW_ATTEMPTS2 = Math.min(10, Math.max(1, Math.trunc(attemptsInput || 3)));
   const HOST_REVIEW_BACKOFF_MINUTES2 = (() => {
@@ -1244,7 +1244,7 @@ function makeConfig(rawArgs) {
     const lowerInput = Number(range[0]);
     const upperInput = Number(range[1]);
     if (!Number.isFinite(lowerInput) && !Number.isNaN(lowerInput) || !Number.isFinite(upperInput) && !Number.isNaN(upperInput)) {
-      throw new Error("coderabbitBackoffMinutes values must be finite");
+      throw new Error("hostReviewBackoffMinutes values must be finite");
     }
     const low = Math.min(1440, Math.max(1, Math.trunc(lowerInput || 45)));
     const high = Math.min(1440, Math.max(low, Math.trunc(upperInput || 90)));
@@ -1268,7 +1268,7 @@ function makeConfig(rawArgs) {
     "Implementation smells \u2014 Nested Complexity: if-statements nested inside other ifs and/or loops, which sharply raises defect risk. Bumpy Road: a function that fails to encapsulate its responsibilities and instead holds several separate chunks of logic \u2014 extract each chunk into its own function. Complex Conditional: a single branch condition (in an if/for/while) combining multiple logical operators such as AND/OR. Large Assertion Blocks (test smell): a long run of consecutive assert statements that signals a missing abstraction. Duplicated Assertion Blocks (test smell): the same assertion block copy-pasted across the suite \u2014 a DRY violation."
   ].join("\n") : "";
   const HOST_REVIEW_GUIDANCE = REVIEW_TOOL2 === "dakar" ? `Do NOT run ${HOST_REVIEWER_NAME} yourself: the workflow host runs ${HOST_REVIEWER_NAME} against your COMMITTED work after the stage returns, absorbs any deferral backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work \u2014 only committed changes reach the host review.` : `Do NOT run ${HOST_REVIEWER_NAME.toLowerCase()} yourself and do not spend context waiting on its rate limits: the workflow host runs \`coderabbit review --agent\` against your COMMITTED work after the stage returns, absorbs any rate-limit backoff without agent tokens, and feeds actionable findings back to you as blocking review items. Your responsibilities are the deterministic commit gates and committing every piece of work \u2014 only committed changes reach the host review.`;
-  const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? HOST_REVIEW_GUIDANCE : `Use \`coderabbit review --agent\` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the \`vsleep\` command) for \`$(shuf -i ${CODERABBIT_BACKOFF_MINUTES[0]}-${CODERABBIT_BACKOFF_MINUTES[1]} -n 1)\` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.`;
+  const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? HOST_REVIEW_GUIDANCE : `Use \`coderabbit review --agent\` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the \`vsleep\` command) for \`$(shuf -i ${HOST_REVIEW_BACKOFF_MINUTES2[0]}-${HOST_REVIEW_BACKOFF_MINUTES2[1]} -n 1)\` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.`;
   const SPARK_DELEGATION_GUIDANCE = "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks.";
   const SCRUTINEER_DELEGATION_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? `Delegate deterministic gate execution to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until the gates are green. ${CODERABBIT_REVIEW_GUIDANCE}` : `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND2}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`;
   return {
@@ -1342,6 +1342,10 @@ function makeConfig(rawArgs) {
     COMMIT_GATE_GUIDANCE: COMMIT_GATE_GUIDANCE2,
     CS_CHECK_GUIDANCE: CS_CHECK_GUIDANCE2,
     CODERABBIT_REVIEW_GUIDANCE,
+    CODERABBIT_BETWEEN_WORK_ITEMS: HOST_REVIEW_BETWEEN_WORK_ITEMS2,
+    CODERABBIT_ATTEMPTS: HOST_REVIEW_ATTEMPTS2,
+    CODERABBIT_BACKOFF_MINUTES: HOST_REVIEW_BACKOFF_MINUTES2,
+    CODERABBIT_FINDINGS_FILE: HOST_REVIEW_FINDINGS_FILE2,
     SPARK_DELEGATION_GUIDANCE,
     SCRUTINEER_DELEGATION_GUIDANCE
   };
@@ -2936,7 +2940,7 @@ function makeHostReview(config) {
   function reviewBackoffMinutes2(seed) {
     let hash = 5381;
     for (const ch of String(seed)) hash = (hash * 33 ^ ch.codePointAt(0)) >>> 0;
-    const [low, high] = config.reviewBackoffMinutes;
+    const [low, high] = config.reviewBackoffMinutes ?? config.coderabbitBackoffMinutes ?? [45, 90];
     return low + hash % (high - low + 1);
   }
   async function runHostReview2(worktree, label, deps = {}) {
@@ -2951,11 +2955,12 @@ function makeHostReview(config) {
     try {
       for (let attempt = 1; ; attempt++) {
         terminalAttempt = attempt;
-        log(`[${boundedLabel}] ${displayName} host review attempt ${attempt} of ${config.reviewAttempts}`);
+        const attempts = config.reviewAttempts ?? config.coderabbitAttempts ?? 3;
+        log(`[${boundedLabel}] ${displayName} host review attempt ${attempt} of ${attempts}`);
         const single = reviewer === "dakar" ? await dakarAttempt(worktree, exec, deps) : await coderabbitAttempt(worktree, exec);
-        if (single.outcome === "rate-limited" && attempt < config.reviewAttempts) {
+        if (single.outcome === "rate-limited" && attempt < attempts) {
           const minutes = reviewBackoffMinutes2(`${boundedLabel}#${attempt}`);
-          log(`[${boundedLabel}] ${displayName} rate limited/deferred; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${config.reviewAttempts} (wall-clock only, no agent tokens)`);
+          log(`[${boundedLabel}] ${displayName} rate limited/deferred; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${attempts} (wall-clock only, no agent tokens)`);
           await sleep(minutes);
           continue;
         }
@@ -2985,7 +2990,8 @@ function makeHostReview(config) {
       const severity = Object.hasOwn(hostReviewMetrics.bySeverity, rawSeverity) ? rawSeverity : "unknown";
       hostReviewMetrics.bySeverity[severity] += 1;
     }
-    if (!config.reviewFindingsFile || !review.findings.length) return;
+    const findingsFile = config.reviewFindingsFile ?? config.coderabbitFindingsFile ?? "";
+    if (!findingsFile || !review.findings.length) return;
     const append = async () => {
       const timestamp = deps.timestamp || (async () => {
         const stamp = await execFileStatus("date", ["-u", "+%Y-%m-%dT%H:%M:%SZ"]);
@@ -2998,12 +3004,12 @@ function makeHostReview(config) {
           const fs = process.getBuiltinModule("node:fs/promises");
           await fs.appendFile(path, data, "utf8");
         });
-        await appendFile(config.reviewFindingsFile, `${lines.join("\n")}
+        await appendFile(findingsFile, `${lines.join("\n")}
 `);
       } catch (error) {
         hostReviewMetrics.sinkFailures += 1;
         hostReviewMetrics.sinkError = boundedTail(error?.message || String(error), 500);
-        log(`[${boundedTail(label, 120)}] could not append ${reviewerDisplayName(review.reviewer)} host-review findings to ${config.reviewFindingsFile}: ${hostReviewMetrics.sinkError}`);
+        log(`[${boundedTail(label, 120)}] could not append ${reviewerDisplayName(review.reviewer)} host-review findings to ${findingsFile}: ${hostReviewMetrics.sinkError}`);
       }
     };
     const pending = findingsSinkTail.then(append, append);
