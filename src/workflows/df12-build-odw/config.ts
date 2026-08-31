@@ -140,12 +140,20 @@ export interface RawWorkflowArgs {
   coderabbitHostReview?: boolean
   /** Run the host CodeRabbit review between per-work-item build turns rather than only at end of stage. */
   coderabbitBetweenWorkItems?: boolean
+  /** Canonical host-review between-work-item switch. */
+  hostReviewBetweenWorkItems?: boolean
   /** Total attempts per host CodeRabbit review when rate limited. */
   coderabbitAttempts?: number | string
+  /** Canonical bounded host-review attempt count. */
+  hostReviewAttempts?: number | string
   /** Rate-limit backoff window in minutes as a `[low, high]` pair; sanitized into an ordered range. */
   coderabbitBackoffMinutes?: unknown
+  /** Canonical host-review retry backoff range. */
+  hostReviewBackoffMinutes?: unknown
   /** Optional durable JSONL sink path for every CodeRabbit finding. */
   coderabbitFindingsFile?: string
+  /** Canonical host-review findings JSONL output path. */
+  hostReviewFindingsFile?: string
   /** Have the host re-run commit gates against committed HEAD; set false to trust the agent's claim. */
   hostCommitGates?: boolean
   /** Run the CodeScene code-health check as a gate; set false to skip. */
@@ -291,13 +299,13 @@ export interface WorkflowConfig {
   /** True when the host runs CodeRabbit against committed work. */
   CODERABBIT_HOST_REVIEW: boolean
   /** True to run the host CodeRabbit review between per-work-item build turns. */
-  CODERABBIT_BETWEEN_WORK_ITEMS: boolean
+  HOST_REVIEW_BETWEEN_WORK_ITEMS: boolean
   /** Attempts per host CodeRabbit review when rate limited; at least 1. */
-  CODERABBIT_ATTEMPTS: number
+  HOST_REVIEW_ATTEMPTS: number
   /** Ordered `[low, high]` rate-limit backoff window in minutes. */
-  CODERABBIT_BACKOFF_MINUTES: [number, number]
+  HOST_REVIEW_BACKOFF_MINUTES: [number, number]
   /** JSONL sink path for CodeRabbit findings, or empty string when disabled. */
-  CODERABBIT_FINDINGS_FILE: string
+  HOST_REVIEW_FINDINGS_FILE: string
   /** True when the host re-runs commit gates against committed HEAD. */
   HOST_COMMIT_GATES: boolean
   /** True when the CodeScene code-health check runs as a gate. */
@@ -455,15 +463,16 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   // the end of the implementation stage. Only meaningful when both host
   // review and the per-work-item build are on. coderabbitBetweenWorkItems=false
   // restores end-of-stage-only host review.
-  const CODERABBIT_BETWEEN_WORK_ITEMS = cfg.coderabbitBetweenWorkItems !== false
-  const attemptsInput = Number(cfg.coderabbitAttempts)
+  const HOST_REVIEW_BETWEEN_WORK_ITEMS = (cfg.hostReviewBetweenWorkItems ?? cfg.coderabbitBetweenWorkItems) !== false
+  const attemptsInput = Number(cfg.hostReviewAttempts ?? cfg.coderabbitAttempts)
   // NaN deliberately reaches the established default fallback; only infinities reject.
   if (!Number.isFinite(attemptsInput) && !Number.isNaN(attemptsInput)) {
     throw new Error('coderabbitAttempts must be finite')
   }
-  const CODERABBIT_ATTEMPTS = Math.min(10, Math.max(1, Math.trunc(attemptsInput || 3))) // total attempts per host review when rate limited
-  const CODERABBIT_BACKOFF_MINUTES: [number, number] = (() => {
-    const range = Array.isArray(cfg.coderabbitBackoffMinutes) ? cfg.coderabbitBackoffMinutes : []
+  const HOST_REVIEW_ATTEMPTS = Math.min(10, Math.max(1, Math.trunc(attemptsInput || 3))) // total attempts per host review when rate limited
+  const HOST_REVIEW_BACKOFF_MINUTES: [number, number] = (() => {
+    const rawRange = cfg.hostReviewBackoffMinutes ?? cfg.coderabbitBackoffMinutes
+    const range = Array.isArray(rawRange) ? rawRange : []
     const lowerInput = Number(range[0])
     const upperInput = Number(range[1])
     // NaN deliberately reaches the established default fallback; only infinities reject.
@@ -476,7 +485,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   })()
   // Optional durable JSONL sink for every CodeRabbit finding, so recurring
   // finding classes can be tuned into deterministic lint rules over time.
-  const CODERABBIT_FINDINGS_FILE = String(cfg.coderabbitFindingsFile || '')
+  const HOST_REVIEW_FINDINGS_FILE = String(cfg.hostReviewFindingsFile ?? cfg.coderabbitFindingsFile ?? '')
   // The deterministic commit-gate command set for the target project. `make all`
   // is the df12 house default, but it is NOT universal: some projects alias
   // `all` to a release build, so operators must be able to name the authoritative
@@ -587,10 +596,10 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     DAKAR_BUDGET_GBP,
     CODERABBIT_REVIEW_COMMAND,
     CODERABBIT_HOST_REVIEW,
-    CODERABBIT_BETWEEN_WORK_ITEMS,
-    CODERABBIT_ATTEMPTS,
-    CODERABBIT_BACKOFF_MINUTES,
-    CODERABBIT_FINDINGS_FILE,
+    HOST_REVIEW_BETWEEN_WORK_ITEMS,
+    HOST_REVIEW_ATTEMPTS,
+    HOST_REVIEW_BACKOFF_MINUTES,
+    HOST_REVIEW_FINDINGS_FILE,
     HOST_COMMIT_GATES,
     CS_CHECK,
     CS_CHECK_COMMAND,

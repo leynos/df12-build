@@ -196,10 +196,10 @@ const {
   DAKAR_BUDGET_GBP,
   CODERABBIT_REVIEW_COMMAND,
   CODERABBIT_HOST_REVIEW,
-  CODERABBIT_BETWEEN_WORK_ITEMS,
-  CODERABBIT_ATTEMPTS,
-  CODERABBIT_BACKOFF_MINUTES,
-  CODERABBIT_FINDINGS_FILE,
+  HOST_REVIEW_BETWEEN_WORK_ITEMS,
+  HOST_REVIEW_ATTEMPTS,
+  HOST_REVIEW_BACKOFF_MINUTES,
+  HOST_REVIEW_FINDINGS_FILE,
   HOST_COMMIT_GATES,
   HOST_GATES_BETWEEN_WORK_ITEMS,
   CS_CHECK,
@@ -325,10 +325,6 @@ const { triagePrompt, runTriage } = makeRemediation({
 // Host review and host commit gates with the run wiring bound
 // once (see host-review.ts).
 const HOST_REVIEW_ENABLED = CODERABBIT_HOST_REVIEW
-const HOST_REVIEW_BETWEEN_WORK_ITEMS = CODERABBIT_BETWEEN_WORK_ITEMS
-const HOST_REVIEW_ATTEMPTS = CODERABBIT_ATTEMPTS
-const HOST_REVIEW_BACKOFF_MINUTES = CODERABBIT_BACKOFF_MINUTES
-const HOST_REVIEW_FINDINGS_FILE = CODERABBIT_FINDINGS_FILE
 // Parse the operator-configured command once so preflight probes and review
 // execution preserve the same quoted fixed arguments.
 const parsedDakarInvocation = tokenizeShellCommand(DAKAR_COMMAND)
@@ -343,9 +339,9 @@ const hostReview = makeHostReview({
   dakarInvocation: DAKAR_INVOCATION,
   reviewTimeoutSeconds: REVIEW_TIMEOUT_SECONDS,
   dakarBudgetGbp: DAKAR_BUDGET_GBP,
-  coderabbitAttempts: HOST_REVIEW_ATTEMPTS,
-  coderabbitBackoffMinutes: HOST_REVIEW_BACKOFF_MINUTES,
-  coderabbitFindingsFile: HOST_REVIEW_FINDINGS_FILE,
+  reviewAttempts: HOST_REVIEW_ATTEMPTS,
+  reviewBackoffMinutes: HOST_REVIEW_BACKOFF_MINUTES,
+  reviewFindingsFile: HOST_REVIEW_FINDINGS_FILE,
   commitGates: COMMIT_GATES,
   commitGateTimeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
   csCheck: CS_CHECK,

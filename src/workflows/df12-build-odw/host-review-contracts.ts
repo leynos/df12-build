@@ -149,11 +149,11 @@ export interface HostReviewConfig {
   /** Dakar budget in GBP; zero omits the argument and uses Dakar's default. */
   dakarBudgetGbp: number
   /** Maximum host-review attempts before a deferral becomes terminal. */
-  coderabbitAttempts: number
+  reviewAttempts: number
   /** Inclusive deterministic retry-backoff range in minutes. */
-  coderabbitBackoffMinutes: [number, number]
+  reviewBackoffMinutes: [number, number]
   /** Durable JSONL findings sink; an empty path disables recording. */
-  coderabbitFindingsFile: string
+  reviewFindingsFile: string
   /** Deterministic host gate commands run against committed work. */
   commitGates: readonly string[]
   /** Per-command host-gate timeout in seconds. */
