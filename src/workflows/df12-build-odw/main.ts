@@ -313,11 +313,13 @@ const HOST_REVIEW_ENABLED = CODERABBIT_HOST_REVIEW
 // execution preserve the same quoted fixed arguments.
 const DAKAR_INVOCATION = dakarInvocationFromCommand(DAKAR_COMMAND)
 if (!DAKAR_INVOCATION) throw new Error(DAKAR_COMMAND_VALIDATION_ERROR)
+const DAKAR_SENSITIVE_VALUES = [process.env.OPENAI_API_KEY || '']
 const hostReview = makeHostReview({
   base: BASE,
   reviewTool: REVIEW_TOOL,
   dakarCommand: DAKAR_COMMAND,
   dakarInvocation: DAKAR_INVOCATION,
+  dakarSensitiveValues: DAKAR_SENSITIVE_VALUES,
   reviewTimeoutSeconds: REVIEW_TIMEOUT_SECONDS,
   dakarBudgetGbp: DAKAR_BUDGET_GBP,
   reviewAttempts: HOST_REVIEW_ATTEMPTS,

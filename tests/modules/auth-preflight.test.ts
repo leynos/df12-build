@@ -116,7 +116,7 @@ describe('makeAuthPreflight', () => {
       { command: 'pi', args: ['--version'] },
     ])
     expect(authFailures).toBe(1)
-    expect(logs).not.toContain('[auth] preflight passed')
+    expect(logs.join('\n')).not.toContain('[auth] preflight passed')
   })
 
   test('redacts an inline Dakar option value when probe output omits its option name', async () => {

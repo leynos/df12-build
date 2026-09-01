@@ -129,23 +129,33 @@ describe('runDakarHostReview', () => {
     expect(required(calls[0]).options.timeoutMs).toBe(125_000)
   })
 
-  test('the state root is removed when reviewer execution throws', async () => {
+  test('reviewer execution errors are redacted and still remove the state root', async () => {
+    const secret = 'fixed-dakar-argument-that-must-not-escape'
     const cleanupCalls: Array<{ stateRoot: string; options: { recursive: true; force: true } }> = []
     let stateRoot = ''
     const exec = async (_command: string, args: readonly string[]) => {
       stateRoot = required(args[args.indexOf('--state-root') + 1])
       expect(existsSync(stateRoot)).toBe(true)
-      throw new Error('Dakar execution failed')
+      throw new Error(`Dakar execution failed ${secret}`)
     }
-    const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar' })
-    await expect(runCoderabbitHostReview('/work/tree', 'label', {
-      exec,
-      removeDakarStateRoot: (target, options) => {
-        cleanupCalls.push({ stateRoot: target, options })
-        rmSync(target, options)
-        throw new Error('cleanup failed')
-      },
-    })).rejects.toThrow('Dakar execution failed')
+    const { runCoderabbitHostReview } = hostReview({
+      reviewTool: 'dakar',
+      dakarCommand: `dakar-review --api-key=${secret}`,
+    })
+    let failure: Error | undefined
+    try {
+      await runCoderabbitHostReview('/work/tree', 'label', {
+        exec,
+        removeDakarStateRoot: (target, options) => {
+          cleanupCalls.push({ stateRoot: target, options })
+          rmSync(target, options)
+          throw new Error('cleanup failed')
+        },
+      })
+    } catch (error) {
+      failure = error as Error
+    }
+    expect(required(failure).message).toBe('Dakar execution failed [REDACTED]')
     expect(existsSync(stateRoot)).toBe(false)
     expect(cleanupCalls).toEqual([{ stateRoot, options: { recursive: true, force: true } }])
   })
@@ -193,26 +203,24 @@ describe('runDakarHostReview', () => {
       },
     })
     expect(review.outcome).toBe('clean')
-    const cleanupLog = logs.find((line) => line.startsWith('[Dakar] could not remove temporary state root: ')) as string
+    const cleanupLog = required(logs.find((line) => line.startsWith('[Dakar] could not remove temporary state root: ')))
     expect(cleanupLog).toStartWith('[Dakar] could not remove temporary state root: ')
     expect(cleanupLog.length).toBeLessThanOrEqual(550)
   })
 
-  test('redacts an inherited OpenAI key echoed by Dakar', async () => {
-    const previousKey = process.env.OPENAI_API_KEY
+  test('redacts explicitly supplied OpenAI and fixed-argument values echoed by Dakar', async () => {
     const secret = 'openai-key-that-must-not-escape-review'
-    process.env.OPENAI_API_KEY = secret
-    try {
-      const { exec } = recordingExec({
-        stdout: dakarJson({ ok: false, stage: 'review', error: `Dakar echoed ${secret}` }),
-      })
-      const review = await hostReview({ reviewTool: 'dakar' }).runHostReview('/work/tree', 'redacted', { exec })
-      expect(review.detail).toContain('[REDACTED]')
-      expect(review.detail).not.toContain(secret)
-    } finally {
-      if (previousKey === undefined) delete process.env.OPENAI_API_KEY
-      else process.env.OPENAI_API_KEY = previousKey
-    }
+    const { exec } = recordingExec({
+      stdout: dakarJson({ ok: false, stage: 'review', error: `Dakar echoed ${secret} and fixed-secret` }),
+    })
+    const review = await hostReview({
+      reviewTool: 'dakar',
+      dakarCommand: 'dakar-review --api-key=fixed-secret',
+      dakarSensitiveValues: [secret],
+    }).runHostReview('/work/tree', 'redacted', { exec })
+    expect(review.detail).toContain('[REDACTED]')
+    expect(review.detail).not.toContain(secret)
+    expect(review.detail).not.toContain('fixed-secret')
   })
 
   test('a configured budget adds the --budget-gbp flag', async () => {

@@ -59,10 +59,29 @@ const DAKAR_SEVERITIES = new Set(Object.keys(DAKAR_SEVERITY_MAP))
 const DAKAR_REQUIRED_FINDING_FIELDS = ['path', 'title', 'detail', 'evidence'] as const
 const DAKAR_PARENT_TIMEOUT_GRACE_MS = 5_000
 
-/** Redact the inherited OpenAI key if an untrusted Dakar diagnostic echoes it. */
-function redactDakarDetail(detail: string): string {
-  const key = process.env.OPENAI_API_KEY
-  return key ? detail.split(key).join('[REDACTED]') : detail
+/** Redact explicitly supplied values from untrusted Dakar protocol text. */
+function redactDakarDetail(detail: string, sensitiveValues: readonly string[] = []): string {
+  let redacted = detail
+  for (const value of sensitiveValues) {
+    if (value) redacted = redacted.split(value).join('[REDACTED]')
+  }
+  return redacted
+}
+
+/** Collect configured argv values that must never be retained in diagnostics. */
+function dakarDiagnosticRedactions(invocation: readonly string[], extraValues: readonly string[] = []): string[] {
+  const values = [...extraValues]
+  for (const [index, argument] of invocation.entries()) {
+    if (index === 0 || /^--[A-Za-z][A-Za-z0-9-]*$/.test(argument)) continue
+    const inlineOption = /^(--[A-Za-z][A-Za-z0-9-]*)=(.+)$/.exec(argument)
+    const assignment = /^[A-Za-z_][A-Za-z0-9_]*=(.+)$/.exec(argument)
+    const inlineValue = inlineOption?.[2]
+    const assignmentValue = assignment?.[1]
+    if (inlineValue !== undefined) values.push(argument, inlineValue)
+    else if (assignmentValue !== undefined) values.push(argument, assignmentValue)
+    else values.push(argument)
+  }
+  return values
 }
 
 /** Dakar-only state-root lifecycle used by one isolated reviewer attempt. */
@@ -133,12 +152,12 @@ export function parseDakarDocument(stdout: unknown): DakarDocument | null {
 }
 
 /** Map one validated Dakar finding onto the retained findings contract. */
-export function mapDakarFinding(finding: DakarFinding): ReviewFinding {
+export function mapDakarFinding(finding: DakarFinding, sensitiveValues: readonly string[] = []): ReviewFinding {
   const severity = DAKAR_SEVERITY_MAP[String(finding.severity || '').toLowerCase()] || 'info'
-  const filePath = redactDakarDetail(String(finding.path || '')).slice(0, 2000)
-  const title = redactDakarDetail(String(finding.title || ''))
-  const detail = redactDakarDetail(String(finding.detail || ''))
-  const evidence = redactDakarDetail(String(finding.evidence || ''))
+  const filePath = redactDakarDetail(String(finding.path || ''), sensitiveValues).slice(0, 2000)
+  const title = redactDakarDetail(String(finding.title || ''), sensitiveValues)
+  const detail = redactDakarDetail(String(finding.detail || ''), sensitiveValues)
+  const evidence = redactDakarDetail(String(finding.evidence || ''), sensitiveValues)
   const hasLine = finding.line !== undefined && finding.line !== null && String(finding.line) !== ''
   const locator = hasLine ? ` (${filePath}:${finding.line})` : ''
   return { type: 'finding', severity, fileName: filePath, comment: `${title} — ${detail}${locator}`.slice(0, 2000), codegenInstructions: `${detail}\nEvidence: ${evidence}`.slice(0, 2000), suggestions: [] }
@@ -167,18 +186,18 @@ export function validateCleanDakarFindings(raw: unknown): string {
 }
 
 /** Classify and fail-closed validate one Dakar process result. */
-export function classifyDakarReview(execResult: ExecStatus): HostReviewAttempt {
+export function classifyDakarReview(execResult: ExecStatus, sensitiveValues: readonly string[] = []): HostReviewAttempt {
   /** Prefer the process timeout signal over a protocol-derived fallback. */
   const category = (fallback: ReviewErrorCategory): ReviewErrorCategory => execResult.killed ? 'timeout' : fallback
   const doc = parseDakarDocument(execResult.stdout)
   if (!doc) {
-    const detail = boundedTail([execResult.stderr, execResult.message].filter(Boolean).join('\n')) || 'dakar-review produced no parsable JSON output'
+    const detail = boundedTail(redactDakarDetail([execResult.stderr, execResult.message].filter(Boolean).join('\n'), sensitiveValues)) || 'dakar-review produced no parsable JSON output'
     return { outcome: 'error', findings: [], detail, errorCategory: category('invalid-output') }
   }
   if (doc.ok === false) {
-    const stage = boundedTail(doc.stage ?? 'unknown', 200)
-    if (String(doc.stage) === 'deferred') return { outcome: 'rate-limited', findings: [], detail: `Dakar review deferred (stage: ${stage}) — ${boundedTail(doc.error || 'no detail')}`, errorCategory: category('deferred') }
-    const detail = `stage: ${stage} — ${boundedTail(doc.error || 'no detail')}`
+    const stage = boundedTail(redactDakarDetail(String(doc.stage ?? 'unknown'), sensitiveValues), 200)
+    if (String(doc.stage) === 'deferred') return { outcome: 'rate-limited', findings: [], detail: `Dakar review deferred (stage: ${stage}) — ${boundedTail(redactDakarDetail(String(doc.error || 'no detail'), sensitiveValues))}`, errorCategory: category('deferred') }
+    const detail = `stage: ${stage} — ${boundedTail(redactDakarDetail(String(doc.error || 'no detail'), sensitiveValues))}`
     if (authFailureDetail([doc.error, execResult.stderr, execResult.message].filter(Boolean).join('\n'))) {
       return { outcome: 'auth', findings: [], detail, errorCategory: category('auth') }
     }
@@ -190,16 +209,17 @@ export function classifyDakarReview(execResult: ExecStatus): HostReviewAttempt {
   }
   if (doc.ok === true && doc.verdict === 'changes-requested') {
     const validation = validateChangesRequestedFindings(doc.findings)
-    return validation.ok ? { outcome: 'findings', findings: validation.findings.map(mapDakarFinding), detail: '', errorCategory: category('none') } : { outcome: 'error', findings: [], detail: validation.detail, errorCategory: category('invalid-output') }
+    return validation.ok ? { outcome: 'findings', findings: validation.findings.map((finding) => mapDakarFinding(finding, sensitiveValues)), detail: '', errorCategory: category('none') } : { outcome: 'error', findings: [], detail: validation.detail, errorCategory: category('invalid-output') }
   }
-  return { outcome: 'error', findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail(doc.verdict ?? 'none', 200)})`, errorCategory: category('invalid-output') }
+  return { outcome: 'error', findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail(redactDakarDetail(String(doc.verdict ?? 'none'), sensitiveValues), 200)})`, errorCategory: category('invalid-output') }
 }
 
 /** Bind one Dakar attempt to configuration while leaving host seams injectable. */
-export function makeDakarAttempt(config: Pick<HostReviewConfig, 'base' | 'dakarInvocation' | 'reviewTimeoutSeconds' | 'dakarBudgetGbp'>): (worktree: string, exec: NonNullable<HostReviewDeps['exec']>, deps: DakarAttemptDeps) => Promise<HostReviewAttempt> {
+export function makeDakarAttempt(config: Pick<HostReviewConfig, 'base' | 'dakarInvocation' | 'dakarSensitiveValues' | 'reviewTimeoutSeconds' | 'dakarBudgetGbp'>): (worktree: string, exec: NonNullable<HostReviewDeps['exec']>, deps: DakarAttemptDeps) => Promise<HostReviewAttempt> {
   const invocation = config.dakarInvocation || []
   const executable = invocation[0] || 'dakar-review'
   const prefixArgs = invocation.slice(1)
+  const sensitiveValues = dakarDiagnosticRedactions(invocation, config.dakarSensitiveValues)
   return async function runDakarAttempt(worktree, exec, deps) {
     const fs = process.getBuiltinModule('node:fs')
     const os = process.getBuiltinModule('node:os')
@@ -216,8 +236,13 @@ export function makeDakarAttempt(config: Pick<HostReviewConfig, 'base' | 'dakarI
       const review = classifyDakarReview(await exec(executable, [...prefixArgs, ...args], {
         cwd: worktree,
         timeoutMs: config.reviewTimeoutSeconds * 1000 + DAKAR_PARENT_TIMEOUT_GRACE_MS,
-      }))
-      return { ...review, detail: redactDakarDetail(review.detail) }
+      }), sensitiveValues)
+      return review
+    } catch (error) {
+      const message = boundedTail(redactDakarDetail((error as Error | null)?.message || String(error), sensitiveValues))
+      const redacted = new Error(message)
+      redacted.name = (error as Error | null)?.name || 'Error'
+      throw redacted
     } finally {
       try {
         stateRoots.remove(stateRoot, { recursive: true, force: true })

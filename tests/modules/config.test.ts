@@ -1,7 +1,4 @@
-// Module tests for the run-configuration record (decomposition milestone 5).
-// makeConfig owns every args default, clamp, and derivation; the entry
-// destructures the record once, so these tests are the contract for the
-// whole `args` surface.
+/** @file Tests makeConfig defaults, clamps, validation, and compatibility aliases. */
 import { describe, expect, test } from 'bun:test'
 
 import { makeConfig } from '../../src/workflows/df12-build-odw/config.ts'

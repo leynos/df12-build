@@ -377,7 +377,9 @@ commit gates, then CodeScene, then Dakar as the selected host reviewer, and
 only then the token-spending reviewer agents. With host-run review enabled,
 selecting `reviewTool: 'coderabbit'` replaces Dakar in that sequence; its CLI,
 quota, and adapter-specific test details are documented below.
-`tests/modules/host-review.test.ts` covers the Dakar command line,
+`tests/modules/host-review.dakar.test.ts`,
+`tests/modules/host-review.dakar-outcomes.test.ts`, and
+`tests/modules/host-review.dispatch.test.ts` cover the Dakar command line,
 temporary-state cleanup, budget flag, and outcome mapping;
 `tests/df12-build-odw-assessment.test.mjs` covers the Dakar authentication
 preflight and its independence from the legacy CodeRabbit flag.

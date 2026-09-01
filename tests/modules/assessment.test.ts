@@ -83,8 +83,8 @@ describe('deferred-review classification', () => {
     ['CodeRabbit temporarily unavailable', false],
     ['coderabbit found 3 blocking issues', false],
     ['rate limit exceeded on the build API', false],
-    // Dakar deferrals use one exact prefix and must classify as recoverable
-    // review faults, just like CodeRabbit rate limits.
+    // A raw Dakar prefix is not structured recovery evidence and must not be
+    // treated as a recoverable review fault.
     ['Dakar review deferred (stage: deferred) — budget exhausted', false],
     ['Dakar unavailable', false],
     ['Dakar migration deferred pending approval', false],

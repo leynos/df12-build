@@ -144,6 +144,8 @@ export interface HostReviewConfig {
   dakarCommand: string
   /** Parsed Dakar invocation shared with preflight when the entrypoint binds it. */
   dakarInvocation?: readonly string[]
+  /** Values that review diagnostics must redact before they leave the adapter. */
+  dakarSensitiveValues?: readonly string[]
   /** Parent execution timeout shared by both reviewer adapters. */
   reviewTimeoutSeconds: number
   /** Dakar budget in GBP; zero omits the argument and uses Dakar's default. */

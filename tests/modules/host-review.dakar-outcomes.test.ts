@@ -1,21 +1,29 @@
 /** @file Tests Dakar outcome mapping, validation, and retry behaviour. */
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, rmSync } from 'node:fs'
 
 import { hostReview, recordingExec, required } from '../fixtures/host-review.ts'
 import type { ReviewOutcome } from '../../src/workflows/df12-build-odw/host-review.ts'
 
+const g = globalThis as Record<string, unknown>
+
 describe('Dakar outcome mapping', () => {
   const junk: string[] = []
+  let previousLog: unknown
+  beforeEach(() => {
+    previousLog = g.log
+    g.log = () => {}
+  })
   afterEach(() => {
+    g.log = previousLog
     for (const target of junk.splice(0)) rmSync(target, { recursive: true, force: true })
   })
 
   const dakarJson = (doc: Record<string, unknown>) => `noise before json\n${JSON.stringify(doc)}\n`
 
-  // The outcome-mapping table: each Dakar document maps to exactly one
-  // CoderabbitOutcome, so every run-task deferral/blocking path keeps working.
-  const cases: Array<{ name: string; doc?: Record<string, unknown>; stdout?: string; outcome: ReviewOutcome }> = [
+  // The outcome-mapping table: each Dakar document maps to exactly one neutral
+  // review outcome, so every run-task deferral/blocking path keeps working.
+  const cases: Array<{ name: string; doc: Record<string, unknown>; outcome: ReviewOutcome }> = [
     { name: 'a passing verdict is clean', doc: { ok: true, verdict: 'pass', findings: [] }, outcome: 'clean' },
     { name: 'a skipped run (nothing unreviewed) is clean', doc: { ok: true, skipped: true }, outcome: 'clean' },
     { name: 'changes-requested is findings', doc: { ok: true, verdict: 'changes-requested', findings: [{ severity: 'high', path: 'a.ts', title: 't', detail: 'd', evidence: 'e' }] }, outcome: 'findings' },
@@ -24,7 +32,7 @@ describe('Dakar outcome mapping', () => {
   ]
   for (const scenario of cases) {
     test(scenario.name, async () => {
-      const { exec } = recordingExec({ stdout: scenario.stdout ?? dakarJson(scenario.doc as Record<string, unknown>) })
+      const { exec } = recordingExec({ stdout: dakarJson(scenario.doc) })
       const { runCoderabbitHostReview } = hostReview({ reviewTool: 'dakar', reviewAttempts: 1 })
       const review = await runCoderabbitHostReview('/w', 'l', { exec })
       expect(review.outcome).toBe(scenario.outcome)

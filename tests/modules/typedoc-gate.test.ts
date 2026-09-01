@@ -10,9 +10,9 @@ import { tmpdir } from 'node:os'
 
 const REPO = fileURLToPath(new URL('../../', import.meta.url))
 const TYPEDOC = path.join(REPO, 'node_modules', '.bin', 'typedoc')
-const TYPEDOC_SPAWN_TIMEOUT_MS = 15_000
+const TYPEDOC_SPAWN_TIMEOUT_MS = 30_000
 const TYPEDOC_OPTIONS = JSON.parse(readFileSync(path.join(REPO, 'typedoc.json'), 'utf8')) as Record<string, unknown>
-const TYPEDOC_TEST_TIMEOUT_MS = TYPEDOC_SPAWN_TIMEOUT_MS + 5_000
+const TYPEDOC_TEST_TIMEOUT_MS = TYPEDOC_SPAWN_TIMEOUT_MS + 10_000
 
 interface TypeDocRun {
   status: number

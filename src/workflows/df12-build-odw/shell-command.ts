@@ -184,10 +184,10 @@ export function tokenizeShellCommand(command: string): ShellCommandTokens | null
   return { words, leadingAssignments, executableWordIndex, hasUnquotedControlOperator }
 }
 
-/** Error shared by every boundary that accepts a Dakar command configuration. */
+/** Error shared by boundaries that keep unsafe Dakar input out of host execution. */
 export const DAKAR_COMMAND_VALIDATION_ERROR = 'Invalid dakarCommand: expected a non-empty command with balanced shell quoting, no environment assignments, and no unquoted control operators'
 
-/** Validate and normalise an operator-provided Dakar command into exec arguments. */
+/** Reject unsafe operator input before normalizing it into host-review exec arguments. */
 export function dakarInvocationFromCommand(command: string): string[] | null {
   const tokens = tokenizeShellCommand(command)
   if (
@@ -200,7 +200,7 @@ export function dakarInvocationFromCommand(command: string): string[] | null {
   return validateDakarInvocation(tokens.words.map((word) => word.value))
 }
 
-/** Validate a direct Dakar invocation so it cannot bypass command validation. */
+/** Reject direct argv that could otherwise bypass the host-review safety boundary. */
 export function validateDakarInvocation(invocation: readonly unknown[] | null | undefined): string[] | null {
   if (!Array.isArray(invocation) || invocation.length === 0) return null
   const words: string[] = []

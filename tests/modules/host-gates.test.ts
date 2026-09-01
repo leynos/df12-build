@@ -1,5 +1,5 @@
 /** @file Tests CodeScene and streaming host commit gates. */
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -12,13 +12,18 @@ g.log = () => {}
 
 describe('runCodeSceneCheck', () => {
   const junk: string[] = []
+  let previousLog: unknown
   const tmp = (prefix: string) => {
     const dir = mkdtempSync(path.join(tmpdir(), prefix))
     junk.push(dir)
     return dir
   }
-  afterEach(() => {
+  beforeEach(() => {
+    previousLog = g.log
     g.log = () => {}
+  })
+  afterEach(() => {
+    g.log = previousLog
     for (const target of junk.splice(0)) if (target) rmSync(target, { recursive: true, force: true })
   })
 
@@ -134,12 +139,18 @@ describe('runCodeSceneCheck', () => {
 describe('runHostCommitGates streaming', () => {
   // Track every temp dir and gate log so nothing leaks across repeated runs.
   const junk: string[] = []
+  let previousLog: unknown
   const tmp = (prefix: string) => {
     const dir = mkdtempSync(path.join(tmpdir(), prefix))
     junk.push(dir)
     return dir
   }
+  beforeEach(() => {
+    previousLog = g.log
+    g.log = () => {}
+  })
   afterEach(() => {
+    g.log = previousLog
     for (const target of junk.splice(0)) {
       if (target) rmSync(target, { recursive: true, force: true })
     }
@@ -201,7 +212,7 @@ describe('runHostCommitGates streaming', () => {
     })
     const result = await runHostCommitGates(dir, '1.2.3', 'r1')
     expect(result.green).toBe(false)
-    expect(result.detail).toMatch(/gate log write failed|failed/)
+    expect(result.detail).toContain('gate log write failed')
     expect(readFileSync(victim, 'utf8')).toBe('original\n')
   })
 

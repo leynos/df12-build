@@ -202,9 +202,10 @@ Minimal sidecar `odw.config.json` shape for the Claude/Codex split:
 
 ### Inspectable logs in the sidecar
 
-Point both log sinks at the sidecar so a run's agent transcripts and CodeRabbit
-findings are durably inspectable next to the run, without touching workflow
-behaviour — both are out-of-band sinks outside the project Git worktree, so
+Point both log sinks at the sidecar so a run's agent transcripts and selected
+host-review findings are durably inspectable next to the run, without touching
+workflow behaviour — both are out-of-band sinks outside the project Git
+worktree, so
 they never enter a diff, trip `workflow-freshness`, or affect a gate:
 
 - **Agent logs** — set `runsRoot` (in `odw.config.json`) to an absolute path
@@ -213,21 +214,22 @@ they never enter a diff, trip `workflow-freshness`, or affect a gate:
   `agent_started`/`agent_finished` per `agent()` call, tagged by adapter,
   label, and phase), `result.json` (the final return, including every
   `reviewRounds`, `assessments`, the host-gate result, the CodeScene result, and
-  the CodeRabbit summary), and
+  the host-review summary), and
   `error.json`. This is entirely ODW's domain — no workflow involvement.
   Regenerate the value per run, or use a shared `~/.odw/runs` for a single
   pool; the sidecar keeps each run's logs beside its config and notes.
-- **Review findings** — set `hostReviewFindingsFile` (in `args.json`) to a
-  sidecar JSONL path, e.g. `"$SIDECAR/coderabbit-findings.jsonl"`. Every parsed
+- **Review findings** — set the canonical `hostReviewFindingsFile` field (in
+  `args.json`) to a sidecar JSONL path, e.g.
+  `"$SIDECAR/coderabbit-findings.jsonl"`. Only that example filename is
+  historical; the field and sink apply to the selected host reviewer. Every parsed
   finding (timestamp, task label, severity, file, comment, codegen
   instructions, suggestion count) is appended as a best-effort serialized JSONL
   write: a bad path or full disk degrades logging with a warning, reports the
   sink failure through `hostReview`, and never fails a task. In the default
   Dakar mode, the sink carries Dakar findings with severities mapped onto the
   CodeRabbit scale (`critical` becomes `critical`, `high` becomes `major`,
-  `medium` becomes `minor`, and `low` becomes `trivial`); the field name keeps
-  its historical spelling. The former `coderabbitFindingsFile` name remains a
-  deprecated compatibility alias.
+  `medium` becomes `minor`, and `low` becomes `trivial`). The former
+  `coderabbitFindingsFile` name remains a deprecated compatibility alias.
 
 Patch the sidecar copy only to recover or tune a live workshop. Record the
 patch in `operator-notes.md`, validate it there, then promote the proven change
@@ -647,7 +649,7 @@ Example `args.json`:
   "maxPlanningParallel": 4,
   "maxBuildParallel": 4,
   "maxTasks": 12,
-  "hostReviewFindingsFile": "/home/example/Projects/example-project.workshop/df12-build-run/coderabbit-findings.jsonl",
+  "hostReviewFindingsFile": "/home/example/Projects/example-project.workshop/df12-build-run/host-review-findings.jsonl",
   "buildAdapter": "codex-medium",
   "buildModel": "gpt-5.6-terra",
   "planAdapter": "claude",

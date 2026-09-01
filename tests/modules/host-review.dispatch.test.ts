@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { reviewerDisplayName } from '../../src/workflows/df12-build-odw/host-review.ts'
 import type { ExecOptions } from '../../src/workflows/df12-build-odw/exec.ts'
-import { hostReview, recordingExec } from '../fixtures/host-review.ts'
+import { hostReview, recordingExec, required } from '../fixtures/host-review.ts'
 
 const g = globalThis as Record<string, unknown>
 g.log = () => {}
@@ -58,7 +58,7 @@ describe('reviewTool dispatch', () => {
     expect(surface.metrics().hostReview.runs - before.runs).toBe(1)
     expect(surface.metrics().hostReview.timeouts - before.timeouts).toBe(1)
     expect(surface.metrics().hostReview.errors - before.errors).toBe(1)
-    const terminal = logs.find((line) => line.startsWith('[host-review] terminal ')) as string
+    const terminal = required(logs.find((line) => line.startsWith('[host-review] terminal ')))
     const event = JSON.parse(terminal.slice('[host-review] terminal '.length))
     expect(event).toEqual({ reviewer: 'coderabbit', label: 'x'.repeat(120), attempts: 1, elapsedMs: 45, outcome: 'error', errorCategory: 'timeout' })
   })

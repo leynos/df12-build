@@ -6,6 +6,7 @@
  * @module
  */
 import { authFailureDetail } from './faults.ts'
+import { boundedTail } from './host-review-contracts.ts'
 import type { ExecOptions, ExecStatus } from './exec.ts'
 
 /** One fatal prerequisite failure returned before workflow execution. */
@@ -52,13 +53,8 @@ export interface AuthPreflightDeps {
   recordHostReviewAuthFailure: () => void
 }
 
-function boundedTail(value: unknown, limit = 2000): string {
-  const text = String(value || '').trim()
-  return text.length <= limit ? text : text.slice(-limit)
-}
-
 function statusDetail(status: ExecStatus): string {
-  return boundedTail([status.stdout, status.stderr, status.message].filter(Boolean).join('\n'))
+  return boundedTail([status.stdout, status.stderr, status.message].filter(Boolean).join('\n').trim())
 }
 
 const ENVIRONMENT_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=(.+)$/
@@ -100,7 +96,7 @@ function redactedDakarStatusDetail(status: ExecStatus, invocation: readonly stri
   for (const value of sensitiveValues) {
     if (value) detail = detail.split(value).join('[REDACTED]')
   }
-  return boundedTail(detail)
+  return boundedTail(detail.trim())
 }
 
 /** Bind the configured auth and reviewer readiness checks to host primitives. */

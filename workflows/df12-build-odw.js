@@ -1369,12 +1369,8 @@ function makeConfig(rawArgs) {
 }
 
 // src/workflows/df12-build-odw/auth-preflight.ts
-function boundedTail2(value, limit = 2e3) {
-  const text = String(value || "").trim();
-  return text.length <= limit ? text : text.slice(-limit);
-}
 function statusDetail(status) {
-  return boundedTail2([status.stdout, status.stderr, status.message].filter(Boolean).join("\n"));
+  return boundedTail([status.stdout, status.stderr, status.message].filter(Boolean).join("\n").trim());
 }
 var ENVIRONMENT_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=(.+)$/;
 var AUTH_PROBE_TIMEOUT_MS = 1e4;
@@ -1407,7 +1403,7 @@ function redactedDakarStatusDetail(status, invocation, sensitiveValues = []) {
   for (const value of sensitiveValues) {
     if (value) detail = detail.split(value).join("[REDACTED]");
   }
-  return boundedTail2(detail);
+  return boundedTail(detail.trim());
 }
 function makeAuthPreflight(config, deps) {
   return async function runAuthPreflight2() {
@@ -2604,9 +2600,26 @@ var DAKAR_SEVERITY_MAP = {
 var DAKAR_SEVERITIES = new Set(Object.keys(DAKAR_SEVERITY_MAP));
 var DAKAR_REQUIRED_FINDING_FIELDS = ["path", "title", "detail", "evidence"];
 var DAKAR_PARENT_TIMEOUT_GRACE_MS = 5e3;
-function redactDakarDetail(detail) {
-  const key = process.env.OPENAI_API_KEY;
-  return key ? detail.split(key).join("[REDACTED]") : detail;
+function redactDakarDetail(detail, sensitiveValues = []) {
+  let redacted = detail;
+  for (const value of sensitiveValues) {
+    if (value) redacted = redacted.split(value).join("[REDACTED]");
+  }
+  return redacted;
+}
+function dakarDiagnosticRedactions(invocation, extraValues = []) {
+  const values = [...extraValues];
+  for (const [index, argument] of invocation.entries()) {
+    if (index === 0 || /^--[A-Za-z][A-Za-z0-9-]*$/.test(argument)) continue;
+    const inlineOption = /^(--[A-Za-z][A-Za-z0-9-]*)=(.+)$/.exec(argument);
+    const assignment = /^[A-Za-z_][A-Za-z0-9_]*=(.+)$/.exec(argument);
+    const inlineValue = inlineOption?.[2];
+    const assignmentValue = assignment?.[1];
+    if (inlineValue !== void 0) values.push(argument, inlineValue);
+    else if (assignmentValue !== void 0) values.push(argument, assignmentValue);
+    else values.push(argument);
+  }
+  return values;
 }
 function parseDakarDocument(stdout) {
   const text = String(stdout || "");
@@ -2641,12 +2654,12 @@ function parseDakarDocument(stdout) {
   }
   return null;
 }
-function mapDakarFinding(finding) {
+function mapDakarFinding(finding, sensitiveValues = []) {
   const severity = DAKAR_SEVERITY_MAP[String(finding.severity || "").toLowerCase()] || "info";
-  const filePath = redactDakarDetail(String(finding.path || "")).slice(0, 2e3);
-  const title = redactDakarDetail(String(finding.title || ""));
-  const detail = redactDakarDetail(String(finding.detail || ""));
-  const evidence = redactDakarDetail(String(finding.evidence || ""));
+  const filePath = redactDakarDetail(String(finding.path || ""), sensitiveValues).slice(0, 2e3);
+  const title = redactDakarDetail(String(finding.title || ""), sensitiveValues);
+  const detail = redactDakarDetail(String(finding.detail || ""), sensitiveValues);
+  const evidence = redactDakarDetail(String(finding.evidence || ""), sensitiveValues);
   const hasLine = finding.line !== void 0 && finding.line !== null && String(finding.line) !== "";
   const locator = hasLine ? ` (${filePath}:${finding.line})` : "";
   return { type: "finding", severity, fileName: filePath, comment: `${title} \u2014 ${detail}${locator}`.slice(0, 2e3), codegenInstructions: `${detail}
@@ -2670,17 +2683,17 @@ function validateCleanDakarFindings(raw) {
   if (!Array.isArray(raw)) return "Dakar returned a clean verdict with a malformed findings field";
   return raw.length > 0 ? "Dakar returned a clean verdict with findings; refusing to discard reviewer findings" : "";
 }
-function classifyDakarReview(execResult) {
+function classifyDakarReview(execResult, sensitiveValues = []) {
   const category = (fallback) => execResult.killed ? "timeout" : fallback;
   const doc = parseDakarDocument(execResult.stdout);
   if (!doc) {
-    const detail = boundedTail([execResult.stderr, execResult.message].filter(Boolean).join("\n")) || "dakar-review produced no parsable JSON output";
+    const detail = boundedTail(redactDakarDetail([execResult.stderr, execResult.message].filter(Boolean).join("\n"), sensitiveValues)) || "dakar-review produced no parsable JSON output";
     return { outcome: "error", findings: [], detail, errorCategory: category("invalid-output") };
   }
   if (doc.ok === false) {
-    const stage = boundedTail(doc.stage ?? "unknown", 200);
-    if (String(doc.stage) === "deferred") return { outcome: "rate-limited", findings: [], detail: `Dakar review deferred (stage: ${stage}) \u2014 ${boundedTail(doc.error || "no detail")}`, errorCategory: category("deferred") };
-    const detail = `stage: ${stage} \u2014 ${boundedTail(doc.error || "no detail")}`;
+    const stage = boundedTail(redactDakarDetail(String(doc.stage ?? "unknown"), sensitiveValues), 200);
+    if (String(doc.stage) === "deferred") return { outcome: "rate-limited", findings: [], detail: `Dakar review deferred (stage: ${stage}) \u2014 ${boundedTail(redactDakarDetail(String(doc.error || "no detail"), sensitiveValues))}`, errorCategory: category("deferred") };
+    const detail = `stage: ${stage} \u2014 ${boundedTail(redactDakarDetail(String(doc.error || "no detail"), sensitiveValues))}`;
     if (authFailureDetail([doc.error, execResult.stderr, execResult.message].filter(Boolean).join("\n"))) {
       return { outcome: "auth", findings: [], detail, errorCategory: category("auth") };
     }
@@ -2692,14 +2705,15 @@ function classifyDakarReview(execResult) {
   }
   if (doc.ok === true && doc.verdict === "changes-requested") {
     const validation = validateChangesRequestedFindings(doc.findings);
-    return validation.ok ? { outcome: "findings", findings: validation.findings.map(mapDakarFinding), detail: "", errorCategory: category("none") } : { outcome: "error", findings: [], detail: validation.detail, errorCategory: category("invalid-output") };
+    return validation.ok ? { outcome: "findings", findings: validation.findings.map((finding) => mapDakarFinding(finding, sensitiveValues)), detail: "", errorCategory: category("none") } : { outcome: "error", findings: [], detail: validation.detail, errorCategory: category("invalid-output") };
   }
-  return { outcome: "error", findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail(doc.verdict ?? "none", 200)})`, errorCategory: category("invalid-output") };
+  return { outcome: "error", findings: [], detail: `unrecognized Dakar review shape (ok=${doc.ok}, verdict=${boundedTail(redactDakarDetail(String(doc.verdict ?? "none"), sensitiveValues), 200)})`, errorCategory: category("invalid-output") };
 }
 function makeDakarAttempt(config) {
   const invocation = config.dakarInvocation || [];
   const executable = invocation[0] || "dakar-review";
   const prefixArgs = invocation.slice(1);
+  const sensitiveValues = dakarDiagnosticRedactions(invocation, config.dakarSensitiveValues);
   return async function runDakarAttempt(worktree, exec, deps) {
     const fs = process.getBuiltinModule("node:fs");
     const os = process.getBuiltinModule("node:os");
@@ -2716,8 +2730,13 @@ function makeDakarAttempt(config) {
       const review = classifyDakarReview(await exec(executable, [...prefixArgs, ...args2], {
         cwd: worktree,
         timeoutMs: config.reviewTimeoutSeconds * 1e3 + DAKAR_PARENT_TIMEOUT_GRACE_MS
-      }));
-      return { ...review, detail: redactDakarDetail(review.detail) };
+      }), sensitiveValues);
+      return review;
+    } catch (error) {
+      const message = boundedTail(redactDakarDetail(error?.message || String(error), sensitiveValues));
+      const redacted = new Error(message);
+      redacted.name = error?.name || "Error";
+      throw redacted;
     } finally {
       try {
         stateRoots.remove(stateRoot, { recursive: true, force: true });
@@ -3952,11 +3971,13 @@ var { triagePrompt, runTriage } = makeRemediation({
 var HOST_REVIEW_ENABLED = CODERABBIT_HOST_REVIEW;
 var DAKAR_INVOCATION = dakarInvocationFromCommand(DAKAR_COMMAND);
 if (!DAKAR_INVOCATION) throw new Error(DAKAR_COMMAND_VALIDATION_ERROR);
+var DAKAR_SENSITIVE_VALUES = [process.env.OPENAI_API_KEY || ""];
 var hostReview = makeHostReview({
   base: BASE,
   reviewTool: REVIEW_TOOL,
   dakarCommand: DAKAR_COMMAND,
   dakarInvocation: DAKAR_INVOCATION,
+  dakarSensitiveValues: DAKAR_SENSITIVE_VALUES,
   reviewTimeoutSeconds: REVIEW_TIMEOUT_SECONDS,
   dakarBudgetGbp: DAKAR_BUDGET_GBP,
   reviewAttempts: HOST_REVIEW_ATTEMPTS,
