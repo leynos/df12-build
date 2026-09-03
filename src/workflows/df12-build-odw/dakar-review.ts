@@ -73,7 +73,7 @@ function dakarDiagnosticRedactions(invocation: readonly string[], extraValues: r
   const values = [...extraValues]
   for (const [index, argument] of invocation.entries()) {
     if (index === 0 || /^--[A-Za-z][A-Za-z0-9-]*$/.test(argument)) continue
-    const inlineOption = /^(--[A-Za-z][A-Za-z0-9-]*)=(.+)$/.exec(argument)
+    const inlineOption = /^(--[^\s=]+)=(.+)$/.exec(argument)
     const assignment = /^[A-Za-z_][A-Za-z0-9_]*=(.+)$/.exec(argument)
     const inlineValue = inlineOption?.[2]
     const assignmentValue = assignment?.[1]

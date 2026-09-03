@@ -1380,9 +1380,9 @@ function redactedDakarProbeCommand(invocation) {
   return [executable, ...optionNames, "--version"].join(" ");
 }
 function redactedDakarStatusDetail(status, invocation, sensitiveValues = []) {
-  let detail = statusDetail(status);
+  let detail = [status.stdout, status.stderr, status.message].filter(Boolean).join("\n").trim();
   for (const [index, value] of invocation.entries()) {
-    const inlineOption = /^(--[A-Za-z][A-Za-z0-9-]*)=(.+)$/.exec(value);
+    const inlineOption = /^(--[^\s=]+)=(.+)$/.exec(value);
     const inlineValue = inlineOption?.[2];
     if (inlineOption && inlineValue !== void 0) {
       detail = detail.split(value).join("[REDACTED]");
@@ -2611,7 +2611,7 @@ function dakarDiagnosticRedactions(invocation, extraValues = []) {
   const values = [...extraValues];
   for (const [index, argument] of invocation.entries()) {
     if (index === 0 || /^--[A-Za-z][A-Za-z0-9-]*$/.test(argument)) continue;
-    const inlineOption = /^(--[A-Za-z][A-Za-z0-9-]*)=(.+)$/.exec(argument);
+    const inlineOption = /^(--[^\s=]+)=(.+)$/.exec(argument);
     const assignment = /^[A-Za-z_][A-Za-z0-9_]*=(.+)$/.exec(argument);
     const inlineValue = inlineOption?.[2];
     const assignmentValue = assignment?.[1];

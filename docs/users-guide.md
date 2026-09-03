@@ -203,10 +203,12 @@ Minimal sidecar `odw.config.json` shape for the Claude/Codex split:
 ### Inspectable logs in the sidecar
 
 Point both log sinks at the sidecar so a run's agent transcripts and selected
-host-review findings are durably inspectable next to the run, without touching
-workflow behaviour — both are out-of-band sinks outside the project Git
-worktree, so
-they never enter a diff, trip `workflow-freshness`, or affect a gate:
+host-review findings are retained next to the run, without touching workflow
+behaviour. Agent transcripts are durable; host-review findings are retained
+only when the best-effort JSONL append succeeds. An invalid path or full disk
+can make findings unavailable for inspection. Both are out-of-band sinks
+outside the project Git worktree, so they never enter a diff, trip
+`workflow-freshness`, or affect a gate:
 
 - **Agent logs** — set `runsRoot` (in `odw.config.json`) to an absolute path
   inside the run's sidecar, e.g. `"$SIDECAR/runs"`. ODW writes each run's

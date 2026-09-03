@@ -215,7 +215,7 @@ describe('runDakarHostReview', () => {
     })
     const review = await hostReview({
       reviewTool: 'dakar',
-      dakarCommand: 'dakar-review --api-key=fixed-secret',
+      dakarCommand: 'dakar-review --api_key=fixed-secret',
       dakarSensitiveValues: [secret],
     }).runHostReview('/work/tree', 'redacted', { exec })
     expect(review.detail).toContain('[REDACTED]')

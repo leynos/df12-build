@@ -73,9 +73,9 @@ function redactedDakarProbeCommand(invocation: readonly string[]): string {
 
 /** Remove configured Dakar argument values from an execution-status diagnostic. */
 function redactedDakarStatusDetail(status: ExecStatus, invocation: readonly string[], sensitiveValues: readonly string[] = []): string {
-  let detail = statusDetail(status)
+  let detail = [status.stdout, status.stderr, status.message].filter(Boolean).join('\n').trim()
   for (const [index, value] of invocation.entries()) {
-    const inlineOption = /^(--[A-Za-z][A-Za-z0-9-]*)=(.+)$/.exec(value)
+    const inlineOption = /^(--[^\s=]+)=(.+)$/.exec(value)
     const inlineValue = inlineOption?.[2]
     if (inlineOption && inlineValue !== undefined) {
       detail = detail.split(value).join('[REDACTED]')

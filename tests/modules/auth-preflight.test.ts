@@ -126,7 +126,7 @@ describe('makeAuthPreflight', () => {
         requireHostReviewAuth: true,
         requiredAdapters: new Set(),
         reviewTool: 'dakar',
-        dakarInvocation: ['dakar-review', '--api-key=super-secret'],
+        dakarInvocation: ['dakar-review', '--api_key=super-secret'],
       },
       {
         exec: async (command) => command === 'dakar-review'
@@ -143,6 +143,33 @@ describe('makeAuthPreflight', () => {
 
     expect(failures).toHaveLength(1)
     expect(required(failures[0]).detail).toBe('credential rejected: [REDACTED]')
+  })
+
+  test('redacts a truncated inline-option value before bounding probe output', async () => {
+    const secret = 'super-secret'
+    const run = makeAuthPreflight(
+      {
+        enabled: true,
+        requireHostReviewAuth: true,
+        requiredAdapters: new Set(),
+        reviewTool: 'dakar',
+        dakarInvocation: ['dakar-review', `--api_key=${secret}`],
+      },
+      {
+        exec: async (command) => command === 'dakar-review'
+          ? status({ ok: false, message: `${secret}${'x'.repeat(1_991)}` })
+          : status(),
+        environment: { get: () => 'test-key' },
+        phase: () => {},
+        log: () => {},
+        recordHostReviewAuthFailure: () => {},
+      },
+    )
+
+    const failures = await run()
+
+    expect(failures).toHaveLength(1)
+    expect(required(failures[0]).detail).not.toContain('secret')
   })
 
   test('redacts a leading Dakar environment assignment and its bare echoed value', async () => {
