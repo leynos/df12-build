@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import { hostGateLogPath } from '../../src/workflows/df12-build-odw/host-review.ts'
+import type { HostGateTimer } from '../../src/workflows/df12-build-odw/host-gates.ts'
+import type { HostReviewSpanAttributes, HostReviewTraceContext } from '../../src/workflows/df12-build-odw/host-review-contracts.ts'
 import { hostReview, required } from '../fixtures/host-review.ts'
 
 const g = globalThis as Record<string, unknown>
@@ -294,4 +296,134 @@ describe('runHostCommitGates streaming', () => {
     await new Promise((resolve) => setTimeout(resolve, 2500))
     expect(existsSync(marker)).toBe(false)
   }, 10000)
+})
+
+describe('injected host-gate seams', () => {
+  /** Build a minimal never-closing child so injected timers control settlement. */
+  const fakeChild = () => {
+    const listeners: Record<string, (value: number | Error | null) => void> = {}
+    const readable = { on: () => {}, pause: () => {}, resume: () => {} }
+    return {
+      pid: 42,
+      stdout: readable,
+      stderr: readable,
+      on: (event: 'close' | 'error', listener: (value: number | Error | null) => void) => { listeners[event] = listener },
+      kill: () => {},
+      listeners,
+    }
+  }
+
+  /** Keep a deterministic, synchronous secure log for injected-boundary tests. */
+  const fakeLog = () => ({ write: () => true, end: (done: () => void) => done(), on: () => {} })
+
+  test('surfaces a detached gate spawn failure through the injected process seam', async () => {
+    const surface = hostReview({ commitGates: ['ignored'], gateLogPath: () => '/tmp/fake-gate.log' }, {
+      hostGates: { openSecureLog: fakeLog, spawnGate: () => { throw new Error('spawn denied') } },
+    })
+    const result = await surface.runHostCommitGates('/worktree', 'task', 'round')
+    expect(result.green).toBe(false)
+    expect(result.detail).toContain('spawn failed: spawn denied')
+  })
+
+  test('contains exclusive log-open failures before a child can start', async () => {
+    let spawned = false
+    const surface = hostReview({ commitGates: ['ignored'], gateLogPath: () => '/tmp/fake-gate.log' }, {
+      hostGates: {
+        openSecureLog: () => { throw new Error('ELOOP') },
+        spawnGate: () => { spawned = true; return fakeChild() },
+      },
+    })
+    const result = await surface.runHostCommitGates('/worktree', 'task', 'round')
+    expect(result.green).toBe(false)
+    expect(result.detail).toContain('gate log write failed: ELOOP')
+    expect(spawned).toBe(false)
+  })
+
+  test('reaps the injected process group after a timer-driven gate timeout', async () => {
+    const timers: Array<() => void> = []
+    const signals: string[] = []
+    const child = fakeChild()
+    const surface = hostReview({ commitGates: ['ignored'], commitGateTimeoutSeconds: 1, gateLogPath: () => '/tmp/fake-gate.log' }, {
+      hostGates: {
+        openSecureLog: fakeLog,
+        spawnGate: () => child,
+        terminateProcessGroup: (_child, signal) => signals.push(signal),
+        setTimer: (callback) => { timers.push(callback); return {} },
+        clearTimer: () => {},
+      },
+    })
+    const pending = surface.runHostCommitGates('/worktree', 'task', 'round')
+    required(timers[0])()
+    required(timers[1])()
+    required(timers[2])()
+    const result = await pending
+    expect(signals).toEqual(['SIGTERM', 'SIGKILL'])
+    expect(result.green).toBe(false)
+    expect(result.detail).toContain('killed after the 1s gate timeout')
+  })
+
+  test('contains secure-log write faults and terminates the injected group', async () => {
+    let streamError: ((error?: Error) => void) | undefined
+    const signals: string[] = []
+    const child = fakeChild()
+    const surface = hostReview({ commitGates: ['ignored'], gateLogPath: () => '/tmp/fake-gate.log' }, {
+      hostGates: {
+        openSecureLog: () => ({
+          write: () => true,
+          end: (done) => done(),
+          on: (event, listener) => { if (event === 'error') streamError = listener },
+        }),
+        spawnGate: () => child,
+        terminateProcessGroup: (_child, signal) => signals.push(signal),
+        setTimer: (callback) => {
+          const timer = { cancelled: false } as HostGateTimer & { cancelled: boolean }
+          queueMicrotask(() => { if (!timer.cancelled) callback() })
+          return timer
+        },
+        clearTimer: (timer) => { (timer as HostGateTimer & { cancelled: boolean }).cancelled = true },
+      },
+    })
+    const pending = surface.runHostCommitGates('/worktree', 'task', 'round')
+    required(streamError)(new Error('disk full'))
+    const result = await pending
+    expect(result.green).toBe(false)
+    expect(result.detail).toContain('gate log write failed: disk full')
+    expect(signals).toEqual(['SIGTERM', 'SIGKILL'])
+  })
+
+  test('reports an injected CodeScene availability-probe fault without spawning a gate', async () => {
+    let spawned = false
+    const spans: Array<{ name: string; context: HostReviewTraceContext; end?: HostReviewSpanAttributes }> = []
+    const tracer = {
+      startSpan: (name: string, context: HostReviewTraceContext) => {
+        const entry: { name: string; context: HostReviewTraceContext; end?: HostReviewSpanAttributes } = { name, context }
+        spans.push(entry)
+        return { end: (attributes: HostReviewSpanAttributes = {}) => { entry.end = attributes } }
+      },
+    }
+    const surface = hostReview({ csCheck: true, csCheckCommand: 'cs-check-changed' }, {
+      hostGates: {
+        probeCodeScene: async () => ({ ok: false, stdout: '', stderr: 'probe failed', message: 'probe failed' }),
+        spawnGate: () => { spawned = true; return fakeChild() },
+        tracer,
+        traceContext: { runId: 'run-gate' },
+      },
+    })
+    const result = await surface.runCodeSceneCheck('/worktree', 'task', 'round')
+    expect(result.clean).toBe(false)
+    expect(result.detail).toContain('probe failed')
+    expect(spawned).toBe(false)
+    expect(spans).toEqual([{ name: 'host-review.codescene', context: { runId: 'run-gate', taskId: 'task' }, end: expect.objectContaining({ outcome: 'error', errorCategory: 'execution' }) }])
+  })
+
+  test('contains an injected temporary log-root cleanup failure', async () => {
+    const messages: string[] = []
+    const prior = g.log
+    g.log = (message: unknown) => messages.push(String(message))
+    const surface = hostReview({ gateLogRoot: { create: () => '/tmp/injected-root', remove: () => { throw new Error('cleanup denied') } } })
+    await surface.runHostCommitGates('/worktree', 'task', 'round')
+    surface.disposeHostGateLogs()
+    g.log = prior
+    expect(messages.join('\n')).toContain('could not remove temporary log root: cleanup denied')
+  })
 })

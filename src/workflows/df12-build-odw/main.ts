@@ -329,6 +329,9 @@ const hostReview = makeHostReview({
   commitGateTimeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
   csCheck: CS_CHECK,
   csCheckCommand: CS_CHECK_COMMAND,
+  // This deterministic identifier lets every host boundary correlate one
+  // workflow run without turning task labels into metric dimensions.
+  traceContext: { runId: `df12-build-odw:${BASE}:${ROADMAP}` },
 })
 
 const {

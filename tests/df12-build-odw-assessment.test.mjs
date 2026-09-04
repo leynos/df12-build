@@ -500,7 +500,7 @@ test('CodeRabbit findings are captured to the JSONL sink and the run aggregate',
   await surface.recordHostReview('1.2.3 r2', { reviewer: 'coderabbit', outcome: 'rate-limited', attempts: 3, elapsedMs: 1, errorCategory: 'deferred', findings: [], detail: 'Review limit reached' })
 
   assert.deepEqual(
-    { ...surface.hostReviewMetrics(), bySeverity: { ...surface.hostReviewMetrics().bySeverity } },
+    { ...surface.hostReviewMetrics(), bySeverity: { ...surface.hostReviewMetrics().bySeverity }, durationBuckets: { ...surface.hostReviewMetrics().durationBuckets } },
     {
       runs: 0,
       findings: 2,
@@ -512,6 +512,7 @@ test('CodeRabbit findings are captured to the JSONL sink and the run aggregate',
       sinkFailures: 0,
       bySeverity: { critical: 0, major: 1, minor: 0, trivial: 0, info: 1, unknown: 0 },
       sinkError: '',
+      durationBuckets: { underOneSecond: 0, oneToTenSeconds: 0, tenToSixtySeconds: 0, sixtySecondsOrMore: 0 },
     },
   )
   const lines = readFileSync(sink, 'utf8').trim().split('\n').map((line) => JSON.parse(line))

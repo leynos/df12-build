@@ -3,12 +3,28 @@ import { describe, expect, test } from 'bun:test'
 
 import { reviewerDisplayName } from '../../src/workflows/df12-build-odw/host-review.ts'
 import type { ExecOptions } from '../../src/workflows/df12-build-odw/exec.ts'
+import type { HostReviewSpanAttributes, HostReviewTraceContext } from '../../src/workflows/df12-build-odw/host-review-contracts.ts'
 import { hostReview, recordingExec, required } from '../fixtures/host-review.ts'
 
 const g = globalThis as Record<string, unknown>
 g.log = () => {}
 
 describe('reviewTool dispatch', () => {
+  /** Capture bounded host-review spans without depending on a telemetry SDK. */
+  const traceRecorder = () => {
+    const spans: Array<{ name: string; context: HostReviewTraceContext; attributes: HostReviewSpanAttributes; end?: HostReviewSpanAttributes }> = []
+    return {
+      spans,
+      tracer: {
+        startSpan: (name: string, context: HostReviewTraceContext, attributes: HostReviewSpanAttributes = {}) => {
+          const entry: { name: string; context: HostReviewTraceContext; attributes: HostReviewSpanAttributes; end?: HostReviewSpanAttributes } = { name, context, attributes }
+          spans.push(entry)
+          return { end: (end: HostReviewSpanAttributes = {}) => { entry.end = end } }
+        },
+      },
+    }
+  }
+
   test('the coderabbit tool still routes to the NDJSON classifier', async () => {
     const ndjson = [
       '{"type":"status","message":"reviewing"}',
@@ -74,5 +90,45 @@ describe('reviewTool dispatch', () => {
     })
     expect(deferred.metrics().hostReview).toMatchObject({ runs: 1, deferred: 1, authFailures: 0, retries: 0 })
     expect(auth.metrics().hostReview).toMatchObject({ runs: 1, deferred: 0, authFailures: 1, retries: 0 })
+  })
+
+  test('closes secret-free correlated spans for success, retry, timeout, and sink failure', async () => {
+    const trace = traceRecorder()
+    let attempt = 0
+    const surface = hostReview({
+      reviewTool: 'dakar',
+      reviewAttempts: 2,
+      reviewFindingsFile: '/untrusted/secret-path',
+      tracer: trace.tracer,
+      traceContext: { runId: 'run-123' },
+    })
+    const retry = await surface.runHostReview('/w', 'task-42', {
+      exec: async () => {
+        attempt += 1
+        return attempt === 1
+          ? { ok: true, stdout: '{"ok":false,"stage":"deferred","error":"retry"}', stderr: '' }
+          : { ok: true, stdout: '{"ok":true,"verdict":"changes-requested","findings":[{"severity":"high","path":"a.ts","title":"fix","detail":"secret-finding","evidence":"e"}]}', stderr: '' }
+      },
+      sleep: async () => {},
+    })
+    await surface.recordHostReview('task-42', retry, { append: async () => { throw new Error('disk full secret-finding') } })
+    const timedOut = await hostReview({ reviewTool: 'coderabbit', tracer: trace.tracer, traceContext: { runId: 'run-123' } })
+      .runHostReview('/w', 'task-42', { exec: recordingExec({ ok: false, killed: true, message: 'secret-finding' }).exec })
+
+    expect(retry.outcome).toBe('findings')
+    expect(timedOut.errorCategory).toBe('timeout')
+    expect(trace.spans.map((entry) => entry.name)).toEqual(expect.arrayContaining([
+      'host-review.operation',
+      'host-review.attempt',
+      'host-review.dakar.subprocess',
+      'host-review.dakar.state-root.create',
+      'host-review.dakar.state-root.remove',
+      'host-review.findings-sink',
+      'host-review.coderabbit.subprocess',
+    ]))
+    expect(trace.spans.every((entry) => entry.context.runId === 'run-123' && entry.context.taskId === 'task-42' && entry.end !== undefined)).toBe(true)
+    expect(trace.spans.some((entry) => entry.end?.errorCategory === 'timeout')).toBe(true)
+    expect(JSON.stringify(trace.spans)).not.toContain('secret-finding')
+    expect(surface.metrics().hostReview.durationBuckets.underOneSecond).toBe(1)
   })
 })

@@ -30,6 +30,39 @@ export type ReviewOutcome = 'clean' | 'findings' | 'rate-limited' | 'auth' | 'er
 /** Bounded reason attached to terminal host-review telemetry. */
 export type ReviewErrorCategory = 'none' | 'deferred' | 'timeout' | 'auth' | 'invalid-output' | 'execution'
 
+/** Bounded scalar values allowed on host-review trace spans. */
+export type HostReviewSpanValue = string | number | boolean
+
+/** Low-cardinality attributes attached to a host-review span. */
+export type HostReviewSpanAttributes = Readonly<Record<string, HostReviewSpanValue>>
+
+/** Correlation carried through host-review boundaries without becoming a metric label. */
+export interface HostReviewTraceContext {
+  /** Stable identifier for the enclosing workflow run. */
+  runId: string
+  /** Optional bounded task or review label known by the caller. */
+  taskId?: string
+}
+
+/** Handle returned by a vendor-neutral host-review tracing implementation. */
+export interface HostReviewSpan {
+  /** Close the span with bounded terminal attributes. */
+  end: (attributes?: HostReviewSpanAttributes) => void
+}
+
+/** Injectable tracing port for host-review process and persistence boundaries. */
+export interface HostReviewTracer {
+  /** Start one bounded span within the supplied workflow and task correlation. */
+  startSpan: (name: string, context: HostReviewTraceContext, attributes?: HostReviewSpanAttributes) => HostReviewSpan
+}
+
+const NOOP_HOST_REVIEW_SPAN: HostReviewSpan = { end: () => {} }
+
+/** Default tracing implementation used when the workflow host has no tracer. */
+export const NOOP_HOST_REVIEW_TRACER: HostReviewTracer = {
+  startSpan: () => NOOP_HOST_REVIEW_SPAN,
+}
+
 /** Validated result produced by exactly one reviewer adapter attempt. */
 export interface HostReviewAttempt {
   /** Tool-neutral terminal outcome. */
@@ -116,6 +149,12 @@ export interface HostReviewDeps {
   sleep?: (minutes: number) => Promise<void>
   /** Monotonic-enough millisecond clock used only for bounded telemetry. */
   nowMs?: () => number
+  /** Optional per-review trace context; task identifiers are bounded before use. */
+  traceContext?: Partial<HostReviewTraceContext>
+  /** Optional tracer override for one review operation or deterministic test. */
+  tracer?: HostReviewTracer
+  /** One-based attempt supplied by the retry facade to adapter-level spans. */
+  attempt?: number
 }
 
 /** Injectable persistence seams for the serialized findings sink. */
@@ -124,6 +163,8 @@ export interface HostReviewRecordingDeps {
   timestamp?: () => Promise<string>
   /** Append one already-formatted JSONL batch to the configured sink. */
   append?: (path: string, data: string) => Promise<void>
+  /** Optional trace context for a sink append outside the task pipeline. */
+  traceContext?: Partial<HostReviewTraceContext>
 }
 
 /** Run-scoped gate-log root lifecycle, injected where filesystem ownership matters. */
@@ -174,6 +215,22 @@ export interface HostReviewConfig {
   gateLogPath?: (tag: string, roundLabel: string, index: number) => string
   /** Optional gate-log allocation lifecycle used by host-gate boundaries. */
   gateLogRoot?: HostGateLogRoot
+  /** Optional vendor-neutral tracer injected by the workflow composition boundary. */
+  tracer?: HostReviewTracer
+  /** Stable workflow correlation used when operation-specific context is absent. */
+  traceContext?: HostReviewTraceContext
+}
+
+/** Fixed latency buckets that avoid metric labels based on task or command text. */
+export interface HostReviewDurationBuckets {
+  /** Completed in under one second. */
+  underOneSecond: number
+  /** Completed in one to under ten seconds. */
+  oneToTenSeconds: number
+  /** Completed in ten to under sixty seconds. */
+  tenToSixtySeconds: number
+  /** Completed in sixty seconds or longer. */
+  sixtySecondsOrMore: number
 }
 
 /** Metric aggregate maintained per composed host-review surface. */
@@ -198,6 +255,8 @@ export interface HostReviewMetrics {
   bySeverity: Record<'critical' | 'major' | 'minor' | 'trivial' | 'info' | 'unknown', number>
   /** Last bounded sink error, empty when healthy. */
   sinkError: string
+  /** Terminal review durations grouped into a fixed, bounded vocabulary. */
+  durationBuckets: HostReviewDurationBuckets
 }
 
 /** Metric aggregate maintained for deterministic host gates. */
@@ -270,5 +329,5 @@ export function reviewBlockingItems(reviewer: string, findings: readonly ReviewF
 
 /** Construct a zeroed, run-scoped host-review metric aggregate. */
 export function makeHostReviewMetrics(): HostReviewMetrics {
-  return { runs: 0, findings: 0, retries: 0, deferred: 0, timeouts: 0, errors: 0, authFailures: 0, sinkFailures: 0, bySeverity: { critical: 0, major: 0, minor: 0, trivial: 0, info: 0, unknown: 0 }, sinkError: '' }
+  return { runs: 0, findings: 0, retries: 0, deferred: 0, timeouts: 0, errors: 0, authFailures: 0, sinkFailures: 0, bySeverity: { critical: 0, major: 0, minor: 0, trivial: 0, info: 0, unknown: 0 }, sinkError: '', durationBuckets: { underOneSecond: 0, oneToTenSeconds: 0, tenToSixtySeconds: 0, sixtySecondsOrMore: 0 } }
 }

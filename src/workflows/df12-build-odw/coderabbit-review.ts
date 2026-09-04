@@ -10,6 +10,7 @@ import { authFailureDetail } from './faults.ts'
 import type { ExecStatus } from './exec.ts'
 import {
   boundedTail,
+  NOOP_HOST_REVIEW_TRACER,
   type HostReviewConfig,
   type HostReviewDeps,
   type HostReviewAttempt,
@@ -72,13 +73,24 @@ export function classifyCoderabbitOutcome(execResult: { ok?: boolean; stderr?: s
 }
 
 /** Bind one CodeRabbit attempt to the shared timeout and base-branch config. */
-export function makeCoderabbitAttempt(config: Pick<HostReviewConfig, 'base' | 'reviewTimeoutSeconds'>): (worktree: string, exec: NonNullable<HostReviewDeps['exec']>) => Promise<HostReviewAttempt> {
-  return async function runCoderabbitAttempt(worktree, exec) {
-    const result: ExecStatus = await exec('coderabbit', ['review', '--agent', '--type', 'committed', '--base', config.base], { cwd: worktree, timeoutMs: config.reviewTimeoutSeconds * 1000 })
+export function makeCoderabbitAttempt(config: Pick<HostReviewConfig, 'base' | 'reviewTimeoutSeconds'>): (worktree: string, exec: NonNullable<HostReviewDeps['exec']>, deps?: HostReviewDeps) => Promise<HostReviewAttempt> {
+  return async function runCoderabbitAttempt(worktree, exec, deps = {}) {
+    const tracer = deps.tracer || NOOP_HOST_REVIEW_TRACER
+    const traceContext = deps.traceContext || { runId: 'host-review' }
+    const startedMs = Number(process.hrtime.bigint() / 1_000_000n)
+    const span = tracer.startSpan('host-review.coderabbit.subprocess', { runId: boundedTail(traceContext.runId || 'host-review', 120), ...(traceContext.taskId ? { taskId: boundedTail(traceContext.taskId, 120) } : {}) }, { reviewer: 'coderabbit', attempt: deps.attempt || 1 })
+    let result: ExecStatus
+    try {
+      result = await exec('coderabbit', ['review', '--agent', '--type', 'committed', '--base', config.base], { cwd: worktree, timeoutMs: config.reviewTimeoutSeconds * 1000 })
+    } catch (error) {
+      span.end({ reviewer: 'coderabbit', attempt: deps.attempt || 1, outcome: 'error', errorCategory: 'execution', timeout: false, elapsedMs: Math.max(0, Number(process.hrtime.bigint() / 1_000_000n) - startedMs) })
+      throw error
+    }
     const parsed = parseCoderabbitAgentOutput(result.stdout)
     const outcome = classifyCoderabbitOutcome(result, parsed)
     const detail = outcome === 'clean' || outcome === 'findings' ? '' : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join('; ') || 'coderabbit produced no parsable outcome').trim()
     const errorCategory: ReviewErrorCategory = result.killed ? 'timeout' : outcome === 'rate-limited' ? 'deferred' : outcome === 'auth' ? 'auth' : outcome === 'error' ? (parsed.error || parsed.complete ? 'execution' : 'invalid-output') : 'none'
+    span.end({ reviewer: 'coderabbit', attempt: deps.attempt || 1, outcome, errorCategory, timeout: errorCategory === 'timeout', elapsedMs: Math.max(0, Number(process.hrtime.bigint() / 1_000_000n) - startedMs) })
     return { outcome, findings: parsed.findings, detail: boundedTail(detail), errorCategory }
   }
 }

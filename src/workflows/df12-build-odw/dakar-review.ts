@@ -11,6 +11,7 @@ import type { ExecStatus } from './exec.ts'
 import { authFailureDetail } from './faults.ts'
 import {
   boundedTail,
+  NOOP_HOST_REVIEW_TRACER,
   type HostReviewConfig,
   type HostReviewDeps,
   type HostReviewAttempt,
@@ -90,6 +91,8 @@ export interface DakarAttemptDeps {
   dakarStateRoots?: DakarStateRoots
   /** Deprecated cleanup seam retained for compatibility with older callers. */
   removeDakarStateRoot?: (stateRoot: string, options: { recursive: true; force: true }) => void
+  /** One-based attempt number retained for bounded cleanup diagnostics. */
+  attempt?: number
 }
 
 /** Fresh Dakar state-root service, injectable for filesystem-failure tests. */
@@ -225,29 +228,47 @@ export function makeDakarAttempt(config: Pick<HostReviewConfig, 'base' | 'dakarI
     const os = process.getBuiltinModule('node:os')
     const path = process.getBuiltinModule('node:path')
     const stateRoots = deps.dakarStateRoots || { create: () => fs.mkdtempSync(path.join(os.tmpdir(), 'df12-dakar-state-')), remove: deps.removeDakarStateRoot || fs.rmSync }
+    const tracer = (deps as HostReviewDeps).tracer || NOOP_HOST_REVIEW_TRACER
+    const traceContext = (deps as HostReviewDeps).traceContext || { runId: 'host-review' }
+    /** Read a monotonic clock only for bounded span durations. */
+    const nowMs = () => Number(process.hrtime.bigint() / 1_000_000n)
+    /** Start one Dakar boundary span without propagating paths or diagnostics. */
+    const trace = (name: string) => {
+      const startedMs = nowMs()
+      return { startedMs, span: tracer.startSpan(name, { runId: boundedTail(traceContext.runId || 'host-review', 120), ...(traceContext.taskId ? { taskId: boundedTail(traceContext.taskId, 120) } : {}) }, { reviewer: 'dakar', attempt: deps.attempt || 1 }) }
+    }
     let stateRoot: string
+    const createSpan = trace('host-review.dakar.state-root.create')
     try {
       stateRoot = stateRoots.create()
+      createSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: 'clean', errorCategory: 'none', timeout: false, elapsedMs: Math.max(0, nowMs() - createSpan.startedMs) })
     } catch (error) {
+      createSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: 'error', errorCategory: 'execution', timeout: false, elapsedMs: Math.max(0, nowMs() - createSpan.startedMs) })
       return { outcome: 'error', findings: [], detail: boundedTail((error as Error | null)?.message || String(error)), errorCategory: 'execution' }
     }
     const args = ['--repo-root', worktree, '--base', config.base, '--state-root', stateRoot, '--timeout', String(config.reviewTimeoutSeconds), ...(config.dakarBudgetGbp > 0 ? ['--budget-gbp', String(config.dakarBudgetGbp)] : [])]
+    const processSpan = trace('host-review.dakar.subprocess')
     try {
       const review = classifyDakarReview(await exec(executable, [...prefixArgs, ...args], {
         cwd: worktree,
         timeoutMs: config.reviewTimeoutSeconds * 1000 + DAKAR_PARENT_TIMEOUT_GRACE_MS,
       }), sensitiveValues)
+      processSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: review.outcome, errorCategory: review.errorCategory, timeout: review.errorCategory === 'timeout', elapsedMs: Math.max(0, nowMs() - processSpan.startedMs) })
       return review
     } catch (error) {
+      processSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: 'error', errorCategory: 'execution', timeout: false, elapsedMs: Math.max(0, nowMs() - processSpan.startedMs) })
       const message = boundedTail(redactDakarDetail((error as Error | null)?.message || String(error), sensitiveValues))
       const redacted = new Error(message)
       redacted.name = (error as Error | null)?.name || 'Error'
       throw redacted
     } finally {
+      const removeSpan = trace('host-review.dakar.state-root.remove')
       try {
         stateRoots.remove(stateRoot, { recursive: true, force: true })
+        removeSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: 'clean', errorCategory: 'none', timeout: false, elapsedMs: Math.max(0, nowMs() - removeSpan.startedMs) })
       } catch (error) {
-        log(`[Dakar] could not remove temporary state root: ${boundedTail((error as Error | null)?.message || String(error), 500)}`)
+        removeSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: 'error', errorCategory: 'execution', timeout: false, elapsedMs: Math.max(0, nowMs() - removeSpan.startedMs) })
+        log(`[Dakar] ${boundedTail(traceContext.taskId || 'host-review', 120)} attempt ${deps.attempt || 1} could not remove temporary state root: ${boundedTail((error as Error | null)?.message || String(error), 500)}`)
       }
     }
   }

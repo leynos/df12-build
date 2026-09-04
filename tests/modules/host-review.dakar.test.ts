@@ -203,9 +203,9 @@ describe('runDakarHostReview', () => {
       },
     })
     expect(review.outcome).toBe('clean')
-    const cleanupLog = required(logs.find((line) => line.startsWith('[Dakar] could not remove temporary state root: ')))
-    expect(cleanupLog).toStartWith('[Dakar] could not remove temporary state root: ')
-    expect(cleanupLog.length).toBeLessThanOrEqual(550)
+    const cleanupLog = required(logs.find((line) => line.startsWith('[Dakar] label attempt 1 could not remove temporary state root: ')))
+    expect(cleanupLog).toStartWith('[Dakar] label attempt 1 could not remove temporary state root: ')
+    expect(cleanupLog.length).toBeLessThanOrEqual(570)
   })
 
   test('redacts explicitly supplied OpenAI and fixed-argument values echoed by Dakar', async () => {

@@ -1134,6 +1134,11 @@ function redactedShellCommand(command) {
 }
 
 // src/workflows/df12-build-odw/host-review-contracts.ts
+var NOOP_HOST_REVIEW_SPAN = { end: () => {
+} };
+var NOOP_HOST_REVIEW_TRACER = {
+  startSpan: () => NOOP_HOST_REVIEW_SPAN
+};
 function boundedTail(text, limit = 2e3) {
   const value = String(text || "");
   return value.length > limit ? value.slice(-limit) : value;
@@ -1161,7 +1166,7 @@ function reviewBlockingItems(reviewer, findings) {
   return (findings || []).filter((finding) => HOST_REVIEW_BLOCKING_SEVERITIES.has(String(finding.severity || "").toLowerCase())).map((finding) => `${name} (${finding.severity}) ${finding.fileName || "unknown file"}: ${String(finding.comment || finding.codegenInstructions || "see the recorded suggestions").slice(0, 500)}`);
 }
 function makeHostReviewMetrics() {
-  return { runs: 0, findings: 0, retries: 0, deferred: 0, timeouts: 0, errors: 0, authFailures: 0, sinkFailures: 0, bySeverity: { critical: 0, major: 0, minor: 0, trivial: 0, info: 0, unknown: 0 }, sinkError: "" };
+  return { runs: 0, findings: 0, retries: 0, deferred: 0, timeouts: 0, errors: 0, authFailures: 0, sinkFailures: 0, bySeverity: { critical: 0, major: 0, minor: 0, trivial: 0, info: 0, unknown: 0 }, sinkError: "", durationBuckets: { underOneSecond: 0, oneToTenSeconds: 0, tenToSixtySeconds: 0, sixtySecondsOrMore: 0 } };
 }
 
 // src/workflows/df12-build-odw/config.ts
@@ -2580,12 +2585,23 @@ function classifyCoderabbitOutcome(execResult, parsed) {
   return parsed.complete && CODERABBIT_SUCCESS_STATUSES.has(String(parsed.complete.status)) ? "clean" : "error";
 }
 function makeCoderabbitAttempt(config) {
-  return async function runCoderabbitAttempt(worktree, exec) {
-    const result = await exec("coderabbit", ["review", "--agent", "--type", "committed", "--base", config.base], { cwd: worktree, timeoutMs: config.reviewTimeoutSeconds * 1e3 });
+  return async function runCoderabbitAttempt(worktree, exec, deps = {}) {
+    const tracer = deps.tracer || NOOP_HOST_REVIEW_TRACER;
+    const traceContext = deps.traceContext || { runId: "host-review" };
+    const startedMs = Number(process.hrtime.bigint() / 1000000n);
+    const span = tracer.startSpan("host-review.coderabbit.subprocess", { runId: boundedTail(traceContext.runId || "host-review", 120), ...traceContext.taskId ? { taskId: boundedTail(traceContext.taskId, 120) } : {} }, { reviewer: "coderabbit", attempt: deps.attempt || 1 });
+    let result;
+    try {
+      result = await exec("coderabbit", ["review", "--agent", "--type", "committed", "--base", config.base], { cwd: worktree, timeoutMs: config.reviewTimeoutSeconds * 1e3 });
+    } catch (error) {
+      span.end({ reviewer: "coderabbit", attempt: deps.attempt || 1, outcome: "error", errorCategory: "execution", timeout: false, elapsedMs: Math.max(0, Number(process.hrtime.bigint() / 1000000n) - startedMs) });
+      throw error;
+    }
     const parsed = parseCoderabbitAgentOutput(result.stdout);
     const outcome = classifyCoderabbitOutcome(result, parsed);
     const detail = outcome === "clean" || outcome === "findings" ? "" : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join("; ") || "coderabbit produced no parsable outcome").trim();
     const errorCategory = result.killed ? "timeout" : outcome === "rate-limited" ? "deferred" : outcome === "auth" ? "auth" : outcome === "error" ? parsed.error || parsed.complete ? "execution" : "invalid-output" : "none";
+    span.end({ reviewer: "coderabbit", attempt: deps.attempt || 1, outcome, errorCategory, timeout: errorCategory === "timeout", elapsedMs: Math.max(0, Number(process.hrtime.bigint() / 1000000n) - startedMs) });
     return { outcome, findings: parsed.findings, detail: boundedTail(detail), errorCategory };
   };
 }
@@ -2719,29 +2735,45 @@ function makeDakarAttempt(config) {
     const os = process.getBuiltinModule("node:os");
     const path = process.getBuiltinModule("node:path");
     const stateRoots = deps.dakarStateRoots || { create: () => fs.mkdtempSync(path.join(os.tmpdir(), "df12-dakar-state-")), remove: deps.removeDakarStateRoot || fs.rmSync };
+    const tracer = deps.tracer || NOOP_HOST_REVIEW_TRACER;
+    const traceContext = deps.traceContext || { runId: "host-review" };
+    const nowMs = () => Number(process.hrtime.bigint() / 1000000n);
+    const trace = (name) => {
+      const startedMs = nowMs();
+      return { startedMs, span: tracer.startSpan(name, { runId: boundedTail(traceContext.runId || "host-review", 120), ...traceContext.taskId ? { taskId: boundedTail(traceContext.taskId, 120) } : {} }, { reviewer: "dakar", attempt: deps.attempt || 1 }) };
+    };
     let stateRoot;
+    const createSpan = trace("host-review.dakar.state-root.create");
     try {
       stateRoot = stateRoots.create();
+      createSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: "clean", errorCategory: "none", timeout: false, elapsedMs: Math.max(0, nowMs() - createSpan.startedMs) });
     } catch (error) {
+      createSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: "error", errorCategory: "execution", timeout: false, elapsedMs: Math.max(0, nowMs() - createSpan.startedMs) });
       return { outcome: "error", findings: [], detail: boundedTail(error?.message || String(error)), errorCategory: "execution" };
     }
     const args2 = ["--repo-root", worktree, "--base", config.base, "--state-root", stateRoot, "--timeout", String(config.reviewTimeoutSeconds), ...config.dakarBudgetGbp > 0 ? ["--budget-gbp", String(config.dakarBudgetGbp)] : []];
+    const processSpan = trace("host-review.dakar.subprocess");
     try {
       const review = classifyDakarReview(await exec(executable, [...prefixArgs, ...args2], {
         cwd: worktree,
         timeoutMs: config.reviewTimeoutSeconds * 1e3 + DAKAR_PARENT_TIMEOUT_GRACE_MS
       }), sensitiveValues);
+      processSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: review.outcome, errorCategory: review.errorCategory, timeout: review.errorCategory === "timeout", elapsedMs: Math.max(0, nowMs() - processSpan.startedMs) });
       return review;
     } catch (error) {
+      processSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: "error", errorCategory: "execution", timeout: false, elapsedMs: Math.max(0, nowMs() - processSpan.startedMs) });
       const message = boundedTail(redactDakarDetail(error?.message || String(error), sensitiveValues));
       const redacted = new Error(message);
       redacted.name = error?.name || "Error";
       throw redacted;
     } finally {
+      const removeSpan = trace("host-review.dakar.state-root.remove");
       try {
         stateRoots.remove(stateRoot, { recursive: true, force: true });
+        removeSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: "clean", errorCategory: "none", timeout: false, elapsedMs: Math.max(0, nowMs() - removeSpan.startedMs) });
       } catch (error) {
-        log(`[Dakar] could not remove temporary state root: ${boundedTail(error?.message || String(error), 500)}`);
+        removeSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: "error", errorCategory: "execution", timeout: false, elapsedMs: Math.max(0, nowMs() - removeSpan.startedMs) });
+        log(`[Dakar] ${boundedTail(traceContext.taskId || "host-review", 120)} attempt ${deps.attempt || 1} could not remove temporary state root: ${boundedTail(error?.message || String(error), 500)}`);
       }
     }
   };
@@ -2754,21 +2786,56 @@ function codeSceneExecutable(command) {
   if (!tokens || tokens.hasUnquotedControlOperator) return null;
   return tokens.words[tokens.executableWordIndex]?.value || "";
 }
-function makeGateLogPaths(lifecycle) {
+function hostGateLogPath(root, tag, roundLabel, index) {
+  const slug = (value) => String(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+  const path = process.getBuiltinModule("node:path");
+  return path.join(root, `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`);
+}
+function productionHostGateDeps() {
   const fs = process.getBuiltinModule("node:fs");
   const os = process.getBuiltinModule("node:os");
   const path = process.getBuiltinModule("node:path");
+  const { spawn } = process.getBuiltinModule("node:child_process");
+  return {
+    probeCodeScene: execFileStatus,
+    spawnGate: (command, cwd) => spawn("sh", ["-c", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] }),
+    /** Prefer signalling the detached group so background descendants are reaped. */
+    terminateProcessGroup: (child, signal) => {
+      if (typeof child.pid === "number") {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch {
+        }
+      }
+      child.kill(signal);
+    },
+    /** Refuse pre-existing or symlinked paths before a gate writes untrusted output. */
+    openSecureLog: (logFile) => {
+      const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
+      const fd = fs.openSync(logFile, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 384);
+      return fs.createWriteStream(logFile, { fd, autoClose: true });
+    },
+    createLogRoot: () => fs.mkdtempSync(path.join(os.tmpdir(), "df12-gates-")),
+    removeLogRoot: (root, options) => fs.rmSync(root, options),
+    setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+    clearTimer: (timer) => clearTimeout(timer),
+    nowMs: () => Number(process.hrtime.bigint() / 1000000n)
+  };
+}
+function makeGateLogPaths(lifecycle, deps) {
   let gateLogRoot = "";
   const root = () => {
-    if (!gateLogRoot) gateLogRoot = lifecycle?.create() || fs.mkdtempSync(path.join(os.tmpdir(), "df12-gates-"));
+    if (!gateLogRoot) gateLogRoot = lifecycle?.create() || deps.createLogRoot();
     return gateLogRoot;
   };
   return {
     path: (tag, roundLabel, index) => hostGateLogPath(root(), tag, roundLabel, index),
+    /** Contain root-removal errors so cleanup cannot replace workflow results. */
     dispose: () => {
       if (!gateLogRoot) return;
       try {
-        (lifecycle?.remove || fs.rmSync)(gateLogRoot, { recursive: true, force: true });
+        (lifecycle?.remove || deps.removeLogRoot)(gateLogRoot, { recursive: true, force: true });
       } catch (error) {
         log(`[host gates] could not remove temporary log root: ${boundedTail(error?.message || String(error), 500)}`);
       }
@@ -2776,27 +2843,38 @@ function makeGateLogPaths(lifecycle) {
     }
   };
 }
-function hostGateLogPath(root, tag, roundLabel, index) {
-  const slug = (value) => String(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
-  const path = process.getBuiltinModule("node:path");
-  return path.join(root, `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`);
-}
-function makeHostGates(config, metrics) {
-  const fs = process.getBuiltinModule("node:fs");
-  const generatedLogPaths = makeGateLogPaths(config.gateLogRoot);
+function makeHostGates(config, metrics, injected = {}) {
+  const production = productionHostGateDeps();
+  const deps = { ...production, ...injected };
+  const generatedLogPaths = makeGateLogPaths(config.gateLogRoot, deps);
   const logPath = config.gateLogPath || generatedLogPaths.path;
+  const tracer = deps.tracer || NOOP_HOST_REVIEW_TRACER;
+  const baseContext = deps.traceContext || { runId: "host-review" };
+  function span(name, taskId, attributes) {
+    const startedMs = deps.nowMs();
+    return { handle: tracer.startSpan(name, { runId: boundedTail(baseContext.runId, 120) || "host-review", ...taskId ? { taskId: boundedTail(taskId, 120) } : {} }, { reviewer: deps.reviewer || "unknown", ...attributes }), startedMs };
+  }
+  function endSpan(active, attributes) {
+    active.handle.end({ elapsedMs: Math.max(0, Math.trunc(deps.nowMs() - active.startedMs)), ...attributes });
+  }
   function streamGate(command, cwd, logFile) {
-    const { spawn } = process.getBuiltinModule("node:child_process");
     return new Promise((resolve) => {
-      const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
-      let fd;
+      let stream;
       try {
-        fd = fs.openSync(logFile, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 384);
+        stream = deps.openSecureLog(logFile);
       } catch (error) {
-        resolve({ ok: false, killed: false, tail: `gate log write failed: ${error.message}` });
+        resolve({ ok: false, killed: false, tail: `gate log write failed: ${boundedTail(error?.message || String(error), 500)}` });
         return;
       }
-      const stream = fs.createWriteStream(logFile, { fd, autoClose: true });
+      let child;
+      try {
+        child = deps.spawnGate(command, cwd);
+      } catch (error) {
+        stream.end(() => {
+        });
+        resolve({ ok: false, killed: false, tail: `spawn failed: ${boundedTail(error?.message || String(error), 500)}` });
+        return;
+      }
       const tail = [];
       let carry = "";
       let killed = false;
@@ -2805,13 +2883,35 @@ function makeHostGates(config, metrics) {
       let sigterm;
       let sigkill;
       let forcedSettle;
-      const child = spawn("sh", ["-c", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      const clearTimers = () => {
+        if (sigterm) deps.clearTimer(sigterm);
+        if (sigkill) deps.clearTimer(sigkill);
+        if (forcedSettle) deps.clearTimer(forcedSettle);
+      };
+      const finish = (ok, extra = "", force = false) => {
+        if (settled) return;
+        settled = true;
+        clearTimers();
+        if (carry) tail.push(carry);
+        if (extra) tail.push(extra);
+        let delivered = false;
+        const settle = () => {
+          if (delivered) return;
+          delivered = true;
+          resolve({ ok, killed, tail: tail.slice(-12).join("\n").trim() });
+        };
+        stream.end(settle);
+        if (force) {
+          const timer = deps.setTimer(settle, 100);
+          timer.unref?.();
+        }
+      };
       const record = (chunk) => {
         if (!stream.write(chunk) && !killed) {
-          child.stdout?.pause();
-          child.stderr?.pause();
+          child.stdout?.pause?.();
+          child.stderr?.pause?.();
         }
-        carry += chunk.toString("utf8");
+        carry += String(chunk);
         const lines = carry.split(/\r?\n/);
         carry = lines.pop() || "";
         if (carry.length > GATE_CARRY_LIMIT) carry = carry.slice(-GATE_CARRY_LIMIT);
@@ -2820,83 +2920,48 @@ function makeHostGates(config, metrics) {
           if (tail.length > 12) tail.shift();
         }
       };
-      const finish = (ok, extra = "", force = false) => {
+      const terminate = (reason) => {
         if (settled) return;
-        settled = true;
-        if (carry) tail.push(carry);
-        if (extra) tail.push(extra);
-        const settle = () => resolve({ ok, killed, tail: tail.slice(-12).join("\n").trim() });
-        stream.end(settle);
-        if (force) setTimeout(settle, 100).unref();
-      };
-      const terminateGroup = (signal) => {
-        if (typeof child.pid === "number") {
-          try {
-            process.kill(-child.pid, signal);
-            return;
-          } catch {
-          }
-        }
-        child.kill(signal);
-      };
-      const clearTimers = () => {
-        if (sigterm) clearTimeout(sigterm);
-        if (sigkill) clearTimeout(sigkill);
-        if (forcedSettle) clearTimeout(forcedSettle);
+        killed = true;
+        child.stdout?.resume?.();
+        child.stderr?.resume?.();
+        deps.terminateProcessGroup(child, "SIGTERM");
+        sigkill = deps.setTimer(() => {
+          deps.terminateProcessGroup(child, "SIGKILL");
+          forcedSettle = deps.setTimer(() => finish(false, reason, true), 1e3);
+          forcedSettle.unref?.();
+        }, 2e3);
+        sigkill.unref?.();
       };
       const abortForStreamFailure = (error) => {
         if (settled) return;
-        streamFailure = `gate log write failed: ${error.message}`;
+        streamFailure = `gate log write failed: ${boundedTail(error.message, 500)}`;
         clearTimers();
-        killed = true;
-        child.stdout?.resume();
-        child.stderr?.resume();
-        terminateGroup("SIGTERM");
-        sigkill = setTimeout(() => {
-          terminateGroup("SIGKILL");
-          forcedSettle = setTimeout(() => finish(false, streamFailure, true), 1e3);
-          forcedSettle.unref();
-        }, 2e3);
-        sigkill.unref();
+        terminate(streamFailure);
       };
-      stream.on("error", (error) => abortForStreamFailure(error));
+      stream.on("error", (error) => abortForStreamFailure(error || new Error("unknown gate log failure")));
       stream.on("drain", () => {
-        child.stdout?.resume();
-        child.stderr?.resume();
+        child.stdout?.resume?.();
+        child.stderr?.resume?.();
       });
-      child.stdout.on("data", record);
-      child.stderr.on("data", record);
-      sigterm = setTimeout(() => {
-        killed = true;
-        child.stdout?.resume();
-        child.stderr?.resume();
-        terminateGroup("SIGTERM");
-        sigkill = setTimeout(() => {
-          terminateGroup("SIGKILL");
-          forcedSettle = setTimeout(() => finish(false, "gate process group did not close after SIGKILL", true), 1e3);
-          forcedSettle.unref();
-        }, 2e3);
-        sigkill.unref();
-      }, config.commitGateTimeoutSeconds * 1e3);
-      child.on("close", (code) => {
-        clearTimers();
-        finish(code === 0 && !killed, streamFailure);
-      });
-      child.on("error", (error) => {
-        clearTimers();
-        finish(false, streamFailure || `spawn failed: ${error.message}`);
-      });
+      child.stdout?.on("data", record);
+      child.stderr?.on("data", record);
+      sigterm = deps.setTimer(() => terminate("gate process group did not close after SIGKILL"), config.commitGateTimeoutSeconds * 1e3);
+      child.on("close", (code) => finish(code === 0 && !killed, streamFailure));
+      child.on("error", (error) => finish(false, streamFailure || `spawn failed: ${boundedTail(error?.message || String(error), 500)}`));
     });
   }
   async function runHostCommitGates2(worktree, tag, roundLabel) {
     const results2 = [];
     for (const [index, command] of config.commitGates.entries()) {
       const displayedCommand = redactedShellCommand(command);
+      const active = span("host-review.gate", tag, { attempt: index + 1 });
       metrics.hostGates.runs += 1;
       log(`[task ${tag}] host gate ${index + 1}/${config.commitGates.length} (${roundLabel}): ${displayedCommand}`);
       const logFile = logPath(tag, roundLabel, index);
       const outcome = await streamGate(command, worktree, logFile);
       results2.push({ command: displayedCommand, ok: outcome.ok, logFile });
+      endSpan(active, { outcome: outcome.ok ? "clean" : "error", errorCategory: outcome.killed ? "timeout" : outcome.ok ? "none" : "execution", timeout: outcome.killed });
       if (!outcome.ok) {
         metrics.hostGates.failures += 1;
         const timeout = outcome.killed ? ` (killed after the ${config.commitGateTimeoutSeconds}s gate timeout)` : "";
@@ -2907,43 +2972,38 @@ ${outcome.tail}` };
     return { green: true, results: results2, detail: "" };
   }
   async function runCodeSceneCheck2(worktree, tag, label) {
-    if (!config.csCheck) return { clean: true, skipped: true, detail: "", logFile: "" };
+    const active = span("host-review.codescene", tag, { attempt: 1 });
+    if (!config.csCheck) {
+      endSpan(active, { outcome: "clean", errorCategory: "none", timeout: false, retry: false });
+      return { clean: true, skipped: true, detail: "", logFile: "" };
+    }
     const redactedCommand = redactedShellCommand(config.csCheckCommand);
     const bin = codeSceneExecutable(config.csCheckCommand);
-    if (bin === null) {
+    if (bin === null || !bin) {
       metrics.codeScene.probeFailures += 1;
-      return {
-        clean: false,
-        skipped: false,
-        detail: `CodeScene command could not be parsed safely: ${redactedCommand}`,
-        logFile: ""
-      };
-    }
-    if (!bin) {
-      metrics.codeScene.probeFailures += 1;
-      return {
-        clean: false,
-        skipped: false,
-        detail: `CodeScene command has no executable: ${redactedCommand}`,
-        logFile: ""
-      };
+      const detail = bin === null ? `CodeScene command could not be parsed safely: ${redactedCommand}` : `CodeScene command has no executable: ${redactedCommand}`;
+      endSpan(active, { outcome: "error", errorCategory: "invalid-output", timeout: false, retry: false });
+      return { clean: false, skipped: false, detail, logFile: "" };
     }
     const missing = "__DF12_CODESCENE_BINARY_MISSING__";
-    const probe = await execFileStatus("sh", ["-c", 'command -v "$1" >/dev/null 2>&1 || { printf "%s\\n" "$2"; exit 127; }', "sh", bin, missing], { cwd: worktree, timeoutMs: 1e4 });
+    const probe = await deps.probeCodeScene("sh", ["-c", 'command -v "$1" >/dev/null 2>&1 || { printf "%s\\n" "$2"; exit 127; }', "sh", bin, missing], { cwd: worktree, timeoutMs: 1e4 });
     if (!probe.ok) {
       if (probe.stdout.trim() === missing) {
         metrics.codeScene.skipped += 1;
         log(`[task ${tag}] CodeScene check (${label}) skipped: ${bin} not on PATH`);
+        endSpan(active, { outcome: "clean", errorCategory: "none", timeout: false, retry: false });
         return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: "" };
       }
       metrics.codeScene.probeFailures += 1;
       const fault = [probe.message, probe.stderr, probe.signal ? `signal ${probe.signal}` : "", probe.killed ? "probe killed" : ""].map((part) => String(part || "").trim()).filter(Boolean).join("; ");
+      endSpan(active, { outcome: "error", errorCategory: probe.killed ? "timeout" : "execution", timeout: Boolean(probe.killed), retry: false });
       return { clean: false, skipped: false, detail: `CodeScene availability probe for \`${redactedCommand}\` failed: ${boundedTail(fault) || "unknown probe failure"}`, logFile: "" };
     }
     metrics.codeScene.runs += 1;
     const logFile = logPath(tag, `cs-${label}`, 0);
     log(`[task ${tag}] CodeScene check (${label}): ${redactedCommand}`);
     const outcome = await streamGate(config.csCheckCommand, worktree, logFile);
+    endSpan(active, { outcome: outcome.ok ? "clean" : "error", errorCategory: outcome.killed ? "timeout" : outcome.ok ? "none" : "execution", timeout: outcome.killed, retry: false });
     if (outcome.ok) return { clean: true, skipped: false, detail: "", logFile };
     metrics.codeScene.failures += 1;
     const timeout = outcome.killed ? ` (killed after the ${config.commitGateTimeoutSeconds}s timeout)` : "";
@@ -2960,7 +3020,7 @@ function coderabbitBlockingItems(findings) {
 async function hostSleepMinutes(minutes) {
   await new Promise((resolve) => setTimeout(resolve, minutes * 6e4));
 }
-function makeHostReview(config) {
+function makeHostReview(config, composition = {}) {
   const dakarCommandInvocation = dakarInvocationFromCommand(config.dakarCommand);
   const dakarInvocation = config.dakarInvocation === void 0 ? dakarCommandInvocation : validateDakarInvocation(config.dakarInvocation);
   if (!dakarCommandInvocation || !dakarInvocation) throw new Error(DAKAR_COMMAND_VALIDATION_ERROR);
@@ -2969,13 +3029,24 @@ function makeHostReview(config) {
   const hostReviewMetrics = makeHostReviewMetrics();
   const hostGateMetrics = { runs: 0, failures: 0 };
   const csCheckMetrics = { runs: 0, failures: 0, probeFailures: 0, skipped: 0 };
-  const gates = makeHostGates(config, { hostGates: hostGateMetrics, codeScene: csCheckMetrics });
+  const gates = makeHostGates(config, { hostGates: hostGateMetrics, codeScene: csCheckMetrics }, {
+    ...composition.hostGates,
+    tracer: composition.hostGates?.tracer || config.tracer,
+    traceContext: composition.hostGates?.traceContext || config.traceContext,
+    reviewer: config.reviewTool
+  });
   let findingsSinkTail = Promise.resolve();
   function reviewBackoffMinutes2(seed) {
     let hash = 5381;
     for (const ch of String(seed)) hash = (hash * 33 ^ ch.codePointAt(0)) >>> 0;
     const [low, high] = config.reviewBackoffMinutes ?? config.coderabbitBackoffMinutes ?? [45, 90];
     return low + hash % (high - low + 1);
+  }
+  function recordDuration(elapsedMs) {
+    if (elapsedMs < 1e3) hostReviewMetrics.durationBuckets.underOneSecond += 1;
+    else if (elapsedMs < 1e4) hostReviewMetrics.durationBuckets.oneToTenSeconds += 1;
+    else if (elapsedMs < 6e4) hostReviewMetrics.durationBuckets.tenToSixtySeconds += 1;
+    else hostReviewMetrics.durationBuckets.sixtySecondsOrMore += 1;
   }
   async function runHostReview2(worktree, label, deps = {}) {
     const exec = deps.exec || execFileStatus;
@@ -2985,13 +3056,29 @@ function makeHostReview(config) {
     const displayName = reviewerDisplayName(reviewer);
     const boundedLabel = boundedTail(label, 120);
     const startedMs = nowMs();
+    const spanNowMs = () => Number(process.hrtime.bigint() / 1000000n);
+    const traceContext = {
+      runId: boundedTail(deps.traceContext?.runId || config.traceContext?.runId || "host-review", 120) || "host-review",
+      ...deps.traceContext?.taskId || config.traceContext?.taskId || boundedLabel ? { taskId: boundedTail(deps.traceContext?.taskId || config.traceContext?.taskId || boundedLabel, 120) } : {}
+    };
+    const operationSpan = (deps.tracer || config.tracer || NOOP_HOST_REVIEW_TRACER).startSpan("host-review.operation", traceContext, { reviewer, retry: false });
     let terminalAttempt = 1;
     try {
       for (let attempt = 1; ; attempt++) {
         terminalAttempt = attempt;
         const attempts = config.reviewAttempts ?? config.coderabbitAttempts ?? 3;
         log(`[${boundedLabel}] ${displayName} host review attempt ${attempt} of ${attempts}`);
-        const single = reviewer === "dakar" ? await dakarAttempt(worktree, exec, deps) : await coderabbitAttempt(worktree, exec);
+        const attemptStartedMs = spanNowMs();
+        const attemptSpan = (deps.tracer || config.tracer || NOOP_HOST_REVIEW_TRACER).startSpan("host-review.attempt", traceContext, { reviewer, attempt, retry: attempt > 1 });
+        const adapterDeps = { ...deps, attempt, tracer: deps.tracer || config.tracer || NOOP_HOST_REVIEW_TRACER, traceContext: { ...traceContext, taskId: boundedLabel } };
+        let single;
+        try {
+          single = reviewer === "dakar" ? await dakarAttempt(worktree, exec, adapterDeps) : await coderabbitAttempt(worktree, exec, adapterDeps);
+        } catch (error) {
+          attemptSpan.end({ reviewer, attempt, outcome: "error", errorCategory: "execution", retry: false, timeout: false, elapsedMs: Math.max(0, Math.trunc(spanNowMs() - attemptStartedMs)) });
+          throw error;
+        }
+        attemptSpan.end({ reviewer, attempt, outcome: single.outcome, errorCategory: single.errorCategory, retry: single.outcome === "rate-limited" && attempt < attempts, timeout: single.errorCategory === "timeout", elapsedMs: Math.max(0, Math.trunc(spanNowMs() - attemptStartedMs)) });
         if (single.outcome === "rate-limited" && attempt < attempts) {
           const minutes = reviewBackoffMinutes2(`${boundedLabel}#${attempt}`);
           log(`[${boundedLabel}] ${displayName} rate limited/deferred; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${attempts} (wall-clock only, no agent tokens)`);
@@ -3005,7 +3092,9 @@ function makeHostReview(config) {
         if (review.outcome === "auth") hostReviewMetrics.authFailures += 1;
         if (review.outcome === "error") hostReviewMetrics.errors += 1;
         if (review.errorCategory === "timeout") hostReviewMetrics.timeouts += 1;
+        recordDuration(review.elapsedMs);
         log(`[host-review] terminal ${JSON.stringify({ reviewer, label: boundedLabel, attempts: attempt, elapsedMs: review.elapsedMs, outcome: review.outcome, errorCategory: review.errorCategory })}`);
+        operationSpan.end({ reviewer, attempt, outcome: review.outcome, errorCategory: review.errorCategory, retry: attempt > 1, timeout: review.errorCategory === "timeout", elapsedMs: review.elapsedMs });
         return review;
       }
     } catch (error) {
@@ -3013,7 +3102,9 @@ function makeHostReview(config) {
       hostReviewMetrics.runs += 1;
       hostReviewMetrics.retries += terminalAttempt - 1;
       hostReviewMetrics.errors += 1;
+      recordDuration(elapsedMs);
       log(`[host-review] terminal ${JSON.stringify({ reviewer, label: boundedLabel, attempts: terminalAttempt, elapsedMs, outcome: "error", errorCategory: "execution" })}`);
+      operationSpan.end({ reviewer, attempt: terminalAttempt, outcome: "error", errorCategory: "execution", retry: terminalAttempt > 1, timeout: false, elapsedMs });
       throw error;
     }
   }
@@ -3026,24 +3117,32 @@ function makeHostReview(config) {
     }
     const findingsFile = config.reviewFindingsFile ?? config.coderabbitFindingsFile ?? "";
     if (!findingsFile || !review.findings.length) return;
+    const traceContext = {
+      runId: boundedTail(deps.traceContext?.runId || config.traceContext?.runId || "host-review", 120) || "host-review",
+      ...deps.traceContext?.taskId || config.traceContext?.taskId || label ? { taskId: boundedTail(deps.traceContext?.taskId || config.traceContext?.taskId || label, 120) } : {}
+    };
+    const sinkStartedMs = Number(process.hrtime.bigint() / 1000000n);
+    const sinkSpan = (config.tracer || NOOP_HOST_REVIEW_TRACER).startSpan("host-review.findings-sink", traceContext, { reviewer: review.reviewer });
     const append = async () => {
       const timestamp = deps.timestamp || (async () => {
         const stamp = await execFileStatus("date", ["-u", "+%Y-%m-%dT%H:%M:%SZ"]);
         return stamp.ok ? stamp.stdout.trim() : "";
       });
-      const ts = await timestamp();
-      const lines = review.findings.map((finding) => JSON.stringify({ ts, label, severity: String(finding.severity || ""), file: String(finding.fileName || ""), comment: String(finding.comment || "").slice(0, 2e3), codegenInstructions: String(finding.codegenInstructions || "").slice(0, 2e3), suggestions: Array.isArray(finding.suggestions) ? finding.suggestions.length : 0 }));
       try {
+        const ts = await timestamp();
+        const lines = review.findings.map((finding) => JSON.stringify({ ts, label, severity: String(finding.severity || ""), file: String(finding.fileName || ""), comment: String(finding.comment || "").slice(0, 2e3), codegenInstructions: String(finding.codegenInstructions || "").slice(0, 2e3), suggestions: Array.isArray(finding.suggestions) ? finding.suggestions.length : 0 }));
         const appendFile = deps.append || (async (path, data) => {
           const fs = process.getBuiltinModule("node:fs/promises");
           await fs.appendFile(path, data, "utf8");
         });
         await appendFile(findingsFile, `${lines.join("\n")}
 `);
+        sinkSpan.end({ reviewer: review.reviewer, outcome: "clean", errorCategory: "none", timeout: false, elapsedMs: Math.max(0, Number(process.hrtime.bigint() / 1000000n) - sinkStartedMs) });
       } catch (error) {
         hostReviewMetrics.sinkFailures += 1;
         hostReviewMetrics.sinkError = boundedTail(error?.message || String(error), 500);
         log(`[${boundedTail(label, 120)}] could not append ${reviewerDisplayName(review.reviewer)} host-review findings to ${findingsFile}: ${hostReviewMetrics.sinkError}`);
+        sinkSpan.end({ reviewer: review.reviewer, outcome: "error", errorCategory: "execution", timeout: false, elapsedMs: Math.max(0, Number(process.hrtime.bigint() / 1000000n) - sinkStartedMs) });
       }
     };
     const pending = findingsSinkTail.then(append, append);
@@ -3052,7 +3151,7 @@ function makeHostReview(config) {
   }
   function metrics() {
     return {
-      hostReview: { ...hostReviewMetrics, bySeverity: { ...hostReviewMetrics.bySeverity } },
+      hostReview: { ...hostReviewMetrics, bySeverity: { ...hostReviewMetrics.bySeverity }, durationBuckets: { ...hostReviewMetrics.durationBuckets } },
       hostGates: { ...hostGateMetrics },
       codeScene: { ...csCheckMetrics }
     };
@@ -3986,7 +4085,10 @@ var hostReview = makeHostReview({
   commitGates: COMMIT_GATES,
   commitGateTimeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
   csCheck: CS_CHECK,
-  csCheckCommand: CS_CHECK_COMMAND
+  csCheckCommand: CS_CHECK_COMMAND,
+  // This deterministic identifier lets every host boundary correlate one
+  // workflow run without turning task labels into metric dimensions.
+  traceContext: { runId: `df12-build-odw:${BASE}:${ROADMAP}` }
 });
 var {
   reviewBackoffMinutes,

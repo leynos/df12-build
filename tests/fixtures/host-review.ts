@@ -1,9 +1,10 @@
 /** @file Shared fixtures for focused host-review module tests. */
 import { makeHostReview } from '../../src/workflows/df12-build-odw/host-review.ts'
+import type { HostReviewCompositionDeps } from '../../src/workflows/df12-build-odw/host-review.ts'
 import type { ExecOptions, ExecStatus } from '../../src/workflows/df12-build-odw/exec.ts'
 
 /** Build a host-review surface with deterministic, review-neutral defaults. */
-export function hostReview(overrides: Partial<Parameters<typeof makeHostReview>[0]> = {}) {
+export function hostReview(overrides: Partial<Parameters<typeof makeHostReview>[0]> = {}, composition: HostReviewCompositionDeps = {}) {
   return makeHostReview({
     base: 'main',
     reviewAttempts: 3,
@@ -18,7 +19,7 @@ export function hostReview(overrides: Partial<Parameters<typeof makeHostReview>[
     reviewTimeoutSeconds: 3600,
     dakarBudgetGbp: 0,
     ...overrides,
-  })
+  }, composition)
 }
 
 /** Capture host-review subprocess calls while returning one scripted status. */
