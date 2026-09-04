@@ -59,6 +59,7 @@ import {
   syntheticRecoveryImpl,
 } from './recovery-discovery.ts'
 import { makeConfig } from './config.ts'
+import { makeAuthPreflight } from './auth-preflight.ts'
 import { makePrompts, worktreeSafetyNet } from './prompts.ts'
 import { makeWritePreflight } from './write-preflight.ts'
 import {
@@ -72,16 +73,13 @@ import {
 } from './assessment.ts'
 import { TRIAGE_SCHEMA, makeRemediation, stepOf } from './remediation.ts'
 import {
-  coderabbitBlockingItems,
-  coderabbitCapture,
+  reviewBlockingItems,
   classifyCoderabbitOutcome,
-  csCheckMetrics,
-  hostGateMetrics,
   makeHostReview,
   parseCoderabbitAgentOutput,
 } from './host-review.ts'
 import { makeTaskPipeline, summarizeFixReport, summarizeReviewVerdict } from './run-task.ts'
-import { redactedShellCommand } from './shell-command.ts'
+import { DAKAR_COMMAND_VALIDATION_ERROR, dakarInvocationFromCommand, redactedShellCommand } from './shell-command.ts'
 import type { AssessmentEvidence } from './git-evidence.ts'
 import type { ExecplanState, RecoveryAssessmentFields } from './recovery-decision.ts'
 import type { SelectionResult } from './roadmap.ts'
@@ -176,12 +174,16 @@ const {
   ASSESSMENT_MODEL,
   ASSESSMENT_ESCALATION_MODEL,
   AUTH_REQUIRED_ADAPTERS,
+  REVIEW_TOOL,
+  DAKAR_COMMAND,
+  REVIEW_TIMEOUT_SECONDS,
+  DAKAR_BUDGET_GBP,
   CODERABBIT_REVIEW_COMMAND,
   CODERABBIT_HOST_REVIEW,
-  CODERABBIT_BETWEEN_WORK_ITEMS,
-  CODERABBIT_ATTEMPTS,
-  CODERABBIT_BACKOFF_MINUTES,
-  CODERABBIT_FINDINGS_FILE,
+  HOST_REVIEW_BETWEEN_WORK_ITEMS,
+  HOST_REVIEW_ATTEMPTS,
+  HOST_REVIEW_BACKOFF_MINUTES,
+  HOST_REVIEW_FINDINGS_FILE,
   HOST_COMMIT_GATES,
   HOST_GATES_BETWEEN_WORK_ITEMS,
   CS_CHECK,
@@ -304,78 +306,64 @@ const { triagePrompt, runTriage } = makeRemediation({
   triageEscalationModel: TRIAGE_ESCALATION_MODEL,
 })
 
-// Host-run CodeRabbit review and host commit gates with the run wiring bound
+// Host review and host commit gates with the run wiring bound
 // once (see host-review.ts).
-const {
-  coderabbitBackoffMinutes,
-  runCoderabbitHostReview,
-  recordCoderabbitReview,
-  runHostCommitGates,
-  runCodeSceneCheck,
-} = makeHostReview({
+const HOST_REVIEW_ENABLED = CODERABBIT_HOST_REVIEW
+// Parse the operator-configured command once so preflight probes and review
+// execution preserve the same quoted fixed arguments.
+const DAKAR_INVOCATION = dakarInvocationFromCommand(DAKAR_COMMAND)
+if (!DAKAR_INVOCATION) throw new Error(DAKAR_COMMAND_VALIDATION_ERROR)
+const DAKAR_SENSITIVE_VALUES = [process.env.OPENAI_API_KEY || '']
+const hostReview = makeHostReview({
   base: BASE,
-  coderabbitAttempts: CODERABBIT_ATTEMPTS,
-  coderabbitBackoffMinutes: CODERABBIT_BACKOFF_MINUTES,
-  coderabbitFindingsFile: CODERABBIT_FINDINGS_FILE,
+  reviewTool: REVIEW_TOOL,
+  dakarCommand: DAKAR_COMMAND,
+  dakarInvocation: DAKAR_INVOCATION,
+  dakarSensitiveValues: DAKAR_SENSITIVE_VALUES,
+  reviewTimeoutSeconds: REVIEW_TIMEOUT_SECONDS,
+  dakarBudgetGbp: DAKAR_BUDGET_GBP,
+  reviewAttempts: HOST_REVIEW_ATTEMPTS,
+  reviewBackoffMinutes: HOST_REVIEW_BACKOFF_MINUTES,
+  reviewFindingsFile: HOST_REVIEW_FINDINGS_FILE,
   commitGates: COMMIT_GATES,
   commitGateTimeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
   csCheck: CS_CHECK,
   csCheckCommand: CS_CHECK_COMMAND,
+  // This deterministic identifier lets every host boundary correlate one
+  // workflow run without turning task labels into metric dimensions.
+  traceContext: { runId: `df12-build-odw:${BASE}:${ROADMAP}` },
 })
+
+const {
+  reviewBackoffMinutes,
+  runHostReview,
+  recordHostReview,
+  runHostCommitGates,
+  runCodeSceneCheck,
+  disposeHostGateLogs,
+  metrics: getHostReviewMetrics,
+  recordHostReviewAuthFailure,
+} = hostReview
+const runAuthPreflight = makeAuthPreflight(
+  {
+    enabled: AUTH_PREFLIGHT,
+    requireHostReviewAuth: REQUIRE_CODERABBIT_AUTH,
+    requiredAdapters: AUTH_REQUIRED_ADAPTERS,
+    reviewTool: REVIEW_TOOL,
+    dakarInvocation: DAKAR_INVOCATION,
+  },
+  {
+    exec: execFileStatus,
+    environment: { get: (name) => process.env[name] },
+    phase,
+    log,
+    recordHostReviewAuthFailure,
+  },
+)
 
 // ---------------------------------------------------------------------------
 // Deterministic roadmap selection
 // ---------------------------------------------------------------------------
-async function runAuthPreflight() {
-  if (!AUTH_PREFLIGHT) return []
-  phase('Auth Preflight')
-  const failures: Array<{ tool: string; command: string; detail: string }> = []
-
-  const codex = await execFileStatus('codex', ['login', 'status'])
-  const codexOutput = [codex.stdout, codex.stderr, codex.message].filter(Boolean).join('\n')
-  if (!codex.ok || authFailureDetail(codexOutput)) {
-    failures.push({
-      tool: 'codex',
-      command: 'codex login status',
-      detail: authFailureDetail(codexOutput) || codexOutput.trim() || 'Codex auth status check failed',
-    })
-  }
-
-  if (AUTH_REQUIRED_ADAPTERS.has('claude')) {
-    const claude = await execFileStatus('claude', ['auth', 'status'])
-    const claudeOutput = [claude.stdout, claude.stderr, claude.message].filter(Boolean).join('\n')
-    if (!claude.ok || authFailureDetail(claudeOutput)) {
-      failures.push({
-        tool: 'claude',
-        command: 'claude auth status',
-        detail: authFailureDetail(claudeOutput) || claudeOutput.trim() || 'Claude auth status check failed',
-      })
-    }
-  }
-
-  if (REQUIRE_CODERABBIT_AUTH) {
-    const coderabbit = await execFileStatus('coderabbit', ['auth', 'status'])
-    const coderabbitOutput = [coderabbit.stdout, coderabbit.stderr, coderabbit.message].filter(Boolean).join('\n')
-    if (!coderabbit.ok || authFailureDetail(coderabbitOutput)) {
-      failures.push({
-        tool: 'coderabbit',
-        command: 'coderabbit auth status',
-        detail: authFailureDetail(coderabbitOutput) || coderabbitOutput.trim() || 'CodeRabbit auth status check failed',
-      })
-    }
-  }
-
-  if (failures.length) {
-    log(`[auth] fatal preflight failure: ${failures.map((failure) => `${failure.tool}: ${failure.detail.split(/\r?\n/)[0]}`).join('; ')}`)
-  } else {
-    const passed = ['Codex']
-    if (AUTH_REQUIRED_ADAPTERS.has('claude')) passed.push('Claude')
-    if (REQUIRE_CODERABBIT_AUTH) passed.push('CodeRabbit')
-    log(`[auth] preflight passed for ${passed.join(', ')}`)
-  }
-
-  return failures
-}
 
 function slugForTask(task: SelectedTask): string {
   return `roadmap-${roadmapIdSlug(task.id)}${task.isAddendum ? '-addendum' : ''}`
@@ -480,7 +468,7 @@ async function executeResume(
     let impl: AnyRecord | undefined
     if (stage === 'plan') {
       const planned = await runPlanDesignLoop(task, worktree, { resume: true, extra })
-      if (planned.fail) return planned.fail
+      if (planned.kind === 'failure') return planned.fail
       plan = planned.plan
     } else if (stage === 'implement') {
       plan = {
@@ -491,7 +479,7 @@ async function executeResume(
     }
     if (stage === 'plan' || stage === 'implement') {
       const built = await runImplementationStage(task, worktree, plan as StagePlan, { resume: stage === 'implement', extra })
-      if (built.fail) return built.fail
+      if (built.kind === 'failure') return built.fail
       impl = built.impl
     } else {
       // Carry the ADR 002 assessment's advisory residual risk forward into the
@@ -827,8 +815,9 @@ const {
   PER_WORK_ITEM_BUILD,
   HOST_COMMIT_GATES,
   HOST_GATES_BETWEEN_WORK_ITEMS,
-  CODERABBIT_HOST_REVIEW,
-  CODERABBIT_BETWEEN_WORK_ITEMS,
+  HOST_REVIEW_ENABLED,
+  HOST_REVIEW_BETWEEN_WORK_ITEMS,
+  HOST_REVIEWER: REVIEW_TOOL,
   DRY_RUN,
   AUTO_MERGE,
   BASE,
@@ -853,8 +842,8 @@ const {
   ensureTaskAgentWriteAccess,
   createWorktree,
   runHostCommitGates,
-  runCoderabbitHostReview,
-  recordCoderabbitReview,
+  runHostReview,
+  recordHostReview,
 })
 
 let selectSeq = 0
@@ -1004,7 +993,7 @@ function redactedCodeSceneCommand(command: string): string {
 }
 
 // --- Worker-pool control loop -----------------------------------------------
-async function workflowMain() {
+async function runWorkflowMain() {
 // Fill the pool, then await whichever task finishes first (Promise.race),
 // record it, and refill — re-running select the instant any flow completes. A
 // failed task stops new work but lets in-flight siblings drain. Audits and
@@ -1014,6 +1003,7 @@ const authPreflight = await runAuthPreflight()
 if (authPreflight.length) {
   halted = `fatal auth preflight failed: ${authPreflight.map((failure) => `${failure.tool} (${failure.command})`).join(', ')}`
 }
+
 let stop = Boolean(halted)
 let providerFaultHalt = false
 
@@ -1177,6 +1167,7 @@ const assessments = results
 // artefacts committed (or why salvage was skipped) without opening result.json.
 // summarizeSalvages is a pure, unit-tested aggregator (see assessment.ts).
 const { salvages, summarySuffix: salvageSummarySuffix } = summarizeSalvages(results)
+const hostReviewSnapshot = getHostReviewMetrics()
 
 return {
   base: BASE,
@@ -1193,12 +1184,12 @@ return {
   hostGates: {
     enabled: HOST_COMMIT_GATES,
     timeoutSeconds: COMMIT_GATE_TIMEOUT_SECONDS,
-    ...hostGateMetrics,
+    ...hostReviewSnapshot.hostGates,
   },
   codeScene: {
     enabled: CS_CHECK,
     command: redactedCodeSceneCommand(CS_CHECK_COMMAND),
-    ...csCheckMetrics,
+    ...hostReviewSnapshot.codeScene,
   },
   stageAttempts: STAGE_ATTEMPTS,
   // Host-driven build loop configuration: one builder turn per unticked
@@ -1209,17 +1200,17 @@ return {
   // infrastructure faults plus terminal fault counts per class, so operators
   // can read retry pressure straight from the result instead of the logs.
   faultMetrics: { ...runFaultMetrics },
-  // Host-run CodeRabbit review aggregate: effective configuration plus
-  // bounded counters (reviews run, findings by severity, rate-limited runs,
-  // deferred reviews). Per-finding detail goes to the JSONL sink when
+  // Host-review aggregate: effective configuration plus bounded counters.
+  // Per-finding detail goes to the JSONL sink when
   // coderabbitFindingsFile is configured.
-  coderabbit: {
-    hostReview: CODERABBIT_HOST_REVIEW,
-    attempts: CODERABBIT_ATTEMPTS,
-    backoffMinutes: CODERABBIT_BACKOFF_MINUTES,
-    findingsFile: CODERABBIT_FINDINGS_FILE,
-    ...coderabbitCapture,
-    bySeverity: { ...coderabbitCapture.bySeverity },
+  hostReview: {
+    enabled: HOST_REVIEW_ENABLED,
+    reviewer: REVIEW_TOOL,
+    attempts: HOST_REVIEW_ATTEMPTS,
+    backoffMinutes: HOST_REVIEW_BACKOFF_MINUTES,
+    findingsFile: HOST_REVIEW_FINDINGS_FILE,
+    ...hostReviewSnapshot.hostReview,
+    bySeverity: { ...hostReviewSnapshot.hostReview.bySeverity },
   },
   processed,
   results,
@@ -1249,4 +1240,17 @@ return {
     (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : '') +
     (halted ? ` | halted: ${halted}` : ' | clean stop (no more unblocked tasks).'),
 }
+}
+
+/** Run the workflow and release temporary host-gate logs after every terminal path. */
+async function workflowMain() {
+  try {
+    return await runWorkflowMain()
+  } finally {
+    try {
+      disposeHostGateLogs()
+    } catch (error) {
+      log(`[host gates] could not dispose temporary log roots: ${String((error as Error | null)?.message || error).slice(-500)}`)
+    }
+  }
 }

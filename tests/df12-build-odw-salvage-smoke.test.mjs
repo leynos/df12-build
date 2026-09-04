@@ -98,6 +98,7 @@ async function runSalvageSmoke(mode) {
       projectRoot: repo.dir,
       taskId: '1.1.1',
       authPreflight: false,
+      reviewTool: 'coderabbit',
       coderabbitHostReview: false,
       hostCommitGates: false,
       perWorkItemBuild: false,

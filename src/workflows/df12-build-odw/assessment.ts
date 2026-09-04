@@ -17,6 +17,7 @@ import {
 } from './faults.ts'
 import { collectAssessmentEvidence } from './git-evidence.ts'
 import type { AssessmentEvidence } from './git-evidence.ts'
+import type { HostReviewDeferral } from './host-review.ts'
 import { salvageTaskArtefacts } from './execplan-durability.ts'
 import type { SalvageOutcome } from './execplan-durability.ts'
 import type { RecoveryCandidate } from './types.ts'
@@ -301,37 +302,28 @@ function isInfraFaultResult(result: AssessableResult | null | undefined): boolea
 }
 
 /**
- * Whether an open issue text describes a deferred/rate-limited CodeRabbit
- * review rather than a substantive product defect.
+ * Whether an open issue text describes a deferred/rate-limited host review
+ * rather than a substantive product defect.
  *
  * @param issue A single open-issue string (or any value, coerced to text).
- * @returns True when the text mentions CodeRabbit alongside a deferred/rate-limit marker.
+ * @returns True when the text names a host reviewer alongside a specific deferral marker.
  */
 export function isDeferredReviewIssue(issue: unknown): boolean {
-  const text = String(issue || '').toLowerCase()
-  const deferredReviewMarkers = [
-    'rate limit',
-    'rate_limit',
-    'rate-limit',
-    'ratelimit',
-    '429',
-    'retry after',
-    'waittime',
-    'wait time',
-    'deferred review',
-    'deferred coderabbit review',
-    'coderabbit review deferred',
-    'unavailable',
-  ]
-  return text.includes('coderabbit') && deferredReviewMarkers.some((marker) => text.includes(marker))
+  if (
+    issue !== null
+    && typeof issue === 'object'
+    && (issue as Partial<HostReviewDeferral>).kind === 'host-review-deferral'
+    && ((issue as Partial<HostReviewDeferral>).outcome === 'rate-limited' || (issue as Partial<HostReviewDeferral>).outcome === 'error')
+  ) return true
+  return false
 }
 
 /**
- * Whether every open issue in the list is a deferred/recoverable CodeRabbit
- * review fault (e.g. a 429), so the list carries no substantive defect.
+ * Whether every open issue is a structured deferred host-review record, so the
+ * list carries no substantive defect.
  *
  * @param openIssues The open-issue list, or null/undefined.
- * @returns True only when the list is non-empty and every entry is deferred-review.
+ * @returns True only when the list is non-empty and every entry is deferred.
  */
 export function hasOnlyDeferredReviewIssues(openIssues: readonly unknown[] | null | undefined): boolean {
   const issues = openIssues || []

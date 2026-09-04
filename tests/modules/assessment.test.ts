@@ -78,11 +78,20 @@ function subject(overrides: Record<string, unknown> = {}) {
 
 describe('deferred-review classification', () => {
   const table: Array<[string, boolean]> = [
-    ['Second CodeRabbit review pass deferred: rate_limit, waitTime 26s', true],
-    ['coderabbit review returned HTTP 429; retry later', true],
-    ['CodeRabbit temporarily unavailable', true],
+    ['Second CodeRabbit review pass deferred: rate_limit, waitTime 26s', false],
+    ['coderabbit review returned HTTP 429; retry later', false],
+    ['CodeRabbit temporarily unavailable', false],
     ['coderabbit found 3 blocking issues', false],
     ['rate limit exceeded on the build API', false],
+    // A raw Dakar prefix is not structured recovery evidence and must not be
+    // treated as a recoverable review fault.
+    ['Dakar review deferred (stage: deferred) — budget exhausted', false],
+    ['Dakar unavailable', false],
+    ['Dakar migration deferred pending approval', false],
+    ['Dakar review deferred (stage: approval-pending) — awaiting approval', false],
+    ['Dakar review deferred (stage: changes-requested) — findings remain', false],
+    ['CodeRabbit rollout deferred pending approval', false],
+    ['dakar review changes-requested: 2 blocking findings', false],
     ['', false],
   ]
   for (const [issue, expected] of table) {
@@ -93,15 +102,34 @@ describe('deferred-review classification', () => {
 
   test('hasOnlyDeferredReviewIssues demands a non-empty, all-deferred list', () => {
     expect(hasOnlyDeferredReviewIssues([])).toBe(false)
-    expect(hasOnlyDeferredReviewIssues(['coderabbit 429 rate limit'])).toBe(true)
+    expect(hasOnlyDeferredReviewIssues(['coderabbit 429 rate limit'])).toBe(false)
     expect(hasOnlyDeferredReviewIssues(['coderabbit 429 rate limit', 'tests failing'])).toBe(false)
+  })
+
+  test('recognizes structured host-review deferrals without parsing vendor detail', () => {
+    expect(isDeferredReviewIssue({
+      kind: 'host-review-deferral',
+      reviewer: 'dakar',
+      outcome: 'rate-limited',
+      errorCategory: 'deferred',
+      attempts: 3,
+      detail: 'unrelated operator wording',
+    })).toBe(true)
+    expect(isDeferredReviewIssue({
+      kind: 'host-review-deferral', reviewer: 'dakar', outcome: 'error',
+      errorCategory: 'execution', attempts: 1, detail: 'unrelated detail',
+    })).toBe(true)
+    expect(isDeferredReviewIssue({
+      kind: 'host-review-deferral', reviewer: 'dakar', outcome: 'clean',
+      errorCategory: 'none', attempts: 1, detail: 'unrelated detail',
+    })).toBe(false)
   })
 })
 
 describe('manual-merge handoff guard', () => {
   const base = { ok: false, gatesGreen: true, workItemsCompleted: 3, workItemsTotal: 3, openIssues: ['coderabbit 429 rate limit'] }
-  test('a complete, gate-green addendum with only deferred review issues hands off', () => {
-    expect(addendumImplementationNeedsManualMerge(base)).toBe(true)
+  test('a complete addendum requires structured deferred-review evidence', () => {
+    expect(addendumImplementationNeedsManualMerge(base)).toBe(false)
   })
   test('anything else does not', () => {
     expect(addendumImplementationNeedsManualMerge({ ...base, ok: true })).toBe(false)

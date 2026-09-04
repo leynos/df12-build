@@ -55,17 +55,17 @@ return {
   COMMIT_GATE_TIMEOUT_SECONDS,
   COMMIT_GATE_GUIDANCE,
   runHostCommitGates,
-  hostGateMetrics,
+  hostGateMetrics: () => getHostReviewMetrics().hostGates,
   CODERABBIT_HOST_REVIEW,
-  CODERABBIT_ATTEMPTS,
-  CODERABBIT_BACKOFF_MINUTES,
+  HOST_REVIEW_ATTEMPTS,
+  HOST_REVIEW_BACKOFF_MINUTES,
   parseCoderabbitAgentOutput,
   classifyCoderabbitOutcome,
-  coderabbitBackoffMinutes,
-  runCoderabbitHostReview,
-  recordCoderabbitReview,
-  coderabbitBlockingItems,
-  coderabbitCapture,
+  reviewBackoffMinutes,
+  runHostReview,
+  recordHostReview,
+  reviewBlockingItems,
+  hostReviewMetrics: () => getHostReviewMetrics().hostReview,
   implementPrompt,
   fixPrompt,
   resultFromUnhandledAgentError,
@@ -164,7 +164,7 @@ test('auth-shaped implementation issues are fatal, not deferred review', async (
 
   assert.equal(surface.isDeferredReviewIssue('CodeRabbit auth failed'), false)
   assert.equal(surface.hasOnlyDeferredReviewIssues(['CodeRabbit auth failed']), false)
-  assert.equal(surface.hasOnlyDeferredReviewIssues(['CodeRabbit rate limit retry after 10m']), true)
+  assert.equal(surface.hasOnlyDeferredReviewIssues(['CodeRabbit rate limit retry after 10m']), false)
   assert.equal(surface.implementationAuthFailureDetail(impl), 'Implementation complete\nCodeRabbit auth failed')
   assert.equal(surface.authFailureDetail('CodeRabbit browser login required'), 'CodeRabbit browser login required')
   assert.equal(surface.authFailureDetail('{"loggedIn":false}'), '{"loggedIn":false}')
@@ -404,23 +404,25 @@ test('CodeRabbit outcomes classify from events, never exit codes', async () => {
 
 test('CodeRabbit backoff jitter is deterministic, seeded, and range-bound', async () => {
   const surface = await loadAssessmentSurface()
-  assert.deepEqual(surface.CODERABBIT_BACKOFF_MINUTES, [45, 90])
-  const first = surface.coderabbitBackoffMinutes('coderabbit:1.2.3 r1#1')
-  assert.equal(surface.coderabbitBackoffMinutes('coderabbit:1.2.3 r1#1'), first, 'same seed, same wait')
+  assert.deepEqual(surface.HOST_REVIEW_BACKOFF_MINUTES, [45, 90])
+  const first = surface.reviewBackoffMinutes('coderabbit:1.2.3 r1#1')
+  assert.equal(surface.reviewBackoffMinutes('coderabbit:1.2.3 r1#1'), first, 'same seed, same wait')
   const seeds = ['a#1', 'a#2', 'b#1', 'coderabbit:9.9.9 r3#2']
   for (const seed of seeds) {
-    const minutes = surface.coderabbitBackoffMinutes(seed)
+    const minutes = surface.reviewBackoffMinutes(seed)
     assert.ok(minutes >= 45 && minutes <= 90, `${seed} -> ${minutes}`)
   }
   const narrow = await loadAssessmentSurface({ coderabbitBackoffMinutes: [1, 2] })
-  const minutes = narrow.coderabbitBackoffMinutes('x#1')
+  const minutes = narrow.reviewBackoffMinutes('x#1')
   assert.ok(minutes >= 1 && minutes <= 2)
 })
 
 test('the host review loop backs off on rate limits and stops at the attempt cap', async () => {
-  const surface = await loadAssessmentSurface()
+  // This seam exercises the retained CodeRabbit NDJSON path; the default tool is
+  // now Dakar, so pin the tool to keep asserting the CodeRabbit invocation.
+  const surface = await loadAssessmentSurface({ reviewTool: 'coderabbit' })
   assert.equal(surface.CODERABBIT_HOST_REVIEW, true)
-  assert.equal(surface.CODERABBIT_ATTEMPTS, 3)
+  assert.equal(surface.HOST_REVIEW_ATTEMPTS, 3)
 
   const rateLimited = { ok: true, stdout: '{"type":"error","errorType":"rate_limit","message":"Review limit reached"}', stderr: '' }
   const clean = { ok: true, stdout: '{"type":"complete","status":"reviewed","findings":0}', stderr: '' }
@@ -436,7 +438,7 @@ test('the host review loop backs off on rate limits and stops at the attempt cap
     },
     sleep: async (minutes) => { sleeps.push(minutes) },
   }
-  const review = await surface.runCoderabbitHostReview('/tmp/wt', 'coderabbit:1.2.3 r1', deps)
+  const review = await surface.runHostReview('/tmp/wt', 'coderabbit:1.2.3 r1', deps)
   assert.equal(review.outcome, 'clean')
   assert.equal(review.attempts, 3)
   assert.equal(execCalls.length, 3)
@@ -449,7 +451,7 @@ test('the host review loop backs off on rate limits and stops at the attempt cap
   // slept on again after the final attempt.
   replies = [rateLimited, rateLimited, rateLimited]
   sleeps.length = 0
-  const exhausted = await surface.runCoderabbitHostReview('/tmp/wt', 'coderabbit:1.2.3 r2', deps)
+  const exhausted = await surface.runHostReview('/tmp/wt', 'coderabbit:1.2.3 r2', deps)
   assert.equal(exhausted.outcome, 'rate-limited')
   assert.equal(exhausted.attempts, 3)
   assert.equal(sleeps.length, 2)
@@ -458,7 +460,7 @@ test('the host review loop backs off on rate limits and stops at the attempt cap
   // Auth failures never sleep: the run must halt, not wait 45 minutes.
   replies = [{ ok: true, stdout: '{"type":"error","errorType":"unknown","message":"Run `coderabbit auth login`"}', stderr: '' }]
   sleeps.length = 0
-  const auth = await surface.runCoderabbitHostReview('/tmp/wt', 'coderabbit:1.2.3 r3', deps)
+  const auth = await surface.runHostReview('/tmp/wt', 'coderabbit:1.2.3 r3', deps)
   assert.equal(auth.outcome, 'auth')
   assert.equal(sleeps.length, 0)
 })
@@ -472,7 +474,7 @@ test('only critical and major CodeRabbit findings block; the rest are captured o
     { severity: 'trivial', fileName: 'd.rs', comment: 'whitespace' },
     { severity: 'info', fileName: 'e.rs', comment: 'fyi' },
   ]
-  const blocking = surface.coderabbitBlockingItems(findings)
+  const blocking = surface.reviewBlockingItems('CodeRabbit', findings)
   assert.equal(blocking.length, 2)
   assert.match(blocking[0], /^CodeRabbit \(critical\) a\.rs: UB on empty input/)
   assert.match(blocking[1], /^CodeRabbit \(major\) b\.rs: guard the index/)
@@ -483,20 +485,35 @@ test('CodeRabbit findings are captured to the JSONL sink and the run aggregate',
   const sink = path.join(dir, 'coderabbit-findings.jsonl')
   const surface = await loadAssessmentSurface({ coderabbitFindingsFile: sink })
 
-  await surface.recordCoderabbitReview('1.2.3 r1', {
+  await surface.recordHostReview('1.2.3 r1', {
+    reviewer: 'coderabbit',
     outcome: 'findings',
     attempts: 1,
+    elapsedMs: 1,
+    errorCategory: 'none',
     findings: [
       { severity: 'major', fileName: 'src/a.rs', comment: 'boom', suggestions: [{ x: 1 }] },
       { severity: 'info', fileName: 'docs/b.md', comment: 'nit' },
     ],
     detail: '',
   })
-  await surface.recordCoderabbitReview('1.2.3 r2', { outcome: 'rate-limited', attempts: 3, findings: [], detail: 'Review limit reached' })
+  await surface.recordHostReview('1.2.3 r2', { reviewer: 'coderabbit', outcome: 'rate-limited', attempts: 3, elapsedMs: 1, errorCategory: 'deferred', findings: [], detail: 'Review limit reached' })
 
   assert.deepEqual(
-    { ...surface.coderabbitCapture, bySeverity: { ...surface.coderabbitCapture.bySeverity } },
-    { reviews: 2, findings: 2, rateLimitedRuns: 1, deferred: 0, bySeverity: { major: 1, info: 1 }, sinkError: '' },
+    { ...surface.hostReviewMetrics(), bySeverity: { ...surface.hostReviewMetrics().bySeverity }, durationBuckets: { ...surface.hostReviewMetrics().durationBuckets } },
+    {
+      runs: 0,
+      findings: 2,
+      retries: 0,
+      deferred: 0,
+      timeouts: 0,
+      errors: 0,
+      authFailures: 0,
+      sinkFailures: 0,
+      bySeverity: { critical: 0, major: 1, minor: 0, trivial: 0, info: 1, unknown: 0 },
+      sinkError: '',
+      durationBuckets: { underOneSecond: 0, oneToTenSeconds: 0, tenToSixtySeconds: 0, sixtySecondsOrMore: 0 },
+    },
   )
   const lines = readFileSync(sink, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
   assert.equal(lines.length, 2)
@@ -508,24 +525,82 @@ test('CodeRabbit findings are captured to the JSONL sink and the run aggregate',
   assert.match(lines[0].ts, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
 })
 
-test('host review flips the prompts from agent-run CodeRabbit to host-run', async () => {
+test('host review guidance follows the selected tool', async () => {
   const task = { id: '1.2.3', title: 'Parser' }
   const plan = { execplanPath: 'docs/execplans/roadmap-1-2-3.md' }
 
-  const hosted = await loadAssessmentSurface()
+  const hosted = await loadAssessmentSurface({
+    reviewTool: 'dakar',
+    coderabbitHostReview: false,
+  })
   const hostedImplement = hosted.implementPrompt(task, '/tmp/wt', plan)
-  assert.match(hostedImplement, /Do NOT run coderabbit yourself/)
+  assert.match(hostedImplement, /Do NOT run Dakar yourself/)
   assert.doesNotMatch(hostedImplement, /summon `scrutineer` to run `coderabbit review --agent`/)
-  assert.match(hosted.fixPrompt(task, '/tmp/wt', plan, ['item'], 1), /Do NOT run coderabbit yourself/)
+  assert.match(hosted.fixPrompt(task, '/tmp/wt', plan, ['item'], 1), /Do NOT run Dakar yourself/)
   const hostedAddendum = hosted.implementAddendumPrompt({ id: '1.2.3', subtasks: ['1.2.3.1'] }, '/tmp/wt')
-  assert.match(hostedAddendum, /Do NOT run coderabbit yourself/)
+  assert.match(hostedAddendum, /Do NOT run Dakar yourself/)
   assert.match(hostedAddendum, /open sub-tasks: 1\.2\.3\.1\./, 'subtasks are id strings, joined into the prompt')
 
-  const legacy = await loadAssessmentSurface({ coderabbitHostReview: false })
+  const legacy = await loadAssessmentSurface({
+    reviewTool: 'coderabbit',
+    coderabbitHostReview: false,
+  })
   assert.equal(legacy.CODERABBIT_HOST_REVIEW, false)
   const legacyImplement = legacy.implementPrompt(task, '/tmp/wt', plan)
   assert.match(legacyImplement, /coderabbit review --agent/)
   assert.doesNotMatch(legacyImplement, /Do NOT run coderabbit yourself/)
+})
+
+test('Dakar dispatch ignores the legacy host-review disable flag', async () => {
+  const surface = await loadAssessmentSurface({
+    reviewTool: 'dakar',
+    coderabbitHostReview: false,
+    coderabbitAttempts: 2,
+    reviewTimeoutSeconds: 120,
+  })
+  const calls = []
+  const review = await surface.runHostReview('/tmp/wt', 'dakar:1.2.3 r1', {
+    exec: async (command, commandArgs, options) => {
+      calls.push({ command, commandArgs, options })
+      const stdout = calls.length === 1
+        ? '{"ok":false,"stage":"deferred","error":"temporary capacity"}'
+        : '{"ok":true,"verdict":"pass","findings":[]}'
+      return { ok: true, stdout, stderr: '' }
+    },
+    sleep: async () => {},
+  })
+
+  assert.equal(surface.CODERABBIT_HOST_REVIEW, true)
+  assert.equal(review.outcome, 'clean')
+  assert.equal(calls.length, 2)
+  assert.equal(calls[0].command, 'dakar-review')
+  for (const { commandArgs } of calls) {
+    assert.equal(commandArgs[commandArgs.indexOf('--repo-root') + 1], '/tmp/wt')
+    assert.equal(commandArgs[commandArgs.indexOf('--base') + 1], 'main')
+    assert.equal(commandArgs[commandArgs.indexOf('--timeout') + 1], '120')
+    assert.ok(commandArgs.includes('--state-root'))
+    assert.ok(!commandArgs.includes('--budget-gbp'))
+    assert.ok(!commandArgs.includes('review'))
+  }
+  const stateRoots = calls.map(({ commandArgs }) => commandArgs[commandArgs.indexOf('--state-root') + 1])
+  assert.notEqual(stateRoots[0], stateRoots[1])
+
+  const budgetSurface = await loadAssessmentSurface({ reviewTool: 'dakar', dakarBudgetGbp: 0.25 })
+  const budgetCalls = []
+  await budgetSurface.runHostReview('/tmp/wt', 'dakar:budget', {
+    exec: async (command, commandArgs, options) => {
+      budgetCalls.push({ command, commandArgs, options })
+      return { ok: true, stdout: '{"ok":true,"verdict":"pass","findings":[]}', stderr: '' }
+    },
+  })
+  assert.equal(budgetCalls[0].commandArgs[budgetCalls[0].commandArgs.indexOf('--budget-gbp') + 1], '0.25')
+})
+
+test('Dakar configuration rejects a leading environment assignment', async () => {
+  await assert.rejects(
+    loadAssessmentSurface({ reviewTool: 'dakar', dakarCommand: 'TOKEN=secret dakar-review' }),
+    /Invalid dakarCommand/,
+  )
 })
 
 test('host gates run the configured commands sequentially and tee logs to /tmp', async () => {
@@ -539,7 +614,7 @@ test('host gates run the configured commands sequentially and tee logs to /tmp',
   assert.equal(green.results.length, 2)
   assert.ok(green.results.every((entry) => entry.ok))
   assert.match(readFileSync(green.results[0].logFile, 'utf8'), /hello ok/)
-  assert.deepEqual({ ...surface.hostGateMetrics }, { runs: 2, failures: 0 })
+  assert.deepEqual(surface.hostGateMetrics(), { runs: 2, failures: 0 })
 })
 
 test('a red host gate stops the sequence and carries the log evidence', async () => {
@@ -550,10 +625,10 @@ test('a red host gate stops the sequence and carries the log evidence', async ()
   assert.equal(red.green, false)
   assert.equal(red.results.length, 2, 'later gates never run after a failure')
   assert.equal(red.results[1].ok, false)
-  assert.match(red.detail, /host gate `echo boom; exit 3` failed/)
+  assert.match(red.detail, /host gate `<redacted command>` failed/)
   assert.match(red.detail, /boom/)
   assert.match(red.detail, new RegExp(red.results[1].logFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-  assert.deepEqual({ ...surface.hostGateMetrics }, { runs: 2, failures: 1 })
+  assert.deepEqual(surface.hostGateMetrics(), { runs: 2, failures: 1 })
 })
 
 test('a hung host gate is killed at the configured timeout', async () => {
@@ -582,29 +657,38 @@ test('gate guidance warns about host verification only when it is enabled', asyn
 test('the addendum lane host-verifies gates before spending any review', async () => {
   const source = await readFile(WORKFLOW_PATH, 'utf8')
   const gateCheck = source.indexOf('addendum reported green gates but the host could not reproduce them')
-  const hostReview = source.indexOf("coderabbit:${tag} addendum")
+  const hostReview = source.indexOf("host-review:${HOST_REVIEWER}:${tag} addendum")
   const fallbackReview = source.indexOf('addendum-review:${tag}')
   assert.ok(gateCheck !== -1 && hostReview !== -1 && fallbackReview !== -1)
   assert.ok(gateCheck < hostReview, 'host gates run before the host CodeRabbit review')
   assert.ok(hostReview < fallbackReview, 'host CodeRabbit review runs before the fallback review agent')
 })
 
-test('recoverable review faults classify as deferred review issues', async () => {
+test('only structured host-review records classify as deferred review issues', async () => {
   const surface = await loadAssessmentSurface()
 
-  // The live-run shape from issue #27: a CodeRabbit 429 recorded with the
-  // machine form "rate_limit" (and the log path carrying "coderabbit").
+  // Persisted vendor prose is not workflow-policy input. Current recovery
+  // consumes the neutral record emitted by the host-review boundary.
   const rows = [
-    ['Second CodeRabbit review pass deferred: /tmp/coderabbit-x.out reported errorType: rate_limit, waitTime: 26 seconds, recoverable: true', true],
-    ['coderabbit review returned HTTP 429; retry later', true],
-    ['CodeRabbit rate-limit backoff in progress', true],
-    ['CodeRabbit temporarily unavailable', true],
+    ['Second CodeRabbit review pass deferred: /tmp/coderabbit-x.out reported errorType: rate_limit, waitTime: 26 seconds, recoverable: true', false],
+    ['coderabbit review returned HTTP 429; retry later', false],
+    ['CodeRabbit rate-limit backoff in progress', false],
+    ['CodeRabbit temporarily unavailable', false],
+    ['Dakar unavailable', false],
+    ['Dakar migration deferred pending approval', false],
+    ['Dakar review deferred (stage: approval-pending) — awaiting approval', false],
+    ['Dakar review deferred (stage: changes-requested) — findings remain', false],
+    ['CodeRabbit rollout deferred pending approval', false],
     ['coderabbit found 3 blocking issues', false],
     ['make test failed: rate_limit spec regression', false],
   ]
   for (const [issue, expected] of rows) {
     assert.equal(surface.isDeferredReviewIssue(issue), expected, issue)
   }
+  assert.equal(surface.isDeferredReviewIssue({
+    kind: 'host-review-deferral', reviewer: 'dakar', outcome: 'rate-limited',
+    errorCategory: 'deferred', attempts: 2, detail: 'bounded detail',
+  }), true)
 })
 
 test('green addendum implementation contract drift is manual merge ready', async () => {
@@ -655,7 +739,7 @@ test('green addendum implementation contract drift is manual merge ready', async
       openIssues: ['Second CodeRabbit review deferred: errorType: rate_limit, waitTime: 26 seconds'],
       summary: 'All addendum work items complete; second review pass rate limited',
     }),
-    true,
+    false,
   )
   assert.equal(
     surface.addendumImplementationNeedsManualMerge({
@@ -697,8 +781,8 @@ test('fix rounds carry a structured, mock-satisfiable evidence contract', async 
   assert.equal(surface.summarizeFixReport(null), null)
   assert.deepEqual(surface.summarizeFixReport('applied fixes'), { summary: 'applied fixes' })
   assert.deepEqual(
-    surface.summarizeFixReport({ gatesGreen: true, commits: ['Fix lint'], coderabbitRuns: 2, summary: 'green' }),
-    { commits: ['Fix lint'], gatesGreen: true, coderabbitRuns: 2, resolved: [], openIssues: [], summary: 'green' },
+    surface.summarizeFixReport({ gatesGreen: true, commits: ['Fix lint'], hostReviewRuns: 2, summary: 'green' }),
+    { commits: ['Fix lint'], gatesGreen: true, hostReviewRuns: 2, resolved: [], openIssues: [], summary: 'green' },
   )
 })
 
@@ -726,22 +810,30 @@ test('commit gates default to make all and honour operator overrides', async () 
 // Runtime auth-preflight coverage: fake auth CLIs on PATH record every
 // invocation, so the tests fail for reordered, inverted, or dead preflight
 // code — not merely for edited source text.
-function makeAuthBin({ codexOk = true, claudeOk = true, coderabbitOk = true } = {}) {
+function makeAuthBin({ codexOk = true, claudeOk = true, coderabbitOk = true, dakarOk = true, piOk = true } = {}) {
   const bin = mkdtempSync(path.join(tmpdir(), 'df12-auth-bin-'))
   const logFile = path.join(bin, 'calls.log')
+  const countFile = path.join(bin, 'argument-counts.log')
   writeFileSync(logFile, '')
+  writeFileSync(countFile, '')
   const fake = (name, ok) => {
     const file = path.join(bin, name)
     const body = ok
-      ? `#!/bin/sh\necho "${name} $@" >> "${logFile}"\necho "Session healthy"\nexit 0\n`
-      : `#!/bin/sh\necho "${name} $@" >> "${logFile}"\necho "Not logged in"\nexit 1\n`
+      ? `#!/bin/sh\necho "${name} $@" >> "${logFile}"\nprintf '%s|%s\\n' '${name}' "$#" >> "${countFile}"\necho "Session healthy"\nexit 0\n`
+      : `#!/bin/sh\necho "${name} $@" >> "${logFile}"\nprintf '%s|%s\\n' '${name}' "$#" >> "${countFile}"\necho "Not logged in"\nexit 1\n`
     writeFileSync(file, body)
     chmodSync(file, 0o755)
   }
   fake('codex', codexOk)
   fake('claude', claudeOk)
   fake('coderabbit', coderabbitOk)
-  return { bin, calls: () => readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean) }
+  fake('dakar-review', dakarOk)
+  fake('pi', piOk)
+  return {
+    bin,
+    calls: () => readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean),
+    argumentCounts: () => readFileSync(countFile, 'utf8').trim().split('\n').filter(Boolean),
+  }
 }
 
 async function runPreflightWithFakes(args, fakes) {
@@ -755,9 +847,18 @@ async function runPreflightWithFakes(args, fakes) {
   }
 }
 
+test('an invalid Dakar command fails before preflight can select a fallback executable', async () => {
+  await assert.rejects(
+    loadAssessmentSurface({ dakarCommand: "dakar-review 'unterminated" }),
+    /Invalid dakarCommand: expected a non-empty command with balanced shell quoting/,
+  )
+})
+
 test('auth preflight consults Claude only when a stage routes to the claude adapter', async () => {
+  // reviewTool: 'coderabbit' keeps the CodeRabbit auth-status probe in the
+  // preflight; the Dakar default probes OPENAI_API_KEY instead (covered below).
   const withClaude = makeAuthBin()
-  const failures = await runPreflightWithFakes({}, withClaude)
+  const failures = await runPreflightWithFakes({ reviewTool: 'coderabbit' }, withClaude)
   assert.deepEqual(failures, [])
   assert.deepEqual(withClaude.calls(), [
     'codex login status',
@@ -767,6 +868,7 @@ test('auth preflight consults Claude only when a stage routes to the claude adap
 
   const codexOnly = makeAuthBin()
   const codexOnlyArgs = {
+    reviewTool: 'coderabbit',
     planAdapter: 'codex',
     reviewAdapter: 'codex',
     auditAdapter: 'codex',
@@ -779,15 +881,98 @@ test('auth preflight consults Claude only when a stage routes to the claude adap
     !codexOnly.calls().some((line) => line.startsWith('claude ')),
     'claude must not be consulted when no stage routes to it',
   )
+
+  const legacy = makeAuthBin()
+  const legacyFailures = await runPreflightWithFakes({
+    reviewTool: 'coderabbit',
+    coderabbitHostReview: false,
+  }, legacy)
+  assert.deepEqual(legacyFailures, [])
+  assert.ok(
+    legacy.calls().some((line) => line === 'coderabbit auth status'),
+    'legacy agent-run CodeRabbit still requires CodeRabbit credentials',
+  )
 })
 
 test('auth preflight reports a signed-out Claude as a failure', async () => {
   const fakes = makeAuthBin({ claudeOk: false })
-  const failures = await runPreflightWithFakes({}, fakes)
+  const failures = await runPreflightWithFakes({ reviewTool: 'coderabbit' }, fakes)
   assert.equal(failures.length, 1)
   assert.equal(failures[0].tool, 'claude')
   assert.equal(failures[0].command, 'claude auth status')
   assert.match(failures[0].detail, /Not logged in/)
+})
+
+test('the Dakar preflight requires a non-empty OPENAI_API_KEY and skips CodeRabbit auth', async () => {
+  const previousKey = process.env.OPENAI_API_KEY
+  try {
+    // Default tool is Dakar: an unset key fails the preflight closed, and the
+    // CodeRabbit CLI auth-status probe is never consulted.
+    delete process.env.OPENAI_API_KEY
+    const missing = makeAuthBin()
+    const dakarWithLegacyFlagOff = { reviewTool: 'dakar', coderabbitHostReview: false }
+    const missingFailures = await runPreflightWithFakes(dakarWithLegacyFlagOff, missing)
+    assert.equal(missingFailures.length, 1)
+    assert.equal(missingFailures[0].tool, 'dakar')
+    assert.match(missingFailures[0].detail, /OPENAI_API_KEY/)
+    assert.ok(
+      !missing.calls().some((line) => line.startsWith('coderabbit ')),
+      'coderabbit auth must not be consulted in Dakar mode',
+    )
+
+    // An explicitly empty key fails identically and still avoids CodeRabbit.
+    process.env.OPENAI_API_KEY = ''
+    const empty = makeAuthBin()
+    const emptyFailures = await runPreflightWithFakes(dakarWithLegacyFlagOff, empty)
+    assert.equal(emptyFailures.length, 1)
+    assert.equal(emptyFailures[0].tool, 'dakar')
+    assert.match(emptyFailures[0].detail, /OPENAI_API_KEY/)
+    assert.ok(
+      !empty.calls().some((line) => line.startsWith('coderabbit ')),
+      'coderabbit auth must not be consulted for an empty Dakar key',
+    )
+
+    // A non-empty key clears the Dakar preflight.
+    process.env.OPENAI_API_KEY = 'sk-test-key'
+    const present = makeAuthBin()
+    const presentFailures = await runPreflightWithFakes(dakarWithLegacyFlagOff, present)
+    assert.deepEqual(presentFailures, [])
+    assert.ok(present.calls().some((line) => line === 'dakar-review --version'))
+    assert.ok(present.calls().some((line) => line === 'pi --version'))
+
+    // A key cannot make an unavailable reviewer executable runnable.
+    const unavailable = makeAuthBin({ dakarOk: false })
+    const unavailableFailures = await runPreflightWithFakes(dakarWithLegacyFlagOff, unavailable)
+    assert.equal(unavailableFailures.length, 1)
+    assert.equal(unavailableFailures[0].tool, 'dakar')
+    assert.match(unavailableFailures[0].command, /dakar-review --version/)
+
+    // Dakar shells out through pi, so a healthy front-end alone is insufficient.
+    const unavailablePi = makeAuthBin({ piOk: false })
+    const unavailablePiFailures = await runPreflightWithFakes(dakarWithLegacyFlagOff, unavailablePi)
+    assert.equal(unavailablePiFailures.length, 1)
+    assert.equal(unavailablePiFailures[0].tool, 'dakar')
+    assert.equal(unavailablePiFailures[0].command, 'pi --version')
+    assert.match(unavailablePiFailures[0].detail, /Not logged in/)
+  } finally {
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = previousKey
+  }
+})
+
+test('Dakar preflight preserves quoted fixed command arguments', async () => {
+  const previousKey = process.env.OPENAI_API_KEY
+  try {
+    process.env.OPENAI_API_KEY = 'sk-test-key'
+    const fakes = makeAuthBin()
+    const failures = await runPreflightWithFakes({ dakarCommand: 'dakar-review "--fixed argument"' }, fakes)
+    assert.deepEqual(failures, [])
+    assert.ok(fakes.calls().some((line) => line === 'dakar-review --fixed argument --version'))
+    assert.ok(fakes.argumentCounts().includes('dakar-review|2'))
+  } finally {
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = previousKey
+  }
 })
 
 test('normal and addendum implementations gate auth before integration', async () => {

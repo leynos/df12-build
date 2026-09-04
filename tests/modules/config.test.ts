@@ -1,7 +1,4 @@
-// Module tests for the run-configuration record (decomposition milestone 5).
-// makeConfig owns every args default, clamp, and derivation; the entry
-// destructures the record once, so these tests are the contract for the
-// whole `args` surface.
+/** @file Tests makeConfig defaults, clamps, validation, and compatibility aliases. */
 import { describe, expect, test } from 'bun:test'
 
 import { makeConfig } from '../../src/workflows/df12-build-odw/config.ts'
@@ -30,7 +27,7 @@ describe('makeConfig defaults', () => {
     expect(config.AUTH_PREFLIGHT).toBe(true)
     expect(config.REQUIRE_CODERABBIT_AUTH).toBe(true)
     expect(config.CODERABBIT_HOST_REVIEW).toBe(true)
-    expect(config.CODERABBIT_BETWEEN_WORK_ITEMS).toBe(true)
+    expect(config.HOST_REVIEW_BETWEEN_WORK_ITEMS).toBe(true)
     expect(config.HOST_COMMIT_GATES).toBe(true)
     expect(config.HOST_GATES_BETWEEN_WORK_ITEMS).toBe(true)
     expect(config.CS_CHECK).toBe(true)
@@ -71,7 +68,7 @@ describe('makeConfig defaults', () => {
   test('commit gates and guidance derivation', () => {
     expect(config.COMMIT_GATES).toEqual(['make all'])
     expect(config.COMMIT_GATE_TEXT).toBe('`make all`')
-    expect(config.SCRUTINEER_DELEGATION_GUIDANCE).toContain('coderabbit review --agent')
+    expect(config.SCRUTINEER_DELEGATION_GUIDANCE).toContain('workflow host runs Dakar')
   })
 
   test('search backend defaults to grepai', () => {
@@ -79,6 +76,97 @@ describe('makeConfig defaults', () => {
     expect(config.GREPAI_WORKSPACE).toBe('Projects')
     expect(config.GREPAI_PROJECT).toBeNull()
     expect(config.MEMTRACE_REPO_ID).toBeNull()
+  })
+
+  test('review tool defaults to Dakar with its own knobs', () => {
+    expect(config.REVIEW_TOOL).toBe('dakar')
+    expect(config.DAKAR_COMMAND).toBe('dakar-review')
+    expect(config.REVIEW_TIMEOUT_SECONDS).toBe(3600)
+    // 0 means "use Dakar's own default budget" (the flag is omitted).
+    expect(config.DAKAR_BUDGET_GBP).toBe(0)
+  })
+})
+
+describe('makeConfig review-tool selection', () => {
+  test('Dakar ignores the legacy agent-run CodeRabbit switch', () => {
+    const config = makeConfig({ reviewTool: 'dakar', coderabbitHostReview: false })
+    expect(config.REVIEW_TOOL).toBe('dakar')
+    expect(config.CODERABBIT_HOST_REVIEW).toBe(true)
+    expect(config.CODERABBIT_REVIEW_GUIDANCE).toContain('Do NOT run Dakar yourself')
+  })
+
+  test('CodeRabbit still permits its legacy agent-run review flow', () => {
+    const config = makeConfig({ reviewTool: 'coderabbit', coderabbitHostReview: false })
+    expect(config.CODERABBIT_HOST_REVIEW).toBe(false)
+    expect(config.CODERABBIT_REVIEW_GUIDANCE).toStartWith('Use `coderabbit review --agent`')
+  })
+
+  test('coderabbit is a valid explicit choice', () => {
+    const coderabbit = makeConfig({ reviewTool: 'coderabbit' })
+    expect(coderabbit.REVIEW_TOOL).toBe('coderabbit')
+    expect(coderabbit.CODERABBIT_REVIEW_GUIDANCE).toContain('Do NOT run coderabbit yourself')
+    expect(makeConfig({ reviewTool: 'CodeRabbit' }).REVIEW_TOOL).toBe('coderabbit')
+  })
+
+  test('an unsupported review tool throws rather than silently defaulting', () => {
+    expect(() => makeConfig({ reviewTool: 'sonarqube' })).toThrow(/Unsupported reviewTool/)
+  })
+
+  test('the Dakar command and timeout are overridable and clamped', () => {
+    expect(makeConfig({ dakarCommand: 'dakar review' }).DAKAR_COMMAND).toBe('dakar review')
+    expect(makeConfig({ reviewTimeoutSeconds: 120 }).REVIEW_TIMEOUT_SECONDS).toBe(120)
+    expect(makeConfig({ dakarTimeoutSeconds: 240 }).REVIEW_TIMEOUT_SECONDS).toBe(240)
+    expect(makeConfig({ reviewTimeoutSeconds: 180, dakarTimeoutSeconds: 240 }).REVIEW_TIMEOUT_SECONDS).toBe(180)
+    // Clamp to the 60..7200 band.
+    expect(makeConfig({ reviewTimeoutSeconds: 5 }).REVIEW_TIMEOUT_SECONDS).toBe(60)
+    expect(makeConfig({ reviewTimeoutSeconds: 99999 }).REVIEW_TIMEOUT_SECONDS).toBe(7200)
+  })
+
+  test('the Dakar budget is clamped to the 0..10 GBP band', () => {
+    expect(makeConfig({ dakarBudgetGbp: 2.5 }).DAKAR_BUDGET_GBP).toBe(2.5)
+    expect(makeConfig({ dakarBudgetGbp: -1 }).DAKAR_BUDGET_GBP).toBe(0)
+    expect(makeConfig({ dakarBudgetGbp: 50 }).DAKAR_BUDGET_GBP).toBe(10)
+  })
+
+  test('host-review retry and backoff settings are finite and bounded', () => {
+    expect(() => makeConfig({ hostReviewAttempts: Number.POSITIVE_INFINITY })).toThrow(/hostReviewAttempts must be finite/)
+    expect(() => makeConfig({ hostReviewBackoffMinutes: [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY] })).toThrow(/hostReviewBackoffMinutes values must be finite/)
+    expect(makeConfig({ hostReviewAttempts: 999, hostReviewBackoffMinutes: [9999, 10000] }).HOST_REVIEW_ATTEMPTS).toBe(10)
+    expect(makeConfig({ hostReviewBackoffMinutes: [9999, 10000] }).HOST_REVIEW_BACKOFF_MINUTES).toEqual([1440, 1440])
+  })
+
+  test('legacy CodeRabbit controls remain compatibility aliases', () => {
+    const config = makeConfig({
+      coderabbitBetweenWorkItems: false,
+      coderabbitAttempts: 2,
+      coderabbitBackoffMinutes: [4, 8],
+      coderabbitFindingsFile: 'legacy-findings.jsonl',
+    })
+
+    expect(config.HOST_REVIEW_BETWEEN_WORK_ITEMS).toBe(false)
+    expect(config.HOST_REVIEW_ATTEMPTS).toBe(2)
+    expect(config.HOST_REVIEW_BACKOFF_MINUTES).toEqual([4, 8])
+    expect(config.HOST_REVIEW_FINDINGS_FILE).toBe('legacy-findings.jsonl')
+  })
+
+  test('canonical host-review controls take precedence over legacy aliases', () => {
+    const config = makeConfig({
+      hostReviewBetweenWorkItems: false,
+      coderabbitBetweenWorkItems: true,
+      hostReviewAttempts: 4,
+      coderabbitAttempts: 2,
+      hostReviewBackoffMinutes: [12, 24],
+      coderabbitBackoffMinutes: [45, 90],
+      hostReviewFindingsFile: 'host-findings.jsonl',
+      coderabbitFindingsFile: 'coderabbit-findings.jsonl',
+    })
+
+    expect(config.HOST_REVIEW_BETWEEN_WORK_ITEMS).toBe(false)
+    expect(config.HOST_REVIEW_ATTEMPTS).toBe(4)
+    expect(config.HOST_REVIEW_BACKOFF_MINUTES).toEqual([12, 24])
+    expect(config.HOST_REVIEW_FINDINGS_FILE).toBe('host-findings.jsonl')
+    expect(config.CODERABBIT_ATTEMPTS).toBe(config.HOST_REVIEW_ATTEMPTS)
+    expect(config.CODERABBIT_BACKOFF_MINUTES).toEqual(config.HOST_REVIEW_BACKOFF_MINUTES)
   })
 })
 
@@ -133,9 +221,9 @@ describe('makeConfig overrides and clamps', () => {
   })
 
   test('the between-work-items host review can be disabled independently', () => {
-    expect(makeConfig({ coderabbitBetweenWorkItems: false }).CODERABBIT_BETWEEN_WORK_ITEMS).toBe(false)
+    expect(makeConfig({ coderabbitBetweenWorkItems: false }).HOST_REVIEW_BETWEEN_WORK_ITEMS).toBe(false)
     // Still defaults on when host review is on.
-    expect(makeConfig({ coderabbitHostReview: true }).CODERABBIT_BETWEEN_WORK_ITEMS).toBe(true)
+    expect(makeConfig({ coderabbitHostReview: true }).HOST_REVIEW_BETWEEN_WORK_ITEMS).toBe(true)
   })
 
   test('dryRun waives the CodeRabbit auth requirement', () => {

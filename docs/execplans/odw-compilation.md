@@ -878,3 +878,19 @@ docstring-coverage warning was skipped: this repository's `docs-check` uses
 TypeDoc `notDocumented` validation with zero tolerance, not a percentage
 threshold. No matching roadmap checkbox exists for this documentation-only
 follow-up.
+
+2026-08-21 (post-completion): the host-review subsystem gained Dakar as the
+default reviewer while retaining CodeRabbit behind `reviewTool: 'coderabbit'`.
+The Dakar adapter parses and validates the terminal verdict, maps findings onto
+the established blocking contract, and attempts cleanup of a fresh state root
+after every bounded attempt. The canonical external timeout is tool-neutral
+`reviewTimeoutSeconds`; `dakarTimeoutSeconds` remains its backward-compatible
+input alias, while `dakarBudgetGbp` remains Dakar-specific. Both adapters now
+normalize into `HostReviewResult` and
+`ReviewOutcome` before workflow policy consumes their output. The runner,
+recorder, blocking helper, capture aggregate, labels, and result summary use
+tool-neutral names; the old CodeRabbit-named exports remain compatibility
+aliases only. Each terminal run emits bounded reviewer, label, attempts,
+elapsed time, outcome, and error-category fields. Fixed-cardinality metrics
+cover runs, findings, retries, deferrals, timeouts, errors, authentication
+failures, and serialized JSONL sink failures.

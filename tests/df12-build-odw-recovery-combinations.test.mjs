@@ -274,10 +274,12 @@ test('combination: review-mode resume integrates the clean adopt-complete branch
   assert.equal(result.results.length, 1)
   assert.equal(result.results[0].status, 'done')
   assert.equal(result.results[0].kind, 'recovery-resume')
-  assert.deepEqual(calls, [
-    'recover-assess:1.2.3',
+  assert.equal(calls[0], 'recover-assess:1.2.3')
+  assert.deepEqual(new Set(calls.slice(1, 3)), new Set([
     'write-probe:claude',
     'write-probe:codex-medium',
+  ]))
+  assert.deepEqual(calls.slice(3), [
     'code-review:1.2.3 r1',
     'expert-review:1.2.3 r1',
     'integrate:1.2.3',
@@ -305,7 +307,7 @@ test('combination: a failed review-mode resume halts the run with the blocking e
     fix: {
       gatesGreen: true,
       commits: ['Fix review blockers'],
-      coderabbitRuns: 1,
+      hostReviewRuns: 1,
       resolved: ['tightened the success criterion coverage'],
       openIssues: [],
       summary: 'gates green at HEAD after fixes',
@@ -329,7 +331,7 @@ test('combination: a failed review-mode resume halts the run with the blocking e
   assert.deepEqual(haltedResult.reviewRounds[0].fix, {
     commits: ['Fix review blockers'],
     gatesGreen: true,
-    coderabbitRuns: 1,
+    hostReviewRuns: 1,
     resolved: ['tightened the success criterion coverage'],
     openIssues: [],
     summary: 'gates green at HEAD after fixes',
@@ -381,7 +383,7 @@ test('combination: continue mode finishes a draft-plan survivor through the whol
   )
   assert.deepEqual(result.processed, ['1.2.3'])
   assert.ok(!calls.some((label) => label.startsWith('recover-assess:')), 'continue mode spawns no judgement agent')
-  assert.deepEqual(calls.slice(0, 2), ['write-probe:claude', 'write-probe:codex-medium'])
+  assert.deepEqual(new Set(calls.slice(0, 2)), new Set(['write-probe:claude', 'write-probe:codex-medium']))
   assert.deepEqual(calls.slice(2), [
     'plan:1.2.3 r1',
     'design-review:1.2.3 r1',

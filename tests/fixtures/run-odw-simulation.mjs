@@ -169,7 +169,7 @@ try {
     // review quota), run real gate commands like `make all` in fixture
     // repos, and expect scripted implement agents to tick Progress items. A
     // scenario that wants them must opt in and provide safe fakes.
-    { coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...(scenario.args || {}) },
+    { reviewTool: 'coderabbit', coderabbitHostReview: false, hostCommitGates: false, perWorkItemBuild: false, ...(scenario.args || {}) },
     { total: null, spent: () => 0, remaining: () => Infinity },
     async () => {
       throw new Error('nested workflow not scripted')

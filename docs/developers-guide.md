@@ -47,8 +47,11 @@ Relevant paths:
   `config.ts`, `schemas.ts`, `types.ts`, `roadmap.ts`, `exec.ts`, `faults.ts`,
   `git-evidence.ts`, `recovery-decision.ts`, `recovery-discovery.ts`,
   `prompts.ts`, `write-preflight.ts`, `execplan-durability.ts`, `assessment.ts`,
-  `remediation.ts`, `host-review.ts` (host-run CodeRabbit NDJSON
-  parsing/classification and the host commit gates), `shell-command.ts` (a
+  `remediation.ts`, `auth-preflight.ts` (adapter-aware credential and
+  executable probes), `coderabbit-review.ts` (CodeRabbit NDJSON adapter),
+  `dakar-review.ts` (Dakar JSON adapter), `host-gates.ts` (secure host gates
+  and CodeScene), `host-review-contracts.ts` (neutral review contracts), and
+  `host-review.ts` (neutral composition facade), `shell-command.ts` (a
   non-evaluating parser for configured shell-command words and assignment
   spans), and `run-task.ts`, with
   the injected ODW primitives declared in `odw-globals.d.ts`. TypeScript is
@@ -88,6 +91,12 @@ Relevant paths:
 
 Tick the matching roadmap task and update the relevant ExecPlan whenever a
 branch lands planned work.
+
+The JavaScript files under `workflows/` are runtime/deployment artefacts. Treat
+them as object code, not as source modules subject to the module-level
+docstring rule. In particular, `workflows/df12-build.js` is the baseline Claude
+Code workflow artefact, while `workflows/df12-build-odw.js` is generated from
+the documented TypeScript source tree and must never be edited by hand.
 
 ## ODW workflow contract
 
@@ -294,12 +303,98 @@ eligibility on `missingEvidence` alone and never consults `residualRisk`; the
 advisory risk is instead carried forward into the resumed code-review,
 expert-review, and integration prompts as a non-blocking section.
 
-Host-run CodeRabbit review (`coderabbitHostReview`, default on) moves the CLI
-invocation from agent prompts to the control loop:
+The host review tool is selected by `reviewTool`, which defaults to `dakar`.
+Dakar requires the executable selected by `dakarCommand` (default
+`dakar-review`) and `pi` on `PATH` plus a non-empty `OPENAI_API_KEY`. It runs
+that configured executable
+against the committed diff, parses one JSON document, and maps its verdict onto
+the same review contract described below: clean, findings (`critical`/`major`
+blocking), a deferred backoff, or an error. Dakar uses an OpenAI-backed model,
+so its preflight checks `OPENAI_API_KEY`. Set `reviewTool: 'coderabbit'` to
+restore the NDJSON CodeRabbit path documented in
+`docs/coderabbit-wire-contract.md`.
+
+The external `reviewTimeoutSeconds` setting is clamped to 60–7200 seconds;
+`dakarTimeoutSeconds` remains a backward-compatible input alias. The resolved
+value enters `HostReviewConfig` as `reviewTimeoutSeconds` and bounds
+the parent process for either reviewer and is also passed to Dakar as
+`--timeout`. `dakarBudgetGbp` is clamped to 0–10; positive values become
+`--budget-gbp`, while `0` lets Dakar apply its own hard admission budget. Each
+Dakar attempt creates a fresh `--state-root` below the host temporary directory
+and attempts to remove it in a `finally` block after execution and
+classification settle. Cleanup failures are bounded diagnostics and do not
+replace the review result. Retries therefore share no Dakar state when cleanup
+succeeds.
+
+The shared host-review settings use the canonical names
+`hostReviewBetweenWorkItems`, `hostReviewAttempts`,
+`hostReviewBackoffMinutes`, and `hostReviewFindingsFile`.
+`hostReviewBetweenWorkItems` defaults to `true`; `hostReviewAttempts` defaults
+to `3` and is clamped to `1–10`; and each `hostReviewBackoffMinutes` endpoint is
+clamped to `1–1440` minutes (the default range is `[45, 90]`, and the upper
+endpoint cannot be below the lower one). `hostReviewFindingsFile` is an
+optional append-only JSONL sink path. The historical
+`coderabbitBetweenWorkItems`, `coderabbitAttempts`,
+`coderabbitBackoffMinutes`, and `coderabbitFindingsFile` names remain accepted
+as deprecated compatibility aliases; canonical values take precedence when
+both forms are supplied.
+
+`host-review.ts` exports `parseDakarDocument` and `classifyDakarReview` as the
+Dakar adapter boundary tested directly by the module suite. Both Dakar and
+CodeRabbit then produce the neutral `HostReviewResult` and `ReviewOutcome`
+contract consumed by `run-task.ts`. The parser searches
+backwards through stdout for the terminal JSON object and returns `null` when
+no valid object exists. The classifier validates the complete document before
+mapping it: unknown shapes, malformed findings, findings-free rejections, and
+clean verdicts carrying findings fail closed as review errors. Valid
+`changes-requested` findings map onto the established blocking severity
+contract. The historical `CoderabbitReview`, `CoderabbitOutcome`,
+`CoderabbitFinding`, `runCoderabbitHostReview`, and
+`recordCoderabbitReview` exports remain thin compatibility aliases; workflow
+policy uses only the neutral names.
+
+Every terminal host review emits one bounded structured log event containing
+the reviewer, review label, terminal attempt count, elapsed milliseconds,
+outcome, and error category. `ExecStatus.killed` classifies parent-process
+timeouts without inspecting error prose. The run result's `hostReview` object
+uses fixed metric keys for runs, findings, retries, deferrals, timeouts,
+errors, authentication failures, and JSONL sink failures. Finding severity
+counts also use a fixed vocabulary; task ids and error strings never become
+metric keys. JSONL writes remain serialized through a promise tail.
+
+### Dakar host review (`reviewTool: 'dakar'`, the default)
+
+Dakar is always host-run. The workflow invokes `dakar-review` against the
+committed diff, with a fresh temporary state root for each attempt, and uses
+`dakarBudgetGbp` for optional bounded admission spending. A deferred Dakar
+review is retried in host wall-clock without agent tokens; in a dual-review
+round it falls through to the reviewer agents, while a deferred between-item
+review halts the task for assessment. Blocking Dakar findings short-circuit
+the reviewer agents and enter the bounded fix loop.
+
+In default `reviewTool: 'dakar'` mode, each review point runs the deterministic
+commit gates, then CodeScene, then Dakar as the selected host reviewer, and
+only then the token-spending reviewer agents. With host-run review enabled,
+selecting `reviewTool: 'coderabbit'` replaces Dakar in that sequence; its CLI,
+quota, and adapter-specific test details are documented below.
+`tests/modules/host-review.dakar.test.ts`,
+`tests/modules/host-review.dakar-outcomes.test.ts`, and
+`tests/modules/host-review.dispatch.test.ts` cover the Dakar command line,
+temporary-state cleanup, budget flag, and outcome mapping;
+`tests/df12-build-odw-assessment.test.mjs` covers the Dakar authentication
+preflight and its independence from the legacy CodeRabbit flag.
+
+### CodeRabbit host review (`reviewTool: 'coderabbit'` only)
+
+> The workflow defaults to Dakar. The execution, quota, gate-order, and test
+> details in this subsection apply only when CodeRabbit is selected explicitly.
+
+Host-run CodeRabbit review (`coderabbitHostReview`, default on in CodeRabbit
+mode) moves the CLI invocation from agent prompts to the control loop:
 `coderabbit review --agent --type committed --base <base>` (a FIXED host
 invocation; the `coderabbitReviewCommand` knob applies only to the legacy
 agent-run mode and does NOT override it) runs BETWEEN each per-work-item build
-turn (`coderabbitBetweenWorkItems`, default on) as a deterministic gate on each
+turn (`hostReviewBetweenWorkItems`, default on) as a deterministic gate on each
 committed work item, and again per dual-review round and per addendum.
 
 The review stage spends by a strict cost hierarchy — deterministic gates are
@@ -353,8 +448,8 @@ branch goes to a fix round with the host evidence without spending reviewer
 agents; in the addendum lane an unreproducible green claim fails the addendum
 before any review. With `hostGatesBetweenWorkItems` on (the default), the gates
 ALSO re-run after each committed work item during the per-work-item build,
-BEFORE the between-item CodeRabbit review, so a committed work item whose gates
-are really red is caught at the item boundary (bounded fix loop, then
+BEFORE the between-item selected host review, so a committed work item whose
+gates are really red is caught at the item boundary (bounded fix loop, then
 fail-closed) rather than only at the dual-review stage — closing the window
 where an intermediate red commit could persist across work items on the agent's
 `gatesGreen` claim alone.
@@ -368,12 +463,13 @@ before termination so a backpressured pipe cannot prevent the child from being
 reaped.
 
 `runCodeSceneCheck` (`csCheck`, default on) is a SECOND deterministic gate, run
-after the commit gates and before CodeRabbit at every gate point (each work
-item, each dual-review round, and the addendum lane). It runs `csCheckCommand`
+after the commit gates and before the selected host reviewer at every gate point
+(each work item, each dual-review round, and the addendum lane). It runs
+`csCheckCommand`
 (default `cs-check-changed`, an operator-provided wrapper) through the same
 secure-log spawn path as the commit gates, on the committed changed files. A
 code-health regression short-circuits to a fix round — free gates before the
-quota-limited CodeRabbit and the token-spending reviewer agents — and the
+selected host review and the token-spending reviewer agents — and the
 build/fix prompts carry the smell glossary plus the `@codescene(disable:"...")`
 suppression escape hatch (`CS_CHECK_GUIDANCE`). Like `make verify-modules`
 without Dafny, it skips gracefully (clean, not failed) when the binary is

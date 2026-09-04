@@ -6,8 +6,9 @@ schema = 1
 stems = []
 
 [words]
-# "GitHub Flavored Markdown" (GFM) is a proper product name; keep its US spelling.
-accepted = ["Flavored"]
+# Keep US spellings that are part of external APIs or established schema and
+# command identifiers.
+accepted = ["Artifact", "Flavored", "analyzing", "artifact", "color"]
 
 [words.corrections]
 

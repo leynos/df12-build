@@ -107,15 +107,17 @@ agents, four build-stage agents, and review, triage, audit, or assessment
 slack. Keep `maxAgents` high (such as the ODW default of `1000`) because it is
 the per-run dispatch guard rather than the live process-pool size.
 
-Set the adapter `timeout` with the CodeRabbit flow in mind. With the default
-host-run CodeRabbit review (`coderabbitHostReview`, see the configuration
-list), agents never wait on CodeRabbit — the host absorbs rate-limit backoff in
-its own wall-clock — so the adapter timeout only needs to cover honest stage
-work; 4500–5400 seconds (75–90 minutes) is generous, and a longer silent stream
-is a hung connection, not progress. Only when `coderabbitHostReview=false` do
-implementation agents wait through 45–90 minute CodeRabbit backoffs with
-`vsleep` themselves, and then the timeout must be at least `21600` seconds to
-avoid killing a healthy task mid-backoff.
+Set the adapter `timeout` with the host-review flow in mind. With the default
+host-run review (`reviewTool: "dakar"` running `dakar-review`, or
+`reviewTool: "coderabbit"` with `coderabbitHostReview`; see the configuration
+list), agents never wait on the reviewer — the host absorbs rate-limit and
+Flex-deferral backoff in its own wall-clock — so the adapter timeout only needs
+to cover honest stage work; 4500–5400 seconds (75–90 minutes) is generous, and
+a longer silent stream is a hung connection, not progress. Only when
+`coderabbitHostReview=false` in CodeRabbit mode do implementation agents wait
+through 45–90 minute CodeRabbit backoffs with `vsleep` themselves, and then the
+timeout must be at least `21600` seconds to avoid killing a healthy task
+mid-backoff.
 
 Make sure every adapter named by `args.json` exists in `odw.config.json` or in
 ODW's built-in adapter set. The checked-in ODW workflow now defaults planning
@@ -200,10 +202,13 @@ Minimal sidecar `odw.config.json` shape for the Claude/Codex split:
 
 ### Inspectable logs in the sidecar
 
-Point both log sinks at the sidecar so a run's agent transcripts and CodeRabbit
-findings are durably inspectable next to the run, without touching workflow
-behaviour — both are out-of-band sinks outside the project Git worktree, so
-they never enter a diff, trip `workflow-freshness`, or affect a gate:
+Point both log sinks at the sidecar so a run's agent transcripts and selected
+host-review findings are retained next to the run, without touching workflow
+behaviour. Agent transcripts are durable; host-review findings are retained
+only when the best-effort JSONL append succeeds. An invalid path or full disk
+can make findings unavailable for inspection. Both are out-of-band sinks
+outside the project Git worktree, so they never enter a diff, trip
+`workflow-freshness`, or affect a gate:
 
 - **Agent logs** — set `runsRoot` (in `odw.config.json`) to an absolute path
   inside the run's sidecar, e.g. `"$SIDECAR/runs"`. ODW writes each run's
@@ -211,15 +216,22 @@ they never enter a diff, trip `workflow-freshness`, or affect a gate:
   `agent_started`/`agent_finished` per `agent()` call, tagged by adapter,
   label, and phase), `result.json` (the final return, including every
   `reviewRounds`, `assessments`, the host-gate result, the CodeScene result, and
-  the CodeRabbit summary), and
+  the host-review summary), and
   `error.json`. This is entirely ODW's domain — no workflow involvement.
   Regenerate the value per run, or use a shared `~/.odw/runs` for a single
   pool; the sidecar keeps each run's logs beside its config and notes.
-- **CodeRabbit findings** — set `coderabbitFindingsFile` (in `args.json`) to a
-  sidecar JSONL path, e.g. `"$SIDECAR/coderabbit-findings.jsonl"`. Every parsed
+- **Review findings** — set the canonical `hostReviewFindingsFile` field (in
+  `args.json`) to a sidecar JSONL path, e.g.
+  `"$SIDECAR/coderabbit-findings.jsonl"`. Only that example filename is
+  historical; the field and sink apply to the selected host reviewer. Every parsed
   finding (timestamp, task label, severity, file, comment, codegen
-  instructions, suggestion count) is appended best-effort: a bad path or full
-  disk degrades logging with a warning and never fails a task.
+  instructions, suggestion count) is appended as a best-effort serialized JSONL
+  write: a bad path or full disk degrades logging with a warning, reports the
+  sink failure through `hostReview`, and never fails a task. In the default
+  Dakar mode, the sink carries Dakar findings with severities mapped onto the
+  CodeRabbit scale (`critical` becomes `critical`, `high` becomes `major`,
+  `medium` becomes `minor`, and `low` becomes `trivial`). The former
+  `coderabbitFindingsFile` name remains a deprecated compatibility alias.
 
 Patch the sidecar copy only to recover or tune a live workshop. Record the
 patch in `operator-notes.md`, validate it there, then promote the proven change
@@ -447,6 +459,24 @@ Common arguments:
   `searchBackend` to `memtrace`, when GrepAI is unavailable on the host.
 - `coderabbitReviewCommand`: CodeRabbit command used in implementation prompts.
   Defaults to `coderabbit review --agent`.
+- `reviewTool`: host reviewer for committed work: `dakar` (the default;
+  requires `OPENAI_API_KEY`) or `coderabbit` (the retained NDJSON CLI path).
+  Other values fail at launch.
+
+  **Migration:** The default is now `dakar`. Existing operators must put
+  `dakar-review` and `pi` on `PATH` and provide `OPENAI_API_KEY`. Set
+  `reviewTool` to `coderabbit` to retain the previous NDJSON CLI path. See
+  [Migrate to Dakar host review](migrate-to-dakar-host-review.md) for the
+  operator checklist.
+- `dakarCommand`: Dakar CLI invoked in `dakar` mode. Defaults to
+  `dakar-review`.
+- `reviewTimeoutSeconds`: host-side timeout for each Dakar or CodeRabbit review
+  process and, in Dakar mode, the value passed as Dakar's `--timeout`. Defaults
+  to `3600` and is clamped to 60–7200 seconds. The former
+  `dakarTimeoutSeconds` name remains an accepted input alias.
+- `dakarBudgetGbp`: optional Dakar admission budget, clamped to 0–10. Values
+  above `0` are forwarded as `--budget-gbp`; `0` defers to Dakar's own hard
+  budget.
 - `maxParallel`: task worker-pool width. Defaults to `8` unless `taskId` is
   set.
 - `maxPlanningParallel`: concurrent planning-stage agents. Defaults to `4`.
@@ -482,25 +512,24 @@ Common arguments:
   automatically; set `false` to force the single-turn build for every task.
 - `maxWorkItemRounds`: builder turns per task before the work-item loop fails
   closed. Defaults to `16`.
-- `coderabbitHostReview`: when `true` (the default), the workflow host runs
-  `coderabbit review --agent` against each task's committed work instead of
-  asking agents to babysit CodeRabbit. Rate-limit backoff is absorbed as host
-  wall-clock (zero agent tokens), and blocking findings feed the fix rounds. Set
-  `false` to restore the legacy agent-run flow.
+- `coderabbitHostReview`: in CodeRabbit mode, when `true` (the default), the
+  workflow host runs `coderabbit review --agent` against committed work. Set
+  `false` to restore the legacy agent-run flow. Dakar always runs host-side, so
+  this flag has no effect in the default mode.
 - `hostGatesBetweenWorkItems`: when `true` (the default), and when both
   `hostCommitGates` and `perWorkItemBuild` are on, the host re-runs the commit
-  gates after each committed work item — before the between-item CodeRabbit
-  review — so a committed work item whose gates are actually red is caught at
+  gates after each committed work item — before the between-item selected host
+  reviewer — so a committed work item whose gates are actually red is caught at
   the item boundary instead of only at the dual-review stage. A red gate drives
   a bounded fix loop; if it cannot be made green the work item fails. Set
   `false` to verify gates only at the dual-review boundary (cheaper: one gate
   run per review round rather than one per work item).
 - `csCheck`: when `true` (the default), the host runs a CodeScene code-health
   check on the committed changed files as a deterministic gate AFTER the commit
-  gates and BEFORE CodeRabbit (both free checks precede the quota-limited
-  CodeRabbit and the token-spending reviewer agents). A regression drives a
-  bounded fix round; the build agent clears it by refactoring or, only where
-  refactoring would be deleterious, suppresses the specific smell with a
+  gates and BEFORE the selected host reviewer (both free checks precede the
+  selected host reviewer and the token-spending reviewer agents). A regression
+  drives a bounded fix round; the build agent clears it by refactoring or, only
+  where refactoring would be deleterious, suppresses the specific smell with a
   justified `@codescene(disable:"...")` comment. The check skips gracefully
   only when its binary is absent from `PATH`, like `make verify-modules` without
   Dafny; an availability-probe fault is reported as a failed check instead of
@@ -508,23 +537,26 @@ Common arguments:
 - `csCheckCommand`: the command the CodeScene check runs in the worktree.
   Defaults to `cs-check-changed` (an operator-provided wrapper); override it
   with the exact invocation, e.g. `cs check --changed --base main`.
-- `coderabbitBetweenWorkItems`: when `true` (the default), and when both
-  `coderabbitHostReview` and `perWorkItemBuild` are on, the host runs a
-  CodeRabbit review after each committed work item — a deterministic gate
-  between build turns, after the host gates — rather than only once after the
-  whole implementation stage. Blocking findings drive a bounded fix loop; if
-  they cannot be cleared the work item fails, and if CodeRabbit stays
-  rate-limited or errors after its retries the task halts for assessment
-  instead of continuing unreviewed. Set `false` to review only once at the end
-  of the implementation stage.
-- `coderabbitAttempts`: total host review attempts when CodeRabbit rate
-  limits. Defaults to `3`.
-- `coderabbitBackoffMinutes`: `[low, high]` range for the deterministic
-  backoff wait between rate-limited attempts. Defaults to `[45, 90]`.
-- `coderabbitFindingsFile`: optional absolute path to an append-only JSONL
-  file recording every CodeRabbit finding (timestamp, task, severity, file,
-  comment). Point it at a sidecar file to accumulate findings across runs and
-  tune deterministic lint rules from the recurring classes.
+- `hostReviewBetweenWorkItems`: when `true` (the default) and
+  `perWorkItemBuild` is on, the host runs a review after each committed work
+  item — using Dakar by default or CodeRabbit when selected — rather than only
+  once after the whole implementation stage. CodeRabbit additionally requires
+  `coderabbitHostReview`; Dakar always runs host-side and ignores that legacy
+  flag.
+  Blocking findings drive a bounded fix loop; terminal deferral or errors halt
+  the task for assessment instead of continuing unreviewed. Set `false` to
+  review only once at the end of the implementation stage.
+- `hostReviewAttempts`: total host-review attempts when Dakar defers or
+  CodeRabbit rate limits the review. Defaults to `3` and is clamped to `1–10`.
+- `hostReviewBackoffMinutes`: `[low, high]` range for the deterministic
+  backoff wait after a Dakar deferral or CodeRabbit rate limit. Defaults to
+  `[45, 90]`; each endpoint is clamped to `1–1440` minutes, with `high` never
+  below `low`.
+- `hostReviewFindingsFile`: optional absolute path to an append-only JSONL file
+  recording every host-review finding (timestamp, task, severity, file,
+  comment). The historical `coderabbitBetweenWorkItems`, `coderabbitAttempts`,
+  `coderabbitBackoffMinutes`, and `coderabbitFindingsFile` names remain
+  accepted as deprecated aliases for the corresponding canonical fields.
 - `writeProbeEffort`: reasoning effort for the once-per-run write-preflight
   probe (write an exact token to an exact path — no reasoning). Defaults to
   `minimal`. The probe keeps the plan/build ADAPTER but never inherits
@@ -619,7 +651,7 @@ Example `args.json`:
   "maxPlanningParallel": 4,
   "maxBuildParallel": 4,
   "maxTasks": 12,
-  "coderabbitFindingsFile": "/home/example/Projects/example-project.workshop/df12-build-run/coderabbit-findings.jsonl",
+  "hostReviewFindingsFile": "/home/example/Projects/example-project.workshop/df12-build-run/host-review-findings.jsonl",
   "buildAdapter": "codex-medium",
   "buildModel": "gpt-5.6-terra",
   "planAdapter": "claude",
@@ -637,9 +669,22 @@ Example `args.json`:
 }
 ```
 
+## Default Dakar host review
+
+Dakar is the default host reviewer and always runs host-side. In each
+dual-review round, the host runs the deterministic commit gates, then CodeScene,
+then Dakar, and only then dispatches the reviewer agents. Set `reviewTool` to
+`coderabbit` to select the retained CodeRabbit adapter; its CLI-specific
+behaviour is documented next.
+
 ## Host-run CodeRabbit review
 
-By default the workflow host — not the task agents — runs
+> **Applies to `reviewTool: 'coderabbit'` only.** The host review tool defaults
+> to `reviewTool: 'dakar'`; this section describes the retained CodeRabbit
+> mode.
+
+With `coderabbitHostReview` enabled (the default within CodeRabbit mode), the
+workflow host — not the task agents — runs
 `coderabbit review --agent --type committed` against each task branch: once per
 dual-review round (alongside the code and expert reviewers) and once per
 addendum implementation. Because only committed changes are reviewed, the
@@ -649,17 +694,22 @@ reviewers' blocking items and drive the ordinary fix rounds, while lower
 severities are captured without gating integration.
 
 Rate limits are absorbed by the host: a rate-limited review waits a
-deterministic 45–90 minutes (`coderabbitBackoffMinutes`) and retries, up to
-`coderabbitAttempts` total attempts, costing wall-clock but zero agent tokens.
+deterministic 45–90 minutes (`hostReviewBackoffMinutes`) and retries, up to
+`hostReviewAttempts` total attempts, costing wall-clock but zero agent tokens.
 A rate limit that outlives every attempt — or a CLI fault — defers the review
 with a documented `openIssues` entry on the task result instead of blocking
 integration; the dual reviewers remain decisive. A CodeRabbit authentication
 failure halts the task as `fatal-auth`.
 
-The run result's `coderabbit` object reports the effective configuration and
-bounded counters (reviews run, findings by severity, rate-limited runs,
-deferred reviews). When `coderabbitFindingsFile` is set, every finding is also
-appended as JSONL for cross-run linter tuning.
+The run result's tool-neutral `hostReview` object reports the selected reviewer,
+effective configuration, and bounded counters for runs, findings, retries,
+deferred outcomes, timeouts, errors, authentication failures, and sink
+failures. Terminal logs record the bounded reviewer and review label, terminal
+attempt count, elapsed milliseconds, outcome, and error category; host-side
+timeouts are classified from process metadata. When `hostReviewFindingsFile`
+is set, every finding is appended through the serialized JSONL sink. Sink
+failures are reported through `hostReview` and do not fail the task. The
+historical CodeRabbit type and runner names remain compatibility aliases only.
 
 ## Per-work-item builds
 
