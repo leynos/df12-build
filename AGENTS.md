@@ -205,7 +205,8 @@ rules:
   validation, zero tolerance) enforces this and a JSDoc block on included
   reflections of the kinds listed in `requiredToBeDocumented`; JSON Schema
   constants are tagged `@internal` so their `description` fields remain the
-  per-field documentation.
+  per-field documentation. Every TypeDoc warning is an error there, so use
+  only block tags TypeDoc knows: a `/** @file … */` header fails the gate.
 
 ## Testing
 

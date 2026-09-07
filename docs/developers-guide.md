@@ -690,10 +690,11 @@ expands the configured `src/workflows/df12-build-odw/` entry point. The
 `typedoc.json` configuration excludes declaration files, `meta.js`, and
 internal, private, and protected reflections. Every included module must open
 with a `/** … @module */` block, and included reflections of the kinds listed
-in `requiredToBeDocumented` must carry a JSDoc block; validation warnings are
-errors, the run emits no documentation artefacts, and a failure prints the
-qualified name and location of each undocumented declaration. JSON Schema
-constants are tagged `@internal`
+in `requiredToBeDocumented` must carry a JSDoc block; the run emits no
+documentation artefacts, and a failure prints the qualified name and location
+of each undocumented declaration. Alongside `notDocumented`, the `invalidLink`
+and `invalidPath` validations reject a `{@link …}` or `@document` reference
+that does not resolve. JSON Schema constants are tagged `@internal`
 (their `description` fields are the per-field documentation), so TypeDoc does
 not recurse into the schema literals:
 
@@ -701,14 +702,24 @@ not recurse into the schema literals:
 make docs-check
 ```
 
+The configuration sets **both** promotion flags, and it needs both.
+`treatValidationWarningsAsErrors` promotes the findings of the `validation`
+options only. Every other warning TypeDoc emits — most importantly an unknown
+block tag, such as a `/** @file … */` header TypeDoc does not know — is
+reported on standard output while the process still exits 0, so the gate looks
+green over a comment TypeDoc could not understand. `treatWarningsAsErrors`
+promotes those. Neither flag subsumes the other: drop the first and an
+undocumented export passes, drop the second and an unknown block tag passes.
+`tests/modules/typedoc-gate.test.ts` holds a behavioural case for each,
+running TypeDoc over a throwaway fixture with this same `typedoc.json`.
+
 `make markdownlint` is the separate Markdown gate. It runs the pinned
 `markdownlint-cli2` configuration over maintained Markdown and then refreshes
 the shared en-GB Oxford spelling configuration and checks prose with the
 pinned `typos` release. Keep prose and list items within 80 columns, code
 blocks within 120 columns, and leave tables and headings unwrapped. The
 TypeDoc gate has no percentage-coverage threshold: every included reflection
-required by `typedoc.json` must be documented, and any validation warning is an
-error.
+required by `typedoc.json` must be documented, and any warning is an error.
 
 Do not use a live `odw run` as a routine gate. Run it only when the task
 explicitly asks for execution or smoke testing, because it can spawn agents and
