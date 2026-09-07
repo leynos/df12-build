@@ -13,8 +13,13 @@
  *   site: a declaration and an entry-point module).
  * - `validation.invalidLink: false` makes the broken-link case pass, so
  *   exactly that one fails.
- * - removing `treatWarningsAsErrors` makes the unknown-block-tag case pass, so
- *   exactly that one fails. TypeDoc exits 0 while still printing the warning,
+ * - `validation.invalidPath: false` makes the unresolvable-relative-path case
+ *   pass, so exactly that one fails. That validation covers relative links in
+ *   comments; an unreadable `@document` target is a plain warning, so the
+ *   `@document` case below depends on `treatWarningsAsErrors` instead.
+ * - removing `treatWarningsAsErrors` makes the unknown-block-tag and
+ *   unresolvable-`@document` cases pass, so both fail. TypeDoc exits 0 for an
+ *   unknown block tag while still printing the warning,
  *   which is the hole this configuration closes:
  *   `treatValidationWarningsAsErrors` promotes validation findings only, so it
  *   never covers an unknown block tag.
@@ -42,6 +47,20 @@ interface TypeDocRun {
   entries: string[]
 }
 
+/**
+ * Run TypeDoc over a throwaway fixture tree using the repository's own
+ * `typedoc.json`.
+ *
+ * The fixture directory holds the given `source` as `src/fixture.ts` plus a
+ * documented `src/support.ts`, so a case can fail on the fixture alone rather
+ * than on an empty project. Only the entry point, the tsconfig and the project
+ * name are overridden; every validation and promotion setting comes from the
+ * committed configuration, which is what makes these cases sensitive to it.
+ *
+ * @param source TypeScript source written to the fixture module.
+ * @returns The exit status, combined output, and the directory's file list
+ * after the run, which proves the gate emitted no documentation artefacts.
+ */
 function runTypeDocFixture(source: string): TypeDocRun {
   const dir = mkdtempSync(path.join(tmpdir(), 'df12-typedoc-'))
   try {
@@ -198,6 +217,34 @@ describe('zero-tolerance TypeDoc gate', () => {
     expect(result.exitedDueToTimeout).toBe(false)
     expect(result.status).not.toBe(0)
     expect(result.output).toMatch(/Failed to resolve link to "nonExistentSymbol"/i)
+  }, TYPEDOC_TEST_TIMEOUT_MS)
+
+  test('an unresolvable relative path in a comment fails the gate', () => {
+    const source = DOCUMENTED_MODULE.replace(
+      '/** Return a stable fixture value. */',
+      '/** Return a stable fixture value. See [the note](./missing-note.md). */',
+    )
+    const result = runTypeDocFixture(source)
+
+    expect(result.exitedDueToTimeout).toBe(false)
+    expect(result.status).not.toBe(0)
+    expect(result.output).toMatch(
+      /The relative path \.\/missing-note\.md is not a file/i,
+    )
+  }, TYPEDOC_TEST_TIMEOUT_MS)
+
+  test('an unreadable @document target fails the gate', () => {
+    const source = DOCUMENTED_MODULE.replace(
+      ' * @module\n',
+      ' * @document ./missing-document.md\n * @module\n',
+    )
+    const result = runTypeDocFixture(source)
+
+    expect(result.exitedDueToTimeout).toBe(false)
+    expect(result.status).not.toBe(0)
+    expect(result.output).toMatch(
+      /Failed to read file \.\/missing-document\.md when processing @document tag/i,
+    )
   }, TYPEDOC_TEST_TIMEOUT_MS)
 
   test('an unknown block tag fails the gate rather than warning silently', () => {

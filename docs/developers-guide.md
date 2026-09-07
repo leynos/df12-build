@@ -693,8 +693,9 @@ with a `/** … @module */` block, and included reflections of the kinds listed
 in `requiredToBeDocumented` must carry a JSDoc block; the run emits no
 documentation artefacts, and a failure prints the qualified name and location
 of each undocumented declaration. Alongside `notDocumented`, the `invalidLink`
-and `invalidPath` validations reject a `{@link …}` or `@document` reference
-that does not resolve. JSON Schema constants are tagged `@internal`
+validation rejects a `{@link …}` that names no known symbol and `invalidPath`
+rejects a relative link in a comment that names no file. JSON Schema constants
+are tagged `@internal`
 (their `description` fields are the per-field documentation), so TypeDoc does
 not recurse into the schema literals:
 
@@ -705,11 +706,12 @@ make docs-check
 The configuration sets **both** promotion flags, and it needs both.
 `treatValidationWarningsAsErrors` promotes the findings of the `validation`
 options only. Every other warning TypeDoc emits — most importantly an unknown
-block tag, such as a `/** @file … */` header TypeDoc does not know — is
-reported on standard output while the process still exits 0, so the gate looks
-green over a comment TypeDoc could not understand. `treatWarningsAsErrors`
-promotes those. Neither flag subsumes the other: drop the first and an
-undocumented export passes, drop the second and an unknown block tag passes.
+block tag, such as a `/** @file … */` header TypeDoc does not know, or an
+`@document` target that cannot be read — is reported on standard output while
+the process still exits 0, so the gate looks green over a comment TypeDoc could
+not understand. `treatWarningsAsErrors` promotes those. Neither flag subsumes
+the other: drop the first and an undocumented export passes, drop the second
+and an unknown block tag passes.
 `tests/modules/typedoc-gate.test.ts` holds a behavioural case for each,
 running TypeDoc over a throwaway fixture with this same `typedoc.json`.
 
