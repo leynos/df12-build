@@ -715,6 +715,17 @@ and an unknown block tag passes.
 `tests/modules/typedoc-gate.test.ts` holds a behavioural case for each,
 running TypeDoc over a throwaway fixture with this same `typedoc.json`.
 
+Two suites hold the rest of the chain together.
+`tests/modules/typedoc-gate.test.ts` also asserts the `docs-check` recipe is
+exactly its command, with no `-` prefix to ignore the exit status.
+`tests/modules/ci-workflow-gate.test.ts` asserts CI still invokes `make all`:
+it parses the workflow rather than searching its text, requires a step whose
+whole run value is the command, and requires neither that step nor its job to
+carry a condition. A condition is how a gate is disarmed without the command
+changing, so the assertion is that the `if` key is absent rather than that it
+holds any particular value. The same suite pins the strict Dafny step, which is
+what stops `make all`'s lenient verification quietly skipping in CI.
+
 `make markdownlint` is the separate Markdown gate. It runs the pinned
 `markdownlint-cli2` configuration over maintained Markdown and then refreshes
 the shared en-GB Oxford spelling configuration and checks prose with the
