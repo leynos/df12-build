@@ -36,7 +36,12 @@ The repository contains workflow scripts, skill documentation, docs, operator
 scripts, focused test suites, a project roadmap with ExecPlans, and a small
 validation `Makefile`. Development dependencies (`esbuild`, `fast-check`,
 `@aboviq/bun-test-cucumber`, `ajv`, `lemmascript`, `typescript`, `@types/bun`,
-`markdownlint-cli2`, and `typedoc`) are managed with `bun` via `package.json`.
+`markdownlint-cli2`, `typedoc`, and `yaml`) are managed with `bun` via
+`package.json`. `yaml` is at `^2.9.0` and parses the CI workflow in
+`tests/modules/ci-workflow-gate.test.ts`, which runs under the module test
+gates; that contract must parse the workflow rather than search its text, so
+the parser is a direct dependency rather than one reached through another
+package's tree.
 
 Relevant paths:
 
@@ -690,10 +695,12 @@ expands the configured `src/workflows/df12-build-odw/` entry point. The
 `typedoc.json` configuration excludes declaration files, `meta.js`, and
 internal, private, and protected reflections. Every included module must open
 with a `/** … @module */` block, and included reflections of the kinds listed
-in `requiredToBeDocumented` must carry a JSDoc block; validation warnings are
-errors, the run emits no documentation artefacts, and a failure prints the
-qualified name and location of each undocumented declaration. JSON Schema
-constants are tagged `@internal`
+in `requiredToBeDocumented` must carry a JSDoc block; the run emits no
+documentation artefacts, and a failure prints the qualified name and location
+of each undocumented declaration. Alongside `notDocumented`, the `invalidLink`
+validation rejects a `{@link …}` that names no known symbol and `invalidPath`
+rejects a relative link in a comment that names no file. JSON Schema constants
+are tagged `@internal`
 (their `description` fields are the per-field documentation), so TypeDoc does
 not recurse into the schema literals:
 
@@ -701,14 +708,36 @@ not recurse into the schema literals:
 make docs-check
 ```
 
+The configuration sets **both** promotion flags, and it needs both.
+`treatValidationWarningsAsErrors` promotes the findings of the `validation`
+options only. Every other warning TypeDoc emits — most importantly an unknown
+block tag, such as a `/** @file … */` header TypeDoc does not know, or an
+`@document` target that cannot be read — is reported on standard output while
+the process still exits 0, so the gate looks green over a comment TypeDoc could
+not understand. `treatWarningsAsErrors` promotes those. Neither flag subsumes
+the other: drop the first and an undocumented export passes, drop the second
+and an unknown block tag passes.
+`tests/modules/typedoc-gate.test.ts` holds a behavioural case for each,
+running TypeDoc over a throwaway fixture with this same `typedoc.json`.
+
+Two suites hold the rest of the chain together.
+`tests/modules/typedoc-gate.test.ts` also asserts the `docs-check` recipe is
+exactly its command, with no `-` prefix to ignore the exit status.
+`tests/modules/ci-workflow-gate.test.ts` asserts CI still invokes `make all`:
+it parses the workflow rather than searching its text, requires a step whose
+whole run value is the command, and requires neither that step nor its job to
+carry a condition. A condition is how a gate is disarmed without the command
+changing, so the assertion is that the `if` key is absent rather than that it
+holds any particular value. The same suite pins the strict Dafny step, which is
+what stops `make all`'s lenient verification quietly skipping in CI.
+
 `make markdownlint` is the separate Markdown gate. It runs the pinned
 `markdownlint-cli2` configuration over maintained Markdown and then refreshes
 the shared en-GB Oxford spelling configuration and checks prose with the
 pinned `typos` release. Keep prose and list items within 80 columns, code
 blocks within 120 columns, and leave tables and headings unwrapped. The
 TypeDoc gate has no percentage-coverage threshold: every included reflection
-required by `typedoc.json` must be documented, and any validation warning is an
-error.
+required by `typedoc.json` must be documented, and any warning is an error.
 
 Do not use a live `odw run` as a routine gate. Run it only when the task
 explicitly asks for execution or smoke testing, because it can spawn agents and

@@ -205,7 +205,8 @@ rules:
   validation, zero tolerance) enforces this and a JSDoc block on included
   reflections of the kinds listed in `requiredToBeDocumented`; JSON Schema
   constants are tagged `@internal` so their `description` fields remain the
-  per-field documentation.
+  per-field documentation. Every TypeDoc warning is an error there, so use
+  only block tags TypeDoc knows: a `/** @file … */` header fails the gate.
 
 ## Testing
 
@@ -235,7 +236,7 @@ monograph):
 
 - The devDependencies (`esbuild`, `fast-check`, `lemmascript`,
   `markdownlint-cli2`, `typedoc`, `@aboviq/bun-test-cucumber`, `typescript`,
-  `@types/bun`) are **build and test tooling only** — the shipped workflow
+  `@types/bun`, `yaml`) are **build and test tooling only** — the shipped workflow
   source has no runtime dependencies (the dialect forbids runtime imports).
 - Use caret ranges (`^x.y.z`) for direct dependencies unless a narrower range is
   justified. Commit the lockfile and rebuild it deliberately on major tool
