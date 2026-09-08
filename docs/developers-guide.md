@@ -36,7 +36,12 @@ The repository contains workflow scripts, skill documentation, docs, operator
 scripts, focused test suites, a project roadmap with ExecPlans, and a small
 validation `Makefile`. Development dependencies (`esbuild`, `fast-check`,
 `@aboviq/bun-test-cucumber`, `ajv`, `lemmascript`, `typescript`, `@types/bun`,
-`markdownlint-cli2`, and `typedoc`) are managed with `bun` via `package.json`.
+`markdownlint-cli2`, `typedoc`, and `yaml`) are managed with `bun` via
+`package.json`. `yaml` is at `^2.9.0` and parses the CI workflow in
+`tests/modules/ci-workflow-gate.test.ts`, which runs under the module test
+gates; that contract must parse the workflow rather than search its text, so
+the parser is a direct dependency rather than one reached through another
+package's tree.
 
 Relevant paths:
 
