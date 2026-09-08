@@ -21,6 +21,9 @@
  *   must be the command rather than merely contain it.
  * - Changing the command, removing the job, or removing the `pull_request`
  *   trigger each break a separate assertion.
+ * - Narrowing the trigger to `pull_request: { branches: [...] }` keeps the key
+ *   while excluding the pull requests the repository opens, so the trigger
+ *   case requires the unfiltered form rather than the key's presence.
  *
  * @module
  */
@@ -61,9 +64,17 @@ function stepsRunning(command: string): { if?: unknown, run?: unknown }[] {
 }
 
 describe('CI runs the commit gates', () => {
-  test('the workflow triggers on pull requests', () => {
+  test('the workflow triggers on every pull request, unfiltered', () => {
     expect(WORKFLOW.on, `${WORKFLOW_PATH} has no trigger block`).toBeDefined()
     expect(Object.keys(WORKFLOW.on ?? {})).toContain('pull_request')
+    // The key alone is not enough: `pull_request: { branches: [...] }` keeps
+    // the key while excluding every pull request the repository actually
+    // opens. A bare `pull_request:` parses to null, which is the unfiltered
+    // form, so requiring null rejects any filter added later.
+    expect(
+      WORKFLOW.on?.pull_request,
+      'the pull_request trigger must stay unfiltered so no pull request escapes the gate',
+    ).toBeNull()
   })
 
   test('the gate job exists and carries no condition', () => {
