@@ -5,8 +5,10 @@ MARKDOWN_FILES := $(shell find . \
 	-path './image_out' -prune -o \
 	-name '*.md' -print | sort)
 WORKFLOW_FILES := workflows/df12-build-odw.js workflows/df12-build.js
-TYPOS_VERSION ?= 1.48.0
-TYPOS := uv tool run typos@$(TYPOS_VERSION)
+TYPOS_CONFIG_BUILDER_VERSION ?= v0.1.1
+TYPOS_CONFIG_BUILDER = uv tool run --from \
+	"git+https://github.com/leynos/typos-config-builder.git@$(TYPOS_CONFIG_BUILDER_VERSION)" \
+	typos-config-builder
 .PHONY: all clean fmt check-fmt lint typecheck markdownlint nixie spelling test test-modules test-workflow verify-modules verify-modules-strict workflow-parse workflow-build workflow-freshness docs-check
 
 MDLINT ?= $(shell command -v markdownlint-cli2 2>/dev/null || printf '%s' "$$HOME/.bun/bin/markdownlint-cli2")
@@ -57,9 +59,7 @@ markdownlint:
 	+$(MAKE) spelling
 
 spelling:
-	@uv run scripts/generate_typos_config.py
-	@printf '%s\0' $(MARKDOWN_FILES) | \
-		xargs -0 -r $(TYPOS) --config typos.toml --force-exclude
+	$(TYPOS_CONFIG_BUILDER) gate --repository .
 
 nixie:
 	nixie --renderer merman $(MARKDOWN_FILES)

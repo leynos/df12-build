@@ -634,10 +634,13 @@ make all
 ```
 
 `make all` reaches `make spelling` through the Markdown gate. The spelling
-target refreshes the shared en-GB-oxendict base when newer, regenerates
-`typos.toml`, and checks maintained prose with the pinned `typos` release. Put
-narrow repository-only exceptions in `typos.local.toml`; never edit the
-generated configuration by hand.
+target runs the shared `typos-config-builder` gate, which regenerates
+`typos.toml` from the live shared en-GB-oxendict dictionary and the
+`typos.local.toml` overlay on every run before checking maintained prose. A
+word added to the shared dictionary therefore needs no change here, and
+`typos.toml` must never be drift checked in continuous integration. Put narrow
+repository-only exceptions in `typos.local.toml`; never edit the generated
+configuration by hand.
 
 Run the module suites (bun) or the whole-workflow suites (node, against a fresh
 artefact) separately when iterating:
@@ -726,12 +729,13 @@ holds any particular value. The same suite pins the strict Dafny step, which is
 what stops `make all`'s lenient verification quietly skipping in CI.
 
 `make markdownlint` is the separate Markdown gate. It runs the pinned
-`markdownlint-cli2` configuration over maintained Markdown and then refreshes
-the shared en-GB Oxford spelling configuration and checks prose with the pinned
-`typos` release. Keep prose and list items within 80 columns, code blocks
-within 120 columns, and leave tables and headings unwrapped. The TypeDoc gate
-has no percentage-coverage threshold: every included reflection required by
-`typedoc.json` must be documented, and any warning is an error.
+`markdownlint-cli2` configuration over maintained Markdown and then runs the
+en-GB Oxford spelling gate, which regenerates the configuration from the live
+shared dictionary before checking prose. Keep prose and list items within 80
+columns, code blocks within 120 columns, and leave tables and headings
+unwrapped. The TypeDoc gate has no percentage-coverage threshold: every
+included reflection required by `typedoc.json` must be documented, and any
+warning is an error.
 
 Do not use a live `odw run` as a routine gate. Run it only when the task
 explicitly asks for execution or smoke testing, because it can spawn agents and

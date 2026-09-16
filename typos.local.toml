@@ -8,13 +8,15 @@ stems = []
 [words]
 # Keep US spellings that are part of external APIs or established schema and
 # command identifiers.
-accepted = ["Artifact", "Flavored", "analyzing", "artifact", "color"]
+accepted = ["Artifact", "analyzing", "artifact", "color"]
 
 [words.corrections]
 
 [patterns]
 # Preserve exact API names, enum values, and function identifiers in inline
-# code while keeping Oxford spelling enforced in prose.
+# code while keeping Oxford spelling enforced in prose. Inline code spans were
+# masked by the previous dictionary snapshot; kept until the shared dictionary
+# rules on it.
 ignore = ["`[^`\\n]+`"]
 
 [files]

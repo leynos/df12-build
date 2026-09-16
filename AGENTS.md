@@ -155,10 +155,11 @@ passing every gate.
 
 - Validate with `make markdownlint` (or `bunx markdownlint-cli2 "**/*.md"`) and
   validate Mermaid diagrams with `make nixie`.
-- `make markdownlint` also refreshes the shared en-GB-oxendict base,
-  regenerates `typos.toml`, and checks maintained prose with the pinned `typos`
-  release. Put narrow repository-only exceptions in `typos.local.toml`; never
-  edit the generated configuration by hand.
+- `make markdownlint` also runs `make spelling`, the shared en-GB-oxendict
+  gate. It regenerates `typos.toml` from the live shared dictionary and the
+  `typos.local.toml` overlay on every run, so `typos.toml` is never drift
+  checked in continuous integration. Put narrow repository-only exceptions in
+  `typos.local.toml`; never edit the generated configuration by hand.
 - Wrap prose and bullet points at 80 columns; wrap code blocks at 120 columns;
   do not wrap tables or headings.
 - Use dashes (`-`) for list bullets and GitHub-flavoured footnotes (`[^1]`) for

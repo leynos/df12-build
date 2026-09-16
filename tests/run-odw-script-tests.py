@@ -25,10 +25,8 @@ import contextlib
 import importlib.util
 import io
 import json
-import re
 import sys
 import tempfile
-import tomllib
 import types
 import unittest
 from collections.abc import Mapping
@@ -54,7 +52,6 @@ def load_script(module_name: str, filename: str) -> types.ModuleType:
 
 list_runs = load_script("list_odw_runs", "odw-list-runs")
 odw_watch = load_script("odw_watch", "odw-watch")
-typos_config = load_script("generate_typos_config", "generate_typos_config.py")
 
 
 def make_run_dir(
@@ -120,58 +117,6 @@ class TimestampTests(unittest.TestCase):
         self.assertEqual(list_runs.display_timestamp(None), "")
         self.assertEqual(list_runs.display_timestamp(0.0), "1970-01-01T00:00:00Z")
         self.assertEqual(list_runs.display_timestamp("raw"), "raw")
-
-
-class TyposConfigTests(unittest.TestCase):
-    def test_inline_code_pattern_uses_typos_extend_ignore_re(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repository = Path(tmp)
-            (repository / ".typos-oxendict-base.toml").write_text(
-                """schema = 1
-
-[oxford]
-stems = []
-
-[words]
-accepted = []
-
-[words.corrections]
-
-[patterns]
-ignore = []
-
-[files]
-exclude = []
-""",
-                encoding="utf-8",
-            )
-            (repository / "typos.local.toml").write_text(
-                """schema = 1
-
-[oxford]
-stems = []
-
-[words]
-accepted = []
-
-[words.corrections]
-
-[patterns]
-ignore = ["`[^`\\\\n]+`"]
-
-[files]
-exclude = []
-""",
-                encoding="utf-8",
-            )
-            rendered = typos_config.render_config(repository)
-
-        config = tomllib.loads(rendered)
-        patterns = config["default"]["extend-ignore-re"]
-        self.assertEqual(patterns, [r"`[^`\n]+`"])
-        remaining = re.sub(patterns[0], "", "Inline `apiToken` leaves typoing prose")
-        self.assertNotIn("apiToken", remaining)
-        self.assertIn("typoing prose", remaining)
 
 
 class FilterAndTableTests(unittest.TestCase):

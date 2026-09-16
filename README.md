@@ -43,9 +43,10 @@ Verify the checked-in workflow assets before launching a workshop:
 make all
 ```
 
-The Markdown gate refreshes the shared en-GB-oxendict dictionary when newer,
-regenerates `typos.toml`, and checks maintained prose with a pinned `typos`
-release. A valid committed config remains usable without network access.
+The Markdown gate runs `make spelling`, which regenerates `typos.toml` from the
+live shared en-GB-oxendict dictionary and the `typos.local.toml` overlay on
+every run, then checks maintained prose. Because the dictionary is live,
+`typos.toml` is never drift checked in continuous integration.
 
 ### Basic usage
 
