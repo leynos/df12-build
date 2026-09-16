@@ -215,16 +215,16 @@ outside the project Git worktree, so they never enter a diff, trip
   durable artefacts there: `events.jsonl` (an ordered stream with
   `agent_started`/`agent_finished` per `agent()` call, tagged by adapter,
   label, and phase), `result.json` (the final return, including every
-  `reviewRounds`, `assessments`, the host-gate result, the CodeScene result, and
-  the host-review summary), and
-  `error.json`. This is entirely ODW's domain — no workflow involvement.
-  Regenerate the value per run, or use a shared `~/.odw/runs` for a single
-  pool; the sidecar keeps each run's logs beside its config and notes.
+  `reviewRounds`, `assessments`, the host-gate result, the CodeScene result,
+  and the host-review summary), and `error.json`. This is entirely ODW's domain
+  — no workflow involvement. Regenerate the value per run, or use a shared
+  `~/.odw/runs` for a single pool; the sidecar keeps each run's logs beside its
+  config and notes.
 - **Review findings** — set the canonical `hostReviewFindingsFile` field (in
   `args.json`) to a sidecar JSONL path, e.g.
   `"$SIDECAR/coderabbit-findings.jsonl"`. Only that example filename is
-  historical; the field and sink apply to the selected host reviewer. Every parsed
-  finding (timestamp, task label, severity, file, comment, codegen
+  historical; the field and sink apply to the selected host reviewer. Every
+  parsed finding (timestamp, task label, severity, file, comment, codegen
   instructions, suggestion count) is appended as a best-effort serialized JSONL
   write: a bad path or full disk degrades logging with a warning, reports the
   sink failure through `hostReview`, and never fails a task. In the default
@@ -383,8 +383,8 @@ belong to the same phase, and be in ascending order. A range may contain at
 most 1,000 ids. In `Requires` parsing, malformed, cross-phase, reversed,
 unsafe-integer or oversized ranges are not expanded and do not raise an error;
 any dotted endpoints remain ordinary individual references. For affected
-roadmaps, split ranges into in-phase ascending ranges of no more than 1,000
-ids and correct malformed ids.
+roadmaps, split ranges into in-phase ascending ranges of no more than 1,000 ids
+and correct malformed ids.
 
 The deterministic selector treats a task as unblocked when all of these are
 true:
@@ -472,8 +472,8 @@ Common arguments:
   `dakar-review`.
 - `reviewTimeoutSeconds`: host-side timeout for each Dakar or CodeRabbit review
   process and, in Dakar mode, the value passed as Dakar's `--timeout`. Defaults
-  to `3600` and is clamped to 60–7200 seconds. The former
-  `dakarTimeoutSeconds` name remains an accepted input alias.
+  to `3600` and is clamped to 60–7200 seconds. The former `dakarTimeoutSeconds`
+  name remains an accepted input alias.
 - `dakarBudgetGbp`: optional Dakar admission budget, clamped to 0–10. Values
   above `0` are forwarded as `--budget-gbp`; `0` defers to Dakar's own hard
   budget.
@@ -531,9 +531,9 @@ Common arguments:
   drives a bounded fix round; the build agent clears it by refactoring or, only
   where refactoring would be deleterious, suppresses the specific smell with a
   justified `@codescene(disable:"...")` comment. The check skips gracefully
-  only when its binary is absent from `PATH`, like `make verify-modules` without
-  Dafny; an availability-probe fault is reported as a failed check instead of
-  being treated as an absent binary. Set `false` to disable it.
+  only when its binary is absent from `PATH`, like `make verify-modules`
+  without Dafny; an availability-probe fault is reported as a failed check
+  instead of being treated as an absent binary. Set `false` to disable it.
 - `csCheckCommand`: the command the CodeScene check runs in the worktree.
   Defaults to `cs-check-changed` (an operator-provided wrapper); override it
   with the exact invocation, e.g. `cs check --changed --base main`.
@@ -542,9 +542,8 @@ Common arguments:
   item — using Dakar by default or CodeRabbit when selected — rather than only
   once after the whole implementation stage. CodeRabbit additionally requires
   `coderabbitHostReview`; Dakar always runs host-side and ignores that legacy
-  flag.
-  Blocking findings drive a bounded fix loop; terminal deferral or errors halt
-  the task for assessment instead of continuing unreviewed. Set `false` to
+  flag. Blocking findings drive a bounded fix loop; terminal deferral or errors
+  halt the task for assessment instead of continuing unreviewed. Set `false` to
   review only once at the end of the implementation stage.
 - `hostReviewAttempts`: total host-review attempts when Dakar defers or
   CodeRabbit rate limits the review. Defaults to `3` and is clamped to `1–10`.
@@ -672,10 +671,10 @@ Example `args.json`:
 ## Default Dakar host review
 
 Dakar is the default host reviewer and always runs host-side. In each
-dual-review round, the host runs the deterministic commit gates, then CodeScene,
-then Dakar, and only then dispatches the reviewer agents. Set `reviewTool` to
-`coderabbit` to select the retained CodeRabbit adapter; its CLI-specific
-behaviour is documented next.
+dual-review round, the host runs the deterministic commit gates, then
+CodeScene, then Dakar, and only then dispatches the reviewer agents. Set
+`reviewTool` to `coderabbit` to select the retained CodeRabbit adapter; its
+CLI-specific behaviour is documented next.
 
 ## Host-run CodeRabbit review
 
@@ -701,15 +700,15 @@ with a documented `openIssues` entry on the task result instead of blocking
 integration; the dual reviewers remain decisive. A CodeRabbit authentication
 failure halts the task as `fatal-auth`.
 
-The run result's tool-neutral `hostReview` object reports the selected reviewer,
-effective configuration, and bounded counters for runs, findings, retries,
-deferred outcomes, timeouts, errors, authentication failures, and sink
+The run result's tool-neutral `hostReview` object reports the selected
+reviewer, effective configuration, and bounded counters for runs, findings,
+retries, deferred outcomes, timeouts, errors, authentication failures, and sink
 failures. Terminal logs record the bounded reviewer and review label, terminal
 attempt count, elapsed milliseconds, outcome, and error category; host-side
-timeouts are classified from process metadata. When `hostReviewFindingsFile`
-is set, every finding is appended through the serialized JSONL sink. Sink
-failures are reported through `hostReview` and do not fail the task. The
-historical CodeRabbit type and runner names remain compatibility aliases only.
+timeouts are classified from process metadata. When `hostReviewFindingsFile` is
+set, every finding is appended through the serialized JSONL sink. Sink failures
+are reported through `hostReview` and do not fail the task. The historical
+CodeRabbit type and runner names remain compatibility aliases only.
 
 ## Per-work-item builds
 
@@ -762,15 +761,15 @@ termination so a full log buffer cannot prevent the child from being reaped.
 The run result's top-level `codeScene` object durably records the effective
 setting and command, plus bounded counters: `runs` (checks executed, excluding
 availability skips), `failures` (executed checks that failed, including
-code-health findings),
-`probeFailures` (availability probes that failed for another infrastructure
-reason), and `skipped` (the configured binary was not found on `PATH`). The
-`command` value redacts values in leading `NAME=value` assignments, for example
-`CS_TOKEN=<redacted> cs-check-changed --base main`; the original command is
-still used for execution. If tokenization cannot safely disambiguate malformed
-or control-operator syntax, the displayed command is `<redacted command>`
-instead of being partially redacted. A missing binary is therefore a clean
-skip, whereas `probeFailures` is a surfaced fault and is not counted as a skip.
+code-health findings), `probeFailures` (availability probes that failed for
+another infrastructure reason), and `skipped` (the configured binary was not
+found on `PATH`). The `command` value redacts values in leading `NAME=value`
+assignments, for example `CS_TOKEN=<redacted> cs-check-changed --base main`;
+the original command is still used for execution. If tokenization cannot safely
+disambiguate malformed or control-operator syntax, the displayed command is
+`<redacted command>` instead of being partially redacted. A missing binary is
+therefore a clean skip, whereas `probeFailures` is a surfaced fault and is not
+counted as a skip.
 
 `env` options (for example, `-i`) are unsupported and fail closed at the
 availability probe without executing the configured command; a bare `env`
