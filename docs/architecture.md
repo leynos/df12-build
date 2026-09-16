@@ -185,18 +185,18 @@ The key argument groups are:
   `csCheck`/`csCheckCommand` (the CodeScene code-health gate that runs after
   the commit gates and before host review), `reviewTool` (default `dakar`;
   `coderabbit` selects the retained NDJSON reviewer; other values throw) with
-  `dakarCommand` (default `dakar-review`), `reviewTimeoutSeconds` (default 3600,
-  clamped 60–7200; `dakarTimeoutSeconds` remains an input alias), and
-  `dakarBudgetGbp` (default 0, clamped 0–10),
-  `coderabbitHostReview` (CodeRabbit host-review enablement) and the canonical
+  `dakarCommand` (default `dakar-review`), `reviewTimeoutSeconds` (default
+  3600, clamped 60–7200; `dakarTimeoutSeconds` remains an input alias), and
+  `dakarBudgetGbp` (default 0, clamped 0–10), `coderabbitHostReview`
+  (CodeRabbit host-review enablement) and the canonical
   `hostReviewBetweenWorkItems`/`hostReviewAttempts`/`hostReviewBackoffMinutes`/
   `hostReviewFindingsFile` (between-work-item gating, attempts, backoff, and
   findings capture). The historical `coderabbitBetweenWorkItems`,
   `coderabbitAttempts`, `coderabbitBackoffMinutes`, and
   `coderabbitFindingsFile` names remain deprecated compatibility aliases
-  (canonical values take precedence when both are supplied),
-  `perWorkItemBuild`/`maxWorkItemRounds` (the host-driven work-item build loop),
-  and `stageAttempts` (bounded in-run retry of stage agents on infrastructure
+  (canonical values take precedence when both are supplied), `perWorkItemBuild`/
+  `maxWorkItemRounds` (the host-driven work-item build loop), and
+  `stageAttempts` (bounded in-run retry of stage agents on infrastructure
   faults).
 - Recovery controls: `resumePartialBranches` (opt-in fresh-run discovery),
   `resumeMode` (`assess` reports only; `review` may resume eligible

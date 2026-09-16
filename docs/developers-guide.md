@@ -58,10 +58,9 @@ Relevant paths:
   and CodeScene), `host-review-contracts.ts` (neutral review contracts), and
   `host-review.ts` (neutral composition facade), `shell-command.ts` (a
   non-evaluating parser for configured shell-command words and assignment
-  spans), and `run-task.ts`, with
-  the injected ODW primitives declared in `odw-globals.d.ts`. TypeScript is
-  restricted to erasable syntax by compiler flags (`erasableSyntaxOnly`,
-  `verbatimModuleSyntax`).
+  spans), and `run-task.ts`, with the injected ODW primitives declared in
+  `odw-globals.d.ts`. TypeScript is restricted to erasable syntax by compiler
+  flags (`erasableSyntaxOnly`, `verbatimModuleSyntax`).
 - `workflows/df12-build-odw.js`: GENERATED ODW/Codex workflow artefact, built
   by `make workflow-build` (see `scripts/build-workflow.mjs`); this is the
   single file the sidecar copies and ODW loads.
@@ -311,52 +310,49 @@ expert-review, and integration prompts as a non-blocking section.
 The host review tool is selected by `reviewTool`, which defaults to `dakar`.
 Dakar requires the executable selected by `dakarCommand` (default
 `dakar-review`) and `pi` on `PATH` plus a non-empty `OPENAI_API_KEY`. It runs
-that configured executable
-against the committed diff, parses one JSON document, and maps its verdict onto
-the same review contract described below: clean, findings (`critical`/`major`
-blocking), a deferred backoff, or an error. Dakar uses an OpenAI-backed model,
-so its preflight checks `OPENAI_API_KEY`. Set `reviewTool: 'coderabbit'` to
-restore the NDJSON CodeRabbit path documented in
+that configured executable against the committed diff, parses one JSON
+document, and maps its verdict onto the same review contract described below:
+clean, findings (`critical`/`major` blocking), a deferred backoff, or an error.
+Dakar uses an OpenAI-backed model, so its preflight checks `OPENAI_API_KEY`. Set
+`reviewTool: 'coderabbit'` to restore the NDJSON CodeRabbit path documented in
 `docs/coderabbit-wire-contract.md`.
 
 The external `reviewTimeoutSeconds` setting is clamped to 60–7200 seconds;
 `dakarTimeoutSeconds` remains a backward-compatible input alias. The resolved
-value enters `HostReviewConfig` as `reviewTimeoutSeconds` and bounds
-the parent process for either reviewer and is also passed to Dakar as
-`--timeout`. `dakarBudgetGbp` is clamped to 0–10; positive values become
-`--budget-gbp`, while `0` lets Dakar apply its own hard admission budget. Each
-Dakar attempt creates a fresh `--state-root` below the host temporary directory
-and attempts to remove it in a `finally` block after execution and
-classification settle. Cleanup failures are bounded diagnostics and do not
-replace the review result. Retries therefore share no Dakar state when cleanup
-succeeds.
+value enters `HostReviewConfig` as `reviewTimeoutSeconds` and bounds the parent
+process for either reviewer and is also passed to Dakar as `--timeout`.
+`dakarBudgetGbp` is clamped to 0–10; positive values become `--budget-gbp`,
+while `0` lets Dakar apply its own hard admission budget. Each Dakar attempt
+creates a fresh `--state-root` below the host temporary directory and attempts
+to remove it in a `finally` block after execution and classification settle.
+Cleanup failures are bounded diagnostics and do not replace the review result.
+Retries therefore share no Dakar state when cleanup succeeds.
 
 The shared host-review settings use the canonical names
-`hostReviewBetweenWorkItems`, `hostReviewAttempts`,
-`hostReviewBackoffMinutes`, and `hostReviewFindingsFile`.
-`hostReviewBetweenWorkItems` defaults to `true`; `hostReviewAttempts` defaults
-to `3` and is clamped to `1–10`; and each `hostReviewBackoffMinutes` endpoint is
-clamped to `1–1440` minutes (the default range is `[45, 90]`, and the upper
-endpoint cannot be below the lower one). `hostReviewFindingsFile` is an
-optional append-only JSONL sink path. The historical
-`coderabbitBetweenWorkItems`, `coderabbitAttempts`,
+`hostReviewBetweenWorkItems`, `hostReviewAttempts`, `hostReviewBackoffMinutes`,
+and `hostReviewFindingsFile`. `hostReviewBetweenWorkItems` defaults to `true`;
+`hostReviewAttempts` defaults to `3` and is clamped to `1–10`; and each
+`hostReviewBackoffMinutes` endpoint is clamped to `1–1440` minutes (the default
+range is `[45, 90]`, and the upper endpoint cannot be below the lower one).
+`hostReviewFindingsFile` is an optional append-only JSONL sink path. The
+historical `coderabbitBetweenWorkItems`, `coderabbitAttempts`,
 `coderabbitBackoffMinutes`, and `coderabbitFindingsFile` names remain accepted
-as deprecated compatibility aliases; canonical values take precedence when
-both forms are supplied.
+as deprecated compatibility aliases; canonical values take precedence when both
+forms are supplied.
 
 `host-review.ts` exports `parseDakarDocument` and `classifyDakarReview` as the
 Dakar adapter boundary tested directly by the module suite. Both Dakar and
 CodeRabbit then produce the neutral `HostReviewResult` and `ReviewOutcome`
-contract consumed by `run-task.ts`. The parser searches
-backwards through stdout for the terminal JSON object and returns `null` when
-no valid object exists. The classifier validates the complete document before
-mapping it: unknown shapes, malformed findings, findings-free rejections, and
-clean verdicts carrying findings fail closed as review errors. Valid
+contract consumed by `run-task.ts`. The parser searches backwards through
+stdout for the terminal JSON object and returns `null` when no valid object
+exists. The classifier validates the complete document before mapping it:
+unknown shapes, malformed findings, findings-free rejections, and clean
+verdicts carrying findings fail closed as review errors. Valid
 `changes-requested` findings map onto the established blocking severity
 contract. The historical `CoderabbitReview`, `CoderabbitOutcome`,
-`CoderabbitFinding`, `runCoderabbitHostReview`, and
-`recordCoderabbitReview` exports remain thin compatibility aliases; workflow
-policy uses only the neutral names.
+`CoderabbitFinding`, `runCoderabbitHostReview`, and `recordCoderabbitReview`
+exports remain thin compatibility aliases; workflow policy uses only the
+neutral names.
 
 Every terminal host review emits one bounded structured log event containing
 the reviewer, review label, terminal attempt count, elapsed milliseconds,
@@ -374,8 +370,8 @@ committed diff, with a fresh temporary state root for each attempt, and uses
 `dakarBudgetGbp` for optional bounded admission spending. A deferred Dakar
 review is retried in host wall-clock without agent tokens; in a dual-review
 round it falls through to the reviewer agents, while a deferred between-item
-review halts the task for assessment. Blocking Dakar findings short-circuit
-the reviewer agents and enter the bounded fix loop.
+review halts the task for assessment. Blocking Dakar findings short-circuit the
+reviewer agents and enter the bounded fix loop.
 
 In default `reviewTool: 'dakar'` mode, each review point runs the deterministic
 commit gates, then CodeScene, then Dakar as the selected host reviewer, and
@@ -468,20 +464,19 @@ before termination so a backpressured pipe cannot prevent the child from being
 reaped.
 
 `runCodeSceneCheck` (`csCheck`, default on) is a SECOND deterministic gate, run
-after the commit gates and before the selected host reviewer at every gate point
-(each work item, each dual-review round, and the addendum lane). It runs
-`csCheckCommand`
-(default `cs-check-changed`, an operator-provided wrapper) through the same
-secure-log spawn path as the commit gates, on the committed changed files. A
-code-health regression short-circuits to a fix round — free gates before the
-selected host review and the token-spending reviewer agents — and the
-build/fix prompts carry the smell glossary plus the `@codescene(disable:"...")`
-suppression escape hatch (`CS_CHECK_GUIDANCE`). Like `make verify-modules`
-without Dafny, it skips gracefully (clean, not failed) when the binary is
-absent. Test loaders and the simulation driver force `hostCommitGates: false`
-(fixture repos have no `Makefile`); pipeline coverage uses a scripted fake gate
-command, and the streaming path is covered by a module test with output past
-the old buffer ceiling.
+after the commit gates and before the selected host reviewer at every gate
+point (each work item, each dual-review round, and the addendum lane). It runs
+`csCheckCommand` (default `cs-check-changed`, an operator-provided wrapper)
+through the same secure-log spawn path as the commit gates, on the committed
+changed files. A code-health regression short-circuits to a fix round — free
+gates before the selected host review and the token-spending reviewer agents —
+and the build/fix prompts carry the smell glossary plus the
+`@codescene(disable:"...")` suppression escape hatch (`CS_CHECK_GUIDANCE`). Like
+`make verify-modules` without Dafny, it skips gracefully (clean, not failed)
+when the binary is absent. Test loaders and the simulation driver force
+`hostCommitGates: false` (fixture repos have no `Makefile`); pipeline coverage
+uses a scripted fake gate command, and the streaming path is covered by a
+module test with output past the old buffer ceiling.
 
 The shared `shell-command.ts` abstraction tokenizes the limited POSIX quoting,
 escaping, and nested-substitution forms needed here without evaluating the
@@ -626,8 +621,8 @@ cargo install merman-cli --version '=0.7.0' --locked
 uv tool install --python 3.14 --managed-python 'nixie-cli==1.1.0'
 ```
 
-Continuous Integration (CI) pins those versions, Bun 1.3.14, and uv 0.11.19;
-see `.github/workflows/ci.yml` when updating local tooling.
+Continuous Integration (CI) pins those versions, Bun 1.3.14, and uv 0.11.19; see
+`.github/workflows/ci.yml` when updating local tooling.
 
 ## Validation
 
@@ -694,15 +689,14 @@ the zero-tolerance documentation gate: TypeDoc's `notDocumented` validation
 expands the configured `src/workflows/df12-build-odw/` entry point. The
 `typedoc.json` configuration excludes declaration files, `meta.js`, and
 internal, private, and protected reflections. Every included module must open
-with a `/** … @module */` block, and included reflections of the kinds listed
-in `requiredToBeDocumented` must carry a JSDoc block; the run emits no
+with a `/** … @module */` block, and included reflections of the kinds listed in
+`requiredToBeDocumented` must carry a JSDoc block; the run emits no
 documentation artefacts, and a failure prints the qualified name and location
 of each undocumented declaration. Alongside `notDocumented`, the `invalidLink`
 validation rejects a `{@link …}` that names no known symbol and `invalidPath`
 rejects a relative link in a comment that names no file. JSON Schema constants
-are tagged `@internal`
-(their `description` fields are the per-field documentation), so TypeDoc does
-not recurse into the schema literals:
+are tagged `@internal` (their `description` fields are the per-field
+documentation), so TypeDoc does not recurse into the schema literals:
 
 ```bash
 make docs-check
@@ -716,9 +710,9 @@ block tag, such as a `/** @file … */` header TypeDoc does not know, or an
 the process still exits 0, so the gate looks green over a comment TypeDoc could
 not understand. `treatWarningsAsErrors` promotes those. Neither flag subsumes
 the other: drop the first and an undocumented export passes, drop the second
-and an unknown block tag passes.
-`tests/modules/typedoc-gate.test.ts` holds a behavioural case for each,
-running TypeDoc over a throwaway fixture with this same `typedoc.json`.
+and an unknown block tag passes. `tests/modules/typedoc-gate.test.ts` holds a
+behavioural case for each, running TypeDoc over a throwaway fixture with this
+same `typedoc.json`.
 
 Two suites hold the rest of the chain together.
 `tests/modules/typedoc-gate.test.ts` also asserts the `docs-check` recipe is
@@ -733,11 +727,11 @@ what stops `make all`'s lenient verification quietly skipping in CI.
 
 `make markdownlint` is the separate Markdown gate. It runs the pinned
 `markdownlint-cli2` configuration over maintained Markdown and then refreshes
-the shared en-GB Oxford spelling configuration and checks prose with the
-pinned `typos` release. Keep prose and list items within 80 columns, code
-blocks within 120 columns, and leave tables and headings unwrapped. The
-TypeDoc gate has no percentage-coverage threshold: every included reflection
-required by `typedoc.json` must be documented, and any warning is an error.
+the shared en-GB Oxford spelling configuration and checks prose with the pinned
+`typos` release. Keep prose and list items within 80 columns, code blocks
+within 120 columns, and leave tables and headings unwrapped. The TypeDoc gate
+has no percentage-coverage threshold: every included reflection required by
+`typedoc.json` must be documented, and any warning is an error.
 
 Do not use a live `odw run` as a routine gate. Run it only when the task
 explicitly asks for execution or smoke testing, because it can spawn agents and

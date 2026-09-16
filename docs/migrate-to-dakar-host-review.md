@@ -55,9 +55,10 @@ To retain the previous NDJSON CLI path, select it explicitly:
 }
 ```
 
-The existing CodeRabbit host-review and legacy-agent configuration continues
-to apply in this mode. See the [CodeRabbit wire
-contract](coderabbit-wire-contract.md) for its parser and outcome contract.
+The existing CodeRabbit host-review and legacy-agent configuration continues to
+apply in this mode. See the
+[CodeRabbit wire contract](coderabbit-wire-contract.md) for its parser and
+outcome contract.
 
 ## See also
 

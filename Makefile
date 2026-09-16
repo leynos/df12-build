@@ -9,6 +9,16 @@ TYPOS_VERSION ?= 1.48.0
 TYPOS := uv tool run typos@$(TYPOS_VERSION)
 .PHONY: all clean fmt check-fmt lint typecheck markdownlint nixie spelling test test-modules test-workflow verify-modules verify-modules-strict workflow-parse workflow-build workflow-freshness docs-check
 
+MDLINT ?= $(shell command -v markdownlint-cli2 2>/dev/null || printf '%s' "$$HOME/.bun/bin/markdownlint-cli2")
+# `make fmt` and `make check-fmt` call mdtablefix directly. `--git` selects the
+# Markdown files Git tracks and `--include-untracked` adds the untracked files
+# Git does not ignore, so a new document is formatted before it is staged.
+# Both modes need mdtablefix 0.6.0 or later; CI pins the version at the
+# install-mdtablefix step.
+MDTABLEFIX ?= mdtablefix
+MDTABLEFIX_SELECT = --git --include-untracked
+MDTABLEFIX_RULES = --wrap --renumber --breaks --ellipsis --fences
+
 all: check-fmt lint typecheck markdownlint nixie docs-check test workflow-freshness verify-modules
 
 # Reset fetched dependencies. The generated workflow artefact is deliberately
@@ -20,7 +30,8 @@ clean:
 	rm -f .typos-oxendict-base.json .typos-oxendict-base.toml
 
 fmt:
-	mdformat-all
+	$(MDTABLEFIX) --in-place $(MDTABLEFIX_SELECT) $(MDTABLEFIX_RULES)
+	@unset FORCE_COLOR; $(MDLINT) --fix "**/*.md"
 
 # Regenerate the ODW workflow artifact from the module tree under src/.
 workflow-build:
@@ -32,6 +43,7 @@ workflow-freshness: workflow-build
 
 check-fmt:
 	git diff --check "$$(git merge-base HEAD $(BASE))..HEAD"
+	$(MDTABLEFIX) --check $(MDTABLEFIX_SELECT) $(MDTABLEFIX_RULES)
 
 lint: markdownlint workflow-parse
 
