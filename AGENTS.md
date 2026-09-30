@@ -155,15 +155,26 @@ passing every gate.
 
 - Validate with `make markdownlint` (or `bunx markdownlint-cli2 "**/*.md"`) and
   validate Mermaid diagrams with `make nixie`.
-- `make markdownlint` also runs `make spelling`, the shared en-GB-oxendict
-  gate. It regenerates `typos.toml` from the live shared dictionary and the
-  `typos.local.toml` overlay on every run, so `typos.toml` is never drift
-  checked in continuous integration. Put narrow repository-only exceptions in
-  `typos.local.toml`; never edit the generated configuration by hand.
 - Wrap prose and bullet points at 80 columns; wrap code blocks at 120 columns;
   do not wrap tables or headings.
 - Use dashes (`-`) for list bullets and GitHub-flavoured footnotes (`[^1]`) for
   references.
+
+<!-- typos-config-builder:agents-md:start -->
+
+## Spelling
+
+- `make spelling` runs the pinned `typos-config-builder gate`, which
+  regenerates `typos.toml` from the shared en-GB-oxendict dictionary and
+  `typos.local.toml`, then checks spelling and the shared phrase corrections.
+- `typos.toml` is generated: never edit it by hand. Put narrow
+  repository-specific exceptions in `typos.local.toml`, as exact or full-line
+  patterns rather than bare accepted words.
+- When `make spelling` changes `typos.toml`, commit the regenerated file. If
+  the change is unrelated to your work, commit it in a separate base pull
+  request and stack your branch on it, so each review diff stays focused.
+
+<!-- typos-config-builder:agents-md:end -->
 
 ## TypeScript in the ODW dialect
 

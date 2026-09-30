@@ -642,6 +642,10 @@ word added to the shared dictionary therefore needs no change here, and
 repository-only exceptions in `typos.local.toml`; never edit the generated
 configuration by hand.
 
+`TYPOS_CONFIG_BUILDER_VERSION` in the `Makefile` pins the
+`typos-config-builder` release the gate runs (currently `v0.1.3`). Raise it
+together with the regenerated `typos.toml`, never on its own.
+
 Run the module suites (bun) or the whole-workflow suites (node, against a fresh
 artefact) separately when iterating:
 
