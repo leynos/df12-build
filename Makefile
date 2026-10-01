@@ -5,7 +5,7 @@ MARKDOWN_FILES := $(shell find . \
 	-path './image_out' -prune -o \
 	-name '*.md' -print | sort)
 WORKFLOW_FILES := workflows/df12-build-odw.js workflows/df12-build.js
-TYPOS_CONFIG_BUILDER_VERSION ?= v0.1.1
+TYPOS_CONFIG_BUILDER_VERSION ?= v0.1.3
 TYPOS_CONFIG_BUILDER = uv tool run --from \
 	"git+https://github.com/leynos/typos-config-builder.git@$(TYPOS_CONFIG_BUILDER_VERSION)" \
 	typos-config-builder
