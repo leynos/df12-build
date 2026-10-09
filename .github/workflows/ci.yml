@@ -73,7 +73,7 @@ jobs:
         # first release with `--check` and `--git`.
         uses: leynos/shared-actions/.github/actions/install-mdtablefix@c5a54701c8603a0fa756a6b34c49bc2af75a6c11
         with:
-          version: "0.6.0"
+          version: "0.6.1"
       - name: Run commit gates
         run: make all
       - name: Lint Markdown
