@@ -9,6 +9,15 @@
  */
 import type { FaultMetrics } from './types.ts'
 
+/** Extract a usable message from a thrown value, including plain objects. */
+export function faultThrownMessage(error: unknown): string {
+  if (error !== null && (typeof error === 'object' || typeof error === 'function') && 'message' in error) {
+    const message = error.message
+    if (typeof message === 'string' && message) return message
+  }
+  return String(error)
+}
+
 /**
  * Bounded-cardinality fault counters, surfaced verbatim in the run result so
  * operators can see retry pressure and terminal fault classes without
@@ -113,7 +122,7 @@ export function makeWithInfraRetry(attempts: number, metrics: FaultMetrics = fau
       try {
         return await run()
       } catch (error) {
-        const message = ((error as Error | null) && (error as Error).message) || String(error)
+        const message = faultThrownMessage(error)
         if (attempt >= attempts || !infrastructureFailureDetail(message)) {
           // Log the terminal boundary distinctly from the retry path so
           // operators can see where the retry budget actually gave up.

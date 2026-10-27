@@ -60,6 +60,36 @@ export const WRITE_PROBE_SCHEMA = {
   required: ['ok'],
 }
 
+/** The fields consumed from a schema-validated probe reply. */
+interface WriteProbeReply {
+  ok: boolean
+  detail?: string
+}
+
+// Agent replies cross a runtime boundary even when a schema was requested.
+function isWriteProbeReply(value: unknown): value is WriteProbeReply {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && 'ok' in value
+    && typeof value.ok === 'boolean'
+    && (!('detail' in value) || typeof value.detail === 'string')
+}
+
+// JavaScript permits throwing any value, including plain objects and strings.
+function writeProbeErrorMessage(error: unknown): string {
+  if (error !== null && (typeof error === 'object' || typeof error === 'function') && 'message' in error) {
+    const message = error.message
+    if (message) return String(message)
+  }
+  return String(error)
+}
+
+function isProbeSymlinkError(error: unknown): boolean {
+  if (error === null || (typeof error !== 'object' && typeof error !== 'function') || !('code' in error)) return false
+  return error.code === 'ELOOP' || error.code === 'EMLINK'
+}
+
 /**
  * Path for one adapter's probe file inside a task worktree. The adapter
  * name is sanitized so it can never escape the intended directory or
@@ -67,7 +97,7 @@ export const WRITE_PROBE_SCHEMA = {
  */
 export function writeProbePath(worktree: string, adapter: string): string {
   const path = process.getBuiltinModule('node:path')
-  return path.join(worktree, `.df12-write-probe-${String(adapter).replace(/[^0-9a-zA-Z._-]+/g, '-')}`)
+  return path.join(worktree, `.df12-write-probe-${String(adapter).replaceAll(/[^0-9a-zA-Z._-]+/g, '-')}`)
 }
 
 /**
@@ -128,8 +158,8 @@ export async function verifyWriteProbe(probeFile: string, token: string): Promis
   // Open once with O_NOFOLLOW|O_NONBLOCK and verify/read through the handle:
   // the check and read target one inode, symlinks cannot redirect the read,
   // and a FIFO cannot block before the regular-file check.
-  let handle = null
-  let content: string | null = null
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined
+  let content: string | undefined
   try {
     handle = await fs.open(probeFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
     const stat = await handle.stat()
@@ -137,18 +167,17 @@ export async function verifyWriteProbe(probeFile: string, token: string): Promis
       content = await handle.readFile({ encoding: 'utf8' })
     }
   } catch (error) {
-    const failure = error as (Error & { code?: string }) | null
     // Linux reports ELOOP for O_NOFOLLOW on a symlink; FreeBSD uses EMLINK.
-    if (failure && (failure.code === 'ELOOP' || failure.code === 'EMLINK')) {
+    if (isProbeSymlinkError(error)) {
       await fs.rm(probeFile, { force: true, recursive: true })
       return { ok: false, detail: 'probe path is not a regular file (symlink or special file rejected)' }
     }
-    return { ok: false, detail: `probe file missing or unreadable: ${(failure && failure.message) || String(error)}` }
+    return { ok: false, detail: `probe file missing or unreadable: ${writeProbeErrorMessage(error)}` }
   } finally {
     if (handle) await handle.close()
   }
   await fs.rm(probeFile, { force: true, recursive: true })
-  if (content === null) {
+  if (content === undefined) {
     return { ok: false, detail: 'probe path is not a regular file (symlink or special file rejected)' }
   }
   if (content.trim() === token) return { ok: true, detail: '' }
@@ -179,7 +208,7 @@ export async function hostWriteProbe(worktree: string): Promise<{
     await fs.rm(hostProbe, { force: true })
     return { ok: true, detail: '' }
   } catch (error) {
-    return { ok: false, detail: ((error as Error | null) && (error as Error).message) || String(error) }
+    return { ok: false, detail: writeProbeErrorMessage(error) }
   }
 }
 
@@ -204,32 +233,41 @@ export function makeWritePreflight({ enabled, targets }: { enabled: boolean; tar
       // pre-existing file (or symlink) at the probe path must never be able to
       // satisfy — or redirect — the verification that follows.
       await clearProbeArtifact(probeFile)
-      let reply: { ok?: boolean; detail?: string } | null = null
+      let reply: WriteProbeReply | undefined
       let agentError = ''
       try {
-        reply = (await agent(writeProbePrompt(probeFile, token), target.options({
-          phase: 'Worktree',
-          label: `write-probe:${target.adapter}`,
+        const response = await agent(writeProbePrompt(probeFile, token), {
+          ...target.options({
+            phase: 'Worktree',
+            label: `write-probe:${target.adapter}`,
+            schema: WRITE_PROBE_SCHEMA,
+          }),
+          // Keep the reply contract if routing omitted or replaced it.
           schema: WRITE_PROBE_SCHEMA,
-        }))) as { ok?: boolean; detail?: string } | null
+        })
+        if (isWriteProbeReply(response)) {
+          reply = response
+        } else {
+          agentError = 'write probe agent reply has invalid fields'
+        }
       } catch (error) {
-        agentError = ((error as Error | null) && (error as Error).message) || String(error)
+        agentError = writeProbeErrorMessage(error)
       }
       const verified = await verifyWriteProbe(probeFile, token)
-      if (verified.ok) return null
+      if (verified.ok) return
       const detail = [verified.detail, reply && reply.ok === false ? reply.detail : '', agentError]
         .filter(Boolean)
         .join('; ')
       return { adapter: target.adapter, detail }
     }))
-    const failures = outcomes.filter((outcome): outcome is { adapter: string; detail: string } => outcome !== null)
+    const failures = outcomes.filter((outcome): outcome is { adapter: string; detail: string } => outcome !== undefined)
     return { ok: failures.length === 0, failures }
   }
 
   // One probe per run: sandbox scope does not vary between sibling worktrees,
   // so every task shares the first task's verdict (concurrent tasks await the
   // same promise and fail fast together when the environment is broken).
-  let taskAgentWritePreflight: Promise<WritePreflightOutcome> | null = null
+  let taskAgentWritePreflight: Promise<WritePreflightOutcome> | undefined
   function ensureTaskAgentWriteAccess(worktree: string, tag: string): Promise<WritePreflightOutcome> {
     if (!enabled) return Promise.resolve({ ok: true, skipped: true, failures: [] })
     if (!taskAgentWritePreflight) taskAgentWritePreflight = runTaskAgentWritePreflight(worktree, tag)

@@ -117,7 +117,7 @@ export function makeRecoveryDiscovery(limits: RecoveryDiscoveryLimits) {
     const mapped: RecoveryCandidate[] = []
     for (const branch of branches) {
       const parsed = branchToRoadmapId(branch)
-      const task = parsed ? byId.get(parsed.id) : null
+      const task = parsed ? byId.get(parsed.id) : undefined
       if (!parsed || !task) {
         skipped.push({ id: parsed?.id || '', branchName: branch, reason: 'unmapped-branch' })
         continue
@@ -201,19 +201,21 @@ export async function readExecplanState(
     const text = await readFileText(path.join(candidate.worktreePath || '', candidate.execplanPath), candidate.worktreePath || undefined)
     return parseExecplanState(text)
   } catch (error) {
-    const failure = error as (Error & { code?: string }) | null
-    if (failure && (failure.code === 'ENOENT' || failure.code === 'ENOTDIR')) {
+    const fields = error && (typeof error === 'object' || typeof error === 'function') ? error : undefined
+    const code = fields && 'code' in fields ? fields.code : undefined
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
       return { status: 'missing', ticked: 0, unticked: 0, items: [] }
     }
     // A plan that cannot be read is NOT a missing plan: dispatching to the
     // planning stage on an I/O or permission fault could overwrite durable
     // work. Surface the fault; the continue boundary reports it.
+    const message = fields && 'message' in fields ? fields.message : undefined
     return {
       status: 'unreadable',
       ticked: 0,
       unticked: 0,
       items: [],
-      error: `${candidate.execplanPath}: ${(failure && failure.message) || String(error)}`,
+      error: `${candidate.execplanPath}: ${message || String(error)}`,
     }
   }
 }

@@ -107,18 +107,30 @@ export function parsePorcelainDirty(output: unknown): NameStatusEntry[] {
  * trims the raw text; pass `parse` for structured output (e.g.
  * {@link parseNameStatus}).
  */
-export async function gitEvidence<T = string>(
+export function gitEvidence(
   worktreePath: string,
   commandArgs: readonly string[],
-  parse: (text: string) => T = ((text: string) => String(text || '').trim()) as unknown as (text: string) => T,
-): Promise<GitEvidenceValue<T>> {
+  parse?: undefined,
+): Promise<GitEvidenceValue<string>>
+/** Run a git probe with a parser for structured output. */
+export function gitEvidence<T>(
+  worktreePath: string,
+  commandArgs: readonly string[],
+  parse: (text: string) => T,
+): Promise<GitEvidenceValue<T>>
+export async function gitEvidence<T>(
+  worktreePath: string,
+  commandArgs: readonly string[],
+  parse?: (text: string) => T,
+): Promise<GitEvidenceValue<T | string>> {
+  const parseOutput = parse === undefined ? (text: string) => String(text || '').trim() : parse
   const result = await execFileStatus('git', ['-C', worktreePath, ...commandArgs])
   if (result.ok) {
-    return { ok: true, value: parse(result.stdout) }
+    return { ok: true, value: parseOutput(result.stdout) }
   }
   return {
     ok: false,
-    value: parse(result.stdout),
+    value: parseOutput(result.stdout),
     error: [result.message, result.stderr, result.stdout].filter(Boolean).join('\n').trim(),
   }
 }
@@ -151,12 +163,12 @@ export async function collectAssessmentEvidence(
     gitEvidence(worktreePath, ['status', '--porcelain=v1']),
     baseCommit
       ? gitEvidence(worktreePath, ['diff', '--name-status', `${baseCommit}...HEAD`], parseNameStatus)
-      : Promise.resolve({ ok: false, value: [] as NameStatusEntry[], error: 'missing base commit' }),
+      : Promise.resolve<GitEvidenceValue<NameStatusEntry[]>>({ ok: false, value: [], error: 'missing base commit' }),
     gitEvidence(worktreePath, ['diff', '--name-status'], parseNameStatus),
     gitEvidence(worktreePath, ['diff', '--cached', '--name-status'], parseNameStatus),
     baseCommit
       ? gitEvidence(worktreePath, ['log', '--oneline', '--max-count=20', `${baseCommit}..HEAD`], (text) => String(text || '').trim().split(/\r?\n/).filter(Boolean))
-      : Promise.resolve({ ok: false, value: [] as string[], error: 'missing base commit' }),
+      : Promise.resolve<GitEvidenceValue<string[]>>({ ok: false, value: [], error: 'missing base commit' }),
   ])
   if (!current.ok) errors.push(`rev-parse HEAD: ${current.error}`)
   if (!branch.ok) errors.push(`rev-parse --abbrev-ref HEAD: ${branch.error}`)
@@ -187,7 +199,7 @@ export async function collectAssessmentEvidence(
     baseCommit,
     currentCommit: current.value || '',
     dirtyState: status.ok ? (String(status.value || '').trim() ? 'dirty' : 'clean') : 'unknown',
-    changedFiles: [...allChanged].sort(),
+    changedFiles: [...allChanged].toSorted(),
     committedChanges: committed.value,
     dirtyChanges,
     stagedChanges: staged.value,
@@ -251,6 +263,8 @@ export async function directoryExists(pathValue: unknown): Promise<{
     const stat = await fs.stat(String(pathValue))
     return { ok: true, exists: stat.isDirectory(), detail: '' }
   } catch (error) {
+    // SAFETY: Node filesystem promises reject with errors whose errno code is
+    // optional; the null check preserves the fallback for a nullish throw.
     const failure = error as (Error & { code?: string }) | null
     if (failure && (failure.code === 'ENOENT' || failure.code === 'ENOTDIR')) {
       return { ok: true, exists: false, detail: '' }

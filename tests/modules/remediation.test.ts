@@ -63,6 +63,14 @@ describe('dedupeProposals', () => {
     expect(() => dedupeProposals([proposal({ title: '' })])).toThrow(/non-blank string/)
   })
 
+  test('preserves the nullish input contract', () => {
+    expect(dedupeProposals(null)).toEqual([])
+    expect(dedupeProposals(undefined)).toEqual([])
+    for (const entry of [null, undefined]) {
+      expect(() => dedupeProposals([entry])).toThrow('remediation proposal title must be a non-blank string')
+    }
+  })
+
   test('preserves aggregated sources across repeated deduplication', () => {
     const first = dedupeProposals([
       proposal({ source: 'audit:1.2.3' }),

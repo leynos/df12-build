@@ -42,7 +42,7 @@ export interface HostGateConfig {
 /** Minimal readable process stream needed by the secure gate pump. */
 export interface HostGateReadable {
   /** Subscribe to stream data events. */
-  on: (event: 'data', listener: (chunk: unknown) => void) => unknown
+  on: (event: 'data', listener: (chunk: string | Uint8Array) => void) => void
   /** Pause a backpressured process pipe. */
   pause?: () => void
   /** Resume a process pipe before group termination. */
@@ -58,25 +58,27 @@ export interface HostGateChild {
   /** Standard error pump. */
   stderr?: HostGateReadable
   /** Subscribe to close and spawn-error events. */
-  on: (event: 'close' | 'error', listener: (value: number | Error | null) => void) => unknown
+  on: (event: 'close' | 'error', listener: (value: number | Error | null) => void) => void
   /** Fallback single-process signal operation. */
-  kill: (signal: 'SIGTERM' | 'SIGKILL') => unknown
+  kill: (signal: 'SIGTERM' | 'SIGKILL') => void
 }
 
 /** Secure output stream contract used by the gate log sink. */
 export interface HostGateLog {
   /** Write one process-output chunk and report backpressure. */
-  write: (chunk: unknown) => boolean
+  write: (chunk: string | Uint8Array) => boolean
   /** Flush and close the stream before settling the gate. */
   end: (callback: () => void) => void
   /** Subscribe to stream errors and drain notifications. */
-  on: (event: 'error' | 'drain', listener: (error?: Error) => void) => unknown
+  on: (event: 'error' | 'drain', listener: (error?: Error) => void) => void
 }
 
 /** Opaque timer handle returned by a host timer implementation. */
 export interface HostGateTimer {
   /** Allow the event loop to exit while this timer remains pending. */
   unref?: () => void
+  /** Cancel a native timer using its disposal operation. */
+  [Symbol.dispose]?: () => void
 }
 
 /**
@@ -115,6 +117,11 @@ export interface HostGateDeps {
 /** Maximum retained unterminated output while a gate continues streaming to disk. */
 export const GATE_CARRY_LIMIT = 16_384
 
+/** Restrict task labels to safe path components within the allocated root. */
+function gateLogLabel(value: string): string {
+  return String(value).replaceAll(/[^A-Za-z0-9._-]+/g, '-').replaceAll(/^-+|-+$/g, '').slice(0, 60)
+}
+
 /** Return the executable word of a safely tokenized configured command. */
 export function codeSceneExecutable(command: string): string | null {
   const tokens = tokenizeShellCommand(command)
@@ -124,10 +131,8 @@ export function codeSceneExecutable(command: string): string | null {
 
 /** Calculate a sanitized private gate-log path within a caller-owned root. */
 export function hostGateLogPath(root: string, tag: string, roundLabel: string, index: number): string {
-  /** Prevent untrusted task labels from escaping the allocated private root. */
-  const slug = (value: unknown) => String(value).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
   const path = process.getBuiltinModule('node:path')
-  return path.join(root, `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`)
+  return path.join(root, `gate-${gateLogLabel(tag)}-${gateLogLabel(roundLabel)}-${index + 1}.out`)
 }
 
 /** Build production defaults without exposing Node modules to callers. */
@@ -138,11 +143,25 @@ function productionHostGateDeps(): Required<Pick<HostGateDeps, 'probeCodeScene' 
   const { spawn } = process.getBuiltinModule('node:child_process')
   return {
     probeCodeScene: execFileStatus,
-    spawnGate: (command, cwd) => spawn('sh', ['-c', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }) as unknown as HostGateChild,
+    spawnGate: (command, cwd) => {
+      const child = spawn('sh', ['-c', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      const gateChild: HostGateChild = {
+        on: (event, listener) => {
+          if (event === 'close') child.on('close', listener)
+          else child.on('error', listener)
+        },
+        kill: (signal) => { child.kill(signal) },
+      }
+      if (child.pid !== undefined) gateChild.pid = child.pid
+      gateChild.stdout = child.stdout
+      gateChild.stderr = child.stderr
+      return gateChild
+    },
     /** Prefer signalling the detached group so background descendants are reaped. */
     terminateProcessGroup: (child, signal) => {
-      if (typeof child.pid === 'number') {
-        try { process.kill(-child.pid, signal); return } catch { /* A race can reap the group before escalation. */ }
+      const pid = child.pid
+      if (pid !== undefined && Number.isSafeInteger(pid)) {
+        try { process.kill(-pid, signal); return } catch { /* A race can reap the group before escalation. */ }
       }
       child.kill(signal)
     },
@@ -150,18 +169,32 @@ function productionHostGateDeps(): Required<Pick<HostGateDeps, 'probeCodeScene' 
     openSecureLog: (logFile) => {
       const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants
       const fd = fs.openSync(logFile, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
-      return fs.createWriteStream(logFile, { fd, autoClose: true }) as unknown as HostGateLog
+      const stream = fs.createWriteStream(logFile, { fd, autoClose: true })
+      return {
+        write: (chunk) => stream.write(chunk),
+        end: (callback) => { stream.end(callback) },
+        on: (event, listener) => {
+          if (event === 'error') stream.on('error', listener)
+          else stream.on('drain', listener)
+        },
+      }
     },
     createLogRoot: () => fs.mkdtempSync(path.join(os.tmpdir(), 'df12-gates-')),
     removeLogRoot: (root, options) => fs.rmSync(root, options),
     setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
-    clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+    clearTimer: (timer) => { timer[Symbol.dispose]?.() },
     nowMs: () => Number(process.hrtime.bigint() / 1_000_000n),
   }
 }
 
+/** Private paths and cleanup for one host-gate log root. */
+interface GateLogPaths {
+  path: (tag: string, roundLabel: string, index: number) => string
+  dispose: () => void
+}
+
 /** Allocate a lazy temporary-root path service with cleanup failure containment. */
-function makeGateLogPaths(lifecycle: HostGateLogRoot | undefined, deps: Required<Pick<HostGateDeps, 'createLogRoot' | 'removeLogRoot'>>): { path: (tag: string, roundLabel: string, index: number) => string; dispose: () => void } {
+function makeGateLogPaths(lifecycle: HostGateLogRoot | undefined, deps: Required<Pick<HostGateDeps, 'createLogRoot' | 'removeLogRoot'>>): GateLogPaths {
   let gateLogRoot = ''
   /** Allocate the root on first gate use so disabled gates do not touch disk. */
   const root = () => {
@@ -174,6 +207,8 @@ function makeGateLogPaths(lifecycle: HostGateLogRoot | undefined, deps: Required
     dispose: () => {
       if (!gateLogRoot) return
       try { (lifecycle?.remove || deps.removeLogRoot)(gateLogRoot, { recursive: true, force: true }) } catch (error) {
+        // SAFETY: Optional property access tolerates any thrown non-nullish
+        // value; a missing or falsy message falls back to String(error).
         log(`[host gates] could not remove temporary log root: ${boundedTail((error as Error | null)?.message || String(error), 500)}`)
       }
       gateLogRoot = ''
@@ -181,15 +216,24 @@ function makeGateLogPaths(lifecycle: HostGateLogRoot | undefined, deps: Required
   }
 }
 
-/** Bind secure gate execution to run-scoped metrics, tracing, and configuration. */
-export function makeHostGates(config: HostGateConfig, metrics: { hostGates: HostGateMetrics; codeScene: CodeSceneMetrics }, injected: HostGateDeps = {}): {
+/** Bound operations for deterministic host gates and CodeScene. */
+export interface HostGateSurface {
   /** Run every configured commit gate in order. */
   runHostCommitGates: (worktree: string, tag: string, roundLabel: string) => Promise<HostGateRun>
   /** Run CodeScene after commit gates when configured. */
   runCodeSceneCheck: (worktree: string, tag: string, label: string) => Promise<CodeSceneCheckResult>
   /** Remove any temporary root allocated by this gate surface. */
   disposeHostGateLogs: () => void
-} {
+}
+
+/** Active tracing handle with its monotonic start time. */
+interface ActiveGateSpan {
+  handle: HostReviewSpan
+  startedMs: number
+}
+
+/** Bind secure gate execution to run-scoped metrics, tracing, and configuration. */
+export function makeHostGates(config: HostGateConfig, metrics: { hostGates: HostGateMetrics; codeScene: CodeSceneMetrics }, injected: HostGateDeps = {}): HostGateSurface {
   const production = productionHostGateDeps()
   const deps = { ...production, ...injected }
   const generatedLogPaths = makeGateLogPaths(config.gateLogRoot, deps)
@@ -198,23 +242,46 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
   const baseContext = deps.traceContext || { runId: 'host-review' }
 
   /** Start a bounded gate span and measure elapsed time without payload data. */
-  function span(name: string, taskId: string, attributes: Record<string, string | number | boolean>): { handle: HostReviewSpan; startedMs: number } {
+  function span(name: string, taskId: string, attributes: Record<string, string | number | boolean>): ActiveGateSpan {
     const startedMs = deps.nowMs()
-    return { handle: tracer.startSpan(name, { runId: boundedTail(baseContext.runId, 120) || 'host-review', ...(taskId ? { taskId: boundedTail(taskId, 120) } : {}) }, { reviewer: deps.reviewer || 'unknown', ...attributes }), startedMs }
+    const context: HostReviewTraceContext = { runId: boundedTail(baseContext.runId, 120) || 'host-review' }
+    if (taskId) context.taskId = boundedTail(taskId, 120)
+    return { handle: tracer.startSpan(name, context, { reviewer: deps.reviewer || 'unknown', ...attributes }), startedMs }
+  }
+
+  /** Bound the elapsed duration using the injected monotonic clock. */
+  function gateSpanElapsedMs(active: ActiveGateSpan): number {
+    const elapsedMs = deps.nowMs() - active.startedMs
+    return Math.max(0, Math.trunc(elapsedMs))
   }
 
   /** Finish a gate span with fixed-category outcome and duration attributes. */
-  function endSpan(active: { handle: HostReviewSpan; startedMs: number }, attributes: Record<string, string | number | boolean>): void {
-    active.handle.end({ elapsedMs: Math.max(0, Math.trunc(deps.nowMs() - active.startedMs)), ...attributes })
+  function endSpan(active: ActiveGateSpan, attributes: Record<string, string | number | boolean>): void {
+    active.handle.end({ elapsedMs: gateSpanElapsedMs(active), ...attributes })
   }
 
   /** Stream one shell gate to its secure log and return its bounded terminal tail. */
   function streamGate(command: string, cwd: string, logFile: string): Promise<{ ok: boolean; killed: boolean; tail: string }> {
     return new Promise((resolve) => {
       let stream: HostGateLog
-      try { stream = deps.openSecureLog(logFile) } catch (error) { resolve({ ok: false, killed: false, tail: `gate log write failed: ${boundedTail((error as Error | null)?.message || String(error), 500)}` }); return }
+      try {
+        stream = deps.openSecureLog(logFile)
+      } catch (error) {
+        // SAFETY: Optional property access tolerates any thrown non-nullish
+        // value; a missing or falsy message falls back to String(error).
+        resolve({ ok: false, killed: false, tail: `gate log write failed: ${boundedTail((error as Error | null)?.message || String(error), 500)}` })
+        return
+      }
       let child: HostGateChild
-      try { child = deps.spawnGate(command, cwd) } catch (error) { stream.end(() => {}); resolve({ ok: false, killed: false, tail: `spawn failed: ${boundedTail((error as Error | null)?.message || String(error), 500)}` }); return }
+      try {
+        child = deps.spawnGate(command, cwd)
+      } catch (error) {
+        stream.end(() => {})
+        // SAFETY: Optional property access tolerates any thrown non-nullish
+        // value; a missing or falsy message falls back to String(error).
+        resolve({ ok: false, killed: false, tail: `spawn failed: ${boundedTail((error as Error | null)?.message || String(error), 500)}` })
+        return
+      }
       const tail: string[] = []
       let carry = ''
       let killed = false
@@ -239,7 +306,7 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
         if (force) { const timer = deps.setTimer(settle, 100); timer.unref?.() }
       }
       /** Stream a chunk while retaining only bounded terminal lines in memory. */
-      const record = (chunk: unknown) => {
+      const record = (chunk: string | Uint8Array) => {
         if (!stream.write(chunk) && !killed) { child.stdout?.pause?.(); child.stderr?.pause?.() }
         carry += String(chunk)
         const lines = carry.split(/\r?\n/)
@@ -274,7 +341,11 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
       child.stderr?.on('data', record)
       sigterm = deps.setTimer(() => terminate('gate process group did not close after SIGKILL'), config.commitGateTimeoutSeconds * 1000)
       child.on('close', (code) => finish(code === 0 && !killed, streamFailure))
-      child.on('error', (error) => finish(false, streamFailure || `spawn failed: ${boundedTail((error as Error | null)?.message || String(error), 500)}`))
+      child.on('error', (error) => {
+        // SAFETY: Optional property access tolerates the event's numeric,
+        // error, or null value; missing messages fall back to String(error).
+        finish(false, streamFailure || `spawn failed: ${boundedTail((error as Error | null)?.message || String(error), 500)}`)
+      })
     })
   }
 
@@ -289,7 +360,7 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
       const logFile = logPath(tag, roundLabel, index)
       const outcome = await streamGate(command, worktree, logFile)
       results.push({ command: displayedCommand, ok: outcome.ok, logFile })
-      endSpan(active, { outcome: outcome.ok ? 'clean' : 'error', errorCategory: outcome.killed ? 'timeout' : outcome.ok ? 'none' : 'execution', timeout: outcome.killed })
+      endSpan(active, { outcome: outcome.ok ? 'clean' : 'error', errorCategory: outcome.killed ? 'timeout' : (outcome.ok ? 'none' : 'execution'), timeout: outcome.killed })
       if (!outcome.ok) {
         metrics.hostGates.failures += 1
         const timeout = outcome.killed ? ` (killed after the ${config.commitGateTimeoutSeconds}s gate timeout)` : ''
@@ -312,7 +383,7 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
       return { clean: false, skipped: false, detail, logFile: '' }
     }
     const missing = '__DF12_CODESCENE_BINARY_MISSING__'
-    const probe = await deps.probeCodeScene('sh', ['-c', 'command -v "$1" >/dev/null 2>&1 || { printf "%s\\n" "$2"; exit 127; }', 'sh', bin, missing], { cwd: worktree, timeoutMs: 10_000 })
+    const probe = await deps.probeCodeScene('sh', ['-c', String.raw`command -v "$1" >/dev/null 2>&1 || { printf "%s\n" "$2"; exit 127; }`, 'sh', bin, missing], { cwd: worktree, timeoutMs: 10_000 })
     if (!probe.ok) {
       if (probe.stdout.trim() === missing) {
         metrics.codeScene.skipped += 1
@@ -321,7 +392,10 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
         return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: '' }
       }
       metrics.codeScene.probeFailures += 1
-      const fault = [probe.message, probe.stderr, probe.signal ? `signal ${probe.signal}` : '', probe.killed ? 'probe killed' : ''].map((part) => String(part || '').trim()).filter(Boolean).join('; ')
+      const fault = [probe.message, probe.stderr, probe.signal ? `signal ${probe.signal}` : '', probe.killed ? 'probe killed' : ''].flatMap((part) => {
+        const text = String(part || '').trim()
+        return text ? [text] : []
+      }).join('; ')
       endSpan(active, { outcome: 'error', errorCategory: probe.killed ? 'timeout' : 'execution', timeout: Boolean(probe.killed), retry: false })
       return { clean: false, skipped: false, detail: `CodeScene availability probe for \`${redactedCommand}\` failed: ${boundedTail(fault) || 'unknown probe failure'}`, logFile: '' }
     }
@@ -329,7 +403,7 @@ export function makeHostGates(config: HostGateConfig, metrics: { hostGates: Host
     const logFile = logPath(tag, `cs-${label}`, 0)
     log(`[task ${tag}] CodeScene check (${label}): ${redactedCommand}`)
     const outcome = await streamGate(config.csCheckCommand, worktree, logFile)
-    endSpan(active, { outcome: outcome.ok ? 'clean' : 'error', errorCategory: outcome.killed ? 'timeout' : outcome.ok ? 'none' : 'execution', timeout: outcome.killed, retry: false })
+    endSpan(active, { outcome: outcome.ok ? 'clean' : 'error', errorCategory: outcome.killed ? 'timeout' : (outcome.ok ? 'none' : 'execution'), timeout: outcome.killed, retry: false })
     if (outcome.ok) return { clean: true, skipped: false, detail: '', logFile }
     metrics.codeScene.failures += 1
     const timeout = outcome.killed ? ` (killed after the ${config.commitGateTimeoutSeconds}s timeout)` : ''

@@ -190,6 +190,18 @@ describe('runDakarHostReview', () => {
     expect(removed).toBe(false)
   })
 
+  test('a malformed state-root error is converted to a string', async () => {
+    const { runHostReview } = hostReview({ reviewTool: 'dakar', reviewAttempts: 1 })
+    const review = await runHostReview('/work/tree', 'label', {
+      dakarStateRoots: {
+        create: () => { throw { message: 42 } },
+        remove: () => {},
+      },
+    })
+    expect(review.outcome).toBe('error')
+    expect(review.detail).toContain('[object Object]')
+  })
+
   test('a cleanup failure does not replace a successful review result', async () => {
     const logs: string[] = []
     g.log = (message: unknown) => logs.push(String(message))

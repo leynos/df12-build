@@ -18,6 +18,16 @@ export interface DurabilityVerdict {
   detail: string
 }
 
+/** Result of resolving an agent-supplied ExecPlan path within its worktree. */
+export interface ExecplanPathResolution {
+  /** True when the path is a task-scoped ExecPlan inside the worktree. */
+  ok: boolean
+  /** The path relative to the worktree; empty when the path is rejected. */
+  relPath: string
+  /** Empty when accepted; otherwise why the path was rejected. */
+  detail: string
+}
+
 /**
  * The result of a salvage-commit attempt: `committed` paths, `skipped`
  * `{path,reason}` entries, the commit `sha` (empty when nothing was committed
@@ -69,14 +79,7 @@ export function isTaskArtefactPath(candidate: unknown): boolean {
  * @param planPath The agent-supplied plan path (untrusted).
  * @returns `{ ok, relPath, detail }`; `ok` is true only for a normalized task-scoped ExecPlan path.
  */
-export function execplanRelPath(worktree: string, planPath: unknown): {
-  /** True when the normalized path is a task-scoped `docs/execplans/*.md` path inside the worktree. */
-  ok: boolean
-  /** The path relative to the worktree; empty when `ok` is false. */
-  relPath: string
-  /** Empty when `ok`; otherwise why the path was rejected. */
-  detail: string
-} {
+export function execplanRelPath(worktree: string, planPath: unknown): ExecplanPathResolution {
   const path = process.getBuiltinModule('node:path')
   const raw = String(planPath || '')
   const rel = path.isAbsolute(raw) ? path.relative(worktree, raw) : path.normalize(raw)
@@ -156,7 +159,10 @@ export async function commitExecplanApproval(worktree: string, planPath: unknown
       }
     }
   } catch (error) {
-    return { ok: false, detail: `could not update the plan status: ${((error as Error | null) && (error as Error).message) || String(error)}` }
+    // SAFETY: the short-circuit excludes nullish values, and JavaScript boxes
+    // primitives for property reads. The optional message remains unknown.
+    const message = error && (error as { message?: unknown }).message
+    return { ok: false, detail: `could not update the plan status: ${message || String(error)}` }
   }
   const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1', '--', relPath])
   if (!status.ok) {
@@ -198,9 +204,9 @@ export async function commitExecplanDraft(worktree: string, relPath: string, tag
   const status = await execFileStatus('git', ['-C', worktree, 'status', '--porcelain=v1'])
   if (!status.ok) return { ok: false, detail: `git status failed: ${(status.message || status.stderr || '').trim()}` }
   const lines = String(status.stdout).split(/\r?\n/).filter(Boolean)
-  if (!lines.length) return { ok: false, detail: 'nothing to commit: the worktree is already clean' }
+  if (lines.length === 0) return { ok: false, detail: 'nothing to commit: the worktree is already clean' }
   const foreign = lines.filter((line) => line.slice(3).replace(/^"(.*)"$/, '$1') !== relPath)
-  if (foreign.length) {
+  if (foreign.length > 0) {
     const sample = foreign.slice(0, 8).map((line) => line.trim()).join('; ')
     return { ok: false, detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? '; …' : ''})` }
   }
@@ -272,7 +278,7 @@ export async function salvageTaskArtefacts(worktree: string, candidatePaths: rea
     }
     verified.push(contained.relPath)
   }
-  if (!verified.length) {
+  if (verified.length === 0) {
     return { committed: [], skipped, sha: '', detail: 'nothing to salvage: no eligible task-scoped artefacts are dirty' }
   }
   const add = await execFileStatus('git', ['-C', worktree, 'add', '--', ...verified])
@@ -311,7 +317,7 @@ export async function verifyWorktreeCommitted(worktree: string): Promise<Durabil
     return { ok: false, detail: `git status failed: ${(status.message || status.stderr || '').trim()}` }
   }
   const lines = String(status.stdout).split(/\r?\n/).filter(Boolean)
-  if (!lines.length) return { ok: true, detail: '' }
+  if (lines.length === 0) return { ok: true, detail: '' }
   const sample = lines.slice(0, 8).map((line) => line.trim()).join('; ')
   return { ok: false, detail: `${lines.length} uncommitted path(s): ${sample}${lines.length > 8 ? '; …' : ''}` }
 }

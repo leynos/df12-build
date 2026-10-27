@@ -67,6 +67,8 @@ export interface StageImpl extends Record<string, unknown> {
   summary?: string
   /** Issues the implementation left unresolved. */
   openIssues?: string[]
+  /** Commit subjects reported by the schema-validated implementation agent. */
+  commits?: string[]
   // Advisory, non-blocking residual risk carried forward from an ADR 002
   // recovery assessment; rendered as review/integration context only (#23).
   /** Advisory, non-blocking risks carried into review and integration. */
@@ -81,7 +83,19 @@ interface StageReview extends Record<string, unknown> {
   verdict?: string
   blocking?: string[]
   summary?: string
-  proposedRoadmapItems?: Array<Record<string, unknown>>
+  proposedRoadmapItems?: ProposedRoadmapItem[]
+}
+
+/** A reviewer-proposed follow-up, validated by REVIEW_SCHEMA. */
+interface ProposedRoadmapItem {
+  title: string
+  rationale: string
+  severity?: string
+}
+
+/** A follow-up proposal annotated with the originating review. */
+interface TaskProposal extends ProposedRoadmapItem {
+  source: string
 }
 
 interface StageIntegration extends Record<string, unknown> {
@@ -122,6 +136,48 @@ export type StageResult = Record<string, unknown> & {
 type Lock = <T>(fn: () => Promise<T>) => Promise<T>
 type MergeLock = (<T>(fn: () => Promise<T>) => Promise<T>) | null
 type AgentOptions = (options: Record<string, unknown>) => Record<string, unknown>
+
+/** Preserve message properties from thrown values, including non-Error objects. */
+function thrownMessage(error: unknown): unknown {
+  const message = error != null && (typeof error === 'object' || typeof error === 'function') && 'message' in error
+    ? error.message
+    : undefined
+  return message || String(error)
+}
+
+/** Additional caller-provided fields copied onto a task result. */
+interface ExtraResultFields {
+  [key: string]: unknown
+}
+
+/** Accept additional result fields only from an object-shaped options value. */
+function isExtraResultFields(value: unknown): value is ExtraResultFields {
+  return value != null && typeof value === 'object'
+}
+
+function extraResultFields(value: unknown): ExtraResultFields {
+  return isExtraResultFields(value) ? value : {}
+}
+
+type TaskAgentSchema =
+  | typeof PLAN_SCHEMA
+  | typeof DESIGN_VERDICT_SCHEMA
+  | typeof FIX_SCHEMA
+  | typeof IMPL_SCHEMA
+  | typeof INTEGRATE_SCHEMA
+  | typeof REVIEW_SCHEMA
+
+/**
+ * Preserve the schema at the agent boundary even if an injected router
+ * removes or replaces it while choosing an adapter or model.
+ */
+function routeTaskAgentOptions(
+  router: AgentOptions,
+  options: { phase: string; label: string },
+  schema: TaskAgentSchema,
+) {
+  return { ...router({ ...options, schema }), schema }
+}
 
 /**
  * The dependency contract injected into {@link makeTaskPipeline}: the
@@ -266,6 +322,40 @@ export interface FixReportSummary {
   summary: unknown
 }
 
+/** Fields accepted from a fix report before its bounded summary is prepared. */
+interface FixReportInput {
+  commits?: unknown
+  gatesGreen?: unknown
+  hostReviewRuns?: unknown
+  coderabbitRuns?: unknown
+  resolved?: unknown
+  openIssues?: unknown
+  summary?: unknown
+}
+
+/** Evidence recorded for one bounded dual-review round. */
+interface ReviewRound {
+  round: number
+  codeReview: ReviewVerdictSummary | null
+  expertReview: ReviewVerdictSummary | null
+  blocking: string[]
+  hostGates?: HostGateRun['results']
+  fix: FixReportSummary | null
+}
+
+/** Include host gate evidence only when those gates ran in this round. */
+function withHostGateEvidence(record: ReviewRound, gates: HostGateRun | undefined): ReviewRound {
+  if (!gates) return record
+  const { fix, ...review } = record
+  return { ...review, hostGates: gates.results, fix }
+}
+
+/** Preserve the omission of deferred-review evidence when no review was deferred. */
+function withDeferredHostReviews(result: StageResult, deferrals: HostReviewDeferral[]): StageResult {
+  if (deferrals.length === 0) return result
+  return { ...result, deferredHostReviews: deferrals }
+}
+
 /** Successful plan-stage product, mutually exclusive with other variants. */
 export interface PipelinePlanProduct<T> {
   /** Runtime discriminator for a successful planning stage. */
@@ -351,7 +441,7 @@ export function summarizeReviewVerdict(review: StageReview | null | undefined): 
  * @returns `{ summary }` when `fix` is a string, a trimmed structured
  *   record when `fix` is an object, or `null` when `fix` is absent.
  */
-export function summarizeFixReport(fix: Record<string, unknown> | string | null | undefined): FixReportSummary | null {
+export function summarizeFixReport(fix: FixReportInput | string | null | undefined): FixReportSummary | null {
   if (!fix) return null
   if (typeof fix === 'string') return { summary: fix }
   return {
@@ -410,6 +500,45 @@ export function integrationIncomplete(integration: StageIntegration | null): boo
  */
 export function integrationHaltDetail(integration: StageIntegration | null): string {
   return integration?.conflicts || integration?.summary || INTEGRATION_INCOMPLETE_DETAIL
+}
+
+// Shared tail of the implementation stage: the committed-worktree durability
+// gate and the plan-status advisory, identical for both build modes.
+async function finishImplementationStage(task: SelectedTask, worktree: string, plan: StagePlan, impl: StageImpl, extra: ExtraResultFields): Promise<PipelineStageProduct<StageImpl, 'impl'>> {
+  const tag = task.id
+  // Host-verified durability gate: ok=true with a dirty worktree is a
+  // contract violation — uncommitted work is unreviewable and would be lost
+  // at the squash merge, so fail fast with the exact paths.
+  const committed = await verifyWorktreeCommitted(worktree)
+  if (!committed.ok) {
+    return {
+      kind: 'failure',
+      fail: {
+        id: tag,
+        status: 'failed',
+        stage: 'implement',
+        detail: `implementation returned ok but left uncommitted state in the worktree (${committed.detail}); every work item must be committed before returning`,
+        openIssues: impl.openIssues || [],
+        worktree,
+        proposals: [],
+        ...extra,
+      },
+    }
+  }
+  // Stale plan status costs a resumed run one redundant stage, never
+  // correctness — log it rather than failing a green implementation.
+  if (plan.execplanPath) {
+    const contained = execplanRelPath(worktree, plan.execplanPath)
+    if (contained.ok) {
+      const planState = await readExecplanState({ worktreePath: worktree, execplanPath: contained.relPath })
+      if (planState.status !== 'complete') {
+        log(`[task ${tag}] implementation returned ok but the committed ExecPlan status is '${planState.status}' (expected COMPLETE)${planState.error ? `: ${planState.error}` : ''}`)
+      }
+    } else {
+      log(`[task ${tag}] skipping the post-implementation plan-status check: ${contained.detail}`)
+    }
+  }
+  return { kind: 'impl', impl }
 }
 
 /**
@@ -473,16 +602,16 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
 
   async function runPlanDesignLoop(task: SelectedTask, worktree: string, opts: Record<string, unknown> = {}): Promise<PipelineStageProduct<StagePlan, 'plan'>> {
     const tag = task.id
-    const extra = (opts.extra as Record<string, unknown>) || {}
+    const extra = extraResultFields(opts.extra)
     let plan: StagePlan | null = null
     let designVerdict: DesignVerdict | null = null
     for (let round = 1; round <= MAX_DESIGN_ROUNDS; round++) {
       phase('Plan')
-      plan = (await planningLock(() => withInfraRetry(() => agent(planPrompt(task, worktree, designVerdict, round, opts), planAgentOptions({
+      // SAFETY: ODW validates the structured reply against PLAN_SCHEMA.
+      plan = (await planningLock(() => withInfraRetry(() => agent(planPrompt(task, worktree, designVerdict, round, opts), routeTaskAgentOptions(planAgentOptions, {
         phase: 'Plan',
         label: `plan:${tag} r${round}`,
-        schema: PLAN_SCHEMA,
-      })), `plan:${tag} r${round}`))) as StagePlan | null
+      }, PLAN_SCHEMA)), `plan:${tag} r${round}`))) as StagePlan | null
       if (!plan) return { kind: 'failure', fail: { id: tag, status: 'failed', stage: 'plan', detail: 'planner returned nothing', worktree, proposals: [], ...extra } }
       // Containment before any filesystem access: the planner's path is
       // untrusted data, and an escape fails the task closed.
@@ -538,11 +667,12 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
       }
 
       phase('Design Review')
-      designVerdict = (await planningLock(() => withInfraRetry(() => agent(designReviewPrompt(task, worktree, plan as StagePlan, round), reviewAgentOptions({
+      const reviewedPlan = plan
+      // SAFETY: ODW validates the structured reply against DESIGN_VERDICT_SCHEMA.
+      designVerdict = (await planningLock(() => withInfraRetry(() => agent(designReviewPrompt(task, worktree, reviewedPlan, round), routeTaskAgentOptions(reviewAgentOptions, {
         phase: 'Design Review',
         label: `design-review:${tag} r${round}`,
-        schema: DESIGN_VERDICT_SCHEMA,
-      })), `design-review:${tag} r${round}`))) as DesignVerdict | null
+      }, DESIGN_VERDICT_SCHEMA)), `design-review:${tag} r${round}`))) as DesignVerdict | null
       if (designVerdict?.satisfied) {
         log(`[task ${tag}] design approved in round ${round}`)
         // Deterministic bookkeeping owned by the control loop: record the
@@ -607,9 +737,10 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     blocking: string[],
     label: string,
     round: number,
-  ): Promise<{ report: Record<string, unknown> | null; dirtyDetail: string | null }> {
+  ): Promise<{ report: FixReportInput | null; dirtyDetail: string | null }> {
     phase('Implement')
-    const report = (await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, blocking, round), buildAgentOptions({ phase: 'Implement', label, schema: FIX_SCHEMA })), label))) as Record<string, unknown> | null
+    // SAFETY: ODW validates the structured reply against FIX_SCHEMA.
+    const report = (await buildLock(() => withInfraRetry(() => agent(fixPrompt(task, worktree, plan, blocking, round), routeTaskAgentOptions(buildAgentOptions, { phase: 'Implement', label }, FIX_SCHEMA)), label))) as FixReportInput | null
     const committed = await verifyWorktreeCommitted(worktree)
     return { report, dirtyDetail: committed.ok ? null : committed.detail }
   }
@@ -619,7 +750,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     worktree: string,
     plan: StagePlan,
     itemLabel: string,
-    extra: Record<string, unknown>,
+    extra: ExtraResultFields,
   ): Promise<{ ok: true } | { fail: StageResult }> {
     const tag = task.id
     // Bounded fix loop shared by the two deterministic checks. The commit gates
@@ -675,7 +806,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     worktree: string,
     plan: StagePlan,
     itemLabel: string,
-    extra: Record<string, unknown>,
+    extra: ExtraResultFields,
   ): Promise<{ ok: true; hostReviewRuns: number } | { fail: StageResult }> {
     const tag = task.id
     let runs = 0
@@ -692,7 +823,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
       }
       const blocking = reviewBlockingItems(hostReviewerDisplayName, review.findings)
       log(`[task ${tag}] between-item ${hostReviewerDisplayName} ${itemLabel} attempt ${attempt}: ${review.findings.length} finding(s), ${blocking.length} blocking`)
-      if (!blocking.length) return { ok: true, hostReviewRuns: runs }
+      if (blocking.length === 0) return { ok: true, hostReviewRuns: runs }
       if (attempt === MAX_REVIEW_ROUNDS) {
         return { fail: { id: tag, status: 'failed', stage: 'code-review', detail: `${hostReviewerDisplayName} between-item review left blocking finding(s) unresolved after ${MAX_REVIEW_ROUNDS} fix attempt(s) on ${itemLabel}: ${blocking.join('; ')}`, worktree, proposals: [], ...extra } }
       }
@@ -706,7 +837,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
 
   async function runWorkItemBuildLoop(task: SelectedTask, worktree: string, plan: StagePlan, opts: Record<string, unknown> = {}): Promise<PipelineStageProduct<StageImpl, 'impl'> | null> {
     const tag = task.id
-    const extra = (opts.extra as Record<string, unknown>) || {}
+    const extra = extraResultFields(opts.extra)
     const fail = (detail: string, openIssues: string[] = []) => ({ kind: 'failure' as const, fail: { id: tag, status: 'failed', stage: 'implement', detail, openIssues, worktree, proposals: [], ...extra } })
     const contained = execplanRelPath(worktree, plan.execplanPath)
     if (!contained.ok) return fail(contained.detail)
@@ -714,7 +845,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     const initial = await readExecplanState(planRef)
     if (initial.status === 'unreadable') return fail(`could not read the committed ExecPlan: ${initial.error}`)
     if (initial.status === 'missing') return fail(`the ExecPlan disappeared before the build: ${contained.relPath}`)
-    if (!(initial.items || []).length) return null
+    if (initial.items.length === 0) return null
     const commits: string[] = []
     const openIssues: string[] = []
     let hostReviewRuns = 0
@@ -725,14 +856,14 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
       const before = await readExecplanState(planRef)
       if (before.status === 'unreadable') return fail(`could not read the committed ExecPlan: ${before.error}`, openIssues)
       if (before.status === 'missing') return fail(`the committed ExecPlan disappeared mid-build: ${contained.relPath}`, openIssues)
-      const item = (before.items || []).find((entry) => !entry.ticked)
+      const item = before.items.find((entry) => !entry.ticked)
       if (!item) break
       const label = `implement:${tag} wi${round}`
-      const impl = (await buildLock(() => withInfraRetry(() => agent(implementWorkItemPrompt(task, worktree, plan, item, { ...opts, noProgressNote }), buildAgentOptions({
+      // SAFETY: ODW validates the structured reply against IMPL_SCHEMA.
+      const impl = (await buildLock(() => withInfraRetry(() => agent(implementWorkItemPrompt(task, worktree, plan, item, { ...opts, noProgressNote }), routeTaskAgentOptions(buildAgentOptions, {
         phase: 'Implement',
         label,
-        schema: IMPL_SCHEMA,
-      })), label))) as StageImpl | null
+      }, IMPL_SCHEMA)), label))) as StageImpl | null
       lastImpl = impl
       const authDetail = implementationAuthFailureDetail(impl)
       if (authDetail) {
@@ -742,7 +873,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
       if (!impl || !impl.ok || !impl.gatesGreen) {
         return fail(impl?.summary || `work item did not reach a green state: ${item.text}`, impl?.openIssues || [])
       }
-      if (Array.isArray(impl.commits)) commits.push(...(impl.commits as string[]))
+      if (Array.isArray(impl.commits)) commits.push(...impl.commits)
       openIssues.push(...(impl.openIssues || []))
       hostReviewRuns += Number(impl.hostReviewRuns ?? impl.coderabbitRuns) || 0
       // Host-verified durability per turn: a dirty worktree or an uncommitted
@@ -786,8 +917,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     const final = await readExecplanState(planRef)
     if (final.status === 'unreadable') return fail(`could not read the committed ExecPlan after the build: ${final.error}`, openIssues)
     if (final.status === 'missing') return fail(`the committed ExecPlan is absent after the build: ${contained.relPath}`, openIssues)
-    const remaining = (final.items || []).filter((entry) => !entry.ticked)
-    if (remaining.length) {
+    const remaining = final.items.filter((entry) => !entry.ticked)
+    if (remaining.length > 0) {
       return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0]?.text ?? 'unknown'}`, openIssues)
     }
     return {
@@ -808,7 +939,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
 
   async function runImplementationStage(task: SelectedTask, worktree: string, plan: StagePlan, opts: Record<string, unknown> = {}): Promise<PipelineStageProduct<StageImpl, 'impl'>> {
     const tag = task.id
-    const extra = (opts.extra as Record<string, unknown>) || {}
+    const extra = extraResultFields(opts.extra)
     phase('Implement')
     if (PER_WORK_ITEM_BUILD) {
       const itemised = await runWorkItemBuildLoop(task, worktree, plan, opts)
@@ -820,11 +951,11 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
       }
       log(`[task ${tag}] the committed ExecPlan has no Progress checklist; falling back to the single-turn build`)
     }
-    const impl = (await buildLock(() => withInfraRetry(() => agent(implementPrompt(task, worktree, plan, opts), buildAgentOptions({
+    // SAFETY: ODW validates the structured reply against IMPL_SCHEMA.
+    const impl = (await buildLock(() => withInfraRetry(() => agent(implementPrompt(task, worktree, plan, opts), routeTaskAgentOptions(buildAgentOptions, {
       phase: 'Implement',
       label: `implement:${tag}`,
-      schema: IMPL_SCHEMA,
-    })), `implement:${tag}`))) as StageImpl | null
+    }, IMPL_SCHEMA)), `implement:${tag}`))) as StageImpl | null
     const authDetail = implementationAuthFailureDetail(impl)
     if (authDetail) {
       faultMetrics.authFaults += 1
@@ -848,45 +979,6 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     return finishImplementationStage(task, worktree, plan, impl, extra)
   }
 
-  // Shared tail of the implementation stage: the committed-worktree durability
-  // gate and the plan-status advisory, identical for both build modes.
-  async function finishImplementationStage(task: SelectedTask, worktree: string, plan: StagePlan, impl: StageImpl, extra: Record<string, unknown>): Promise<PipelineStageProduct<StageImpl, 'impl'>> {
-    const tag = task.id
-    // Host-verified durability gate: ok=true with a dirty worktree is a
-    // contract violation — uncommitted work is unreviewable and would be lost
-    // at the squash merge, so fail fast with the exact paths.
-    const committed = await verifyWorktreeCommitted(worktree)
-    if (!committed.ok) {
-      return {
-        kind: 'failure',
-        fail: {
-          id: tag,
-          status: 'failed',
-          stage: 'implement',
-          detail: `implementation returned ok but left uncommitted state in the worktree (${committed.detail}); every work item must be committed before returning`,
-          openIssues: impl?.openIssues || [],
-          worktree,
-          proposals: [],
-          ...extra,
-        },
-      }
-    }
-    // Stale plan status costs a resumed run one redundant stage, never
-    // correctness — log it rather than failing a green implementation.
-    if (plan?.execplanPath) {
-      const contained = execplanRelPath(worktree, plan.execplanPath)
-      if (!contained.ok) {
-        log(`[task ${tag}] skipping the post-implementation plan-status check: ${contained.detail}`)
-      } else {
-        const planState = await readExecplanState({ worktreePath: worktree, execplanPath: contained.relPath })
-        if (planState.status !== 'complete') {
-          log(`[task ${tag}] implementation returned ok but the committed ExecPlan status is '${planState.status}' (expected COMPLETE)${planState.error ? `: ${planState.error}` : ''}`)
-        }
-      }
-    }
-    return { kind: 'impl', impl }
-  }
-
   // One integration implementation for the normal pipeline and the addendum
   // lane (the two copies had already drifted once). Deliberately NOT wrapped
   // in withInfraRetry: integration pushes to origin/BASE, so a hidden-success
@@ -904,7 +996,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     // point stays a readable command rather than a long positional list.
     context: {
       worktree: string
-      proposals: Array<Record<string, unknown>>
+      proposals: TaskProposal[]
       kindExtra: Record<string, unknown>
       impl?: StageImpl | null
     },
@@ -913,12 +1005,13 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     const tag = task.id
     const doIntegrate = () => {
       phase('Integrate')
-      return buildLock(() => agent(integratePrompt(task, worktree, impl), buildAgentOptions({ phase: 'Integrate', label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })))
+      return buildLock(() => agent(integratePrompt(task, worktree, impl), routeTaskAgentOptions(buildAgentOptions, { phase: 'Integrate', label: `integrate:${tag}` }, INTEGRATE_SCHEMA)))
     }
     try {
+      // SAFETY: ODW validates the structured reply against INTEGRATE_SCHEMA.
       return { integration: (mergeLock ? await mergeLock(doIntegrate) : await doIntegrate()) as StageIntegration | null }
     } catch (error) {
-      const message = ((error as Error | null) && (error as Error).message) || String(error)
+      const message = thrownMessage(error)
       if (!infrastructureFailureDetail(message)) throw error
       faultMetrics.infraFaults += 1
       return {
@@ -938,15 +1031,15 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
   async function runDualReviewAndIntegration(task: SelectedTask, worktree: string, plan: StagePlan, impl: StageImpl, mergeLock: MergeLock, options: Record<string, unknown> = {}): Promise<StageResult> {
     const tag = task.id
     const kindExtra = options.kind ? { kind: options.kind } : {}
-    const proposals: Array<Record<string, unknown>> = []
-    const reviewRounds: Array<Record<string, unknown>> = []
+    const proposals: TaskProposal[] = []
+    const reviewRounds: ReviewRound[] = []
     let reviewsPass = false
     const deferredHostReviews: HostReviewDeferral[] = []
     for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
       // Host-verified gates FIRST: deterministic, zero tokens, and a red
       // branch must not spend reviewer agents. A red gate goes straight to a
       // fix round carrying the host log evidence.
-      let hostGates: HostGateRun | null = null
+      let hostGates: HostGateRun | undefined
       if (HOST_COMMIT_GATES) {
         hostGates = await hostGateLock(() => runHostCommitGates(worktree, tag, `r${round}`))
         if (!hostGates.green) {
@@ -977,7 +1070,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         if (!cs.clean) {
           log(`[task ${tag}] CodeScene check red in round ${round}`)
           const csBlocking = [`CODESCENE RED: ${cs.detail} Clear these code-health regressions by refactoring, or — only where further refinement would be deleterious — suppress the specific smell with a justified @codescene(disable:"...") comment, then re-run the check to green and commit.`]
-          reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: csBlocking, ...(hostGates ? { hostGates: hostGates.results } : {}), fix: null })
+          reviewRounds.push(withHostGateEvidence({ round, codeReview: null, expertReview: null, blocking: csBlocking, fix: null }, hostGates))
           if (round === MAX_REVIEW_ROUNDS) break
           const csFix = await dispatchFixAndVerify(task, worktree, plan, csBlocking, `fix:${tag} cs r${round}`, round)
           const csRound = reviewRounds.at(-1)
@@ -1009,10 +1102,10 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         } else {
           const hostReviewBlocking = reviewBlockingItems(hostReviewerDisplayName, hostReview.findings)
           log(`[task ${tag}] ${hostReviewerDisplayName} host review round ${round}: ${hostReview.findings.length} finding(s), ${hostReviewBlocking.length} blocking`)
-          if (hostReviewBlocking.length) {
+          if (hostReviewBlocking.length > 0) {
             // Short-circuit before the reviewer agents: fix the host-review
             // blockers first, spending zero agent tokens this round.
-            reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: hostReviewBlocking, ...(hostGates ? { hostGates: hostGates.results } : {}), fix: null })
+            reviewRounds.push(withHostGateEvidence({ round, codeReview: null, expertReview: null, blocking: hostReviewBlocking, fix: null }, hostGates))
             if (round === MAX_REVIEW_ROUNDS) break
             const hostReviewFix = await dispatchFixAndVerify(task, worktree, plan, hostReviewBlocking, `fix:${tag} r${round}`, round)
             const hostReviewRound = reviewRounds.at(-1)
@@ -1032,13 +1125,14 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
       // each reviewer retries infra faults and records any residual one here.
       const reviewInfraFaults: string[] = []
       const runReviewAgent = (promptText: string, reviewPhase: string, label: string) => () =>
-        withInfraRetry(() => agent(promptText, reviewAgentOptions({ phase: reviewPhase, label, schema: REVIEW_SCHEMA })), label)
+        withInfraRetry(() => agent(promptText, routeTaskAgentOptions(reviewAgentOptions, { phase: reviewPhase, label }, REVIEW_SCHEMA)), label)
           .catch((error) => {
-            const message = ((error as Error | null) && (error as Error).message) || String(error)
+            const message = thrownMessage(error)
             if (!infrastructureFailureDetail(message)) throw error
             reviewInfraFaults.push(`${label}: ${message}`)
             return null
           })
+      // SAFETY: Each reply is validated against REVIEW_SCHEMA; parallel maps failed slots to null.
       const [codeReview, expertReview] = (await parallel([
         runReviewAgent(codeReviewPrompt(task, worktree, plan, impl), 'Code Review', `code-review:${tag} r${round}`),
         runReviewAgent(expertReviewPrompt(task, worktree, plan, impl), 'Expert Review', `expert-review:${tag} r${round}`),
@@ -1047,12 +1141,12 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         if (r?.proposedRoadmapItems?.length) proposals.push(...r.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
       }
       if (!codeReview || !expertReview) {
-        const missing = [
-          !codeReview ? 'code review' : null,
-          !expertReview ? 'expert review' : null,
-        ].filter(Boolean).join(' and ')
+        const missingReviews: string[] = []
+        if (!codeReview) missingReviews.push('code review')
+        if (!expertReview) missingReviews.push('expert review')
+        const missing = missingReviews.join(' and ')
         reviewRounds.push({ round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking: [], fix: null })
-        if (reviewInfraFaults.length) {
+        if (reviewInfraFaults.length > 0) {
           faultMetrics.infraFaults += 1
           return {
             id: tag,
@@ -1080,9 +1174,9 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         ...(codeReview.blocking || []),
         ...(expertReview.blocking || []),
       ]
-      const roundRecord: Record<string, unknown> = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, ...(hostGates ? { hostGates: hostGates.results } : {}), fix: null }
+      const roundRecord = withHostGateEvidence({ round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, fix: null }, hostGates)
       reviewRounds.push(roundRecord)
-      if (blocking.length === 0 && codeReview?.verdict === 'pass' && expertReview?.verdict === 'pass') {
+      if (blocking.length === 0 && codeReview.verdict === 'pass' && expertReview.verdict === 'pass') {
         reviewsPass = true
         log(`[task ${tag}] dual review passed in round ${round}`)
         break
@@ -1100,7 +1194,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     }
 
     if (!reviewsPass) {
-      const lastRound = reviewRounds[reviewRounds.length - 1] as { blocking?: string[] } | undefined
+      const lastRound = reviewRounds.at(-1)
       const finalBlocking = (lastRound?.blocking || []).slice(0, 6).join('; ')
       return {
         id: tag,
@@ -1127,10 +1221,10 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         return { id: tag, status: 'halted', stage: 'integrate', detail: integrationHaltDetail(integration), worktree, proposals, ...kindExtra }
       }
     } else {
-      return { id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals, ...(deferredHostReviews.length ? { deferredHostReviews } : {}), ...kindExtra }
+      return { ...withDeferredHostReviews({ id: tag, status: 'manual-merge-ready', plan, impl, integration, worktree, proposals }, deferredHostReviews), ...kindExtra }
     }
 
-    return { id: tag, status: 'done', plan, impl, integration, worktree, proposals, ...(deferredHostReviews.length ? { deferredHostReviews } : {}), ...kindExtra }
+    return { ...withDeferredHostReviews({ id: tag, status: 'done', plan, impl, integration, worktree, proposals }, deferredHostReviews), ...kindExtra }
   }
 
   async function runTask(task: SelectedTask, mergeLock: MergeLock): Promise<StageResult> {
@@ -1187,7 +1281,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     // remediation from spawning more remediation.
     if (task.isAddendum) {
       phase('Implement')
-      const impl = (await buildLock(() => withInfraRetry(() => agent(implementAddendumPrompt(task, worktree), buildAgentOptions({ phase: 'Implement', label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`))) as StageImpl | null
+      // SAFETY: ODW validates the structured reply against IMPL_SCHEMA.
+      const impl = (await buildLock(() => withInfraRetry(() => agent(implementAddendumPrompt(task, worktree), routeTaskAgentOptions(buildAgentOptions, { phase: 'Implement', label: `addendum:${tag}` }, IMPL_SCHEMA)), `addendum:${tag}`))) as StageImpl | null
       const authDetail = implementationAuthFailureDetail(impl)
       if (authDetail) {
         faultMetrics.authFaults += 1
@@ -1205,7 +1300,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
       const openIssues = impl?.openIssues || []
       const onlyDeferredReviewIssues = hasOnlyDeferredReviewIssues(openIssues)
       if (addendumImplementationNeedsManualMerge(impl)) {
-        const deferredEvidence = openIssues.length
+        const deferredEvidence = openIssues.length > 0
           ? ` Outstanding deferred review evidence: ${openIssues.join('; ')}`
           : ''
         return {
@@ -1214,7 +1309,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
           stage: 'addendum',
           detail:
             `addendum implementation reported completed work and green gates but did not set ok=true` +
-            `${openIssues.length ? ' and left only deferred/recoverable review issues open' : ' and no open issues'}; ` +
+            `${openIssues.length > 0 ? ' and left only deferred/recoverable review issues open' : ' and no open issues'}; ` +
             `branch left for operator verification before integration.${deferredEvidence}`,
           openIssues,
           impl,
@@ -1233,7 +1328,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
       if (!committed.ok) {
         return await attachAssessment(task, wt, { id: tag, status: 'failed', stage: 'addendum', detail: `addendum implementation returned ok but left uncommitted state in the worktree (${committed.detail}); every sub-task must be committed before returning`, openIssues, worktree, proposals: [], kind: 'addendum' })
       }
-      const proposals: Array<Record<string, unknown>> = []
+      const proposals: TaskProposal[] = []
       const addendumDeferredReviews: HostReviewDeferral[] = []
       // Host-verified gates: addenda have no review rounds, so a gatesGreen
       // claim the host cannot reproduce fails here, before any review spend.
@@ -1264,7 +1359,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
           return { id: tag, status: 'fatal-auth', stage: 'auth', detail: `${hostReviewerDisplayName} host review is not authenticated: ${hostReview.detail}`, worktree, proposals, kind: 'addendum' }
         }
         const blockingFindings = reviewBlockingItems(hostReviewerDisplayName, hostReview.findings)
-        if (blockingFindings.length) {
+        if (blockingFindings.length > 0) {
           return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'addendum-review', detail: `${hostReviewerDisplayName} host review found blocking issue(s): ${blockingFindings.join('; ')}`, impl, worktree, proposals, kind: 'addendum' })
         }
         const deferredReview = hostReviewDeferral(hostReview)
@@ -1278,7 +1373,8 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         || addendumDeferredReviews.length > 0
       if (needsFallbackReview) {
         phase('Code Review')
-        addendumReview = (await withInfraRetry(() => agent(addendumReviewPrompt(task, worktree, impl), reviewAgentOptions({ phase: 'Code Review', label: `addendum-review:${tag}`, schema: REVIEW_SCHEMA })), `addendum-review:${tag}`)) as StageReview | null
+        // SAFETY: ODW validates the structured reply against REVIEW_SCHEMA.
+        addendumReview = (await withInfraRetry(() => agent(addendumReviewPrompt(task, worktree, impl), routeTaskAgentOptions(reviewAgentOptions, { phase: 'Code Review', label: `addendum-review:${tag}` }, REVIEW_SCHEMA)), `addendum-review:${tag}`)) as StageReview | null
         if (addendumReview?.proposedRoadmapItems?.length) {
           proposals.push(...addendumReview.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })))
         }
@@ -1297,9 +1393,9 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
           return await attachAssessment(task, wt, { id: tag, status: 'halted', stage: 'integrate', detail: integrationHaltDetail(integration), worktree, proposals, kind: 'addendum' })
         }
       } else {
-        return { id: tag, status: 'manual-merge-ready', impl, addendumReview, integration, worktree, proposals, ...(addendumDeferredReviews.length ? { deferredHostReviews: addendumDeferredReviews } : {}), kind: 'addendum' }
+        return { ...withDeferredHostReviews({ id: tag, status: 'manual-merge-ready', impl, addendumReview, integration, worktree, proposals }, addendumDeferredReviews), kind: 'addendum' }
       }
-      return { id: tag, status: 'done', impl, addendumReview, integration, worktree, proposals, ...(addendumDeferredReviews.length ? { deferredHostReviews: addendumDeferredReviews } : {}), kind: 'addendum' }
+      return { ...withDeferredHostReviews({ id: tag, status: 'done', impl, addendumReview, integration, worktree, proposals }, addendumDeferredReviews), kind: 'addendum' }
     }
 
     // --- Plan <-> Design review (adversarial loop) --------------------------
@@ -1321,7 +1417,7 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
     }
     return outcome
     } catch (error) {
-      const detail = `unhandled agent error: ${((error as Error | null) && (error as Error).message) || String(error)}`
+      const detail = `unhandled agent error: ${thrownMessage(error)}`
       const result = resultFromUnhandledAgentError(tag, detail, { worktree }, faultMetrics)
       return await attachAssessment(task, wt, result)
     }

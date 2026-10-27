@@ -268,3 +268,13 @@ describe('makeConfig overrides and clamps', () => {
     expect(config.WRITE_PROBE_MODEL_BY_ADAPTER).toEqual({ claude: 'probe-model' })
   })
 })
+
+ test('rejects malformed workflow argument types', () => {
+  expect(() => makeConfig({ maxParallel: 'many' })).toThrow('Invalid workflow argument type')
+  expect(() => makeConfig({ writeProbeModelByAdapter: { codex: 42 } })).toThrow('Invalid workflow argument type')
+})
+
+test('recovery discovery requires literal true even for truthy legacy input', () => {
+  expect(makeConfig({ resumePartialBranches: 'yes' }).RESUME_PARTIAL_BRANCHES).toBe(false)
+  expect(makeConfig({ resumePartialBranches: true }).RESUME_PARTIAL_BRANCHES).toBe(true)
+})

@@ -298,8 +298,12 @@ export function boundedTail(text: unknown, limit = 2000): string {
 /** Return the capitalized reviewer name used in operator-facing prose. */
 export function reviewerDisplayName(reviewer: HostReviewResult['reviewer']): string {
   switch (reviewer) {
-    case 'dakar': return 'Dakar'
-    case 'coderabbit': return 'CodeRabbit'
+    case 'dakar': {
+      return 'Dakar'
+    }
+    case 'coderabbit': {
+      return 'CodeRabbit'
+    }
     default: {
       const unmatched: never = reviewer
       throw new Error(`Unknown host reviewer: ${unmatched}`)

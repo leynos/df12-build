@@ -10,6 +10,7 @@ import {
   faultMetrics,
   infrastructureFailureDetail,
   makeWithInfraRetry,
+  faultThrownMessage,
   providerFailureDetail,
   resultFromUnhandledAgentError,
 } from '../../src/workflows/df12-build-odw/faults.ts'
@@ -113,5 +114,16 @@ describe('resultFromUnhandledAgentError', () => {
       proposals: [],
       worktree: '/tmp/wt',
     })
+  })
+})
+
+
+describe('faultThrownMessage', () => {
+  test('uses string messages and safely normalizes other thrown values', () => {
+    expect(faultThrownMessage(new Error('broken'))).toBe('broken')
+    expect(faultThrownMessage({ message: 'plain failure' })).toBe('plain failure')
+    expect(faultThrownMessage({ message: 42 })).toBe('[object Object]')
+    expect(faultThrownMessage(null)).toBe('null')
+    expect(faultThrownMessage('failure')).toBe('failure')
   })
 })

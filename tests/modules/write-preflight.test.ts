@@ -3,7 +3,7 @@
 // claimed ok, and the worktree is untrusted content — so the symlink and
 // decoy cases are the load-bearing ones.
 import { beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, symlinkSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, symlinkSync, writeFileSync, readFileSync, mkdirSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -117,6 +117,56 @@ describe('hostWriteProbe', () => {
 })
 
 describe('probe options right-sizing', () => {
+  for (const schemaAction of ['omit', 'replace'] as const) {
+    test(`the probe retains its schema when routing options ${schemaAction} it`, async () => {
+      const dir = tmp()
+      const tag = '1.2.3'
+      const adapter = 'codex'
+      const routerInputs: Array<Record<string, unknown>> = []
+      const agentOptions: Array<Record<string, unknown>> = []
+      try {
+        globals.agent = async (_prompt: string, options: Record<string, unknown>) => {
+          agentOptions.push(options)
+          writeFileSync(writeProbePath(dir, adapter), writeProbeToken(tag, adapter))
+          return { ok: true }
+        }
+        const targets = () => [{
+          role: 'build',
+          adapter,
+          options: (options: Record<string, unknown>) => {
+            routerInputs.push(options)
+            const routed = {
+              adapter,
+              model: 'codex-cheap',
+              effort: 'minimal',
+              phase: options.phase,
+              label: options.label,
+            }
+            return schemaAction === 'omit'
+              ? routed
+              : { ...routed, schema: { type: 'string' } }
+          },
+        }]
+        const { runTaskAgentWritePreflight } = makeWritePreflight({ enabled: true, targets })
+
+        expect(await runTaskAgentWritePreflight(dir, tag)).toEqual({ ok: true, failures: [] })
+        expect(routerInputs).toHaveLength(1)
+        expect(routerInputs[0]?.schema).toBe(WRITE_PROBE_SCHEMA)
+        expect(agentOptions).toHaveLength(1)
+        expect(agentOptions[0]?.schema).toBe(WRITE_PROBE_SCHEMA)
+        expect(agentOptions[0]).toMatchObject({
+          adapter,
+          model: 'codex-cheap',
+          effort: 'minimal',
+          phase: 'Worktree',
+          label: 'write-probe:codex',
+        })
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  }
+
   test('the probe keeps the adapter, uses minimal effort, and passes no reasoning model', async () => {
     const seen: Array<Record<string, unknown>> = []
     globals.agent = async (_prompt: string, opts: Record<string, unknown> = {}) => {
@@ -146,6 +196,61 @@ describe('probe options right-sizing', () => {
 })
 
 describe('makeWritePreflight', () => {
+  for (const [label, thrown, expected] of [
+    ['error', new Error('adapter failed'), 'adapter failed'],
+    ['string', 'adapter disconnected', 'adapter disconnected'],
+    ['object', { message: 'adapter unavailable' }, 'adapter unavailable'],
+    ['numeric message', { message: 42 }, '42'],
+    ['null', null, 'null'],
+  ] as const) {
+    test(`reports an agent failure thrown as ${label}`, async () => {
+      const dir = tmp()
+      try {
+        globals.agent = async () => { throw thrown }
+        const targets = () => [{ role: 'build', adapter: 'codex', options: (options: Record<string, unknown>) => options }]
+        const { runTaskAgentWritePreflight } = makeWritePreflight({ enabled: true, targets })
+
+        const outcome = await runTaskAgentWritePreflight(dir, '1.2.3')
+        expect(outcome.ok).toBe(false)
+        expect(outcome.failures).toHaveLength(1)
+        expect(outcome.failures[0]?.detail).toContain(expected)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  }
+
+  test('reports a malformed agent reply when the host probe is missing', async () => {
+    const dir = tmp()
+    try {
+      globals.agent = async () => ({ ok: false, detail: 42 })
+      const targets = () => [{ role: 'build', adapter: 'codex', options: (options: Record<string, unknown>) => options }]
+      const { runTaskAgentWritePreflight } = makeWritePreflight({ enabled: true, targets })
+
+      const outcome = await runTaskAgentWritePreflight(dir, '1.2.3')
+      expect(outcome.ok).toBe(false)
+      expect(outcome.failures[0]?.detail).toContain('agent reply has invalid fields')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('accepts a verified probe even when the agent reply is malformed', async () => {
+    const dir = tmp()
+    try {
+      globals.agent = async () => {
+        writeFileSync(writeProbePath(dir, 'codex'), writeProbeToken('1.2.3', 'codex'))
+        return { ok: 'yes' }
+      }
+      const targets = () => [{ role: 'build', adapter: 'codex', options: (options: Record<string, unknown>) => options }]
+      const { runTaskAgentWritePreflight } = makeWritePreflight({ enabled: true, targets })
+
+      expect(await runTaskAgentWritePreflight(dir, '1.2.3')).toEqual({ ok: true, failures: [] })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('passes when every adapter really writes its token', async () => {
     const dir = tmp()
     globals.agent = async (prompt: string) => {

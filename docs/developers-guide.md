@@ -36,12 +36,12 @@ The repository contains workflow scripts, skill documentation, docs, operator
 scripts, focused test suites, a project roadmap with ExecPlans, and a small
 validation `Makefile`. Development dependencies (`esbuild`, `fast-check`,
 `@aboviq/bun-test-cucumber`, `ajv`, `lemmascript`, `typescript`, `@types/bun`,
-`markdownlint-cli2`, `typedoc`, and `yaml`) are managed with `bun` via
-`package.json`. `yaml` is at `^2.9.0` and parses the CI workflow in
-`tests/modules/ci-workflow-gate.test.ts`, which runs under the module test
-gates; that contract must parse the workflow rather than search its text, so
-the parser is a direct dependency rather than one reached through another
-package's tree.
+`markdownlint-cli2`, `oxlint`, `oxlint-tsgolint`, `ai-deslop`, `typedoc`, and
+`yaml`) are managed with `bun` via `package.json`. `yaml` is at `^2.9.0` and
+parses the CI workflow in `tests/modules/ci-workflow-gate.test.ts`, which runs
+under the module test gates; that contract must parse the workflow rather than
+search its text, so the parser is a direct dependency rather than one reached
+through another package's tree.
 
 Relevant paths:
 
@@ -116,6 +116,10 @@ loader would reject. Within the src tree, keep the ODW script contract intact:
 - Do not import ODW primitives. `args`, `agent`, `parallel`, `phase`, `log`,
   and `budget` are injected by ODW.
 - Use schemas where JavaScript consumes agent output as structured data.
+- When routing options for assessment, write-preflight, or task-dispatch agent
+  calls, retain the call's required schema even if the router replaces the
+  options or omits `schema`; ODW uses it to validate structured replies at the
+  agent boundary.
 - Keep phase and label names explicit enough to make the dashboard useful.
 - Keep target-project mutation inside agent prompts and real git worktrees;
   ODW copy isolation is not a persistent handoff mechanism for this workflow.
@@ -731,6 +735,19 @@ carry a condition. A condition is how a gate is disarmed without the command
 changing, so the assertion is that the `if` key is absent rather than that it
 holds any particular value. The same suite pins the strict Dafny step, which is
 what stops `make all`'s lenient verification quietly skipping in CI.
+
+`make lint` runs the pinned Oxlint rules over the authored module tree in
+`src/`, after Markdown linting and workflow parsing. The configuration in
+`oxlint.config.mjs` applies the supported Unicorn recommended rules and the
+recommended `ai-deslop` rules with type-aware checks. Its exact dependency
+pins, the Unicorn/deslop rule conflict, and scoped ODW rule exceptions are
+recorded in `docs/adr-004-linting-strategy.md`.
+
+The workflow artefacts in `workflows/` are excluded from Oxlint. They are
+object code: `make workflow-parse` checks their workflow syntax and
+`make workflow-freshness` checks that the generated ODW artefact matches its
+TypeScript source. Tests are also outside the application source lint target;
+`make test` remains their behavioural gate.
 
 `make markdownlint` is the separate Markdown gate. It runs the pinned
 `markdownlint-cli2` configuration over maintained Markdown and then runs the

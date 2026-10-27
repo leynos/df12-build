@@ -93,6 +93,18 @@ export const TRIAGE_SCHEMA = {
   required: ['ok', 'decisions', 'summary'],
 }
 
+/** Agent options assembled for a remediation triage request. */
+type TriageAgentCallOptions = {
+  /** Workflow phase in which the agent runs. */
+  phase: 'Remediation'
+  /** Task-specific label shown in the workflow dashboard. */
+  label: string
+  /** Schema enforced on the agent's structured response. */
+  schema: typeof TRIAGE_SCHEMA
+  /** Escalated model when proposals span multiple sources. */
+  model?: string
+}
+
 /**
  * Derives the step prefix (`"<phase>.<step>"`) a roadmap id belongs to, so
  * proposals and new tasks can be grouped and filed under the right step
@@ -106,18 +118,23 @@ export const stepOf = (id: unknown): string => String(id).split('.').slice(0, 2)
  * obvious repeats (multiple reviews/audits raising the same item). Order
  * and first-seen metadata are preserved; the deduped source tags are
  * unioned so a later multi-source escalation check still sees every origin.
+ * A missing proposal list is empty; a missing entry has no valid title and
+ * is rejected with the same error as any other titleless proposal.
  */
-export function dedupeProposals(proposals: readonly Record<string, unknown>[]): DedupedRemediationProposal[] {
+export function dedupeProposals(
+  proposals: readonly (Record<string, unknown> | null | undefined)[] | null | undefined,
+): DedupedRemediationProposal[] {
   const byKey = new Map<string, DedupedRemediationProposal>()
   for (const proposal of proposals || []) {
-    const title = typeof proposal?.title === 'string' ? proposal.title.trim() : ''
-    const key = title.toLowerCase().replace(/\s+/g, ' ')
+    if (!proposal) throw new TypeError('remediation proposal title must be a non-blank string')
+    const title = typeof proposal.title === 'string' ? proposal.title.trim() : ''
+    const key = title.toLowerCase().replaceAll(/\s+/g, ' ')
     if (!key) throw new TypeError('remediation proposal title must be a non-blank string')
     // Canonical origin is `source` (the tag run-task.ts stamps); rationale is a
     // legacy fallback only.
-    const fallback = String(proposal?.source || proposal?.rationale || '')
+    const fallback = String(proposal.source || proposal.rationale || '')
     const sources = Array.isArray(proposal.sources)
-      ? proposal.sources.map((source) => String(source)).filter(Boolean)
+      ? proposal.sources.map(String).filter(Boolean)
       : []
     if (fallback && !sources.includes(fallback)) sources.push(fallback)
     const uniqueSources = [...new Set(sources)]
@@ -143,7 +160,7 @@ export function triageNeedsEscalation(deduped: readonly (RemediationProposal & {
     for (const source of proposal.sources || []) sources.add(source)
     // Fall back to the proposal's own source tag (rationale only as a last
     // resort for legacy inputs) when the merged `sources` was not threaded.
-    if (!(proposal.sources || []).length) {
+    if ((proposal.sources || []).length === 0) {
       const fallback = String(proposal.source || proposal.rationale || '')
       if (fallback) sources.add(fallback)
     }
@@ -200,8 +217,8 @@ export function makeRemediation({ preamble, worktreeSafetyNet, base, roadmap, tr
     // spans multiple audit/review sources (potential cross-phase / conflicting
     // routing).
     const deduped = dedupeProposals(proposals)
-    if (!deduped.length) return { ok: true, decisions: [], summary: 'no proposals to triage after de-duplication' }
-    const options: Record<string, unknown> = { phase: 'Remediation', label: `triage:${stepPrefix}`, schema: TRIAGE_SCHEMA }
+    if (deduped.length === 0) return { ok: true, decisions: [], summary: 'no proposals to triage after de-duplication' }
+    const options: TriageAgentCallOptions = { phase: 'Remediation', label: `triage:${stepPrefix}`, schema: TRIAGE_SCHEMA }
     if (triageNeedsEscalation(deduped)) options.model = triageEscalationModel
     return await agent(triagePrompt(stepPrefix, deduped), triageAgentOptions(options))
   }

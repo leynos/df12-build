@@ -3,9 +3,24 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, rmSync } from 'node:fs'
 
 import { hostReview, recordingExec, required } from '../fixtures/host-review.ts'
+import { mapDakarFinding } from '../../src/workflows/df12-build-odw/host-review.ts'
 import type { ReviewOutcome } from '../../src/workflows/df12-build-odw/host-review.ts'
 
 const g = globalThis as Record<string, unknown>
+
+test('maps only own Dakar severity names and falls back for unknown names', () => {
+  for (const [severity, expected] of [
+    ['critical', 'critical'],
+    ['HIGH', 'major'],
+    ['medium', 'minor'],
+    ['low', 'trivial'],
+    ['constructor', 'info'],
+    ['__proto__', 'info'],
+    ['unrecognized', 'info'],
+  ]) {
+    expect(mapDakarFinding({ severity }).severity).toBe(expected)
+  }
+})
 
 describe('Dakar outcome mapping', () => {
   const junk: string[] = []
@@ -68,6 +83,13 @@ describe('Dakar outcome mapping', () => {
     const review = await runCoderabbitHostReview('/w', 'l', { exec })
     expect(review.outcome).toBe('error')
     expect(review.detail).toContain('changes-requested')
+  })
+
+  test('a passing document with a malformed findings value fails closed', async () => {
+    const { exec } = recordingExec({ stdout: dakarJson({ ok: true, verdict: 'pass', findings: 'invalid' }) })
+    const review = await hostReview({ reviewTool: 'dakar', reviewAttempts: 1 }).runHostReview('/w', 'l', { exec })
+    expect(review.outcome).toBe('error')
+    expect(review.errorCategory).toBe('invalid-output')
   })
 
   test('normalizes an uppercase Dakar severity before validating it', async () => {

@@ -4,7 +4,7 @@
 // fixture repo.
 import { describe, expect, spyOn, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -18,6 +18,7 @@ import {
   summarizeSalvages,
 } from '../../src/workflows/df12-build-odw/assessment.ts'
 import * as durability from '../../src/workflows/df12-build-odw/execplan-durability.ts'
+import { ASSESSMENT_SCHEMA } from '../../src/workflows/df12-build-odw/schemas.ts'
 
 const globals = globalThis as Record<string, unknown>
 globals.log = () => {}
@@ -237,6 +238,49 @@ describe('assessment model tier', () => {
     expect(models[0]).toBe('medium-default')
     expect(models[1]).toBe('escalation-high')
   })
+})
+
+async function assertAssessmentSchemaRouting(
+  route: (options: Record<string, unknown>) => Record<string, unknown>,
+): Promise<void> {
+  const { dir, baseSha } = makeRepo()
+  const previousAgent = globals.agent
+  const calls: Array<Record<string, unknown>> = []
+  try {
+    globals.agent = async (_prompt: string, options: Record<string, unknown>) => {
+      calls.push(options)
+      return { classification: 'continue-manual', taskScoped: true }
+    }
+    const assessment = subject({ assessmentAgentOptions: route })
+    await assessment.attachAssessment(
+      { id: '1.2.3', title: 'Schema boundary' },
+      { branch: 'roadmap-1-2-3', worktreePath: dir, baseSha },
+      { status: 'failed', stage: 'review', detail: 'gates red' },
+    )
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.schema).toBe(ASSESSMENT_SCHEMA)
+    expect(calls[0]?.adapter).toBe('recording-adapter')
+    expect(calls[0]?.model).toBe('recording-model')
+  } finally {
+    globals.agent = previousAgent
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test('assessment agent receives its schema when routing omits it', async () => {
+  await assertAssessmentSchemaRouting(() => ({
+    adapter: 'recording-adapter',
+    model: 'recording-model',
+  }))
+})
+
+test('assessment agent receives its schema when routing replaces it', async () => {
+  await assertAssessmentSchemaRouting((options) => ({
+    ...options,
+    adapter: 'recording-adapter',
+    model: 'recording-model',
+    schema: { type: 'string' },
+  }))
 })
 
 // A branch whose docs/execplans directory is already tracked, so a fresh
@@ -535,6 +579,21 @@ describe('recovery assessment entry points', () => {
     expect(threw.assessment).toBeNull()
     expect(threw.assessmentError).toMatch(/exited with code 137/)
     expect(threw.evidence).toBeDefined()
+  })
+
+  test('normalizes a malformed thrown assessment message', async () => {
+    const { dir, baseSha } = makeRepo()
+    globals.agent = async () => { throw { message: 42 } }
+    const assessed = await subject().assessRecoveryCandidate(candidate(dir, baseSha))
+    expect(assessed.assessmentError).toBe('[object Object]')
+  })
+
+  test('rejects a non-object assessment result from an injected agent', async () => {
+    const { dir, baseSha } = makeRepo()
+    globals.agent = async () => 'invalid assessment'
+    const assessed = await subject().assessRecoveryCandidate(candidate(dir, baseSha))
+    expect(assessed.assessment).toBeNull()
+    expect(assessed.assessmentError).toContain('malformed structured output')
   })
 })
 

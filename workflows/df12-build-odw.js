@@ -34,23 +34,26 @@ export const meta = {
 
 // src/workflows/df12-build-odw/recovery-decision.ts
 function advisoryResidualRisk(assessment) {
-  return Array.isArray(assessment?.residualRisk) ? assessment.residualRisk : [];
+  const residualRisk = assessment?.residualRisk;
+  if (!Array.isArray(residualRisk)) return [];
+  const entries = residualRisk;
+  return entries.every((entry) => typeof entry === "string") ? entries : [];
 }
 var TASK_BRANCH_RE = /^roadmap-((?:\d+-)*\d+)(-addendum)?$/;
 function branchToRoadmapId(branch) {
   const match = TASK_BRANCH_RE.exec(String(branch || ""));
-  if (!match) return null;
+  if (!match) return match;
   const id = match[1];
   if (id === void 0) return null;
-  return { id: id.replace(/-/g, "."), isAddendum: Boolean(match[2]) };
+  return { id: id.replaceAll("-", "."), isAddendum: Boolean(match[2]) };
 }
 function parseWorktreeList(output) {
   const entries = [];
-  let current = null;
+  let current;
   for (const line of String(output || "").split(/\r?\n/)) {
     if (!line.trim()) {
       if (current) entries.push(current);
-      current = null;
+      current = void 0;
       continue;
     }
     const spaceIndex = line.indexOf(" ");
@@ -89,11 +92,11 @@ var RECOVERY_SKIP_REASONS = [
 ];
 function recoveryResumeEligibility(candidate, evidence, assessment) {
   if (candidate?.isAddendum) return "addendum-branch";
-  if ((evidence?.collectionErrors || []).length) return "evidence-collection-error";
+  if ((evidence?.collectionErrors || []).length > 0) return "evidence-collection-error";
   if (evidence?.dirtyState !== "clean") return "dirty-worktree";
-  if (!(evidence?.recentCommits || []).length) return "no-committed-work";
+  if ((evidence.recentCommits || []).length === 0) return "no-committed-work";
   if (assessment?.taskScoped !== true) return "not-task-scoped";
-  if ((assessment?.missingEvidence || []).length) return "missing-validation-evidence";
+  if ((assessment.missingEvidence || []).length > 0) return "missing-validation-evidence";
   if (!candidate?.execplanPath) return "missing-execplan";
   return "";
 }
@@ -112,10 +115,15 @@ function recoveryDecision(candidate, evidence, assessment, mode, flags = {}) {
   return { action: "resume", classification, reason: "", skip: false };
 }
 var EXECPLAN_STATUS_MAP = {
+  /** The plan is still being drafted. */
   draft: "draft",
+  /** The plan is approved for implementation. */
   approved: "approved",
+  /** Implementation is in progress. */
   "in progress": "in-progress",
+  /** Work on the plan is blocked. */
   blocked: "blocked",
+  /** Implementation is complete and ready for review. */
   complete: "complete"
 };
 function parseExecplanState(text) {
@@ -123,8 +131,8 @@ function parseExecplanState(text) {
   let status = "unknown";
   const statusMatch = source.match(/^Status:\s*([A-Za-z ]+?)\s*$/m);
   if (statusMatch?.[1] !== void 0) {
-    const value = statusMatch[1].trim().toLowerCase().replace(/\s+/g, " ");
-    status = EXECPLAN_STATUS_MAP[value] || "unknown";
+    const value = statusMatch[1].trim().toLowerCase().replaceAll(/\s+/g, " ");
+    status = Object.entries(EXECPLAN_STATUS_MAP).find(([key]) => key === value)?.[1] ?? "unknown";
   }
   let ticked = 0;
   let unticked = 0;
@@ -143,15 +151,17 @@ function parseExecplanState(text) {
   }
   return { status, ticked, unticked, items };
 }
+function reportContinueDecision(reason) {
+  return { action: "report", stage: null, reason, skip: true };
+}
 function recoveryContinueDecision(candidate, evidence, planState, flags = {}) {
-  const report = (reason) => ({ action: "report", stage: null, reason, skip: true });
-  if (candidate?.isAddendum) return report("addendum-branch");
-  if ((evidence?.collectionErrors || []).length) return report("evidence-collection-error");
-  if (evidence?.dirtyState !== "clean") return report("dirty-worktree");
-  if (planState.status === "unreadable") return report("plan-unreadable");
-  if (planState.status === "blocked") return report("plan-blocked");
+  if (candidate?.isAddendum) return reportContinueDecision("addendum-branch");
+  if ((evidence?.collectionErrors || []).length > 0) return reportContinueDecision("evidence-collection-error");
+  if (evidence?.dirtyState !== "clean") return reportContinueDecision("dirty-worktree");
+  if (planState.status === "unreadable") return reportContinueDecision("plan-unreadable");
+  if (planState.status === "blocked") return reportContinueDecision("plan-blocked");
   const stage = planState.status === "approved" || planState.status === "in-progress" ? "implement" : planState.status === "complete" ? "review" : "plan";
-  if (stage === "review" && !(evidence?.recentCommits || []).length) return report("no-committed-work");
+  if (stage === "review" && (evidence.recentCommits || []).length === 0) return reportContinueDecision("no-committed-work");
   if (flags.dryRun) return { action: "report", stage, reason: "dry-run", skip: true };
   return { action: "resume", stage, reason: "", skip: false };
 }
@@ -347,7 +357,7 @@ var REQUIRES_LINE_RE = /^\s*-\s+Requires\s+(.+?)\.?\s*$/;
 var STEP_RANGE_RE = /\bsteps?\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)\b/gi;
 var ROADMAP_ID_RE = /\b\d+(?:\.\d+)+\b/g;
 function roadmapIdSlug(id) {
-  return String(id).replace(/[^0-9a-zA-Z]+/g, "-");
+  return String(id).replaceAll(/[^0-9a-zA-Z]+/g, "-");
 }
 function parentIdOf(id) {
   const parts = id.split(".");
@@ -363,7 +373,7 @@ function extractRoadmapIds(text) {
     const end = match[2];
     if (start === void 0 || end === void 0) continue;
     const expanded = expandStepRange(start, end);
-    if (expanded.length) {
+    if (expanded.length > 0) {
       ids.delete(start);
       ids.delete(end);
       for (const id of expanded) ids.add(id);
@@ -390,7 +400,7 @@ function expandStepRange(start, end) {
 function parseRoadmap(text) {
   const tasks = [];
   const byId = /* @__PURE__ */ new Map();
-  let currentTask = null;
+  let currentTask;
   for (const [index, line] of text.split(/\r?\n/).entries()) {
     const taskMatch = line.match(TASK_LINE_RE);
     if (taskMatch) {
@@ -440,17 +450,17 @@ function completedIds(tasks) {
   const completionByTask = /* @__PURE__ */ new Map();
   const postOrder = [];
   const pending = [...tasks];
-  while (pending.length) {
+  while (pending.length > 0) {
     const task = pending.pop();
     postOrder.push(task);
     pending.push(...task.subtasks);
   }
-  for (const task of postOrder.reverse()) {
+  for (const task of postOrder.toReversed()) {
     completionByTask.set(task, isComplete(task) && task.subtasks.every((subtask) => completionByTask.get(subtask)));
   }
   const recordCompletedSubtasks = (task) => {
     const pendingSubtasks = [task];
-    while (pendingSubtasks.length) {
+    while (pendingSubtasks.length > 0) {
       const subtask = pendingSubtasks.pop();
       if (completionByTask.get(subtask)) completed.add(subtask.id);
       pendingSubtasks.push(...subtask.subtasks);
@@ -466,13 +476,13 @@ function completedIds(tasks) {
     }
   }
   for (const [prefix, groupedTasks] of prefixes.entries()) {
-    if (groupedTasks.length && groupedTasks.every((task) => completionByTask.get(task))) completed.add(prefix);
+    if (groupedTasks.length > 0 && groupedTasks.every((task) => completionByTask.get(task))) completed.add(prefix);
   }
   return completed;
 }
 function isTaskFullyComplete(task) {
   const pending = [task];
-  while (pending.length) {
+  while (pending.length > 0) {
     const current = pending.pop();
     if (!isComplete(current)) return false;
     pending.push(...current.subtasks);
@@ -485,7 +495,7 @@ function taskMatchesOnlyTask(candidate, onlyTask) {
   return Boolean(candidate.task.subtasks?.includes(onlyTask));
 }
 function blockedSummary(blocked) {
-  if (!blocked.length) return "";
+  if (blocked.length === 0) return "";
   const sample = blocked.slice(0, 5).join("; ");
   const suffix = blocked.length > 5 ? `; ${blocked.length - 5} more` : "";
   return `${blocked.length} blocked task(s): ${sample}${suffix}`;
@@ -498,7 +508,7 @@ function selectRoadmapTask(roadmapText, taken, onlyTask) {
   const blocked = [];
   for (const task of tasks) {
     const openSubtasks = task.subtasks.filter((subtask) => !isTaskFullyComplete(subtask));
-    if (isComplete(task) && openSubtasks.length && !addendumTaken.has(task.id)) {
+    if (isComplete(task) && openSubtasks.length > 0 && !addendumTaken.has(task.id)) {
       candidates.push({
         order: task.line,
         kind: "addendum",
@@ -514,7 +524,7 @@ function selectRoadmapTask(roadmapText, taken, onlyTask) {
     }
     if (!isComplete(task) && !normalTaken.has(task.id)) {
       const missing = task.requires.filter((id) => !completed.has(id));
-      if (missing.length) {
+      if (missing.length > 0) {
         blocked.push(`${task.id} requires ${missing.join(", ")}`);
       } else {
         candidates.push({
@@ -524,7 +534,7 @@ function selectRoadmapTask(roadmapText, taken, onlyTask) {
             id: task.id,
             title: task.title,
             requires: task.requires,
-            rationale: task.requires.length ? `Every declared dependency is complete: ${task.requires.join(", ")}.` : "The task has no declared dependencies.",
+            rationale: task.requires.length > 0 ? `Every declared dependency is complete: ${task.requires.join(", ")}.` : "The task has no declared dependencies.",
             isAddendum: false,
             subtasks: []
           }
@@ -532,7 +542,7 @@ function selectRoadmapTask(roadmapText, taken, onlyTask) {
       }
     }
   }
-  const matchingCandidates = candidates.filter((candidate) => taskMatchesOnlyTask(candidate, onlyTask)).sort((left, right) => left.order - right.order);
+  const matchingCandidates = candidates.filter((candidate) => taskMatchesOnlyTask(candidate, onlyTask)).toSorted((left, right) => left.order - right.order);
   const selected = matchingCandidates[0];
   if (!selected) {
     const reason = onlyTask ? `Task ${onlyTask} is not currently unblocked as a normal task or addendum pass. ${blockedSummary(blocked)}` : blockedSummary(blocked);
@@ -550,7 +560,7 @@ function roadmapTaskIndex(roadmapText) {
   const byId = /* @__PURE__ */ new Map();
   for (const task of tasks) {
     byId.set(task.id, task);
-    for (const subtask of task.subtasks || []) byId.set(subtask.id, subtask);
+    for (const subtask of task.subtasks) byId.set(subtask.id, subtask);
   }
   return byId;
 }
@@ -562,13 +572,17 @@ function candidateRoadmapComplete(task, isAddendum) {
 // src/workflows/df12-build-odw/exec.ts
 async function execFileText(command, commandArgs, options = {}) {
   const { execFile } = process.getBuiltinModule("node:child_process");
+  const execOptions = {
+    cwd: options.cwd || process.cwd(),
+    maxBuffer: 16 * 1024 * 1024
+  };
+  if (options.timeoutMs) execOptions.timeout = options.timeoutMs;
   return await new Promise((resolve, reject) => {
-    execFile(command, [...commandArgs], { cwd: options.cwd || process.cwd(), maxBuffer: 16 * 1024 * 1024, ...options.timeoutMs ? { timeout: options.timeoutMs } : {} }, (error, stdout, stderr) => {
+    execFile(command, [...commandArgs], execOptions, (error, stdout, stderr) => {
       if (error) {
-        const failure = error;
-        failure.stdout = stdout;
-        failure.stderr = stderr;
-        reject(failure);
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
         return;
       }
       resolve(stdout);
@@ -593,7 +607,7 @@ async function execFileStatus(command, commandArgs, options = {}) {
   }
 }
 function shellQuote(value) {
-  return `'${String(value).replace(/'/g, "'\\''")}'`;
+  return `'${String(value).replaceAll("'", String.raw`'\''`)}'`;
 }
 async function fileState(pathValue, baseDir = process.cwd()) {
   if (!pathValue) return { ok: true, exists: false, detail: "" };
@@ -613,6 +627,13 @@ async function fileState(pathValue, baseDir = process.cwd()) {
 }
 
 // src/workflows/df12-build-odw/faults.ts
+function faultThrownMessage(error) {
+  if (error !== null && (typeof error === "object" || typeof error === "function") && "message" in error) {
+    const message = error.message;
+    if (typeof message === "string" && message) return message;
+  }
+  return String(error);
+}
 function createFaultMetrics() {
   return { infraRetries: 0, infraFaults: 0, providerFaults: 0, authFaults: 0 };
 }
@@ -665,7 +686,7 @@ function makeWithInfraRetry(attempts, metrics = faultMetrics) {
       try {
         return await run();
       } catch (error) {
-        const message = error && error.message || String(error);
+        const message = faultThrownMessage(error);
         if (attempt >= attempts || !infrastructureFailureDetail(message)) {
           if (infrastructureFailureDetail(message)) {
             log(`[${label}] infrastructure fault persisted after ${attempt} of ${attempts} attempt(s); giving up: ${message}`);
@@ -744,14 +765,15 @@ function parsePorcelainDirty(output) {
     return [];
   });
 }
-async function gitEvidence(worktreePath, commandArgs, parse = ((text) => String(text || "").trim())) {
+async function gitEvidence(worktreePath, commandArgs, parse) {
+  const parseOutput = parse === void 0 ? (text) => String(text || "").trim() : parse;
   const result = await execFileStatus("git", ["-C", worktreePath, ...commandArgs]);
   if (result.ok) {
-    return { ok: true, value: parse(result.stdout) };
+    return { ok: true, value: parseOutput(result.stdout) };
   }
   return {
     ok: false,
-    value: parse(result.stdout),
+    value: parseOutput(result.stdout),
     error: [result.message, result.stderr, result.stdout].filter(Boolean).join("\n").trim()
   };
 }
@@ -795,7 +817,7 @@ async function collectAssessmentEvidence(task, wt) {
     baseCommit,
     currentCommit: current.value || "",
     dirtyState: status.ok ? String(status.value || "").trim() ? "dirty" : "clean" : "unknown",
-    changedFiles: [...allChanged].sort(),
+    changedFiles: [...allChanged].toSorted(),
     committedChanges: committed.value,
     dirtyChanges,
     stagedChanges: staged.value,
@@ -861,7 +883,7 @@ function makeRecoveryDiscovery(limits) {
     const mapped = [];
     for (const branch of branches) {
       const parsed = branchToRoadmapId(branch);
-      const task = parsed ? byId.get(parsed.id) : null;
+      const task = parsed ? byId.get(parsed.id) : void 0;
       if (!parsed || !task) {
         skipped.push({ id: parsed?.id || "", branchName: branch, reason: "unmapped-branch" });
         continue;
@@ -919,16 +941,18 @@ async function readExecplanState(candidate) {
     const text = await readFileText(path.join(candidate.worktreePath || "", candidate.execplanPath), candidate.worktreePath || void 0);
     return parseExecplanState(text);
   } catch (error) {
-    const failure = error;
-    if (failure && (failure.code === "ENOENT" || failure.code === "ENOTDIR")) {
+    const fields = error && (typeof error === "object" || typeof error === "function") ? error : void 0;
+    const code = fields && "code" in fields ? fields.code : void 0;
+    if (code === "ENOENT" || code === "ENOTDIR") {
       return { status: "missing", ticked: 0, unticked: 0, items: [] };
     }
+    const message = fields && "message" in fields ? fields.message : void 0;
     return {
       status: "unreadable",
       ticked: 0,
       unticked: 0,
       items: [],
-      error: `${candidate.execplanPath}: ${failure && failure.message || String(error)}`
+      error: `${candidate.execplanPath}: ${message || String(error)}`
     };
   }
 }
@@ -978,7 +1002,7 @@ function commandSubstitutionEnd(command, start) {
   let depth = 1;
   while (cursor < command.length) {
     const character = command[cursor];
-    if (character === void 0) return null;
+    if (character === void 0) return;
     if (character === "\\" && quote !== "'") {
       cursor += 2;
       continue;
@@ -1006,20 +1030,23 @@ function commandSubstitutionEnd(command, start) {
     }
     cursor += 1;
   }
-  return null;
+  return;
 }
 function assignmentName(command, word) {
   let cursor = word.start;
   let name = "";
   while (cursor < word.end) {
     const character = command[cursor];
-    if (character === void 0) return null;
-    if (character === "=") return name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : null;
-    if (!/[A-Za-z0-9_]/.test(character)) return null;
+    if (character === void 0) return;
+    if (character === "=") {
+      if (name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return name;
+      return;
+    }
+    if (!/[A-Za-z0-9_]/.test(character)) return;
     name += character;
     cursor += 1;
   }
-  return null;
+  return;
 }
 function tokenizeShellCommand(command) {
   const words = [];
@@ -1057,7 +1084,7 @@ function tokenizeShellCommand(command) {
       }
       if (character === "$" && command[cursor + 1] === "(" && quote !== "'") {
         const end = commandSubstitutionEnd(command, cursor);
-        if (end === null) return null;
+        if (end === void 0) return null;
         value += command.slice(cursor, end);
         hasWord = true;
         cursor = end;
@@ -1145,10 +1172,12 @@ function boundedTail(text, limit = 2e3) {
 }
 function reviewerDisplayName(reviewer) {
   switch (reviewer) {
-    case "dakar":
+    case "dakar": {
       return "Dakar";
-    case "coderabbit":
+    }
+    case "coderabbit": {
       return "CodeRabbit";
+    }
     default: {
       const unmatched = reviewer;
       throw new Error(`Unknown host reviewer: ${unmatched}`);
@@ -1170,12 +1199,86 @@ function makeHostReviewMetrics() {
 }
 
 // src/workflows/df12-build-odw/config.ts
+function isCompatibilityWorkflowArgs(value) {
+  const strings = [
+    "projectRoot",
+    "base",
+    "roadmap",
+    "designDocs",
+    "researchNote",
+    "taskId",
+    "resumeMode",
+    "writeProbeEffort",
+    "searchBackend",
+    "codeSearchBackend",
+    "grepaiWorkspace",
+    "grepaiProject",
+    "project",
+    "memtraceRepoId",
+    "buildAdapter",
+    "planAdapter",
+    "reviewAdapter",
+    "auditAdapter",
+    "triageAdapter",
+    "assessmentAdapter",
+    "buildModel",
+    "planModel",
+    "reviewModel",
+    "auditModel",
+    "auditEffort",
+    "triageModel",
+    "triageEffort",
+    "triageEscalationModel",
+    "assessmentModel",
+    "assessmentEscalationModel",
+    "reviewTool",
+    "dakarCommand",
+    "coderabbitReviewCommand",
+    "coderabbitFindingsFile",
+    "hostReviewFindingsFile",
+    "csCheckCommand"
+  ];
+  const numbers = ["maxTasks", "maxParallel", "maxPlanningParallel", "maxPlanParallel", "maxBuildParallel", "maxDesignRounds", "maxReviewRounds"];
+  const numericStrings = [
+    "stageAttempts",
+    "maxWorkItemRounds",
+    "resumeTaskId",
+    "resumeMaxCandidates",
+    "reviewTimeoutSeconds",
+    "dakarTimeoutSeconds",
+    "dakarBudgetGbp",
+    "coderabbitAttempts",
+    "hostReviewAttempts",
+    "commitGateTimeoutSeconds"
+  ];
+  const booleans = [
+    "perWorkItemBuild",
+    "autoMerge",
+    "documentAudit",
+    "dryRun",
+    "authPreflight",
+    "requireCoderabbitAuth",
+    "assessPartialBranches",
+    "worktreeWritePreflight",
+    "coderabbitHostReview",
+    "coderabbitBetweenWorkItems",
+    "hostReviewBetweenWorkItems",
+    "hostCommitGates",
+    "csCheck",
+    "hostGatesBetweenWorkItems"
+  ];
+  const valid = (keys, types) => keys.every((key) => value[key] === void 0 || types.includes(typeof value[key]));
+  if (!valid(strings, ["string"]) || !valid(numbers, ["number"]) || !valid(numericStrings, ["number", "string"]) || !valid(booleans, ["boolean"])) return false;
+  const models = value.writeProbeModelByAdapter;
+  return models === void 0 || models !== null && typeof models === "object" && !Array.isArray(models) && Object.values(models).every((model) => typeof model === "string");
+}
 var REVIEW_TOOLS = ["dakar", "coderabbit"];
 function isReviewTool(value) {
   return REVIEW_TOOLS.some((tool) => tool === value);
 }
 function makeConfig(rawArgs) {
   const cfg = rawArgs || {};
+  if (!isCompatibilityWorkflowArgs(cfg)) throw new Error("Invalid workflow argument type");
   const PROJECT_ROOT2 = cfg.projectRoot || process.cwd();
   const BASE2 = cfg.base || "main";
   const ROADMAP2 = cfg.roadmap || "docs/roadmap.md";
@@ -1249,7 +1352,8 @@ function makeConfig(rawArgs) {
   const REVIEW_TOOL2 = reviewToolInput;
   const HOST_REVIEWER_NAME = reviewerDisplayName(REVIEW_TOOL2);
   const DAKAR_COMMAND2 = String(cfg.dakarCommand || "dakar-review");
-  const REVIEW_TIMEOUT_SECONDS2 = Math.min(7200, Math.max(60, Math.trunc(Number(cfg.reviewTimeoutSeconds ?? cfg.dakarTimeoutSeconds) || 3600)));
+  const reviewTimeoutInput = Number(cfg.reviewTimeoutSeconds ?? cfg.dakarTimeoutSeconds) || 3600;
+  const REVIEW_TIMEOUT_SECONDS2 = Math.min(7200, Math.max(60, Math.trunc(reviewTimeoutInput)));
   const DAKAR_BUDGET_GBP_RAW = Number(cfg.dakarBudgetGbp);
   const DAKAR_BUDGET_GBP2 = Number.isFinite(DAKAR_BUDGET_GBP_RAW) ? Math.min(10, Math.max(0, DAKAR_BUDGET_GBP_RAW)) : 0;
   const CODERABBIT_REVIEW_COMMAND2 = cfg.coderabbitReviewCommand || "coderabbit review --agent";
@@ -1257,7 +1361,7 @@ function makeConfig(rawArgs) {
   const HOST_REVIEW_BETWEEN_WORK_ITEMS2 = (cfg.hostReviewBetweenWorkItems ?? cfg.coderabbitBetweenWorkItems) !== false;
   const attemptsInput = Number(cfg.hostReviewAttempts ?? cfg.coderabbitAttempts);
   if (!Number.isFinite(attemptsInput) && !Number.isNaN(attemptsInput)) {
-    throw new Error("hostReviewAttempts must be finite");
+    throw new TypeError("hostReviewAttempts must be finite");
   }
   const HOST_REVIEW_ATTEMPTS2 = Math.min(10, Math.max(1, Math.trunc(attemptsInput || 3)));
   const HOST_REVIEW_BACKOFF_MINUTES2 = (() => {
@@ -1273,7 +1377,7 @@ function makeConfig(rawArgs) {
     return [low, high];
   })();
   const HOST_REVIEW_FINDINGS_FILE2 = String(cfg.hostReviewFindingsFile ?? cfg.coderabbitFindingsFile ?? "");
-  const COMMIT_GATES2 = (Array.isArray(cfg.commitGates) && cfg.commitGates.length ? cfg.commitGates : ["make all"]).map((command) => String(command));
+  const COMMIT_GATES2 = (Array.isArray(cfg.commitGates) && cfg.commitGates.length > 0 ? cfg.commitGates : ["make all"]).map(String);
   const COMMIT_GATE_TEXT2 = COMMIT_GATES2.map((command) => `\`${command}\``).join(" then ");
   const HOST_COMMIT_GATES2 = cfg.hostCommitGates !== false;
   const HOST_GATES_BETWEEN_WORK_ITEMS2 = cfg.hostGatesBetweenWorkItems !== false;
@@ -1293,6 +1397,12 @@ function makeConfig(rawArgs) {
   const CODERABBIT_REVIEW_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? HOST_REVIEW_GUIDANCE : `Use \`coderabbit review --agent\` as the per-work-item AI review after deterministic gates are green, and clear all actionable concerns before advancing to the next work item or declaring the fix round complete. CodeRabbit is a shared, rate-limited quota: do not ask it to find errors that the project commit gates, markdown gates, linting, typechecking, or tests can catch locally. If the CodeRabbit rate limit is exceeded, treat the backoff as expected and sleep (use the \`vsleep\` command) for \`$(shuf -i ${HOST_REVIEW_BACKOFF_MINUTES2[0]}-${HOST_REVIEW_BACKOFF_MINUTES2[1]} -n 1)\` minutes before trying again; never shorten this backoff. You are not in any rush, and there is no wallclock time limit for this task. Retry at most three times after the initial CodeRabbit attempt, then record the deferred review with the exact error/output as an open issue so the supervisor can decide whether to relaunch, fallback-review, or wait for the quota to recover.`;
   const SPARK_DELEGATION_GUIDANCE = "You are free to delegate to the `wyvern` fast Codex subagent for bounded read-only tasks on known surfaces as needed; use 5.4-mini in place of 5.3 Codex Spark when Spark quota is unavailable. Quick surface maps, candidate-file recon, targeted consistency searches, and medium-grain 'what changed / where is the seam' checks.";
   const SCRUTINEER_DELEGATION_GUIDANCE = CODERABBIT_HOST_REVIEW2 ? `Delegate deterministic gate execution to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until the gates are green. ${CODERABBIT_REVIEW_GUIDANCE}` : `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND2}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`;
+  const legacyHostReviewAliases = {
+    CODERABBIT_BETWEEN_WORK_ITEMS: HOST_REVIEW_BETWEEN_WORK_ITEMS2,
+    CODERABBIT_ATTEMPTS: HOST_REVIEW_ATTEMPTS2,
+    CODERABBIT_BACKOFF_MINUTES: HOST_REVIEW_BACKOFF_MINUTES2,
+    CODERABBIT_FINDINGS_FILE: HOST_REVIEW_FINDINGS_FILE2
+  };
   return {
     PROJECT_ROOT: PROJECT_ROOT2,
     BASE: BASE2,
@@ -1364,10 +1474,7 @@ function makeConfig(rawArgs) {
     COMMIT_GATE_GUIDANCE: COMMIT_GATE_GUIDANCE2,
     CS_CHECK_GUIDANCE: CS_CHECK_GUIDANCE2,
     CODERABBIT_REVIEW_GUIDANCE,
-    CODERABBIT_BETWEEN_WORK_ITEMS: HOST_REVIEW_BETWEEN_WORK_ITEMS2,
-    CODERABBIT_ATTEMPTS: HOST_REVIEW_ATTEMPTS2,
-    CODERABBIT_BACKOFF_MINUTES: HOST_REVIEW_BACKOFF_MINUTES2,
-    CODERABBIT_FINDINGS_FILE: HOST_REVIEW_FINDINGS_FILE2,
+    ...legacyHostReviewAliases,
     SPARK_DELEGATION_GUIDANCE,
     SCRUTINEER_DELEGATION_GUIDANCE
   };
@@ -1438,10 +1545,11 @@ function makeAuthPreflight(config, deps) {
     if (config.requireHostReviewAuth) {
       if (config.reviewTool === "dakar") {
         const openaiKey = deps.environment.get("OPENAI_API_KEY");
+        const sensitiveValues = typeof openaiKey === "string" ? [openaiKey] : [];
         const dakarWords = config.dakarInvocation.filter((argument) => !ENVIRONMENT_ASSIGNMENT.test(argument));
         const dakarExecutable = dakarWords[0] || "dakar-review";
         const dakar = await deps.exec(dakarExecutable, [...dakarWords.slice(1), "--version"], { timeoutMs: AUTH_PROBE_TIMEOUT_MS });
-        const dakarOutput = redactedDakarStatusDetail(dakar, config.dakarInvocation, typeof openaiKey === "string" ? [openaiKey] : []);
+        const dakarOutput = redactedDakarStatusDetail(dakar, config.dakarInvocation, sensitiveValues);
         if (!dakar.ok) {
           deps.recordHostReviewAuthFailure();
           failures.push({
@@ -1451,7 +1559,7 @@ function makeAuthPreflight(config, deps) {
           });
         }
         const pi = await deps.exec("pi", ["--version"], { timeoutMs: AUTH_PROBE_TIMEOUT_MS });
-        const piOutput = redactedDakarStatusDetail(pi, config.dakarInvocation, typeof openaiKey === "string" ? [openaiKey] : []);
+        const piOutput = redactedDakarStatusDetail(pi, config.dakarInvocation, sensitiveValues);
         if (!pi.ok) {
           deps.recordHostReviewAuthFailure();
           failures.push({ tool: "dakar", command: "pi --version", detail: piOutput || "pi is unavailable or its version probe failed" });
@@ -1477,7 +1585,7 @@ function makeAuthPreflight(config, deps) {
         }
       }
     }
-    if (failures.length) {
+    if (failures.length > 0) {
       deps.log(`[auth] fatal preflight failure: ${failures.map((failure) => `${failure.tool}: ${failure.detail.split(/\r?\n/)[0]}`).join("; ")}`);
     } else {
       const passed = ["Codex"];
@@ -1494,11 +1602,11 @@ function makeAuthPreflight(config, deps) {
 
 // src/workflows/df12-build-odw/prompts.ts
 function encodeUntrustedLine(value) {
-  return JSON.stringify(value).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+  return JSON.stringify(value).replaceAll("\u2028", String.raw`\u2028`).replaceAll("\u2029", String.raw`\u2029`);
 }
 function residualRiskLines(impl) {
   const items = impl?.residualRisk || [];
-  if (!items.length) return [];
+  if (items.length === 0) return [];
   return [
     "",
     "Advisory residual risk (non-blocking \u2014 weigh during review, do not treat as an automatic block).",
@@ -1868,9 +1976,23 @@ var WRITE_PROBE_SCHEMA = {
   },
   required: ["ok"]
 };
+function isWriteProbeReply(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && "ok" in value && typeof value.ok === "boolean" && (!("detail" in value) || typeof value.detail === "string");
+}
+function writeProbeErrorMessage(error) {
+  if (error !== null && (typeof error === "object" || typeof error === "function") && "message" in error) {
+    const message = error.message;
+    if (message) return String(message);
+  }
+  return String(error);
+}
+function isProbeSymlinkError(error) {
+  if (error === null || typeof error !== "object" && typeof error !== "function" || !("code" in error)) return false;
+  return error.code === "ELOOP" || error.code === "EMLINK";
+}
 function writeProbePath(worktree, adapter) {
   const path = process.getBuiltinModule("node:path");
-  return path.join(worktree, `.df12-write-probe-${String(adapter).replace(/[^0-9a-zA-Z._-]+/g, "-")}`);
+  return path.join(worktree, `.df12-write-probe-${String(adapter).replaceAll(/[^0-9a-zA-Z._-]+/g, "-")}`);
 }
 function writeProbeToken(tag, adapter) {
   return `df12-write-probe v1 task=${tag} adapter=${adapter}`;
@@ -1899,8 +2021,8 @@ async function clearProbeArtifact(probeFile) {
 async function verifyWriteProbe(probeFile, token) {
   const fs = process.getBuiltinModule("node:fs/promises");
   const { constants } = process.getBuiltinModule("node:fs");
-  let handle = null;
-  let content = null;
+  let handle;
+  let content;
   try {
     handle = await fs.open(probeFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const stat = await handle.stat();
@@ -1908,17 +2030,16 @@ async function verifyWriteProbe(probeFile, token) {
       content = await handle.readFile({ encoding: "utf8" });
     }
   } catch (error) {
-    const failure = error;
-    if (failure && (failure.code === "ELOOP" || failure.code === "EMLINK")) {
+    if (isProbeSymlinkError(error)) {
       await fs.rm(probeFile, { force: true, recursive: true });
       return { ok: false, detail: "probe path is not a regular file (symlink or special file rejected)" };
     }
-    return { ok: false, detail: `probe file missing or unreadable: ${failure && failure.message || String(error)}` };
+    return { ok: false, detail: `probe file missing or unreadable: ${writeProbeErrorMessage(error)}` };
   } finally {
     if (handle) await handle.close();
   }
   await fs.rm(probeFile, { force: true, recursive: true });
-  if (content === null) {
+  if (content === void 0) {
     return { ok: false, detail: "probe path is not a regular file (symlink or special file rejected)" };
   }
   if (content.trim() === token) return { ok: true, detail: "" };
@@ -1934,7 +2055,7 @@ async function hostWriteProbe(worktree) {
     await fs.rm(hostProbe, { force: true });
     return { ok: true, detail: "" };
   } catch (error) {
-    return { ok: false, detail: error && error.message || String(error) };
+    return { ok: false, detail: writeProbeErrorMessage(error) };
   }
 }
 function makeWritePreflight({ enabled, targets }) {
@@ -1947,26 +2068,35 @@ function makeWritePreflight({ enabled, targets }) {
       const probeFile = writeProbePath(worktree, target.adapter);
       const token = writeProbeToken(tag, target.adapter);
       await clearProbeArtifact(probeFile);
-      let reply = null;
+      let reply;
       let agentError = "";
       try {
-        reply = await agent(writeProbePrompt(probeFile, token), target.options({
-          phase: "Worktree",
-          label: `write-probe:${target.adapter}`,
+        const response = await agent(writeProbePrompt(probeFile, token), {
+          ...target.options({
+            phase: "Worktree",
+            label: `write-probe:${target.adapter}`,
+            schema: WRITE_PROBE_SCHEMA
+          }),
+          // Keep the reply contract if routing omitted or replaced it.
           schema: WRITE_PROBE_SCHEMA
-        }));
+        });
+        if (isWriteProbeReply(response)) {
+          reply = response;
+        } else {
+          agentError = "write probe agent reply has invalid fields";
+        }
       } catch (error) {
-        agentError = error && error.message || String(error);
+        agentError = writeProbeErrorMessage(error);
       }
       const verified = await verifyWriteProbe(probeFile, token);
-      if (verified.ok) return null;
+      if (verified.ok) return;
       const detail = [verified.detail, reply && reply.ok === false ? reply.detail : "", agentError].filter(Boolean).join("; ");
       return { adapter: target.adapter, detail };
     }));
-    const failures = outcomes.filter((outcome) => outcome !== null);
+    const failures = outcomes.filter((outcome) => outcome !== void 0);
     return { ok: failures.length === 0, failures };
   }
-  let taskAgentWritePreflight = null;
+  let taskAgentWritePreflight;
   function ensureTaskAgentWriteAccess2(worktree, tag) {
     if (!enabled) return Promise.resolve({ ok: true, skipped: true, failures: [] });
     if (!taskAgentWritePreflight) taskAgentWritePreflight = runTaskAgentWritePreflight2(worktree, tag);
@@ -2039,7 +2169,8 @@ Status: APPROVED
       }
     }
   } catch (error) {
-    return { ok: false, detail: `could not update the plan status: ${error && error.message || String(error)}` };
+    const message = error && error.message;
+    return { ok: false, detail: `could not update the plan status: ${message || String(error)}` };
   }
   const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1", "--", relPath]);
   if (!status.ok) {
@@ -2068,9 +2199,9 @@ async function commitExecplanDraft(worktree, relPath, tag) {
   const status = await execFileStatus("git", ["-C", worktree, "status", "--porcelain=v1"]);
   if (!status.ok) return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
   const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
-  if (!lines.length) return { ok: false, detail: "nothing to commit: the worktree is already clean" };
+  if (lines.length === 0) return { ok: false, detail: "nothing to commit: the worktree is already clean" };
   const foreign = lines.filter((line) => line.slice(3).replace(/^"(.*)"$/, "$1") !== relPath);
-  if (foreign.length) {
+  if (foreign.length > 0) {
     const sample = foreign.slice(0, 8).map((line) => line.trim()).join("; ");
     return { ok: false, detail: `the worktree holds ${foreign.length} uncommitted path(s) beyond the plan file (${sample}${foreign.length > 8 ? "; \u2026" : ""})` };
   }
@@ -2120,7 +2251,7 @@ async function salvageTaskArtefacts(worktree, candidatePaths, tag) {
     }
     verified.push(contained.relPath);
   }
-  if (!verified.length) {
+  if (verified.length === 0) {
     return { committed: [], skipped, sha: "", detail: "nothing to salvage: no eligible task-scoped artefacts are dirty" };
   }
   const add = await execFileStatus("git", ["-C", worktree, "add", "--", ...verified]);
@@ -2151,29 +2282,37 @@ async function verifyWorktreeCommitted(worktree) {
     return { ok: false, detail: `git status failed: ${(status.message || status.stderr || "").trim()}` };
   }
   const lines = String(status.stdout).split(/\r?\n/).filter(Boolean);
-  if (!lines.length) return { ok: true, detail: "" };
+  if (lines.length === 0) return { ok: true, detail: "" };
   const sample = lines.slice(0, 8).map((line) => line.trim()).join("; ");
   return { ok: false, detail: `${lines.length} uncommitted path(s): ${sample}${lines.length > 8 ? "; \u2026" : ""}` };
 }
 
 // src/workflows/df12-build-odw/assessment.ts
 var SALVAGE_CLASSIFICATIONS = /* @__PURE__ */ new Set(["continue-manual", "adopt-partial", "infra-fault"]);
+function assessmentErrorMessage(error) {
+  if (error && (typeof error === "object" || typeof error === "function") && "message" in error && typeof error.message === "string" && error.message) return error.message;
+  return String(error);
+}
 function summarizeSalvages(results2) {
-  const salvages = results2.filter((result) => result.salvage).map((result) => ({
-    id: result.id || "",
-    classification: result.salvage?.classification || "",
-    committed: result.salvage?.committed || [],
-    skipped: (result.salvage?.skipped || []).length,
-    sha: result.salvage?.sha || "",
-    detail: result.salvage?.detail || ""
-  }));
+  const salvages = results2.flatMap((result) => {
+    const salvage = result.salvage;
+    if (!salvage) return [];
+    return [{
+      id: result.id || "",
+      classification: salvage.classification || "",
+      committed: salvage.committed || [],
+      skipped: (salvage.skipped || []).length,
+      sha: salvage.sha || "",
+      detail: salvage.detail || ""
+    }];
+  });
   const salvagedBranches = salvages.filter((entry) => entry.committed.length > 0).length;
   const summarySuffix = salvagedBranches ? ` | salvaged artefacts on ${salvagedBranches} branch(es)` : "";
   return { salvages, salvagedBranches, summarySuffix };
 }
 function fastAssessmentClassification(evidence) {
   const collectionErrors = evidence?.collectionErrors || [];
-  if (collectionErrors.length) {
+  if (collectionErrors.length > 0) {
     return { classification: "continue-manual", reason: `host evidence collection reported error(s) (${collectionErrors.slice(0, 3).join("; ")}); operator judgement required` };
   }
   const hasCommittedWork = (evidence?.recentCommits || []).length > 0;
@@ -2185,29 +2324,48 @@ function fastAssessmentClassification(evidence) {
 }
 function deterministicAssessment(classification, evidence, reason) {
   return {
+    /** Deterministic disposition of the surviving branch. */
     classification,
+    /** Branch name collected by the host. */
     branchName: evidence.branchName || "",
+    /** Worktree path collected by the host. */
     worktreePath: evidence.worktreePath || "",
+    /** Base commit from which the branch diverged. */
     baseCommit: evidence.baseCommit || "",
+    /** Branch commit observed by the host. */
     currentCommit: evidence.currentCommit || "",
+    /** Host-observed worktree cleanliness. */
     dirtyState: evidence.dirtyState || "unknown",
+    /** Paths observed as changed on the branch or worktree. */
     changedFiles: evidence.changedFiles || [],
+    /** Whether the changed paths were judged task scoped. */
     taskScoped: false,
+    /** ExecPlan assessment; empty when no model judgement was made. */
     execPlan: "",
+    /** Roadmap assessment; empty when no model judgement was made. */
     roadmap: "",
+    /** Validation assessment; empty when no model judgement was made. */
     validation: "",
+    /** Required evidence not established by the assessment. */
     missingEvidence: [],
+    /** Advisory residual risks for later review. */
     residualRisk: [],
+    /** Risks identified during assessment. */
     risks: [],
+    /** Reason for the deterministic disposition. */
     rationale: reason,
+    /** Recommended disposition for the operator. */
     recommendation: reason,
+    /** Follow-up actions identified by the assessment. */
     nextActions: [],
+    /** Identifies the host classifier as the source of the disposition. */
     classifier: "deterministic",
+    /** Complete evidence collected by the host. */
     hostEvidence: evidence
   };
 }
 function boundedSalvageLogText(text, max = 200) {
-  const flat = String(text ?? "").replace(/\s+/g, " ").trim();
+  const flat = String(text).replaceAll(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}\u2026` : flat;
 }
 async function salvageAssessmentArtefacts(taskId, worktree, evidence, classification) {
@@ -2223,14 +2381,14 @@ async function salvageAssessmentArtefacts(taskId, worktree, evidence, classifica
       ...evidence.stagedChanges || []
     ].map((entry) => entry.path);
     const outcome = await salvageTaskArtefacts(worktree, candidates, taskId);
-    if (outcome.committed.length) {
-      log(`[salvage] task ${taskId} (${classification}): committed ${outcome.committed.length} artefact(s) at ${outcome.sha || "<no sha>"}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ""}`);
+    if (outcome.committed.length > 0) {
+      log(`[salvage] task ${taskId} (${classification}): committed ${outcome.committed.length} artefact(s) at ${outcome.sha || "<no sha>"}${outcome.skipped.length > 0 ? `; skipped ${outcome.skipped.length}` : ""}`);
     } else {
-      log(`[salvage] task ${taskId} (${classification}): nothing committed \u2014 ${boundedSalvageLogText(outcome.detail || "no eligible artefacts")}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ""}`);
+      log(`[salvage] task ${taskId} (${classification}): nothing committed \u2014 ${boundedSalvageLogText(outcome.detail || "no eligible artefacts")}${outcome.skipped.length > 0 ? `; skipped ${outcome.skipped.length}` : ""}`);
     }
     return { classification, ...outcome };
   } catch (error) {
-    const detail = `salvage errored: ${error && error.message || String(error)}`;
+    const detail = `salvage errored: ${assessmentErrorMessage(error)}`;
     log(`[salvage] task ${taskId} (${classification}): ${boundedSalvageLogText(detail)}`);
     return { classification, committed: [], skipped: [], sha: "", detail };
   }
@@ -2244,12 +2402,12 @@ function isInfraFaultResult(result) {
   return Boolean(infrastructureFailureDetail(detail));
 }
 function isDeferredReviewIssue(issue) {
-  if (issue !== null && typeof issue === "object" && issue.kind === "host-review-deferral" && (issue.outcome === "rate-limited" || issue.outcome === "error")) return true;
+  if (issue && typeof issue === "object" && "kind" in issue && issue.kind === "host-review-deferral" && "outcome" in issue && (issue.outcome === "rate-limited" || issue.outcome === "error")) return true;
   return false;
 }
 function hasOnlyDeferredReviewIssues(openIssues) {
   const issues = openIssues || [];
-  return issues.length > 0 && issues.every(isDeferredReviewIssue);
+  return issues.length > 0 && issues.every((issue) => isDeferredReviewIssue(issue));
 }
 function implementationAuthFailureDetail(impl) {
   const detail = [impl?.summary, ...impl?.openIssues || []].filter(Boolean).join("\n");
@@ -2262,6 +2420,10 @@ function addendumImplementationNeedsManualMerge(impl) {
   const completed = Number(impl.workItemsCompleted);
   const total = Number(impl.workItemsTotal);
   return Number.isFinite(completed) && Number.isFinite(total) && total > 0 && completed >= total;
+}
+function assessmentModelTier(evidence) {
+  const hasExecplan = (evidence.changedFiles || []).some((entry) => /^docs\/execplans\/.+\.md$/.test(String(entry)));
+  return hasExecplan ? "escalated" : "medium";
 }
 function makeAssessment({ preamble: preamble2, assessPartialBranches, assessmentAgentOptions: assessmentAgentOptions2, assessmentEscalationModel, withInfraRetry: withInfraRetry2 }) {
   function assessmentPromptLines(taskHeader, worktreePath, evidence, contextTitle, contextValue) {
@@ -2299,12 +2461,12 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
       "",
       "Host-collected git evidence:",
       "```json",
-      JSON.stringify(evidence, null, 2),
+      JSON.stringify(evidence, void 0, 2),
       "```",
       "",
       contextTitle,
       "```json",
-      JSON.stringify(contextValue, null, 2),
+      JSON.stringify(contextValue, void 0, 2),
       "```",
       "",
       "Return only the schema-bound assessment object. Free-text recommendations do not drive integration; make the enum classification and evidence fields precise."
@@ -2328,16 +2490,16 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
       candidate
     );
   }
-  function assessmentModelTier(evidence) {
-    const hasExecplan = (evidence.changedFiles || []).some((entry) => /^docs\/execplans\/.+\.md$/.test(String(entry)));
-    return hasExecplan ? "escalated" : "medium";
-  }
   async function runModelAssessment(buildPrompt, phaseName, label, evidence) {
     const tier = assessmentModelTier(evidence);
     const options = { phase: phaseName, label, schema: ASSESSMENT_SCHEMA };
     if (tier === "escalated") options.model = assessmentEscalationModel;
-    const assessment = await withInfraRetry2(() => agent(buildPrompt(), assessmentAgentOptions2(options)), label);
+    const assessment = await withInfraRetry2(
+      () => agent(buildPrompt(), { ...assessmentAgentOptions2(options), schema: ASSESSMENT_SCHEMA }),
+      label
+    );
     if (!assessment) return null;
+    if (typeof assessment !== "object" || Array.isArray(assessment)) throw new Error("assessment agent returned a malformed structured output");
     return { ...assessment, assessmentTier: tier };
   }
   async function assessRecoveryCandidate2(candidate) {
@@ -2373,7 +2535,11 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
         /** Host-collected git evidence for the candidate branch. */
         evidence,
         /** The assessment object (deterministic or model), or null on failure. */
-        assessment: { ...assessment, hostEvidence: evidence },
+        assessment: {
+          ...assessment,
+          /** Complete evidence collected by the host. */
+          hostEvidence: evidence
+        },
         /** Error text when no structured assessment was produced; '' otherwise. */
         assessmentError: ""
       };
@@ -2384,13 +2550,13 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
         /** The assessment object (deterministic or model), or null on failure. */
         assessment: null,
         /** Error text when no structured assessment was produced; '' otherwise. */
-        assessmentError: error && error.message || String(error)
+        assessmentError: assessmentErrorMessage(error)
       };
     }
   }
   function shouldAssessFailure2(result, wt) {
     if (!assessPartialBranches) return false;
-    if (!wt?.branch || !wt?.worktreePath) return false;
+    if (!wt?.branch || !wt.worktreePath) return false;
     if (!result || !["failed", "halted"].includes(result.status || "")) return false;
     if (result.stage === "worktree" || result.stage === "worktree-write" || result.stage === "auth" || result.stage === "provider" || result.stage === "infrastructure" || result.status === "fatal-auth" || result.status === "provider-fault" || result.status === "infra-fault") return false;
     const detail = [result.detail, ...result.openIssues || []].filter(Boolean).join("\n");
@@ -2411,7 +2577,9 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
     const fast = fastAssessmentClassification(evidence);
     if (fast) {
       const salvage = fast.classification === "continue-manual" ? { classification: fast.classification, committed: [], skipped: [], sha: "", detail: "salvage skipped: deterministic continue-manual fires on untrustworthy host evidence" } : null;
-      return { ...result, assessment: deterministicAssessment(fast.classification, evidence, fast.reason), ...salvage ? { salvage } : {} };
+      const assessed = { ...result, assessment: deterministicAssessment(fast.classification, evidence, fast.reason) };
+      if (salvage) return { ...assessed, salvage };
+      return assessed;
     }
     try {
       const assessment = await runModelAssessment(() => assessmentPrompt2(task, wt, result, evidence), "Assess", `assess:${task.id}`, evidence);
@@ -2419,11 +2587,13 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
         return { ...result, assessmentError: "assessment agent returned no structured output", assessmentEvidence: evidence };
       }
       const salvage = await salvageAssessmentArtefacts(task.id, wt.worktreePath || "", evidence, String(assessment.classification || ""));
-      return { ...result, assessment: { ...assessment, hostEvidence: evidence }, ...salvage ? { salvage } : {} };
+      const assessed = { ...result, assessment: { ...assessment, hostEvidence: evidence } };
+      if (salvage) return { ...assessed, salvage };
+      return assessed;
     } catch (error) {
       return {
         ...result,
-        assessmentError: error && error.message || String(error),
+        assessmentError: assessmentErrorMessage(error),
         assessmentEvidence: evidence
       };
     }
@@ -2474,11 +2644,12 @@ var stepOf = (id) => String(id).split(".").slice(0, 2).join(".");
 function dedupeProposals(proposals) {
   const byKey = /* @__PURE__ */ new Map();
   for (const proposal of proposals || []) {
-    const title = typeof proposal?.title === "string" ? proposal.title.trim() : "";
-    const key = title.toLowerCase().replace(/\s+/g, " ");
+    if (!proposal) throw new TypeError("remediation proposal title must be a non-blank string");
+    const title = typeof proposal.title === "string" ? proposal.title.trim() : "";
+    const key = title.toLowerCase().replaceAll(/\s+/g, " ");
     if (!key) throw new TypeError("remediation proposal title must be a non-blank string");
-    const fallback = String(proposal?.source || proposal?.rationale || "");
-    const sources = Array.isArray(proposal.sources) ? proposal.sources.map((source) => String(source)).filter(Boolean) : [];
+    const fallback = String(proposal.source || proposal.rationale || "");
+    const sources = Array.isArray(proposal.sources) ? proposal.sources.map(String).filter(Boolean) : [];
     if (fallback && !sources.includes(fallback)) sources.push(fallback);
     const uniqueSources = [...new Set(sources)];
     const existing = byKey.get(key);
@@ -2494,7 +2665,7 @@ function triageNeedsEscalation(deduped) {
   const sources = /* @__PURE__ */ new Set();
   for (const proposal of deduped) {
     for (const source of proposal.sources || []) sources.add(source);
-    if (!(proposal.sources || []).length) {
+    if ((proposal.sources || []).length === 0) {
       const fallback = String(proposal.source || proposal.rationale || "");
       if (fallback) sources.add(fallback);
     }
@@ -2539,7 +2710,7 @@ function makeRemediation({ preamble: preamble2, worktreeSafetyNet: worktreeSafet
   async function runTriage2(stepPrefix, proposals) {
     phase("Remediation");
     const deduped = dedupeProposals(proposals);
-    if (!deduped.length) return { ok: true, decisions: [], summary: "no proposals to triage after de-duplication" };
+    if (deduped.length === 0) return { ok: true, decisions: [], summary: "no proposals to triage after de-duplication" };
     const options = { phase: "Remediation", label: `triage:${stepPrefix}`, schema: TRIAGE_SCHEMA };
     if (triageNeedsEscalation(deduped)) options.model = triageEscalationModel;
     return await agent(triagePrompt2(stepPrefix, deduped), triageAgentOptions2(options));
@@ -2558,50 +2729,96 @@ function makeRemediation({ preamble: preamble2, worktreeSafetyNet: worktreeSafet
 
 // src/workflows/df12-build-odw/coderabbit-review.ts
 var CODERABBIT_SUCCESS_STATUSES = /* @__PURE__ */ new Set(["review_completed", "reviewed"]);
+function isCoderabbitJsonObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function isOptionalCoderabbitString(value) {
+  return value === void 0 || typeof value === "string";
+}
+function isCoderabbitFinding(event) {
+  return event.type === "finding" && isOptionalCoderabbitString(event.severity) && isOptionalCoderabbitString(event.fileName) && isOptionalCoderabbitString(event.comment) && isOptionalCoderabbitString(event.codegenInstructions) && (event.suggestions === void 0 || Array.isArray(event.suggestions));
+}
+function isCoderabbitError(event) {
+  return event.type === "error" && isOptionalCoderabbitString(event.errorType) && isOptionalCoderabbitString(event.message);
+}
+function isCoderabbitCompletion(event) {
+  return event.type === "complete" && typeof event.status === "string" && (event.findings === void 0 || typeof event.findings === "number" && Number.isFinite(event.findings));
+}
 function parseCoderabbitAgentOutput(stdout) {
   const events = [];
   const rawLines = [];
+  const findings = [];
+  let complete = null;
+  let error = null;
+  let invalidReason = "";
   for (const line of String(stdout || "").split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
       const event = JSON.parse(trimmed);
-      if (event && typeof event === "object") {
+      if (isCoderabbitJsonObject(event)) {
         events.push(event);
+        if (typeof event.type !== "string") {
+          invalidReason ||= "Invalid CodeRabbit event type";
+        } else if (event.type === "finding") {
+          if (isCoderabbitFinding(event)) findings.push(event);
+          else invalidReason ||= "Invalid CodeRabbit finding event";
+        } else if (event.type === "complete") {
+          if (isCoderabbitCompletion(event)) complete ||= event;
+          else invalidReason ||= "Invalid CodeRabbit completion event";
+        } else if (event.type === "error") {
+          if (isCoderabbitError(event)) error ||= event;
+          else invalidReason ||= "Invalid CodeRabbit error event";
+        }
         continue;
       }
     } catch {
     }
     rawLines.push(trimmed);
   }
-  return { events, rawLines, findings: events.filter((event) => event.type === "finding"), complete: events.find((event) => event.type === "complete") || null, error: events.find((event) => event.type === "error") || null };
+  if (invalidReason && !error) error = { type: "error", errorType: "invalid_output", message: invalidReason };
+  return { events, rawLines, findings, complete, error };
 }
 function classifyCoderabbitOutcome(execResult, parsed) {
   const errorText = [parsed.error?.message || "", execResult.stderr || "", execResult.message || ""].join("\n");
   if (parsed.error?.errorType === "rate_limit" || /\brate.?limit|review limit reached/i.test(errorText)) return "rate-limited";
   if (authFailureDetail(errorText)) return "auth";
   if (parsed.error || !execResult.ok && !parsed.complete) return "error";
-  if (parsed.findings.length) return "findings";
+  if (parsed.findings.length > 0) return "findings";
   return parsed.complete && CODERABBIT_SUCCESS_STATUSES.has(String(parsed.complete.status)) ? "clean" : "error";
+}
+function coderabbitErrorCategory(result, outcome, parsed) {
+  if (result.killed) return "timeout";
+  if (outcome === "rate-limited") return "deferred";
+  if (outcome === "auth") return "auth";
+  if (parsed.error?.errorType === "invalid_output") return "invalid-output";
+  if (outcome === "error") return parsed.error || parsed.complete ? "execution" : "invalid-output";
+  return "none";
+}
+function elapsedSince(startedMs) {
+  const nowMs = Number(process.hrtime.bigint() / 1000000n);
+  return Math.max(0, nowMs - startedMs);
 }
 function makeCoderabbitAttempt(config) {
   return async function runCoderabbitAttempt(worktree, exec, deps = {}) {
     const tracer = deps.tracer || NOOP_HOST_REVIEW_TRACER;
     const traceContext = deps.traceContext || { runId: "host-review" };
     const startedMs = Number(process.hrtime.bigint() / 1000000n);
-    const span = tracer.startSpan("host-review.coderabbit.subprocess", { runId: boundedTail(traceContext.runId || "host-review", 120), ...traceContext.taskId ? { taskId: boundedTail(traceContext.taskId, 120) } : {} }, { reviewer: "coderabbit", attempt: deps.attempt || 1 });
+    const spanContext = { runId: boundedTail(traceContext.runId || "host-review", 120) };
+    if (traceContext.taskId) spanContext.taskId = boundedTail(traceContext.taskId, 120);
+    const span = tracer.startSpan("host-review.coderabbit.subprocess", spanContext, { reviewer: "coderabbit", attempt: deps.attempt || 1 });
     let result;
     try {
       result = await exec("coderabbit", ["review", "--agent", "--type", "committed", "--base", config.base], { cwd: worktree, timeoutMs: config.reviewTimeoutSeconds * 1e3 });
     } catch (error) {
-      span.end({ reviewer: "coderabbit", attempt: deps.attempt || 1, outcome: "error", errorCategory: "execution", timeout: false, elapsedMs: Math.max(0, Number(process.hrtime.bigint() / 1000000n) - startedMs) });
+      span.end({ reviewer: "coderabbit", attempt: deps.attempt || 1, outcome: "error", errorCategory: "execution", timeout: false, elapsedMs: elapsedSince(startedMs) });
       throw error;
     }
     const parsed = parseCoderabbitAgentOutput(result.stdout);
     const outcome = classifyCoderabbitOutcome(result, parsed);
     const detail = outcome === "clean" || outcome === "findings" ? "" : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join("; ") || "coderabbit produced no parsable outcome").trim();
-    const errorCategory = result.killed ? "timeout" : outcome === "rate-limited" ? "deferred" : outcome === "auth" ? "auth" : outcome === "error" ? parsed.error || parsed.complete ? "execution" : "invalid-output" : "none";
-    span.end({ reviewer: "coderabbit", attempt: deps.attempt || 1, outcome, errorCategory, timeout: errorCategory === "timeout", elapsedMs: Math.max(0, Number(process.hrtime.bigint() / 1000000n) - startedMs) });
+    const errorCategory = coderabbitErrorCategory(result, outcome, parsed);
+    span.end({ reviewer: "coderabbit", attempt: deps.attempt || 1, outcome, errorCategory, timeout: errorCategory === "timeout", elapsedMs: elapsedSince(startedMs) });
     return { outcome, findings: parsed.findings, detail: boundedTail(detail), errorCategory };
   };
 }
@@ -2616,6 +2833,16 @@ var DAKAR_SEVERITY_MAP = {
 var DAKAR_SEVERITIES = new Set(Object.keys(DAKAR_SEVERITY_MAP));
 var DAKAR_REQUIRED_FINDING_FIELDS = ["path", "title", "detail", "evidence"];
 var DAKAR_PARENT_TIMEOUT_GRACE_MS = 5e3;
+function dakarErrorProperty(error, property) {
+  if (error && (typeof error === "object" || typeof error === "function")) {
+    const value = property === "message" ? "message" in error ? error.message : void 0 : "name" in error ? error.name : void 0;
+    if (typeof value === "string" && value) return value;
+  }
+  return void 0;
+}
+function dakarNowMs() {
+  return Number(process.hrtime.bigint() / 1000000n);
+}
 function redactDakarDetail(detail, sensitiveValues = []) {
   let redacted = detail;
   for (const value of sensitiveValues) {
@@ -2632,8 +2859,8 @@ function dakarDiagnosticRedactions(invocation, extraValues = []) {
     const inlineValue = inlineOption?.[2];
     const assignmentValue = assignment?.[1];
     if (inlineValue !== void 0) values.push(argument, inlineValue);
-    else if (assignmentValue !== void 0) values.push(argument, assignmentValue);
-    else values.push(argument);
+    else if (assignmentValue === void 0) values.push(argument);
+    else values.push(argument, assignmentValue);
   }
   return values;
 }
@@ -2663,7 +2890,8 @@ function parseDakarDocument(stdout) {
     if (document.length > 64e3) return null;
     try {
       const parsed = JSON.parse(document);
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+      return parsed;
     } catch {
       return null;
     }
@@ -2671,7 +2899,8 @@ function parseDakarDocument(stdout) {
   return null;
 }
 function mapDakarFinding(finding, sensitiveValues = []) {
-  const severity = DAKAR_SEVERITY_MAP[String(finding.severity || "").toLowerCase()] || "info";
+  const sourceSeverity = String(finding.severity || "").toLowerCase();
+  const severity = Object.hasOwn(DAKAR_SEVERITY_MAP, sourceSeverity) ? DAKAR_SEVERITY_MAP[sourceSeverity] || "info" : "info";
   const filePath = redactDakarDetail(String(finding.path || ""), sensitiveValues).slice(0, 2e3);
   const title = redactDakarDetail(String(finding.title || ""), sensitiveValues);
   const detail = redactDakarDetail(String(finding.detail || ""), sensitiveValues);
@@ -2682,10 +2911,10 @@ function mapDakarFinding(finding, sensitiveValues = []) {
 Evidence: ${evidence}`.slice(0, 2e3), suggestions: [] };
 }
 function validateChangesRequestedFindings(raw) {
-  const findings = Array.isArray(raw) ? raw : null;
-  if (!findings || findings.length === 0) return { ok: false, detail: "Dakar returned changes-requested without any findings; refusing to treat a reviewer rejection as non-blocking" };
+  if (!Array.isArray(raw) || raw.length === 0) return { ok: false, detail: "Dakar returned changes-requested without any findings; refusing to treat a reviewer rejection as non-blocking" };
+  const findings = raw;
   for (const [index, finding] of findings.entries()) {
-    if (finding === null || typeof finding !== "object" || Array.isArray(finding)) return { ok: false, detail: boundedTail(`Dakar returned a malformed finding at index ${index}; expected an object`) };
+    if (!finding || typeof finding !== "object" || Array.isArray(finding)) return { ok: false, detail: boundedTail(`Dakar returned a malformed finding at index ${index}; expected an object`) };
     const item = finding;
     if (typeof item.severity !== "string" || !DAKAR_SEVERITIES.has(item.severity.toLowerCase())) return { ok: false, detail: boundedTail(`Dakar returned an invalid finding at index ${index}; unsupported severity`) };
     const invalidField = DAKAR_REQUIRED_FINDING_FIELDS.find((field) => typeof item[field] !== "string");
@@ -2737,19 +2966,20 @@ function makeDakarAttempt(config) {
     const stateRoots = deps.dakarStateRoots || { create: () => fs.mkdtempSync(path.join(os.tmpdir(), "df12-dakar-state-")), remove: deps.removeDakarStateRoot || fs.rmSync };
     const tracer = deps.tracer || NOOP_HOST_REVIEW_TRACER;
     const traceContext = deps.traceContext || { runId: "host-review" };
-    const nowMs = () => Number(process.hrtime.bigint() / 1000000n);
     const trace = (name) => {
-      const startedMs = nowMs();
-      return { startedMs, span: tracer.startSpan(name, { runId: boundedTail(traceContext.runId || "host-review", 120), ...traceContext.taskId ? { taskId: boundedTail(traceContext.taskId, 120) } : {} }, { reviewer: "dakar", attempt: deps.attempt || 1 }) };
+      const startedMs = dakarNowMs();
+      const spanContext = { runId: boundedTail(traceContext.runId || "host-review", 120) };
+      if (traceContext.taskId) spanContext.taskId = boundedTail(traceContext.taskId, 120);
+      return { startedMs, span: tracer.startSpan(name, spanContext, { reviewer: "dakar", attempt: deps.attempt || 1 }) };
     };
     let stateRoot;
     const createSpan = trace("host-review.dakar.state-root.create");
     try {
       stateRoot = stateRoots.create();
-      createSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: "clean", errorCategory: "none", timeout: false, elapsedMs: Math.max(0, nowMs() - createSpan.startedMs) });
+      createSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: "clean", errorCategory: "none", timeout: false, elapsedMs: Math.max(0, dakarNowMs() - createSpan.startedMs) });
     } catch (error) {
-      createSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: "error", errorCategory: "execution", timeout: false, elapsedMs: Math.max(0, nowMs() - createSpan.startedMs) });
-      return { outcome: "error", findings: [], detail: boundedTail(error?.message || String(error)), errorCategory: "execution" };
+      createSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: "error", errorCategory: "execution", timeout: false, elapsedMs: Math.max(0, dakarNowMs() - createSpan.startedMs) });
+      return { outcome: "error", findings: [], detail: boundedTail(dakarErrorProperty(error, "message") || String(error)), errorCategory: "execution" };
     }
     const args2 = ["--repo-root", worktree, "--base", config.base, "--state-root", stateRoot, "--timeout", String(config.reviewTimeoutSeconds), ...config.dakarBudgetGbp > 0 ? ["--budget-gbp", String(config.dakarBudgetGbp)] : []];
     const processSpan = trace("host-review.dakar.subprocess");
@@ -2758,22 +2988,22 @@ function makeDakarAttempt(config) {
         cwd: worktree,
         timeoutMs: config.reviewTimeoutSeconds * 1e3 + DAKAR_PARENT_TIMEOUT_GRACE_MS
       }), sensitiveValues);
-      processSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: review.outcome, errorCategory: review.errorCategory, timeout: review.errorCategory === "timeout", elapsedMs: Math.max(0, nowMs() - processSpan.startedMs) });
+      processSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: review.outcome, errorCategory: review.errorCategory, timeout: review.errorCategory === "timeout", elapsedMs: Math.max(0, dakarNowMs() - processSpan.startedMs) });
       return review;
     } catch (error) {
-      processSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: "error", errorCategory: "execution", timeout: false, elapsedMs: Math.max(0, nowMs() - processSpan.startedMs) });
-      const message = boundedTail(redactDakarDetail(error?.message || String(error), sensitiveValues));
+      processSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: "error", errorCategory: "execution", timeout: false, elapsedMs: Math.max(0, dakarNowMs() - processSpan.startedMs) });
+      const message = boundedTail(redactDakarDetail(dakarErrorProperty(error, "message") || String(error), sensitiveValues));
       const redacted = new Error(message);
-      redacted.name = error?.name || "Error";
+      redacted.name = dakarErrorProperty(error, "name") || "Error";
       throw redacted;
     } finally {
       const removeSpan = trace("host-review.dakar.state-root.remove");
       try {
         stateRoots.remove(stateRoot, { recursive: true, force: true });
-        removeSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: "clean", errorCategory: "none", timeout: false, elapsedMs: Math.max(0, nowMs() - removeSpan.startedMs) });
+        removeSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: "clean", errorCategory: "none", timeout: false, elapsedMs: Math.max(0, dakarNowMs() - removeSpan.startedMs) });
       } catch (error) {
-        removeSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: "error", errorCategory: "execution", timeout: false, elapsedMs: Math.max(0, nowMs() - removeSpan.startedMs) });
-        log(`[Dakar] ${boundedTail(traceContext.taskId || "host-review", 120)} attempt ${deps.attempt || 1} could not remove temporary state root: ${boundedTail(error?.message || String(error), 500)}`);
+        removeSpan.span.end({ reviewer: "dakar", attempt: deps.attempt || 1, outcome: "error", errorCategory: "execution", timeout: false, elapsedMs: Math.max(0, dakarNowMs() - removeSpan.startedMs) });
+        log(`[Dakar] ${boundedTail(traceContext.taskId || "host-review", 120)} attempt ${deps.attempt || 1} could not remove temporary state root: ${boundedTail(dakarErrorProperty(error, "message") || String(error), 500)}`);
       }
     }
   };
@@ -2781,15 +3011,17 @@ function makeDakarAttempt(config) {
 
 // src/workflows/df12-build-odw/host-gates.ts
 var GATE_CARRY_LIMIT = 16384;
+function gateLogLabel(value) {
+  return String(value).replaceAll(/[^A-Za-z0-9._-]+/g, "-").replaceAll(/^-+|-+$/g, "").slice(0, 60);
+}
 function codeSceneExecutable(command) {
   const tokens = tokenizeShellCommand(command);
   if (!tokens || tokens.hasUnquotedControlOperator) return null;
   return tokens.words[tokens.executableWordIndex]?.value || "";
 }
 function hostGateLogPath(root, tag, roundLabel, index) {
-  const slug = (value) => String(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
   const path = process.getBuiltinModule("node:path");
-  return path.join(root, `gate-${slug(tag)}-${slug(roundLabel)}-${index + 1}.out`);
+  return path.join(root, `gate-${gateLogLabel(tag)}-${gateLogLabel(roundLabel)}-${index + 1}.out`);
 }
 function productionHostGateDeps() {
   const fs = process.getBuiltinModule("node:fs");
@@ -2798,12 +3030,28 @@ function productionHostGateDeps() {
   const { spawn } = process.getBuiltinModule("node:child_process");
   return {
     probeCodeScene: execFileStatus,
-    spawnGate: (command, cwd) => spawn("sh", ["-c", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] }),
+    spawnGate: (command, cwd) => {
+      const child = spawn("sh", ["-c", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      const gateChild = {
+        on: (event, listener) => {
+          if (event === "close") child.on("close", listener);
+          else child.on("error", listener);
+        },
+        kill: (signal) => {
+          child.kill(signal);
+        }
+      };
+      if (child.pid !== void 0) gateChild.pid = child.pid;
+      gateChild.stdout = child.stdout;
+      gateChild.stderr = child.stderr;
+      return gateChild;
+    },
     /** Prefer signalling the detached group so background descendants are reaped. */
     terminateProcessGroup: (child, signal) => {
-      if (typeof child.pid === "number") {
+      const pid = child.pid;
+      if (pid !== void 0 && Number.isSafeInteger(pid)) {
         try {
-          process.kill(-child.pid, signal);
+          process.kill(-pid, signal);
           return;
         } catch {
         }
@@ -2814,12 +3062,24 @@ function productionHostGateDeps() {
     openSecureLog: (logFile) => {
       const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
       const fd = fs.openSync(logFile, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 384);
-      return fs.createWriteStream(logFile, { fd, autoClose: true });
+      const stream = fs.createWriteStream(logFile, { fd, autoClose: true });
+      return {
+        write: (chunk) => stream.write(chunk),
+        end: (callback) => {
+          stream.end(callback);
+        },
+        on: (event, listener) => {
+          if (event === "error") stream.on("error", listener);
+          else stream.on("drain", listener);
+        }
+      };
     },
     createLogRoot: () => fs.mkdtempSync(path.join(os.tmpdir(), "df12-gates-")),
     removeLogRoot: (root, options) => fs.rmSync(root, options),
     setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
-    clearTimer: (timer) => clearTimeout(timer),
+    clearTimer: (timer) => {
+      timer[Symbol.dispose]?.();
+    },
     nowMs: () => Number(process.hrtime.bigint() / 1000000n)
   };
 }
@@ -2852,10 +3112,16 @@ function makeHostGates(config, metrics, injected = {}) {
   const baseContext = deps.traceContext || { runId: "host-review" };
   function span(name, taskId, attributes) {
     const startedMs = deps.nowMs();
-    return { handle: tracer.startSpan(name, { runId: boundedTail(baseContext.runId, 120) || "host-review", ...taskId ? { taskId: boundedTail(taskId, 120) } : {} }, { reviewer: deps.reviewer || "unknown", ...attributes }), startedMs };
+    const context = { runId: boundedTail(baseContext.runId, 120) || "host-review" };
+    if (taskId) context.taskId = boundedTail(taskId, 120);
+    return { handle: tracer.startSpan(name, context, { reviewer: deps.reviewer || "unknown", ...attributes }), startedMs };
+  }
+  function gateSpanElapsedMs(active) {
+    const elapsedMs = deps.nowMs() - active.startedMs;
+    return Math.max(0, Math.trunc(elapsedMs));
   }
   function endSpan(active, attributes) {
-    active.handle.end({ elapsedMs: Math.max(0, Math.trunc(deps.nowMs() - active.startedMs)), ...attributes });
+    active.handle.end({ elapsedMs: gateSpanElapsedMs(active), ...attributes });
   }
   function streamGate(command, cwd, logFile) {
     return new Promise((resolve) => {
@@ -2948,7 +3214,9 @@ function makeHostGates(config, metrics, injected = {}) {
       child.stderr?.on("data", record);
       sigterm = deps.setTimer(() => terminate("gate process group did not close after SIGKILL"), config.commitGateTimeoutSeconds * 1e3);
       child.on("close", (code) => finish(code === 0 && !killed, streamFailure));
-      child.on("error", (error) => finish(false, streamFailure || `spawn failed: ${boundedTail(error?.message || String(error), 500)}`));
+      child.on("error", (error) => {
+        finish(false, streamFailure || `spawn failed: ${boundedTail(error?.message || String(error), 500)}`);
+      });
     });
   }
   async function runHostCommitGates2(worktree, tag, roundLabel) {
@@ -2986,7 +3254,7 @@ ${outcome.tail}` };
       return { clean: false, skipped: false, detail, logFile: "" };
     }
     const missing = "__DF12_CODESCENE_BINARY_MISSING__";
-    const probe = await deps.probeCodeScene("sh", ["-c", 'command -v "$1" >/dev/null 2>&1 || { printf "%s\\n" "$2"; exit 127; }', "sh", bin, missing], { cwd: worktree, timeoutMs: 1e4 });
+    const probe = await deps.probeCodeScene("sh", ["-c", String.raw`command -v "$1" >/dev/null 2>&1 || { printf "%s\n" "$2"; exit 127; }`, "sh", bin, missing], { cwd: worktree, timeoutMs: 1e4 });
     if (!probe.ok) {
       if (probe.stdout.trim() === missing) {
         metrics.codeScene.skipped += 1;
@@ -2995,7 +3263,10 @@ ${outcome.tail}` };
         return { clean: true, skipped: true, detail: `${bin} not on PATH`, logFile: "" };
       }
       metrics.codeScene.probeFailures += 1;
-      const fault = [probe.message, probe.stderr, probe.signal ? `signal ${probe.signal}` : "", probe.killed ? "probe killed" : ""].map((part) => String(part || "").trim()).filter(Boolean).join("; ");
+      const fault = [probe.message, probe.stderr, probe.signal ? `signal ${probe.signal}` : "", probe.killed ? "probe killed" : ""].flatMap((part) => {
+        const text = String(part || "").trim();
+        return text ? [text] : [];
+      }).join("; ");
       endSpan(active, { outcome: "error", errorCategory: probe.killed ? "timeout" : "execution", timeout: Boolean(probe.killed), retry: false });
       return { clean: false, skipped: false, detail: `CodeScene availability probe for \`${redactedCommand}\` failed: ${boundedTail(fault) || "unknown probe failure"}`, logFile: "" };
     }
@@ -3020,7 +3291,42 @@ function coderabbitBlockingItems(findings) {
 async function hostSleepMinutes(minutes) {
   await new Promise((resolve) => setTimeout(resolve, minutes * 6e4));
 }
+function hostReviewSpanNowMs() {
+  return Number(process.hrtime.bigint() / 1000000n);
+}
+function hostReviewAttemptElapsedMs(startedMs) {
+  const elapsedMs = hostReviewSpanNowMs() - startedMs;
+  return Math.max(0, Math.trunc(elapsedMs));
+}
+function hostReviewSinkElapsedMs(startedMs) {
+  const elapsedMs = hostReviewSpanNowMs() - startedMs;
+  return Math.max(0, elapsedMs);
+}
+function reviewTraceContext(override, fallback, label) {
+  const context = {
+    runId: boundedTail(override?.runId || fallback?.runId || "host-review", 120) || "host-review"
+  };
+  const taskId = override?.taskId || fallback?.taskId || label;
+  if (taskId) context.taskId = boundedTail(taskId, 120);
+  return context;
+}
+function reviewSeverity(value) {
+  switch (value) {
+    case "critical":
+    case "major":
+    case "minor":
+    case "trivial":
+    case "info":
+    case "unknown": {
+      return value;
+    }
+    default: {
+      return "unknown";
+    }
+  }
+}
 function makeHostReview(config, composition = {}) {
+  const compatibility = config;
   const dakarCommandInvocation = dakarInvocationFromCommand(config.dakarCommand);
   const dakarInvocation = config.dakarInvocation === void 0 ? dakarCommandInvocation : validateDakarInvocation(config.dakarInvocation);
   if (!dakarCommandInvocation || !dakarInvocation) throw new Error(DAKAR_COMMAND_VALIDATION_ERROR);
@@ -3038,8 +3344,8 @@ function makeHostReview(config, composition = {}) {
   let findingsSinkTail = Promise.resolve();
   function reviewBackoffMinutes2(seed) {
     let hash = 5381;
-    for (const ch of String(seed)) hash = (hash * 33 ^ ch.codePointAt(0)) >>> 0;
-    const [low, high] = config.reviewBackoffMinutes ?? config.coderabbitBackoffMinutes ?? [45, 90];
+    for (const ch of String(seed)) hash = (hash * 33 ^ (ch.codePointAt(0) ?? 0)) >>> 0;
+    const [low, high] = compatibility.reviewBackoffMinutes ?? compatibility.coderabbitBackoffMinutes ?? [45, 90];
     return low + hash % (high - low + 1);
   }
   function recordDuration(elapsedMs) {
@@ -3051,34 +3357,30 @@ function makeHostReview(config, composition = {}) {
   async function runHostReview2(worktree, label, deps = {}) {
     const exec = deps.exec || execFileStatus;
     const sleep = deps.sleep || hostSleepMinutes;
-    const nowMs = deps.nowMs || (() => Number(process.hrtime.bigint() / 1000000n));
+    const nowMs = deps.nowMs || hostReviewSpanNowMs;
     const reviewer = config.reviewTool;
     const displayName = reviewerDisplayName(reviewer);
     const boundedLabel = boundedTail(label, 120);
     const startedMs = nowMs();
-    const spanNowMs = () => Number(process.hrtime.bigint() / 1000000n);
-    const traceContext = {
-      runId: boundedTail(deps.traceContext?.runId || config.traceContext?.runId || "host-review", 120) || "host-review",
-      ...deps.traceContext?.taskId || config.traceContext?.taskId || boundedLabel ? { taskId: boundedTail(deps.traceContext?.taskId || config.traceContext?.taskId || boundedLabel, 120) } : {}
-    };
+    const traceContext = reviewTraceContext(deps.traceContext, config.traceContext, boundedLabel);
     const operationSpan = (deps.tracer || config.tracer || NOOP_HOST_REVIEW_TRACER).startSpan("host-review.operation", traceContext, { reviewer, retry: false });
     let terminalAttempt = 1;
     try {
       for (let attempt = 1; ; attempt++) {
         terminalAttempt = attempt;
-        const attempts = config.reviewAttempts ?? config.coderabbitAttempts ?? 3;
+        const attempts = compatibility.reviewAttempts ?? compatibility.coderabbitAttempts ?? 3;
         log(`[${boundedLabel}] ${displayName} host review attempt ${attempt} of ${attempts}`);
-        const attemptStartedMs = spanNowMs();
+        const attemptStartedMs = hostReviewSpanNowMs();
         const attemptSpan = (deps.tracer || config.tracer || NOOP_HOST_REVIEW_TRACER).startSpan("host-review.attempt", traceContext, { reviewer, attempt, retry: attempt > 1 });
         const adapterDeps = { ...deps, attempt, tracer: deps.tracer || config.tracer || NOOP_HOST_REVIEW_TRACER, traceContext: { ...traceContext, taskId: boundedLabel } };
         let single;
         try {
           single = reviewer === "dakar" ? await dakarAttempt(worktree, exec, adapterDeps) : await coderabbitAttempt(worktree, exec, adapterDeps);
         } catch (error) {
-          attemptSpan.end({ reviewer, attempt, outcome: "error", errorCategory: "execution", retry: false, timeout: false, elapsedMs: Math.max(0, Math.trunc(spanNowMs() - attemptStartedMs)) });
+          attemptSpan.end({ reviewer, attempt, outcome: "error", errorCategory: "execution", retry: false, timeout: false, elapsedMs: hostReviewAttemptElapsedMs(attemptStartedMs) });
           throw error;
         }
-        attemptSpan.end({ reviewer, attempt, outcome: single.outcome, errorCategory: single.errorCategory, retry: single.outcome === "rate-limited" && attempt < attempts, timeout: single.errorCategory === "timeout", elapsedMs: Math.max(0, Math.trunc(spanNowMs() - attemptStartedMs)) });
+        attemptSpan.end({ reviewer, attempt, outcome: single.outcome, errorCategory: single.errorCategory, retry: single.outcome === "rate-limited" && attempt < attempts, timeout: single.errorCategory === "timeout", elapsedMs: hostReviewAttemptElapsedMs(attemptStartedMs) });
         if (single.outcome === "rate-limited" && attempt < attempts) {
           const minutes = reviewBackoffMinutes2(`${boundedLabel}#${attempt}`);
           log(`[${boundedLabel}] ${displayName} rate limited/deferred; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${attempts} (wall-clock only, no agent tokens)`);
@@ -3112,15 +3414,12 @@ function makeHostReview(config, composition = {}) {
     for (const finding of review.findings) {
       hostReviewMetrics.findings += 1;
       const rawSeverity = String(finding.severity || "unknown").toLowerCase();
-      const severity = Object.hasOwn(hostReviewMetrics.bySeverity, rawSeverity) ? rawSeverity : "unknown";
+      const severity = reviewSeverity(rawSeverity);
       hostReviewMetrics.bySeverity[severity] += 1;
     }
-    const findingsFile = config.reviewFindingsFile ?? config.coderabbitFindingsFile ?? "";
-    if (!findingsFile || !review.findings.length) return;
-    const traceContext = {
-      runId: boundedTail(deps.traceContext?.runId || config.traceContext?.runId || "host-review", 120) || "host-review",
-      ...deps.traceContext?.taskId || config.traceContext?.taskId || label ? { taskId: boundedTail(deps.traceContext?.taskId || config.traceContext?.taskId || label, 120) } : {}
-    };
+    const findingsFile = compatibility.reviewFindingsFile ?? compatibility.coderabbitFindingsFile ?? "";
+    if (!findingsFile || review.findings.length === 0) return;
+    const traceContext = reviewTraceContext(deps.traceContext, config.traceContext, label);
     const sinkStartedMs = Number(process.hrtime.bigint() / 1000000n);
     const sinkSpan = (config.tracer || NOOP_HOST_REVIEW_TRACER).startSpan("host-review.findings-sink", traceContext, { reviewer: review.reviewer });
     const append = async () => {
@@ -3137,16 +3436,18 @@ function makeHostReview(config, composition = {}) {
         });
         await appendFile(findingsFile, `${lines.join("\n")}
 `);
-        sinkSpan.end({ reviewer: review.reviewer, outcome: "clean", errorCategory: "none", timeout: false, elapsedMs: Math.max(0, Number(process.hrtime.bigint() / 1000000n) - sinkStartedMs) });
+        sinkSpan.end({ reviewer: review.reviewer, outcome: "clean", errorCategory: "none", timeout: false, elapsedMs: hostReviewSinkElapsedMs(sinkStartedMs) });
       } catch (error) {
         hostReviewMetrics.sinkFailures += 1;
         hostReviewMetrics.sinkError = boundedTail(error?.message || String(error), 500);
         log(`[${boundedTail(label, 120)}] could not append ${reviewerDisplayName(review.reviewer)} host-review findings to ${findingsFile}: ${hostReviewMetrics.sinkError}`);
-        sinkSpan.end({ reviewer: review.reviewer, outcome: "error", errorCategory: "execution", timeout: false, elapsedMs: Math.max(0, Number(process.hrtime.bigint() / 1000000n) - sinkStartedMs) });
+        sinkSpan.end({ reviewer: review.reviewer, outcome: "error", errorCategory: "execution", timeout: false, elapsedMs: hostReviewSinkElapsedMs(sinkStartedMs) });
       }
     };
     const pending = findingsSinkTail.then(append, append);
-    findingsSinkTail = pending.then(() => void 0, () => void 0);
+    findingsSinkTail = pending.then(() => {
+    }, () => {
+    });
     await pending;
   }
   function metrics() {
@@ -3175,6 +3476,28 @@ function makeHostReview(config, composition = {}) {
 }
 
 // src/workflows/df12-build-odw/run-task.ts
+function thrownMessage(error) {
+  const message = error != null && (typeof error === "object" || typeof error === "function") && "message" in error ? error.message : void 0;
+  return message || String(error);
+}
+function isExtraResultFields(value) {
+  return value != null && typeof value === "object";
+}
+function extraResultFields(value) {
+  return isExtraResultFields(value) ? value : {};
+}
+function routeTaskAgentOptions(router, options, schema) {
+  return { ...router({ ...options, schema }), schema };
+}
+function withHostGateEvidence(record, gates) {
+  if (!gates) return record;
+  const { fix, ...review } = record;
+  return { ...review, hostGates: gates.results, fix };
+}
+function withDeferredHostReviews(result, deferrals) {
+  if (deferrals.length === 0) return result;
+  return { ...result, deferredHostReviews: deferrals };
+}
 function summarizeReviewVerdict(review) {
   if (!review) return null;
   return {
@@ -3201,6 +3524,37 @@ function integrationIncomplete(integration) {
 }
 function integrationHaltDetail(integration) {
   return integration?.conflicts || integration?.summary || INTEGRATION_INCOMPLETE_DETAIL;
+}
+async function finishImplementationStage(task, worktree, plan, impl, extra) {
+  const tag = task.id;
+  const committed = await verifyWorktreeCommitted(worktree);
+  if (!committed.ok) {
+    return {
+      kind: "failure",
+      fail: {
+        id: tag,
+        status: "failed",
+        stage: "implement",
+        detail: `implementation returned ok but left uncommitted state in the worktree (${committed.detail}); every work item must be committed before returning`,
+        openIssues: impl.openIssues || [],
+        worktree,
+        proposals: [],
+        ...extra
+      }
+    };
+  }
+  if (plan.execplanPath) {
+    const contained = execplanRelPath(worktree, plan.execplanPath);
+    if (contained.ok) {
+      const planState = await readExecplanState({ worktreePath: worktree, execplanPath: contained.relPath });
+      if (planState.status !== "complete") {
+        log(`[task ${tag}] implementation returned ok but the committed ExecPlan status is '${planState.status}' (expected COMPLETE)${planState.error ? `: ${planState.error}` : ""}`);
+      }
+    } else {
+      log(`[task ${tag}] skipping the post-implementation plan-status check: ${contained.detail}`);
+    }
+  }
+  return { kind: "impl", impl };
 }
 function makeTaskPipeline(deps) {
   const {
@@ -3246,16 +3600,15 @@ function makeTaskPipeline(deps) {
   const hostReviewerDisplayName = reviewerDisplayName(HOST_REVIEWER);
   async function runPlanDesignLoop2(task, worktree, opts = {}) {
     const tag = task.id;
-    const extra = opts.extra || {};
+    const extra = extraResultFields(opts.extra);
     let plan = null;
     let designVerdict = null;
     for (let round = 1; round <= MAX_DESIGN_ROUNDS2; round++) {
       phase("Plan");
-      plan = await planningLock2(() => withInfraRetry2(() => agent(planPrompt2(task, worktree, designVerdict, round, opts), planAgentOptions2({
+      plan = await planningLock2(() => withInfraRetry2(() => agent(planPrompt2(task, worktree, designVerdict, round, opts), routeTaskAgentOptions(planAgentOptions2, {
         phase: "Plan",
-        label: `plan:${tag} r${round}`,
-        schema: PLAN_SCHEMA
-      })), `plan:${tag} r${round}`));
+        label: `plan:${tag} r${round}`
+      }, PLAN_SCHEMA)), `plan:${tag} r${round}`));
       if (!plan) return { kind: "failure", fail: { id: tag, status: "failed", stage: "plan", detail: "planner returned nothing", worktree, proposals: [], ...extra } };
       const contained = execplanRelPath(worktree, plan.execplanPath);
       if (!contained.ok) {
@@ -3302,11 +3655,11 @@ function makeTaskPipeline(deps) {
         continue;
       }
       phase("Design Review");
-      designVerdict = await planningLock2(() => withInfraRetry2(() => agent(designReviewPrompt2(task, worktree, plan, round), reviewAgentOptions2({
+      const reviewedPlan = plan;
+      designVerdict = await planningLock2(() => withInfraRetry2(() => agent(designReviewPrompt2(task, worktree, reviewedPlan, round), routeTaskAgentOptions(reviewAgentOptions2, {
         phase: "Design Review",
-        label: `design-review:${tag} r${round}`,
-        schema: DESIGN_VERDICT_SCHEMA
-      })), `design-review:${tag} r${round}`));
+        label: `design-review:${tag} r${round}`
+      }, DESIGN_VERDICT_SCHEMA)), `design-review:${tag} r${round}`));
       if (designVerdict?.satisfied) {
         log(`[task ${tag}] design approved in round ${round}`);
         const approved = await commitExecplanApproval(worktree, plan.execplanPath, tag);
@@ -3344,7 +3697,7 @@ function makeTaskPipeline(deps) {
   }
   async function dispatchFixAndVerify(task, worktree, plan, blocking, label, round) {
     phase("Implement");
-    const report = await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, blocking, round), buildAgentOptions2({ phase: "Implement", label, schema: FIX_SCHEMA })), label));
+    const report = await buildLock2(() => withInfraRetry2(() => agent(fixPrompt2(task, worktree, plan, blocking, round), routeTaskAgentOptions(buildAgentOptions2, { phase: "Implement", label }, FIX_SCHEMA)), label));
     const committed = await verifyWorktreeCommitted(worktree);
     return { report, dirtyDetail: committed.ok ? null : committed.detail };
   }
@@ -3398,7 +3751,7 @@ function makeTaskPipeline(deps) {
       }
       const blocking = reviewBlockingItems(hostReviewerDisplayName, review.findings);
       log(`[task ${tag}] between-item ${hostReviewerDisplayName} ${itemLabel} attempt ${attempt}: ${review.findings.length} finding(s), ${blocking.length} blocking`);
-      if (!blocking.length) return { ok: true, hostReviewRuns: runs };
+      if (blocking.length === 0) return { ok: true, hostReviewRuns: runs };
       if (attempt === MAX_REVIEW_ROUNDS2) {
         return { fail: { id: tag, status: "failed", stage: "code-review", detail: `${hostReviewerDisplayName} between-item review left blocking finding(s) unresolved after ${MAX_REVIEW_ROUNDS2} fix attempt(s) on ${itemLabel}: ${blocking.join("; ")}`, worktree, proposals: [], ...extra } };
       }
@@ -3411,7 +3764,7 @@ function makeTaskPipeline(deps) {
   }
   async function runWorkItemBuildLoop2(task, worktree, plan, opts = {}) {
     const tag = task.id;
-    const extra = opts.extra || {};
+    const extra = extraResultFields(opts.extra);
     const fail = (detail, openIssues2 = []) => ({ kind: "failure", fail: { id: tag, status: "failed", stage: "implement", detail, openIssues: openIssues2, worktree, proposals: [], ...extra } });
     const contained = execplanRelPath(worktree, plan.execplanPath);
     if (!contained.ok) return fail(contained.detail);
@@ -3419,7 +3772,7 @@ function makeTaskPipeline(deps) {
     const initial = await readExecplanState(planRef);
     if (initial.status === "unreadable") return fail(`could not read the committed ExecPlan: ${initial.error}`);
     if (initial.status === "missing") return fail(`the ExecPlan disappeared before the build: ${contained.relPath}`);
-    if (!(initial.items || []).length) return null;
+    if (initial.items.length === 0) return null;
     const commits = [];
     const openIssues = [];
     let hostReviewRuns = 0;
@@ -3430,14 +3783,13 @@ function makeTaskPipeline(deps) {
       const before = await readExecplanState(planRef);
       if (before.status === "unreadable") return fail(`could not read the committed ExecPlan: ${before.error}`, openIssues);
       if (before.status === "missing") return fail(`the committed ExecPlan disappeared mid-build: ${contained.relPath}`, openIssues);
-      const item = (before.items || []).find((entry) => !entry.ticked);
+      const item = before.items.find((entry) => !entry.ticked);
       if (!item) break;
       const label = `implement:${tag} wi${round}`;
-      const impl = await buildLock2(() => withInfraRetry2(() => agent(implementWorkItemPrompt2(task, worktree, plan, item, { ...opts, noProgressNote }), buildAgentOptions2({
+      const impl = await buildLock2(() => withInfraRetry2(() => agent(implementWorkItemPrompt2(task, worktree, plan, item, { ...opts, noProgressNote }), routeTaskAgentOptions(buildAgentOptions2, {
         phase: "Implement",
-        label,
-        schema: IMPL_SCHEMA
-      })), label));
+        label
+      }, IMPL_SCHEMA)), label));
       lastImpl = impl;
       const authDetail = implementationAuthFailureDetail(impl);
       if (authDetail) {
@@ -3482,8 +3834,8 @@ function makeTaskPipeline(deps) {
     const final = await readExecplanState(planRef);
     if (final.status === "unreadable") return fail(`could not read the committed ExecPlan after the build: ${final.error}`, openIssues);
     if (final.status === "missing") return fail(`the committed ExecPlan is absent after the build: ${contained.relPath}`, openIssues);
-    const remaining = (final.items || []).filter((entry) => !entry.ticked);
-    if (remaining.length) {
+    const remaining = final.items.filter((entry) => !entry.ticked);
+    if (remaining.length > 0) {
       return fail(`the work-item round cap (maxWorkItemRounds=${MAX_WORK_ITEM_ROUNDS2}) was reached with ${remaining.length} Progress item(s) still unticked; the first is: ${remaining[0]?.text ?? "unknown"}`, openIssues);
     }
     return {
@@ -3503,7 +3855,7 @@ function makeTaskPipeline(deps) {
   }
   async function runImplementationStage2(task, worktree, plan, opts = {}) {
     const tag = task.id;
-    const extra = opts.extra || {};
+    const extra = extraResultFields(opts.extra);
     phase("Implement");
     if (PER_WORK_ITEM_BUILD2) {
       const itemised = await runWorkItemBuildLoop2(task, worktree, plan, opts);
@@ -3513,11 +3865,10 @@ function makeTaskPipeline(deps) {
       }
       log(`[task ${tag}] the committed ExecPlan has no Progress checklist; falling back to the single-turn build`);
     }
-    const impl = await buildLock2(() => withInfraRetry2(() => agent(implementPrompt2(task, worktree, plan, opts), buildAgentOptions2({
+    const impl = await buildLock2(() => withInfraRetry2(() => agent(implementPrompt2(task, worktree, plan, opts), routeTaskAgentOptions(buildAgentOptions2, {
       phase: "Implement",
-      label: `implement:${tag}`,
-      schema: IMPL_SCHEMA
-    })), `implement:${tag}`));
+      label: `implement:${tag}`
+    }, IMPL_SCHEMA)), `implement:${tag}`));
     const authDetail = implementationAuthFailureDetail(impl);
     if (authDetail) {
       faultMetrics2.authFaults += 1;
@@ -3540,48 +3891,17 @@ function makeTaskPipeline(deps) {
     }
     return finishImplementationStage(task, worktree, plan, impl, extra);
   }
-  async function finishImplementationStage(task, worktree, plan, impl, extra) {
-    const tag = task.id;
-    const committed = await verifyWorktreeCommitted(worktree);
-    if (!committed.ok) {
-      return {
-        kind: "failure",
-        fail: {
-          id: tag,
-          status: "failed",
-          stage: "implement",
-          detail: `implementation returned ok but left uncommitted state in the worktree (${committed.detail}); every work item must be committed before returning`,
-          openIssues: impl?.openIssues || [],
-          worktree,
-          proposals: [],
-          ...extra
-        }
-      };
-    }
-    if (plan?.execplanPath) {
-      const contained = execplanRelPath(worktree, plan.execplanPath);
-      if (!contained.ok) {
-        log(`[task ${tag}] skipping the post-implementation plan-status check: ${contained.detail}`);
-      } else {
-        const planState = await readExecplanState({ worktreePath: worktree, execplanPath: contained.relPath });
-        if (planState.status !== "complete") {
-          log(`[task ${tag}] implementation returned ok but the committed ExecPlan status is '${planState.status}' (expected COMPLETE)${planState.error ? `: ${planState.error}` : ""}`);
-        }
-      }
-    }
-    return { kind: "impl", impl };
-  }
   async function integrateTask(task, mergeLock2, context) {
     const { worktree, proposals, kindExtra, impl } = context;
     const tag = task.id;
     const doIntegrate = () => {
       phase("Integrate");
-      return buildLock2(() => agent(integratePrompt2(task, worktree, impl), buildAgentOptions2({ phase: "Integrate", label: `integrate:${tag}`, schema: INTEGRATE_SCHEMA })));
+      return buildLock2(() => agent(integratePrompt2(task, worktree, impl), routeTaskAgentOptions(buildAgentOptions2, { phase: "Integrate", label: `integrate:${tag}` }, INTEGRATE_SCHEMA)));
     };
     try {
       return { integration: mergeLock2 ? await mergeLock2(doIntegrate) : await doIntegrate() };
     } catch (error) {
-      const message = error && error.message || String(error);
+      const message = thrownMessage(error);
       if (!infrastructureFailureDetail(message)) throw error;
       faultMetrics2.infraFaults += 1;
       return {
@@ -3605,7 +3925,7 @@ function makeTaskPipeline(deps) {
     let reviewsPass = false;
     const deferredHostReviews = [];
     for (let round = 1; round <= MAX_REVIEW_ROUNDS2; round++) {
-      let hostGates = null;
+      let hostGates;
       if (HOST_COMMIT_GATES2) {
         hostGates = await hostGateLock2(() => runHostCommitGates2(worktree, tag, `r${round}`));
         if (!hostGates.green) {
@@ -3628,7 +3948,7 @@ function makeTaskPipeline(deps) {
         if (!cs.clean) {
           log(`[task ${tag}] CodeScene check red in round ${round}`);
           const csBlocking = [`CODESCENE RED: ${cs.detail} Clear these code-health regressions by refactoring, or \u2014 only where further refinement would be deleterious \u2014 suppress the specific smell with a justified @codescene(disable:"...") comment, then re-run the check to green and commit.`];
-          reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: csBlocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null });
+          reviewRounds.push(withHostGateEvidence({ round, codeReview: null, expertReview: null, blocking: csBlocking, fix: null }, hostGates));
           if (round === MAX_REVIEW_ROUNDS2) break;
           const csFix = await dispatchFixAndVerify(task, worktree, plan, csBlocking, `fix:${tag} cs r${round}`, round);
           const csRound = reviewRounds.at(-1);
@@ -3654,8 +3974,8 @@ function makeTaskPipeline(deps) {
         } else {
           const hostReviewBlocking = reviewBlockingItems(hostReviewerDisplayName, hostReview2.findings);
           log(`[task ${tag}] ${hostReviewerDisplayName} host review round ${round}: ${hostReview2.findings.length} finding(s), ${hostReviewBlocking.length} blocking`);
-          if (hostReviewBlocking.length) {
-            reviewRounds.push({ round, codeReview: null, expertReview: null, blocking: hostReviewBlocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null });
+          if (hostReviewBlocking.length > 0) {
+            reviewRounds.push(withHostGateEvidence({ round, codeReview: null, expertReview: null, blocking: hostReviewBlocking, fix: null }, hostGates));
             if (round === MAX_REVIEW_ROUNDS2) break;
             const hostReviewFix = await dispatchFixAndVerify(task, worktree, plan, hostReviewBlocking, `fix:${tag} r${round}`, round);
             const hostReviewRound = reviewRounds.at(-1);
@@ -3669,8 +3989,8 @@ function makeTaskPipeline(deps) {
         }
       }
       const reviewInfraFaults = [];
-      const runReviewAgent = (promptText, reviewPhase, label) => () => withInfraRetry2(() => agent(promptText, reviewAgentOptions2({ phase: reviewPhase, label, schema: REVIEW_SCHEMA })), label).catch((error) => {
-        const message = error && error.message || String(error);
+      const runReviewAgent = (promptText, reviewPhase, label) => () => withInfraRetry2(() => agent(promptText, routeTaskAgentOptions(reviewAgentOptions2, { phase: reviewPhase, label }, REVIEW_SCHEMA)), label).catch((error) => {
+        const message = thrownMessage(error);
         if (!infrastructureFailureDetail(message)) throw error;
         reviewInfraFaults.push(`${label}: ${message}`);
         return null;
@@ -3683,12 +4003,12 @@ function makeTaskPipeline(deps) {
         if (r?.proposedRoadmapItems?.length) proposals.push(...r.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })));
       }
       if (!codeReview || !expertReview) {
-        const missing = [
-          !codeReview ? "code review" : null,
-          !expertReview ? "expert review" : null
-        ].filter(Boolean).join(" and ");
+        const missingReviews = [];
+        if (!codeReview) missingReviews.push("code review");
+        if (!expertReview) missingReviews.push("expert review");
+        const missing = missingReviews.join(" and ");
         reviewRounds.push({ round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking: [], fix: null });
-        if (reviewInfraFaults.length) {
+        if (reviewInfraFaults.length > 0) {
           faultMetrics2.infraFaults += 1;
           return {
             id: tag,
@@ -3716,9 +4036,9 @@ function makeTaskPipeline(deps) {
         ...codeReview.blocking || [],
         ...expertReview.blocking || []
       ];
-      const roundRecord = { round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, ...hostGates ? { hostGates: hostGates.results } : {}, fix: null };
+      const roundRecord = withHostGateEvidence({ round, codeReview: summarizeReviewVerdict(codeReview), expertReview: summarizeReviewVerdict(expertReview), blocking, fix: null }, hostGates);
       reviewRounds.push(roundRecord);
-      if (blocking.length === 0 && codeReview?.verdict === "pass" && expertReview?.verdict === "pass") {
+      if (blocking.length === 0 && codeReview.verdict === "pass" && expertReview.verdict === "pass") {
         reviewsPass = true;
         log(`[task ${tag}] dual review passed in round ${round}`);
         break;
@@ -3732,7 +4052,7 @@ function makeTaskPipeline(deps) {
       }
     }
     if (!reviewsPass) {
-      const lastRound = reviewRounds[reviewRounds.length - 1];
+      const lastRound = reviewRounds.at(-1);
       const finalBlocking = (lastRound?.blocking || []).slice(0, 6).join("; ");
       return {
         id: tag,
@@ -3754,9 +4074,9 @@ function makeTaskPipeline(deps) {
         return { id: tag, status: "halted", stage: "integrate", detail: integrationHaltDetail(integration), worktree, proposals, ...kindExtra };
       }
     } else {
-      return { id: tag, status: "manual-merge-ready", plan, impl, integration, worktree, proposals, ...deferredHostReviews.length ? { deferredHostReviews } : {}, ...kindExtra };
+      return { ...withDeferredHostReviews({ id: tag, status: "manual-merge-ready", plan, impl, integration, worktree, proposals }, deferredHostReviews), ...kindExtra };
     }
-    return { id: tag, status: "done", plan, impl, integration, worktree, proposals, ...deferredHostReviews.length ? { deferredHostReviews } : {}, ...kindExtra };
+    return { ...withDeferredHostReviews({ id: tag, status: "done", plan, impl, integration, worktree, proposals }, deferredHostReviews), ...kindExtra };
   }
   async function runTask2(task, mergeLock2) {
     const tag = `${task.id}`;
@@ -3792,7 +4112,7 @@ function makeTaskPipeline(deps) {
       }
       if (task.isAddendum) {
         phase("Implement");
-        const impl2 = await buildLock2(() => withInfraRetry2(() => agent(implementAddendumPrompt2(task, worktree), buildAgentOptions2({ phase: "Implement", label: `addendum:${tag}`, schema: IMPL_SCHEMA })), `addendum:${tag}`));
+        const impl2 = await buildLock2(() => withInfraRetry2(() => agent(implementAddendumPrompt2(task, worktree), routeTaskAgentOptions(buildAgentOptions2, { phase: "Implement", label: `addendum:${tag}` }, IMPL_SCHEMA)), `addendum:${tag}`));
         const authDetail = implementationAuthFailureDetail(impl2);
         if (authDetail) {
           faultMetrics2.authFaults += 1;
@@ -3810,12 +4130,12 @@ function makeTaskPipeline(deps) {
         const openIssues = impl2?.openIssues || [];
         const onlyDeferredReviewIssues = hasOnlyDeferredReviewIssues(openIssues);
         if (addendumImplementationNeedsManualMerge(impl2)) {
-          const deferredEvidence = openIssues.length ? ` Outstanding deferred review evidence: ${openIssues.join("; ")}` : "";
+          const deferredEvidence = openIssues.length > 0 ? ` Outstanding deferred review evidence: ${openIssues.join("; ")}` : "";
           return {
             id: tag,
             status: "manual-merge-ready",
             stage: "addendum",
-            detail: `addendum implementation reported completed work and green gates but did not set ok=true${openIssues.length ? " and left only deferred/recoverable review issues open" : " and no open issues"}; branch left for operator verification before integration.${deferredEvidence}`,
+            detail: `addendum implementation reported completed work and green gates but did not set ok=true${openIssues.length > 0 ? " and left only deferred/recoverable review issues open" : " and no open issues"}; branch left for operator verification before integration.${deferredEvidence}`,
             openIssues,
             impl: impl2,
             worktree,
@@ -3853,7 +4173,7 @@ function makeTaskPipeline(deps) {
             return { id: tag, status: "fatal-auth", stage: "auth", detail: `${hostReviewerDisplayName} host review is not authenticated: ${hostReview2.detail}`, worktree, proposals, kind: "addendum" };
           }
           const blockingFindings = reviewBlockingItems(hostReviewerDisplayName, hostReview2.findings);
-          if (blockingFindings.length) {
+          if (blockingFindings.length > 0) {
             return await attachAssessment2(task, wt, { id: tag, status: "halted", stage: "addendum-review", detail: `${hostReviewerDisplayName} host review found blocking issue(s): ${blockingFindings.join("; ")}`, impl: impl2, worktree, proposals, kind: "addendum" });
           }
           const deferredReview = hostReviewDeferral(hostReview2);
@@ -3866,7 +4186,7 @@ function makeTaskPipeline(deps) {
         const needsFallbackReview = onlyDeferredReviewIssues || addendumDeferredReviews.length > 0;
         if (needsFallbackReview) {
           phase("Code Review");
-          addendumReview = await withInfraRetry2(() => agent(addendumReviewPrompt2(task, worktree, impl2), reviewAgentOptions2({ phase: "Code Review", label: `addendum-review:${tag}`, schema: REVIEW_SCHEMA })), `addendum-review:${tag}`);
+          addendumReview = await withInfraRetry2(() => agent(addendumReviewPrompt2(task, worktree, impl2), routeTaskAgentOptions(reviewAgentOptions2, { phase: "Code Review", label: `addendum-review:${tag}` }, REVIEW_SCHEMA)), `addendum-review:${tag}`);
           if (addendumReview?.proposedRoadmapItems?.length) {
             proposals.push(...addendumReview.proposedRoadmapItems.map((p) => ({ ...p, source: `review:${tag}` })));
           }
@@ -3885,9 +4205,9 @@ function makeTaskPipeline(deps) {
             return await attachAssessment2(task, wt, { id: tag, status: "halted", stage: "integrate", detail: integrationHaltDetail(integration), worktree, proposals, kind: "addendum" });
           }
         } else {
-          return { id: tag, status: "manual-merge-ready", impl: impl2, addendumReview, integration, worktree, proposals, ...addendumDeferredReviews.length ? { deferredHostReviews: addendumDeferredReviews } : {}, kind: "addendum" };
+          return { ...withDeferredHostReviews({ id: tag, status: "manual-merge-ready", impl: impl2, addendumReview, integration, worktree, proposals }, addendumDeferredReviews), kind: "addendum" };
         }
-        return { id: tag, status: "done", impl: impl2, addendumReview, integration, worktree, proposals, ...addendumDeferredReviews.length ? { deferredHostReviews: addendumDeferredReviews } : {}, kind: "addendum" };
+        return { ...withDeferredHostReviews({ id: tag, status: "done", impl: impl2, addendumReview, integration, worktree, proposals }, addendumDeferredReviews), kind: "addendum" };
       }
       const planned = await runPlanDesignLoop2(task, worktree);
       if (planned.kind === "failure") return await attachAssessment2(task, wt, planned.fail);
@@ -3903,12 +4223,27 @@ function makeTaskPipeline(deps) {
       }
       return outcome;
     } catch (error) {
-      const detail = `unhandled agent error: ${error && error.message || String(error)}`;
+      const detail = `unhandled agent error: ${thrownMessage(error)}`;
       const result = resultFromUnhandledAgentError(tag, detail, { worktree }, faultMetrics2);
       return await attachAssessment2(task, wt, result);
     }
   }
   return { runPlanDesignLoop: runPlanDesignLoop2, runWorkItemBuildLoop: runWorkItemBuildLoop2, runImplementationStage: runImplementationStage2, runDualReviewAndIntegration: runDualReviewAndIntegration2, runTask: runTask2 };
+}
+
+// src/workflows/df12-build-odw/task-outcome.ts
+function isOutcomeRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function checkedTaskOutcome(result) {
+  const { integration, kind, proposals, assessment, assessmentError, salvage } = result;
+  const validIntegration = integration === void 0 || integration === null || isOutcomeRecord(integration) && (integration.pushed === void 0 || typeof integration.pushed === "boolean");
+  const validProposals = proposals === void 0 || Array.isArray(proposals) && proposals.every((item) => isOutcomeRecord(item));
+  const validSalvage = salvage === void 0 || isOutcomeRecord(salvage) && typeof salvage.classification === "string" && typeof salvage.sha === "string" && typeof salvage.detail === "string" && Array.isArray(salvage.committed) && salvage.committed.every((item) => typeof item === "string") && Array.isArray(salvage.skipped) && salvage.skipped.every((item) => isOutcomeRecord(item) && typeof item.path === "string" && typeof item.reason === "string");
+  if (!validIntegration || !validProposals || !validSalvage || kind !== void 0 && typeof kind !== "string" || assessment !== void 0 && !isOutcomeRecord(assessment) || assessmentError !== void 0 && typeof assessmentError !== "string") {
+    throw new Error("Invalid task outcome");
+  }
+  return result;
 }
 
 // src/workflows/df12-build-odw/main.ts
@@ -3984,7 +4319,7 @@ if (PROJECT_ROOT !== process.cwd()) {
   try {
     projectRootStat = fs.statSync(PROJECT_ROOT);
   } catch (error) {
-    throw new Error(`Configured projectRoot is not accessible: ${PROJECT_ROOT} (${error && error.message || String(error)})`);
+    throw new Error(`Configured projectRoot is not accessible: ${PROJECT_ROOT} (${faultThrownMessage(error)})`);
   }
   if (!projectRootStat.isDirectory()) {
     throw new Error(`Configured projectRoot is not a directory: ${PROJECT_ROOT}`);
@@ -4132,10 +4467,12 @@ async function createWorktree(task) {
   const setupCommand = `git worktree add -b ${branch} ${worktreePath} origin/${BASE}`;
   try {
     await execFileText("git", ["fetch", "origin", BASE]);
-    const baseSha = (await execFileText("git", ["rev-parse", `origin/${BASE}`])).trim();
+    const baseShaOutput = await execFileText("git", ["rev-parse", `origin/${BASE}`]);
+    const baseSha = baseShaOutput.trim();
     await fs.mkdir(path.dirname(worktreePath), { recursive: true });
     await execFileText("git", ["worktree", "add", "-b", branch, worktreePath, `origin/${BASE}`]);
-    const worktreeSha = (await execFileText("git", ["-C", worktreePath, "rev-parse", "HEAD"])).trim();
+    const worktreeShaOutput = await execFileText("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
+    const worktreeSha = worktreeShaOutput.trim();
     if (worktreeSha !== baseSha) {
       return {
         ok: false,
@@ -4201,18 +4538,18 @@ async function executeResume(task, resume, mergeLock2) {
   try {
     let plan;
     let impl;
-    if (stage === "plan") {
-      const planned = await runPlanDesignLoop(task, worktree, { resume: true, extra });
-      if (planned.kind === "failure") return planned.fail;
-      plan = planned.plan;
-    } else if (stage === "implement") {
-      plan = {
-        execplanPath: enriched.execplanPath,
-        workItems: [],
-        summary: "Resumed from the committed ExecPlan on the surviving branch."
-      };
-    }
     if (stage === "plan" || stage === "implement") {
+      if (stage === "plan") {
+        const planned = await runPlanDesignLoop(task, worktree, { resume: true, extra });
+        if (planned.kind === "failure") return planned.fail;
+        plan = planned.plan;
+      } else {
+        plan = {
+          execplanPath: enriched.execplanPath,
+          workItems: [],
+          summary: "Resumed from the committed ExecPlan on the surviving branch."
+        };
+      }
       const built = await runImplementationStage(task, worktree, plan, { resume: stage === "implement", extra });
       if (built.kind === "failure") return built.fail;
       impl = built.impl;
@@ -4223,7 +4560,7 @@ async function executeResume(task, resume, mergeLock2) {
     }
     return await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock2, { kind: "recovery-resume" });
   } catch (error) {
-    const detail = `unhandled agent error: ${error && error.message || String(error)}`;
+    const detail = `unhandled agent error: ${faultThrownMessage(error)}`;
     return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: "recovery-resume" }, runFaultMetrics);
   }
 }
@@ -4249,7 +4586,7 @@ async function runRecovery(root, mergeLock2 = null) {
   try {
     roadmap = await readRoadmapForSelection(root);
   } catch (error) {
-    summary.errors.push(error && error.message || String(error));
+    summary.errors.push(faultThrownMessage(error));
     log("[recovery] cannot read the canonical roadmap; skipping recovery discovery");
     return { summary, taskResults, held, fatal: null };
   }
@@ -4279,8 +4616,8 @@ async function runRecovery(root, mergeLock2 = null) {
     let decision;
     let evidence;
     let enriched;
-    let assessment = null;
-    let planState = null;
+    let assessment;
+    let planState;
     if (RESUME_MODE === "continue") {
       log(`[recovery] dispatching ${candidate.branchName} (task ${candidate.taskId}) from its committed ExecPlan`);
       evidence = await collectAssessmentEvidence(task, resumeWt);
@@ -4307,28 +4644,35 @@ async function runRecovery(root, mergeLock2 = null) {
       }
       assessment = assessed.assessment;
       summary.assessed += 1;
-      evidence = assessment.hostEvidence;
+      evidence = assessed.evidence;
       const resolved = await recoveryExecplanPath(candidate);
       enriched = { ...candidate, execplanPath: resolved.execplanPath };
-      const assessmentFields = assessment;
-      decision = resolved.error ? { classification: "", action: "report", stage: null, reason: "execplan-stat-error", skip: true } : { stage: "review", ...recoveryDecision(enriched, evidence, assessmentFields, RESUME_MODE, { dryRun: DRY_RUN }) };
+      const assessmentFields = {
+        classification: typeof assessment.classification === "string" ? assessment.classification : void 0,
+        taskScoped: typeof assessment.taskScoped === "boolean" ? assessment.taskScoped : void 0,
+        validation: typeof assessment.validation === "string" ? assessment.validation : void 0,
+        missingEvidence: Array.isArray(assessment.missingEvidence) ? assessment.missingEvidence.map(String) : void 0,
+        residualRisk: advisoryResidualRisk(assessment)
+      };
+      decision = resolved.error ? { classification: "", action: "report", reason: "execplan-stat-error", skip: true } : { stage: "review", ...recoveryDecision(enriched, evidence, assessmentFields, RESUME_MODE, { dryRun: DRY_RUN }) };
     }
     const resultBase = {
       id: candidate.taskId,
       branchName: candidate.branchName,
-      classification: decision.classification,
-      ...planState ? { planStatus: planState.status } : {}
+      classification: decision.classification
     };
+    if (planState) resultBase.planStatus = planState.status;
     if (decision.action !== "resume") {
       if (decision.skip) {
         summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: decision.reason || "" });
       }
-      summary.results.push({
+      const reported = {
         ...resultBase,
-        action: "reported",
-        ...decision.reason ? { reason: decision.reason } : {},
-        ...assessment ? { assessment } : {}
-      });
+        action: "reported"
+      };
+      if (decision.reason) reported.reason = decision.reason;
+      if (assessment) reported.assessment = assessment;
+      summary.results.push(reported);
       log(`[recovery] ${candidate.branchName}: ${decision.classification || planState?.status || "reported"} (reported${decision.reason ? `; ${decision.reason}` : ""})`);
       continue;
     }
@@ -4336,7 +4680,7 @@ async function runRecovery(root, mergeLock2 = null) {
     const residualRisk = advisoryResidualRisk(assessment);
     log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline (advisory residualRisk: ${residualRisk.length})`);
     const resume = { candidate, enriched, evidence, stage, residualRisk };
-    const outcome = await executeResume(task, resume, mergeLock2);
+    const outcome = checkedTaskOutcome(await executeResume(task, resume, mergeLock2));
     if (outcome.status === "fatal-auth" || outcome.status === "provider-fault" || outcome.status === "infra-fault") {
       summary.results.push({ ...resultBase, resumeStage: stage, action: "resume-failed", reason: outcome.detail || outcome.status, residualRisk });
       return { summary, taskResults, held, fatal: outcome };
@@ -4356,12 +4700,11 @@ async function runRecovery(root, mergeLock2 = null) {
   return { summary, taskResults, held, fatal: null };
 }
 function writeProbeTargets() {
-  const probeOptions = (realAdapter) => (options) => ({
-    adapter: realAdapter,
-    ...WRITE_PROBE_MODEL_BY_ADAPTER[String(realAdapter).toLowerCase()] ? { model: WRITE_PROBE_MODEL_BY_ADAPTER[String(realAdapter).toLowerCase()] } : {},
-    effort: WRITE_PROBE_EFFORT,
-    ...options
-  });
+  const probeOptions = (realAdapter) => (options) => {
+    const model = WRITE_PROBE_MODEL_BY_ADAPTER[realAdapter.toLowerCase()];
+    const routing = model ? { adapter: realAdapter, model } : { adapter: realAdapter };
+    return { ...routing, effort: WRITE_PROBE_EFFORT, ...options };
+  };
   const planAdapter = String(PLAN_ADAPTER).toLowerCase();
   const buildAdapter = String(BUILD_ADAPTER).toLowerCase();
   const targets = [
@@ -4424,18 +4767,20 @@ function semaphore(limit) {
   const queue = [];
   let active = 0;
   const drain = () => {
-    while (active < max && queue.length) {
-      const item = queue.shift();
-      if (!item) break;
+    while (active < max && queue.length > 0) {
+      const start = queue.shift();
+      if (!start) break;
       active += 1;
-      Promise.resolve().then(item.fn).then(item.resolve, item.reject).finally(() => {
-        active -= 1;
-        drain();
-      });
+      start();
     }
   };
   return (fn) => new Promise((resolve, reject) => {
-    queue.push({ fn, resolve, reject });
+    queue.push(() => {
+      Promise.resolve().then(fn).then(resolve, reject).finally(() => {
+        active -= 1;
+        drain();
+      });
+    });
     drain();
   });
 }
@@ -4497,7 +4842,7 @@ async function doSelect(taken) {
     log(`[${label}] using working-tree ${ROADMAP}; origin/${BASE} read failed: ${roadmap.fallbackReason}`);
   }
   const selection = selectRoadmapTask(roadmap.text, taken, ONLY_TASK);
-  if (selection?.hasTask && selection.task) {
+  if (selection.hasTask && selection.task) {
     log(`[${label}] selected ${selection.task.isAddendum ? "addendum pass" : "normal task"} ${selection.task.id} from ${roadmap.source}`);
   } else {
     log(`[${label}] no unblocked roadmap task found from ${roadmap.source}`);
@@ -4511,50 +4856,54 @@ function takenSnapshot() {
   };
 }
 function isAlreadyTaken(task) {
-  const processedSet = task?.isAddendum ? processedAddendum : processedNormal;
-  const manualMergeReadySet = task?.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal;
-  const dryRunSet = task?.isAddendum ? dryRunAddendum : dryRunNormal;
-  const recoveryHeldSet = task?.isAddendum ? recoveryHeldAddendum : recoveryHeldNormal;
+  const processedSet = task.isAddendum ? processedAddendum : processedNormal;
+  const manualMergeReadySet = task.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal;
+  const dryRunSet = task.isAddendum ? dryRunAddendum : dryRunNormal;
+  const recoveryHeldSet = task.isAddendum ? recoveryHeldAddendum : recoveryHeldNormal;
   return processedSet.has(task.id) || manualMergeReadySet.has(task.id) || dryRunSet.has(task.id) || recoveryHeldSet.has(task.id) || inflightNormal.has(task.id) || inflightAddendum.has(task.id);
 }
 function markInflight(task) {
-  const inflightSet = task?.isAddendum ? inflightAddendum : inflightNormal;
+  const inflightSet = task.isAddendum ? inflightAddendum : inflightNormal;
   inflightSet.add(task.id);
 }
 function unmarkInflight(task) {
-  const inflightSet = task?.isAddendum ? inflightAddendum : inflightNormal;
+  const inflightSet = task.isAddendum ? inflightAddendum : inflightNormal;
   inflightSet.delete(task.id);
 }
 function markProcessed(task) {
-  const processedSet = task?.isAddendum ? processedAddendum : processedNormal;
+  const processedSet = task.isAddendum ? processedAddendum : processedNormal;
   processedSet.add(task.id);
   processed.push(task.id);
 }
 function markManualMergeReady(task) {
-  const manualMergeReadySet = task?.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal;
+  const manualMergeReadySet = task.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal;
   manualMergeReadySet.add(task.id);
 }
 function markDryRun(task) {
-  const dryRunSet = task?.isAddendum ? dryRunAddendum : dryRunNormal;
+  const dryRunSet = task.isAddendum ? dryRunAddendum : dryRunNormal;
   dryRunSet.add(task.id);
 }
 function addPending(step, items) {
-  if (!items || !items.length) return;
+  if (!items || items.length === 0) return;
   if (!pendingByStep.has(step)) pendingByStep.set(step, []);
   pendingByStep.get(step).push(...items);
 }
 async function flushSettledSteps() {
   if (!canFlush) return;
-  const inflightSteps = new Set([...inflight.keys()].map(stepOf));
-  for (const [step, items] of [...pendingByStep.entries()]) {
-    if (!items.length || inflightSteps.has(step)) continue;
+  const inflightSteps = new Set([...inflight.keys()].map((taskId) => stepOf(taskId)));
+  const pendingEntries = [...pendingByStep.entries()];
+  for (const [step, items] of pendingEntries) {
+    if (items.length === 0 || inflightSteps.has(step)) continue;
     const tr = await mergeLock(() => runTriage(step, items));
-    triages.push({ step, ...tr || {} });
+    triages.push({ step, ...tr });
     if (!tr?.ok || !tr.pushed) {
       log(`[step ${step}] triage did not land; keeping ${items.length} proposal(s) pending`);
       continue;
     }
-    const lanes = (tr?.decisions || []).reduce((m, d) => (m[d.lane] = (m[d.lane] || 0) + 1, m), {});
+    const lanes = {};
+    for (const decision of tr.decisions || []) {
+      lanes[decision.lane] = (lanes[decision.lane] || 0) + 1;
+    }
     log(`[step ${step}] triaged ${items.length} proposal(s): ${Object.entries(lanes).map(([k, v]) => `${v} ${k}`).join(", ") || "none recorded"}`);
     pendingByStep.delete(step);
   }
@@ -4568,13 +4917,13 @@ async function fillPool() {
     let sel;
     try {
       sel = await doSelect(takenSnapshot());
-    } catch (err) {
-      log(`[pool] select agent failed (${err && err.message || String(err)}); stop opening new work, drain in-flight`);
-      if (!halted) halted = `select agent error: ${err && err.message || String(err)}`;
+    } catch (error) {
+      log(`[pool] select agent failed (${faultThrownMessage(error)}); stop opening new work, drain in-flight`);
+      if (!halted) halted = `select agent error: ${faultThrownMessage(error)}`;
       return;
     }
-    if (!sel || !sel.hasTask || !sel.task) {
-      if (inflight.size === 0) log(sel?.blockedSummary ? `No unblocked task: ${sel.blockedSummary}` : "No unblocked roadmap tasks remain.");
+    if (!sel.hasTask || !sel.task) {
+      if (inflight.size === 0) log(sel.blockedSummary ? `No unblocked task: ${sel.blockedSummary}` : "No unblocked roadmap tasks remain.");
       return;
     }
     const task = sel.task;
@@ -4590,9 +4939,9 @@ async function fillPool() {
       // structured output) must NOT reject through Promise.race and crash the
       // whole run — convert it to a failed result the control loop drains.
       runTask(task, mergeLock).then(
-        (result) => ({ id: task.id, task, result }),
-        (err) => {
-          const detail = `unhandled agent error: ${err && err.message || String(err)}`;
+        (result) => ({ id: task.id, task, result: checkedTaskOutcome(result) }),
+        (error) => {
+          const detail = `unhandled agent error: ${faultThrownMessage(error)}`;
           return {
             id: task.id,
             task,
@@ -4608,7 +4957,7 @@ function redactedCodeSceneCommand(command) {
 }
 async function runWorkflowMain() {
   const authPreflight = await runAuthPreflight();
-  if (authPreflight.length) {
+  if (authPreflight.length > 0) {
     halted = `fatal auth preflight failed: ${authPreflight.map((failure) => `${failure.tool} (${failure.command})`).join(", ")}`;
   }
   let stop = Boolean(halted);
@@ -4640,17 +4989,17 @@ async function runWorkflowMain() {
         stop = true;
       }
     } catch (error) {
-      const detail = error && error.message || String(error);
+      const detail = faultThrownMessage(error);
       recovery.errors.push(`recovery pass failed: ${detail}`);
       log(`[recovery] failed (${detail}); continuing with normal roadmap selection`);
     }
   }
-  while (true) {
+  for (; ; ) {
     if (!stop && !halted) {
       try {
         await flushSettledSteps();
-      } catch (err) {
-        log(`[triage] failed (${err && err.message || String(err)}); proposals stay pending for a later sweep`);
+      } catch (error) {
+        log(`[triage] failed (${faultThrownMessage(error)}); proposals stay pending for a later sweep`);
       }
       await fillPool();
     }
@@ -4664,11 +5013,11 @@ async function runWorkflowMain() {
       markProcessed(done.task);
       if (result.kind !== "addendum") {
         addPending(stepOf(done.id), result.proposals);
-        let audit = null;
+        let audit;
         try {
           audit = await mergeLock(() => runAudit({ id: done.id }));
-        } catch (err) {
-          log(`[audit ${done.id}] failed (${err && err.message || String(err)}); skipping (task already merged)`);
+        } catch (error) {
+          log(`[audit ${done.id}] failed (${faultThrownMessage(error)}); skipping (task already merged)`);
         }
         if (audit) {
           audits.push({ afterTask: done.id, ...audit });
@@ -4698,38 +5047,50 @@ async function runWorkflowMain() {
   if (canFlush && !providerFaultHalt) {
     try {
       await flushSettledSteps();
-    } catch (err) {
-      log(`[triage:end] failed (${err && err.message || String(err)}); ${[...pendingByStep.values()].flat().length} proposal(s) left pending`);
+    } catch (error) {
+      log(`[triage:end] failed (${faultThrownMessage(error)}); ${[...pendingByStep.values()].flat().length} proposal(s) left pending`);
     }
   }
-  const unresolvedRecovery = [
-    ...[...recoveryHeldNormal].filter((id) => !processedNormal.has(id) && !manualMergeReadyNormal.has(id)).map((id) => ({ id, isAddendum: false })),
-    ...[...recoveryHeldAddendum].filter((id) => !processedAddendum.has(id) && !manualMergeReadyAddendum.has(id)).map((id) => ({ id, isAddendum: true }))
-  ].sort((left, right) => left.id.localeCompare(right.id, "en", { numeric: true }) || Number(left.isAddendum) - Number(right.isAddendum));
+  const heldRecovery = [];
+  for (const id of recoveryHeldNormal) {
+    if (!processedNormal.has(id) && !manualMergeReadyNormal.has(id)) {
+      heldRecovery.push({ id, isAddendum: false });
+    }
+  }
+  for (const id of recoveryHeldAddendum) {
+    if (!processedAddendum.has(id) && !manualMergeReadyAddendum.has(id)) {
+      heldRecovery.push({ id, isAddendum: true });
+    }
+  }
+  const unresolvedRecovery = heldRecovery.toSorted(
+    (left, right) => left.id.localeCompare(right.id, "en", { numeric: true }) || Number(left.isAddendum) - Number(right.isAddendum)
+  );
   recovery.unresolved = unresolvedRecovery.map((entry) => {
-    const reported = (recovery.results || []).filter((result) => result.id === entry.id);
-    const last = reported[reported.length - 1];
-    return {
+    const reported = recovery.results.filter((result) => result.id === entry.id);
+    const last = reported.at(-1);
+    const unresolved = {
       id: entry.id,
       isAddendum: entry.isAddendum,
       branchName: last?.branchName || "",
       classification: last?.classification || "",
-      action: last?.action || "held",
-      ...last?.reason ? { reason: last.reason } : {}
+      action: last?.action || "held"
     };
+    return last?.reason ? { ...unresolved, reason: last.reason } : unresolved;
   });
-  if (!halted && unresolvedRecovery.length) {
+  if (!halted && unresolvedRecovery.length > 0) {
     halted = `needs-operator-recovery: ${unresolvedRecovery.length} recovery survivor branch(es) still block the roadmap frontier (${unresolvedRecovery.map((entry) => entry.id + (entry.isAddendum ? " (addendum)" : "")).join(", ")}); use recovery.results/recovery.unresolved to close, resume, split, or hoover each branch, then relaunch`;
   }
   const pendingProposals = [...pendingByStep.values()].flat();
-  const assessments = results.filter((result) => result.assessment || result.assessmentError).map((result) => ({
-    id: result.id,
-    stage: result.stage,
-    status: result.status,
-    classification: result.assessment?.classification || "",
-    recommendation: result.assessment?.recommendation || "",
-    assessmentError: result.assessmentError || ""
-  }));
+  const assessments = results.flatMap(
+    (result) => result.assessment || result.assessmentError ? [{
+      id: result.id,
+      stage: result.stage,
+      status: result.status,
+      classification: result.assessment?.classification || "",
+      recommendation: result.assessment?.recommendation || "",
+      assessmentError: result.assessmentError || ""
+    }] : []
+  );
   const { salvages, summarySuffix: salvageSummarySuffix } = summarizeSalvages(results);
   const hostReviewSnapshot = getHostReviewMetrics();
   return {
@@ -4794,7 +5155,7 @@ async function runWorkflowMain() {
     remediationTriage: triages,
     pendingProposals,
     halted,
-    summary: `Processed ${processed.length} roadmap task(s) (pool width ${MAX_PARALLEL}): ` + results.map((r) => `${r.id}=${r.status}`).join(", ") + (recovery.enabled ? ` | recovery(${recovery.mode}): ${recovery.assessed} assessed, ${recovery.resumed} resumed, ${recovery.skipped.length} skipped` : "") + (assessments.length ? ` | assessed ${assessments.length} failed/halted branch(es)` : "") + salvageSummarySuffix + (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : "") + (halted ? ` | halted: ${halted}` : " | clean stop (no more unblocked tasks).")
+    summary: `Processed ${processed.length} roadmap task(s) (pool width ${MAX_PARALLEL}): ` + results.map((r) => `${r.id}=${r.status}`).join(", ") + (recovery.enabled ? ` | recovery(${recovery.mode}): ${recovery.assessed} assessed, ${recovery.resumed} resumed, ${recovery.skipped.length} skipped` : "") + (assessments.length > 0 ? ` | assessed ${assessments.length} failed/halted branch(es)` : "") + salvageSummarySuffix + (triages.length > 0 ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : "") + (halted ? ` | halted: ${halted}` : " | clean stop (no more unblocked tasks).")
   };
 }
 // --- Worker-pool control loop -----------------------------------------------
@@ -4805,7 +5166,7 @@ async function workflowMain() {
     try {
       disposeHostGateLogs();
     } catch (error) {
-      log(`[host gates] could not dispose temporary log roots: ${String(error?.message || error).slice(-500)}`);
+      log(`[host gates] could not dispose temporary log roots: ${faultThrownMessage(error).slice(-500)}`);
     }
   }
 }

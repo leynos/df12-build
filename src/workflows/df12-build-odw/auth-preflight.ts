@@ -131,10 +131,11 @@ export function makeAuthPreflight(config: AuthPreflightConfig, deps: AuthPreflig
     if (config.requireHostReviewAuth) {
       if (config.reviewTool === 'dakar') {
         const openaiKey = deps.environment.get('OPENAI_API_KEY')
+        const sensitiveValues = typeof openaiKey === 'string' ? [openaiKey] : []
         const dakarWords = config.dakarInvocation.filter((argument) => !ENVIRONMENT_ASSIGNMENT.test(argument))
         const dakarExecutable = dakarWords[0] || 'dakar-review'
         const dakar = await deps.exec(dakarExecutable, [...dakarWords.slice(1), '--version'], { timeoutMs: AUTH_PROBE_TIMEOUT_MS })
-        const dakarOutput = redactedDakarStatusDetail(dakar, config.dakarInvocation, typeof openaiKey === 'string' ? [openaiKey] : [])
+        const dakarOutput = redactedDakarStatusDetail(dakar, config.dakarInvocation, sensitiveValues)
         if (!dakar.ok) {
           deps.recordHostReviewAuthFailure()
           failures.push({
@@ -144,7 +145,7 @@ export function makeAuthPreflight(config: AuthPreflightConfig, deps: AuthPreflig
           })
         }
         const pi = await deps.exec('pi', ['--version'], { timeoutMs: AUTH_PROBE_TIMEOUT_MS })
-        const piOutput = redactedDakarStatusDetail(pi, config.dakarInvocation, typeof openaiKey === 'string' ? [openaiKey] : [])
+        const piOutput = redactedDakarStatusDetail(pi, config.dakarInvocation, sensitiveValues)
         if (!pi.ok) {
           deps.recordHostReviewAuthFailure()
           failures.push({ tool: 'dakar', command: 'pi --version', detail: piOutput || 'pi is unavailable or its version probe failed' })
@@ -171,7 +172,7 @@ export function makeAuthPreflight(config: AuthPreflightConfig, deps: AuthPreflig
       }
     }
 
-    if (failures.length) {
+    if (failures.length > 0) {
       deps.log(`[auth] fatal preflight failure: ${failures.map((failure) => `${failure.tool}: ${failure.detail.split(/\r?\n/)[0]}`).join('; ')}`)
     } else {
       const passed = ['Codex']

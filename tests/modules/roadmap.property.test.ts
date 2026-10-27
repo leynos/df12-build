@@ -13,7 +13,17 @@ import {
   isTaskFullyComplete,
   parseRoadmap,
   selectRoadmapTask,
+  taskMatchesOnlyTask,
 } from '../../src/workflows/df12-build-odw/roadmap.ts'
+
+describe('taskMatchesOnlyTask', () => {
+  test('accepts missing or null addendum lists without matching another task', () => {
+    for (const subtasks of [undefined, null]) {
+      expect(taskMatchesOnlyTask({ task: { id: '1.2.3', subtasks } }, '1.2.4')).toBe(false)
+      expect(taskMatchesOnlyTask({ task: { id: '1.2.3', subtasks } }, '1.2.3')).toBe(true)
+    }
+  })
+})
 
 describe('expandStepRange', () => {
   test('expands an in-phase ascending range to every step, inclusive', () => {

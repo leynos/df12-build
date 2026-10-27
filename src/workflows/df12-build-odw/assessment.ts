@@ -17,7 +17,6 @@ import {
 } from './faults.ts'
 import { collectAssessmentEvidence } from './git-evidence.ts'
 import type { AssessmentEvidence } from './git-evidence.ts'
-import type { HostReviewDeferral } from './host-review.ts'
 import { salvageTaskArtefacts } from './execplan-durability.ts'
 import type { SalvageOutcome } from './execplan-durability.ts'
 import type { RecoveryCandidate } from './types.ts'
@@ -38,6 +37,12 @@ import type { RecoveryCandidate } from './types.ts'
 // `adopt-complete` proceeds through the ordinary path and `discard` is thrown
 // away, so neither salvages.
 const SALVAGE_CLASSIFICATIONS = new Set(['continue-manual', 'adopt-partial', 'infra-fault'])
+
+/** Extract a usable message from arbitrary values thrown by adapters. */
+function assessmentErrorMessage(error: unknown): string {
+  if (error && (typeof error === 'object' || typeof error === 'function') && 'message' in error && typeof error.message === 'string' && error.message) return error.message
+  return String(error)
+}
 
 /**
  * A salvage record carrying the classification that triggered (or skipped) it,
@@ -70,6 +75,16 @@ export interface SalvageSummaryEntry {
   detail: string
 }
 
+/** Aggregate salvage rows and their terminal-summary suffix. */
+export interface SalvageSummary {
+  /** One row per task that attempted salvage (committed or skipped). */
+  salvages: SalvageSummaryEntry[]
+  /** Count of branches that actually committed artefacts. */
+  salvagedBranches: number
+  /** Terminal-summary suffix text; empty when every attempt was a skip. */
+  summarySuffix: string
+}
+
 /**
  * Aggregate per-task salvage records into the terminal run summary. Every task
  * whose result carries a `salvage` record contributes a row — including a
@@ -85,24 +100,19 @@ export interface SalvageSummaryEntry {
  */
 export function summarizeSalvages(
   results: ReadonlyArray<{ id?: string; salvage?: Partial<SalvageRecord> | null }>,
-): {
-  /** One row per task that attempted salvage (committed or skipped). */
-  salvages: SalvageSummaryEntry[]
-  /** Count of branches that actually committed artefacts. */
-  salvagedBranches: number
-  /** Terminal-summary suffix text; '' when every attempt was a skip. */
-  summarySuffix: string
-} {
-  const salvages: SalvageSummaryEntry[] = results
-    .filter((result) => result.salvage)
-    .map((result) => ({
+): SalvageSummary {
+  const salvages: SalvageSummaryEntry[] = results.flatMap((result) => {
+    const salvage = result.salvage
+    if (!salvage) return []
+    return [{
       id: result.id || '',
-      classification: result.salvage?.classification || '',
-      committed: result.salvage?.committed || [],
-      skipped: (result.salvage?.skipped || []).length,
-      sha: result.salvage?.sha || '',
-      detail: result.salvage?.detail || '',
-    }))
+      classification: salvage.classification || '',
+      committed: salvage.committed || [],
+      skipped: (salvage.skipped || []).length,
+      sha: salvage.sha || '',
+      detail: salvage.detail || '',
+    }]
+  })
   const salvagedBranches = salvages.filter((entry) => entry.committed.length > 0).length
   const summarySuffix = salvagedBranches ? ` | salvaged artefacts on ${salvagedBranches} branch(es)` : ''
   return { salvages, salvagedBranches, summarySuffix }
@@ -146,6 +156,23 @@ export interface AssessmentWorktree {
   baseSha?: string
 }
 
+// Assessment helpers retain their fallback behaviour for partial host evidence.
+type PartialAssessmentEvidence = {
+  [Field in keyof AssessmentEvidence]?: AssessmentEvidence[Field] | null
+}
+
+/** Options supplied before the assessment adapter applies its routing. */
+type AssessmentInvocationOptions = {
+  /** Workflow phase associated with this assessment call. */
+  phase: string
+  /** Label identifying the assessment call. */
+  label: string
+  /** Structured output contract requested for the assessment call. */
+  schema: typeof ASSESSMENT_SCHEMA
+  /** Escalation model used when host evidence warrants it. */
+  model?: string
+}
+
 /** The run wiring `makeAssessment` binds once: the prompt preamble, the enable switch, adapter routing, the escalation model, and the shared infra-retry wrapper. */
 export interface AssessmentDeps {
   /** Builds the shared prompt preamble for a given worktree path. */
@@ -181,7 +208,7 @@ export function fastAssessmentClassification(
   reason: string
 } | null {
   const collectionErrors = evidence?.collectionErrors || []
-  if (collectionErrors.length) {
+  if (collectionErrors.length > 0) {
     return { classification: 'continue-manual', reason: `host evidence collection reported error(s) (${collectionErrors.slice(0, 3).join('; ')}); operator judgement required` }
   }
   const hasCommittedWork = (evidence?.recentCommits || []).length > 0
@@ -197,30 +224,49 @@ export function fastAssessmentClassification(
 // Build a schema-shaped assessment object for a deterministic classification,
 // carrying host evidence and a `classifier: 'deterministic'` marker so
 // operators can see it was not a model judgement.
-function deterministicAssessment(
+function deterministicAssessment<Evidence extends PartialAssessmentEvidence>(
   classification: string,
-  evidence: AssessmentEvidence,
+  evidence: Evidence,
   reason: string,
-): Record<string, unknown> {
+) {
   return {
+    /** Deterministic disposition of the surviving branch. */
     classification,
+    /** Branch name collected by the host. */
     branchName: evidence.branchName || '',
+    /** Worktree path collected by the host. */
     worktreePath: evidence.worktreePath || '',
+    /** Base commit from which the branch diverged. */
     baseCommit: evidence.baseCommit || '',
+    /** Branch commit observed by the host. */
     currentCommit: evidence.currentCommit || '',
+    /** Host-observed worktree cleanliness. */
     dirtyState: evidence.dirtyState || 'unknown',
+    /** Paths observed as changed on the branch or worktree. */
     changedFiles: evidence.changedFiles || [],
+    /** Whether the changed paths were judged task scoped. */
     taskScoped: false,
+    /** ExecPlan assessment; empty when no model judgement was made. */
     execPlan: '',
+    /** Roadmap assessment; empty when no model judgement was made. */
     roadmap: '',
+    /** Validation assessment; empty when no model judgement was made. */
     validation: '',
+    /** Required evidence not established by the assessment. */
     missingEvidence: [],
+    /** Advisory residual risks for later review. */
     residualRisk: [],
+    /** Risks identified during assessment. */
     risks: [],
+    /** Reason for the deterministic disposition. */
     rationale: reason,
+    /** Recommended disposition for the operator. */
     recommendation: reason,
+    /** Follow-up actions identified by the assessment. */
     nextActions: [],
+    /** Identifies the host classifier as the source of the disposition. */
     classifier: 'deterministic',
+    /** Complete evidence collected by the host. */
     hostEvidence: evidence,
   }
 }
@@ -229,8 +275,8 @@ function deterministicAssessment(
 // collapse whitespace and bound the length so a single operator log line never
 // dumps an unbounded stderr blob. The full text still rides on the structured
 // `result.salvage.detail`; only the log line is bounded.
-function boundedSalvageLogText(text: unknown, max = 200): string {
-  const flat = String(text ?? '').replace(/\s+/g, ' ').trim()
+function boundedSalvageLogText(text: string, max = 200): string {
+  const flat = String(text).replaceAll(/\s+/g, ' ').trim()
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
 }
 
@@ -244,7 +290,7 @@ function boundedSalvageLogText(text: unknown, max = 200): string {
 async function salvageAssessmentArtefacts(
   taskId: string,
   worktree: string,
-  evidence: AssessmentEvidence,
+  evidence: Pick<PartialAssessmentEvidence, 'dirtyChanges' | 'stagedChanges'>,
   classification: string,
 ): Promise<SalvageRecord | null> {
   if (!SALVAGE_CLASSIFICATIONS.has(classification)) return null
@@ -267,14 +313,14 @@ async function salvageAssessmentArtefacts(
     // path is diagnosable without scraping result.json.
     // sha is fixed-length and the counts are bounded, so only the free-text
     // detail needs collapsing/truncation before it reaches the log line.
-    if (outcome.committed.length) {
-      log(`[salvage] task ${taskId} (${classification}): committed ${outcome.committed.length} artefact(s) at ${outcome.sha || '<no sha>'}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ''}`)
+    if (outcome.committed.length > 0) {
+      log(`[salvage] task ${taskId} (${classification}): committed ${outcome.committed.length} artefact(s) at ${outcome.sha || '<no sha>'}${outcome.skipped.length > 0 ? `; skipped ${outcome.skipped.length}` : ''}`)
     } else {
-      log(`[salvage] task ${taskId} (${classification}): nothing committed — ${boundedSalvageLogText(outcome.detail || 'no eligible artefacts')}${outcome.skipped.length ? `; skipped ${outcome.skipped.length}` : ''}`)
+      log(`[salvage] task ${taskId} (${classification}): nothing committed — ${boundedSalvageLogText(outcome.detail || 'no eligible artefacts')}${outcome.skipped.length > 0 ? `; skipped ${outcome.skipped.length}` : ''}`)
     }
     return { classification, ...outcome }
   } catch (error) {
-    const detail = `salvage errored: ${((error as Error | null) && (error as Error).message) || String(error)}`
+    const detail = `salvage errored: ${assessmentErrorMessage(error)}`
     log(`[salvage] task ${taskId} (${classification}): ${boundedSalvageLogText(detail)}`)
     return { classification, committed: [], skipped: [], sha: '', detail }
   }
@@ -305,15 +351,15 @@ function isInfraFaultResult(result: AssessableResult | null | undefined): boolea
  * Whether an open issue text describes a deferred/rate-limited host review
  * rather than a substantive product defect.
  *
- * @param issue A single open-issue string (or any value, coerced to text).
- * @returns True when the text names a host reviewer alongside a specific deferral marker.
+ * @param issue An untrusted open-issue value.
+ * @returns True when the value carries a structured host-review deferral.
  */
 export function isDeferredReviewIssue(issue: unknown): boolean {
   if (
-    issue !== null
+    issue
     && typeof issue === 'object'
-    && (issue as Partial<HostReviewDeferral>).kind === 'host-review-deferral'
-    && ((issue as Partial<HostReviewDeferral>).outcome === 'rate-limited' || (issue as Partial<HostReviewDeferral>).outcome === 'error')
+    && 'kind' in issue && issue.kind === 'host-review-deferral'
+    && 'outcome' in issue && (issue.outcome === 'rate-limited' || issue.outcome === 'error')
   ) return true
   return false
 }
@@ -327,7 +373,7 @@ export function isDeferredReviewIssue(issue: unknown): boolean {
  */
 export function hasOnlyDeferredReviewIssues(openIssues: readonly unknown[] | null | undefined): boolean {
   const issues = openIssues || []
-  return issues.length > 0 && issues.every(isDeferredReviewIssue)
+  return issues.length > 0 && issues.every((issue) => isDeferredReviewIssue(issue))
 }
 
 /**
@@ -360,6 +406,13 @@ export function addendumImplementationNeedsManualMerge(impl: ImplementationRepor
   const completed = Number(impl.workItemsCompleted)
   const total = Number(impl.workItemsTotal)
   return Number.isFinite(completed) && Number.isFinite(total) && total > 0 && completed >= total
+}
+
+// Escalate the single model call when host evidence includes a committed
+// ExecPlan: a potential adopt-complete decision has higher stakes.
+function assessmentModelTier(evidence: Pick<PartialAssessmentEvidence, 'changedFiles'>): 'escalated' | 'medium' {
+  const hasExecplan = (evidence.changedFiles || []).some((entry) => /^docs\/execplans\/.+\.md$/.test(String(entry)))
+  return hasExecplan ? 'escalated' : 'medium'
 }
 
 /**
@@ -418,12 +471,12 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
       '',
       'Host-collected git evidence:',
       '```json',
-      JSON.stringify(evidence, null, 2),
+      JSON.stringify(evidence, undefined, 2),
       '```',
       '',
       contextTitle,
       '```json',
-      JSON.stringify(contextValue, null, 2),
+      JSON.stringify(contextValue, undefined, 2),
       '```',
       '',
       'Return only the schema-bound assessment object. Free-text recommendations do not drive integration; make the enum classification and evidence fields precise.',
@@ -459,15 +512,6 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     )
   }
 
-  // A committed ExecPlan on the branch marks a strong adopt-complete candidate,
-  // so the genuinely high-stakes adopt decision uses the escalation model;
-  // every other ambiguous branch uses the medium default. One model call
-  // either way (the tier is chosen from host evidence, not by re-running).
-  function assessmentModelTier(evidence: AssessmentEvidence): 'escalated' | 'medium' {
-    const hasExecplan = (evidence.changedFiles || []).some((entry) => /^docs\/execplans\/.+\.md$/.test(String(entry)))
-    return hasExecplan ? 'escalated' : 'medium'
-  }
-
   // Run the assessment model on a genuinely-ambiguous branch at the
   // evidence-chosen tier. Returns the assessment object (tier-tagged) or null.
   async function runModelAssessment(
@@ -477,10 +521,14 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     evidence: AssessmentEvidence,
   ): Promise<Record<string, unknown> | null> {
     const tier = assessmentModelTier(evidence)
-    const options: Record<string, unknown> = { phase: phaseName, label, schema: ASSESSMENT_SCHEMA }
+    const options: AssessmentInvocationOptions = { phase: phaseName, label, schema: ASSESSMENT_SCHEMA }
     if (tier === 'escalated') options.model = assessmentEscalationModel
-    const assessment = (await withInfraRetry(() => agent(buildPrompt(), assessmentAgentOptions(options)), label)) as Record<string, unknown> | null
+    const assessment = await withInfraRetry(
+      () => agent(buildPrompt(), { ...assessmentAgentOptions(options), schema: ASSESSMENT_SCHEMA }),
+      label,
+    )
     if (!assessment) return null
+    if (typeof assessment !== 'object' || Array.isArray(assessment)) throw new Error('assessment agent returned a malformed structured output')
     return { ...assessment, assessmentTier: tier }
   }
 
@@ -522,7 +570,11 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
         /** Host-collected git evidence for the candidate branch. */
         evidence,
         /** The assessment object (deterministic or model), or null on failure. */
-        assessment: { ...assessment, hostEvidence: evidence },
+        assessment: {
+          ...assessment,
+          /** Complete evidence collected by the host. */
+          hostEvidence: evidence,
+        },
         /** Error text when no structured assessment was produced; '' otherwise. */
         assessmentError: '',
       }
@@ -533,14 +585,14 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
         /** The assessment object (deterministic or model), or null on failure. */
         assessment: null,
         /** Error text when no structured assessment was produced; '' otherwise. */
-        assessmentError: ((error as Error | null) && (error as Error).message) || String(error),
+        assessmentError: assessmentErrorMessage(error),
       }
     }
   }
 
   function shouldAssessFailure(result: AssessableResult | null | undefined, wt: AssessmentWorktree | null | undefined): boolean {
     if (!assessPartialBranches) return false
-    if (!wt?.branch || !wt?.worktreePath) return false
+    if (!wt?.branch || !wt.worktreePath) return false
     if (!result || !['failed', 'halted'].includes(result.status || '')) return false
     if (result.stage === 'worktree' || result.stage === 'worktree-write' || result.stage === 'auth' || result.stage === 'provider' || result.stage === 'infrastructure' || result.status === 'fatal-auth' || result.status === 'provider-fault' || result.status === 'infra-fault') return false
     const detail = [result.detail, ...(result.openIssues || [])].filter(Boolean).join('\n')
@@ -557,7 +609,7 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
   // through untouched.
   async function salvageInfraFaultArtefacts<T extends AssessableResult>(
     task: { id: string; title?: string },
-    wt: AssessmentWorktree,
+    wt: AssessmentWorktree | null | undefined,
     result: T,
   ): Promise<T & { salvage?: SalvageRecord }> {
     if (!assessPartialBranches || !wt?.branch) return result
@@ -567,7 +619,7 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     // salvage short-circuits on its no-worktree guard before touching evidence.
     const evidence = worktree
       ? await collectAssessmentEvidence(task, wt)
-      : ({ dirtyChanges: [], stagedChanges: [] } as unknown as AssessmentEvidence)
+      : { dirtyChanges: [], stagedChanges: [] }
     const salvage = await salvageAssessmentArtefacts(task.id, worktree, evidence, 'infra-fault')
     return salvage ? { ...result, salvage } : result
   }
@@ -597,7 +649,9 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
       const salvage: SalvageRecord | null = fast.classification === 'continue-manual'
         ? { classification: fast.classification, committed: [], skipped: [], sha: '', detail: 'salvage skipped: deterministic continue-manual fires on untrustworthy host evidence' }
         : null
-      return { ...result, assessment: deterministicAssessment(fast.classification, evidence, fast.reason), ...(salvage ? { salvage } : {}) }
+      const assessed = { ...result, assessment: deterministicAssessment(fast.classification, evidence, fast.reason) }
+      if (salvage) return { ...assessed, salvage }
+      return assessed
     }
     try {
       const assessment = await runModelAssessment(() => assessmentPrompt(task, wt, result, evidence), 'Assess', `assess:${task.id}`, evidence)
@@ -605,11 +659,13 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
         return { ...result, assessmentError: 'assessment agent returned no structured output', assessmentEvidence: evidence }
       }
       const salvage = await salvageAssessmentArtefacts(task.id, wt.worktreePath || '', evidence, String(assessment.classification || ''))
-      return { ...result, assessment: { ...assessment, hostEvidence: evidence }, ...(salvage ? { salvage } : {}) }
+      const assessed = { ...result, assessment: { ...assessment, hostEvidence: evidence } }
+      if (salvage) return { ...assessed, salvage }
+      return assessed
     } catch (error) {
       return {
         ...result,
-        assessmentError: ((error as Error | null) && (error as Error).message) || String(error),
+        assessmentError: assessmentErrorMessage(error),
         assessmentEvidence: evidence,
       }
     }

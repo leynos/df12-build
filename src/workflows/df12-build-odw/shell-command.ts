@@ -40,13 +40,13 @@ export interface ShellCommandTokens {
 }
 
 /** Return the exclusive end offset of a balanced shell command substitution. */
-function commandSubstitutionEnd(command: string, start: number): number | null {
+function commandSubstitutionEnd(command: string, start: number): number | undefined {
   let cursor = start + 2
   let quote = ''
   let depth = 1
   while (cursor < command.length) {
     const character = command[cursor]
-    if (character === undefined) return null
+    if (character === undefined) return
     if (character === '\\' && quote !== "'") {
       cursor += 2
       continue
@@ -74,22 +74,25 @@ function commandSubstitutionEnd(command: string, start: number): number | null {
     }
     cursor += 1
   }
-  return null
+  return
 }
 
-/** Return an unquoted, unescaped assignment name, or null for an executable word. */
-function assignmentName(command: string, word: ShellCommandWord): string | null {
+/** Return an unquoted, unescaped assignment name, or undefined for an executable word. */
+function assignmentName(command: string, word: ShellCommandWord): string | undefined {
   let cursor = word.start
   let name = ''
   while (cursor < word.end) {
     const character = command[cursor]
-    if (character === undefined) return null
-    if (character === '=') return name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : null
-    if (!/[A-Za-z0-9_]/.test(character)) return null
+    if (character === undefined) return
+    if (character === '=') {
+      if (name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return name
+      return
+    }
+    if (!/[A-Za-z0-9_]/.test(character)) return
     name += character
     cursor += 1
   }
-  return null
+  return
 }
 
 /**
@@ -133,7 +136,7 @@ export function tokenizeShellCommand(command: string): ShellCommandTokens | null
       }
       if (character === '$' && command[cursor + 1] === '(' && quote !== "'") {
         const end = commandSubstitutionEnd(command, cursor)
-        if (end === null) return null
+        if (end === undefined) return null
         value += command.slice(cursor, end)
         hasWord = true
         cursor = end

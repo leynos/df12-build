@@ -49,6 +49,7 @@ import {
   makeWithInfraRetry,
   providerFailureDetail,
   resultFromUnhandledAgentError,
+  faultThrownMessage,
 } from './faults.ts'
 import { collectAssessmentEvidence } from './git-evidence.ts'
 import {
@@ -61,7 +62,7 @@ import {
 import { makeConfig } from './config.ts'
 import { makeAuthPreflight } from './auth-preflight.ts'
 import { makePrompts, worktreeSafetyNet } from './prompts.ts'
-import { makeWritePreflight } from './write-preflight.ts'
+import { makeWritePreflight, type WriteProbeTarget } from './write-preflight.ts'
 import {
   addendumImplementationNeedsManualMerge,
   hasOnlyDeferredReviewIssues,
@@ -69,7 +70,6 @@ import {
   isDeferredReviewIssue,
   makeAssessment,
   summarizeSalvages,
-  type SalvageRecord,
 } from './assessment.ts'
 import { TRIAGE_SCHEMA, makeRemediation, stepOf } from './remediation.ts'
 import {
@@ -85,25 +85,10 @@ import type { ExecplanState, RecoveryAssessmentFields } from './recovery-decisio
 import type { SelectionResult } from './roadmap.ts'
 import type { StagePlan, StageResult } from './run-task.ts'
 import type { RecoveryCandidate, SelectedTask } from './types.ts'
+import { checkedTaskOutcome, type TaskOutcome } from './task-outcome.ts'
 
 type AnyRecord = Record<string, unknown>
 type MergeLockFn = (<T>(fn: () => Promise<T>) => Promise<T>) | null
-
-// The result record a drained task contributes to the run summary. The
-// integration slice is typed because the control loop keys processed-ness on
-// `integration?.pushed`.
-interface TaskOutcome extends AnyRecord {
-  id: string
-  status: string
-  stage?: string
-  detail?: string
-  integration?: { pushed?: boolean } | null
-  kind?: string
-  proposals?: AnyRecord[]
-  assessment?: AnyRecord
-  assessmentError?: string
-  salvage?: SalvageRecord
-}
 
 interface RecoveryRunSummary {
   enabled: boolean
@@ -202,7 +187,7 @@ if (PROJECT_ROOT !== process.cwd()) {
   try {
     projectRootStat = fs.statSync(PROJECT_ROOT)
   } catch (error) {
-    throw new Error(`Configured projectRoot is not accessible: ${PROJECT_ROOT} (${((error as Error | null) && (error as Error).message) || String(error)})`)
+    throw new Error(`Configured projectRoot is not accessible: ${PROJECT_ROOT} (${faultThrownMessage(error)})`)
   }
   if (!projectRootStat.isDirectory()) {
     throw new Error(`Configured projectRoot is not a directory: ${PROJECT_ROOT}`)
@@ -384,10 +369,12 @@ async function createWorktree(task: SelectedTask) {
 
   try {
     await execFileText('git', ['fetch', 'origin', BASE])
-    const baseSha = (await execFileText('git', ['rev-parse', `origin/${BASE}`])).trim()
+    const baseShaOutput = await execFileText('git', ['rev-parse', `origin/${BASE}`])
+    const baseSha = baseShaOutput.trim()
     await fs.mkdir(path.dirname(worktreePath), { recursive: true })
     await execFileText('git', ['worktree', 'add', '-b', branch, worktreePath, `origin/${BASE}`])
-    const worktreeSha = (await execFileText('git', ['-C', worktreePath, 'rev-parse', 'HEAD'])).trim()
+    const worktreeShaOutput = await execFileText('git', ['-C', worktreePath, 'rev-parse', 'HEAD'])
+    const worktreeSha = worktreeShaOutput.trim()
     if (worktreeSha !== baseSha) {
       return {
         ok: false,
@@ -407,6 +394,8 @@ async function createWorktree(task: SelectedTask) {
       notes: 'created deterministically by the ODW control loop; no setup agent required',
     }
   } catch (error) {
+    // SAFETY: These host operations fail with Node errors; execFileText
+    // attaches captured text streams to child-process errors.
     const failure = error as (Error & { stderr?: string; stdout?: string }) | null
     const details = [
       (failure && failure.message) || String(error),
@@ -433,6 +422,8 @@ async function readRoadmapForSelection(root: string = process.cwd()) {
       fallbackReason: '',
     }
   } catch (error) {
+    // SAFETY: execFileText rejects with a Node child-process error carrying
+    // its captured text streams.
     const failure = error as (Error & { stderr?: string; stdout?: string }) | null
     const details = [
       (failure && failure.message) || String(error),
@@ -450,6 +441,25 @@ interface ResumeContext {
   stage: string
   residualRisk: string[]
 }
+
+interface RecoveryDispatchDecision {
+  classification?: string
+  action: string
+  stage?: string | null
+  reason?: string
+  skip?: boolean
+}
+
+type RecoveryReportedResult = {
+  id: string
+  branchName: string
+  classification: string | undefined
+  planStatus?: string
+  action: 'reported'
+  reason?: string
+  assessment?: AnyRecord
+}
+
 async function executeResume(
   task: SelectedTask,
   resume: ResumeContext,
@@ -464,21 +474,21 @@ async function executeResume(
     return { id: candidate.taskId, status: 'failed', stage: 'worktree-write', detail, worktree, proposals: [], ...extra }
   }
   try {
-    let plan: StagePlan | undefined
-    let impl: AnyRecord | undefined
-    if (stage === 'plan') {
-      const planned = await runPlanDesignLoop(task, worktree, { resume: true, extra })
-      if (planned.kind === 'failure') return planned.fail
-      plan = planned.plan
-    } else if (stage === 'implement') {
-      plan = {
-        execplanPath: enriched.execplanPath,
-        workItems: [],
-        summary: 'Resumed from the committed ExecPlan on the surviving branch.',
-      }
-    }
+    let plan: StagePlan
+    let impl: AnyRecord
     if (stage === 'plan' || stage === 'implement') {
-      const built = await runImplementationStage(task, worktree, plan as StagePlan, { resume: stage === 'implement', extra })
+      if (stage === 'plan') {
+        const planned = await runPlanDesignLoop(task, worktree, { resume: true, extra })
+        if (planned.kind === 'failure') return planned.fail
+        plan = planned.plan
+      } else {
+        plan = {
+          execplanPath: enriched.execplanPath,
+          workItems: [],
+          summary: 'Resumed from the committed ExecPlan on the surviving branch.',
+        }
+      }
+      const built = await runImplementationStage(task, worktree, plan, { resume: stage === 'implement', extra })
       if (built.kind === 'failure') return built.fail
       impl = built.impl
     } else {
@@ -489,9 +499,9 @@ async function executeResume(
       impl = synthetic
       plan = { execplanPath: synthetic.execplanPath, workItems: [], summary: synthetic.summary }
     }
-    return await runDualReviewAndIntegration(task, candidate.worktreePath, plan as StagePlan, impl as AnyRecord, mergeLock, { kind: 'recovery-resume' })
+    return await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock, { kind: 'recovery-resume' })
   } catch (error) {
-    const detail = `unhandled agent error: ${((error as Error | null) && (error as Error).message) || String(error)}`
+    const detail = `unhandled agent error: ${faultThrownMessage(error)}`
     return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: 'recovery-resume' }, runFaultMetrics)
   }
 }
@@ -531,7 +541,7 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
   try {
     roadmap = await readRoadmapForSelection(root)
   } catch (error) {
-    summary.errors.push(((error as Error | null) && (error as Error).message) || String(error))
+    summary.errors.push(faultThrownMessage(error))
     log('[recovery] cannot read the canonical roadmap; skipping recovery discovery')
     return { summary, taskResults, held, fatal: null }
   }
@@ -562,11 +572,11 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
     }
     const resumeWt = { branch: candidate.branchName, worktreePath: candidate.worktreePath, baseSha: candidate.baseCommit }
 
-    let decision: { classification?: string; action: string; stage?: string | null; reason?: string; skip?: boolean }
+    let decision: RecoveryDispatchDecision
     let evidence: AssessmentEvidence | AnyRecord | undefined
     let enriched: RecoveryCandidate
-    let assessment: AnyRecord | null = null
-    let planState: ExecplanState | null = null
+    let assessment: AnyRecord | undefined
+    let planState: ExecplanState | undefined
     if (RESUME_MODE === 'continue') {
       // Deterministic dispatch: host git evidence plus the committed ExecPlan
       // Status. No judgement agent — the downstream gates ARE the judgement.
@@ -597,46 +607,53 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
           // Infrastructure faults during recovery poison every later agent
           // call too — halt the run instead of pretending branches were
           // assessed.
+          // SAFETY: Empty extra cannot override the task fields or the empty
+          // proposals returned by resultFromUnhandledAgentError.
           return { summary, taskResults, held, fatal: resultFromUnhandledAgentError(candidate.taskId, assessed.assessmentError, {}, runFaultMetrics) as TaskOutcome }
         }
         continue
       }
       assessment = assessed.assessment
       summary.assessed += 1
-      evidence = assessment.hostEvidence as AssessmentEvidence
+      evidence = assessed.evidence
       // Resolve the durable ExecPlan before deciding: resume eligibility
       // requires it, and its absence must stay visible as missing-execplan.
       // A stat FAULT is neither present nor absent — report it distinctly
       // rather than resuming or classifying on unverifiable evidence.
       const resolved = await recoveryExecplanPath(candidate)
       enriched = { ...candidate, execplanPath: resolved.execplanPath }
-      // The agent assessment is untrusted JSON, so assert it into the typed
-      // decision shape at this boundary (via unknown): the decision helpers
-      // read each field defensively, and advisory residualRisk is re-read
-      // through advisoryResidualRisk, not this cast.
-      const assessmentFields = assessment as unknown as RecoveryAssessmentFields
+      const assessmentFields: RecoveryAssessmentFields = {
+        classification: typeof assessment.classification === 'string' ? assessment.classification : undefined,
+        taskScoped: typeof assessment.taskScoped === 'boolean' ? assessment.taskScoped : undefined,
+        validation: typeof assessment.validation === 'string' ? assessment.validation : undefined,
+        missingEvidence: Array.isArray(assessment.missingEvidence)
+          ? assessment.missingEvidence.map(String)
+          : undefined,
+        residualRisk: advisoryResidualRisk(assessment),
+      }
       decision = resolved.error
-        ? { classification: '', action: 'report', stage: null, reason: 'execplan-stat-error', skip: true }
+        ? { classification: '', action: 'report', reason: 'execplan-stat-error', skip: true }
         : { stage: 'review', ...recoveryDecision(enriched, evidence, assessmentFields, RESUME_MODE, { dryRun: DRY_RUN }) }
     }
 
-    const resultBase = {
+    const resultBase: Omit<RecoveryReportedResult, 'action' | 'reason' | 'assessment'> = {
       id: candidate.taskId,
       branchName: candidate.branchName,
       classification: decision.classification,
-      ...(planState ? { planStatus: planState.status } : {}),
     }
+    if (planState) resultBase.planStatus = planState.status
 
     if (decision.action !== 'resume') {
       if (decision.skip) {
         summary.skipped.push({ id: candidate.taskId, branchName: candidate.branchName, reason: decision.reason || '' })
       }
-      summary.results.push({
+      const reported: RecoveryReportedResult = {
         ...resultBase,
         action: 'reported',
-        ...(decision.reason ? { reason: decision.reason } : {}),
-        ...(assessment ? { assessment } : {}),
-      })
+      }
+      if (decision.reason) reported.reason = decision.reason
+      if (assessment) reported.assessment = assessment
+      summary.results.push(reported)
       log(`[recovery] ${candidate.branchName}: ${decision.classification || planState?.status || 'reported'} (reported${decision.reason ? `; ${decision.reason}` : ''})`)
       continue
     }
@@ -652,7 +669,7 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
     const residualRisk = advisoryResidualRisk(assessment)
     log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline (advisory residualRisk: ${residualRisk.length})`)
     const resume = { candidate, enriched, evidence, stage, residualRisk }
-    const outcome = (await executeResume(task, resume, mergeLock)) as TaskOutcome
+    const outcome = checkedTaskOutcome(await executeResume(task, resume, mergeLock))
     if (outcome.status === 'fatal-auth' || outcome.status === 'provider-fault' || outcome.status === 'infra-fault') {
       summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status, residualRisk })
       return { summary, taskResults, held, fatal: outcome }
@@ -681,14 +698,11 @@ function writeProbeTargets() {
   // write permission) but right-sizes the model: minimal effort, an optional
   // cheap per-adapter probe model, and deliberately NO PLAN_MODEL/BUILD_MODEL
   // inheritance — writing an exact token to an exact path needs no reasoning.
-  const probeOptions = (realAdapter: string) => (options: Record<string, unknown>) => ({
-    adapter: realAdapter,
-    ...(WRITE_PROBE_MODEL_BY_ADAPTER[String(realAdapter).toLowerCase()]
-      ? { model: WRITE_PROBE_MODEL_BY_ADAPTER[String(realAdapter).toLowerCase()] }
-      : {}),
-    effort: WRITE_PROBE_EFFORT,
-    ...options,
-  })
+  const probeOptions = (realAdapter: string): WriteProbeTarget['options'] => (options) => {
+    const model = WRITE_PROBE_MODEL_BY_ADAPTER[realAdapter.toLowerCase()]
+    const routing = model ? { adapter: realAdapter, model } : { adapter: realAdapter }
+    return { ...routing, effort: WRITE_PROBE_EFFORT, ...options }
+  }
   // Normalize each adapter once (lowercase, matching AUTH_REQUIRED_ADAPTERS)
   // and reuse the single value for both the dedup key and the agent() adapter,
   // so a mixed-case config cannot make them diverge.
@@ -766,26 +780,29 @@ const mergeLock = mutex()
 
 function semaphore(limit: number) {
   const max = Math.max(1, limit)
-  const queue: Array<{ fn: () => Promise<unknown>; resolve: (value: unknown) => void; reject: (reason: unknown) => void }> = []
+  const queue: Array<() => void> = []
   let active = 0
 
   const drain = () => {
-    while (active < max && queue.length) {
-      const item = queue.shift()
-      if (!item) break
+    while (active < max && queue.length > 0) {
+      const start = queue.shift()
+      if (!start) break
       active += 1
-      Promise.resolve()
-        .then(item.fn)
-        .then(item.resolve, item.reject)
-        .finally(() => {
-          active -= 1
-          drain()
-        })
+      start()
     }
   }
 
   return <T>(fn: () => Promise<T>): Promise<T> => new Promise<T>((resolve, reject) => {
-    queue.push({ fn, resolve: resolve as (value: unknown) => void, reject })
+    // Each closure keeps the result and resolver paired with their own T.
+    queue.push(() => {
+      Promise.resolve()
+        .then(fn)
+        .then(resolve, reject)
+        .finally(() => {
+          active -= 1
+          drain()
+        })
+    })
     drain()
   })
 }
@@ -855,7 +872,7 @@ async function doSelect(taken: { normal: string[]; addendum: string[] }) {
     log(`[${label}] using working-tree ${ROADMAP}; origin/${BASE} read failed: ${roadmap.fallbackReason}`)
   }
   const selection = selectRoadmapTask(roadmap.text, taken, ONLY_TASK)
-  if (selection?.hasTask && selection.task) {
+  if (selection.hasTask && selection.task) {
     log(`[${label}] selected ${selection.task.isAddendum ? 'addendum pass' : 'normal task'} ${selection.task.id} from ${roadmap.source}`)
   } else {
     log(`[${label}] no unblocked roadmap task found from ${roadmap.source}`)
@@ -871,41 +888,41 @@ function takenSnapshot() {
 }
 
 function isAlreadyTaken(task: SelectedTask) {
-  const processedSet = task?.isAddendum ? processedAddendum : processedNormal
-  const manualMergeReadySet = task?.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal
-  const dryRunSet = task?.isAddendum ? dryRunAddendum : dryRunNormal
-  const recoveryHeldSet = task?.isAddendum ? recoveryHeldAddendum : recoveryHeldNormal
+  const processedSet = task.isAddendum ? processedAddendum : processedNormal
+  const manualMergeReadySet = task.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal
+  const dryRunSet = task.isAddendum ? dryRunAddendum : dryRunNormal
+  const recoveryHeldSet = task.isAddendum ? recoveryHeldAddendum : recoveryHeldNormal
   return processedSet.has(task.id) || manualMergeReadySet.has(task.id) || dryRunSet.has(task.id) || recoveryHeldSet.has(task.id) || inflightNormal.has(task.id) || inflightAddendum.has(task.id)
 }
 
 function markInflight(task: SelectedTask) {
-  const inflightSet = task?.isAddendum ? inflightAddendum : inflightNormal
+  const inflightSet = task.isAddendum ? inflightAddendum : inflightNormal
   inflightSet.add(task.id)
 }
 
 function unmarkInflight(task: SelectedTask) {
-  const inflightSet = task?.isAddendum ? inflightAddendum : inflightNormal
+  const inflightSet = task.isAddendum ? inflightAddendum : inflightNormal
   inflightSet.delete(task.id)
 }
 
 function markProcessed(task: SelectedTask) {
-  const processedSet = task?.isAddendum ? processedAddendum : processedNormal
+  const processedSet = task.isAddendum ? processedAddendum : processedNormal
   processedSet.add(task.id)
   processed.push(task.id)
 }
 
 function markManualMergeReady(task: SelectedTask) {
-  const manualMergeReadySet = task?.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal
+  const manualMergeReadySet = task.isAddendum ? manualMergeReadyAddendum : manualMergeReadyNormal
   manualMergeReadySet.add(task.id)
 }
 
 function markDryRun(task: SelectedTask) {
-  const dryRunSet = task?.isAddendum ? dryRunAddendum : dryRunNormal
+  const dryRunSet = task.isAddendum ? dryRunAddendum : dryRunNormal
   dryRunSet.add(task.id)
 }
 
 function addPending(step: string, items: AnyRecord[] | undefined) {
-  if (!items || !items.length) return
+  if (!items || items.length === 0) return
   if (!pendingByStep.has(step)) pendingByStep.set(step, [])
   pendingByStep.get(step)!.push(...items)
 }
@@ -917,16 +934,24 @@ function addPending(step: string, items: AnyRecord[] | undefined) {
 // the next refill — fix-debt-first within the step.
 async function flushSettledSteps() {
   if (!canFlush) return
-  const inflightSteps = new Set([...inflight.keys()].map(stepOf))
-  for (const [step, items] of [...pendingByStep.entries()]) {
-    if (!items.length || inflightSteps.has(step)) continue
+  const inflightSteps = new Set([...inflight.keys()].map((taskId) => stepOf(taskId)))
+  // Snapshot the entries before awaiting triage, which can let other tasks
+  // append proposals to the pending map.
+  const pendingEntries = [...pendingByStep.entries()]
+  for (const [step, items] of pendingEntries) {
+    if (items.length === 0 || inflightSteps.has(step)) continue
+    // SAFETY: ODW validates triage replies against TRIAGE_SCHEMA; the
+    // no-proposals branch returns compatible fields. Keep null for test doubles.
     const tr = (await mergeLock(() => runTriage(step, items))) as { ok?: boolean; pushed?: boolean; decisions?: Array<{ lane: string }> } | null
-    triages.push({ step, ...(tr || {}) })
+    triages.push({ step, ...tr })
     if (!tr?.ok || !tr.pushed) {
       log(`[step ${step}] triage did not land; keeping ${items.length} proposal(s) pending`)
       continue
     }
-    const lanes = (tr?.decisions || []).reduce((m: Record<string, number>, d) => ((m[d.lane] = (m[d.lane] || 0) + 1), m), {})
+    const lanes: Record<string, number> = {}
+    for (const decision of tr.decisions || []) {
+      lanes[decision.lane] = (lanes[decision.lane] || 0) + 1
+    }
     log(`[step ${step}] triaged ${items.length} proposal(s): ${Object.entries(lanes).map(([k, v]) => `${v} ${k}`).join(', ') || 'none recorded'}`)
     pendingByStep.delete(step)
   }
@@ -944,13 +969,13 @@ async function fillPool() {
     let sel
     try {
       sel = await doSelect(takenSnapshot())
-    } catch (err) {
-      log(`[pool] select agent failed (${((err as Error | null) && (err as Error).message) || String(err)}); stop opening new work, drain in-flight`)
-      if (!halted) halted = `select agent error: ${((err as Error | null) && (err as Error).message) || String(err)}`
+    } catch (error) {
+      log(`[pool] select agent failed (${faultThrownMessage(error)}); stop opening new work, drain in-flight`)
+      if (!halted) halted = `select agent error: ${faultThrownMessage(error)}`
       return
     }
-    if (!sel || !sel.hasTask || !sel.task) {
-      if (inflight.size === 0) log(sel?.blockedSummary ? `No unblocked task: ${sel.blockedSummary}` : 'No unblocked roadmap tasks remain.')
+    if (!sel.hasTask || !sel.task) {
+      if (inflight.size === 0) log(sel.blockedSummary ? `No unblocked task: ${sel.blockedSummary}` : 'No unblocked roadmap tasks remain.')
       return
     }
     const task = sel.task
@@ -966,9 +991,11 @@ async function fillPool() {
       // structured output) must NOT reject through Promise.race and crash the
       // whole run — convert it to a failed result the control loop drains.
       runTask(task, mergeLock).then(
-        (result) => ({ id: task.id, task, result: result as TaskOutcome }),
-        (err) => {
-          const detail = `unhandled agent error: ${((err as Error | null) && (err as Error).message) || String(err)}`
+        (result) => ({ id: task.id, task, result: checkedTaskOutcome(result) }),
+        (error) => {
+          const detail = `unhandled agent error: ${faultThrownMessage(error)}`
+          // SAFETY: Empty extra cannot override the task fields or the empty
+          // proposals returned by resultFromUnhandledAgentError.
           return {
             id: task.id,
             task,
@@ -1000,7 +1027,7 @@ async function runWorkflowMain() {
 // remediation triage run here in the control loop (serialized), so their
 // worktrees and BASE writes never collide with each other.
 const authPreflight = await runAuthPreflight()
-if (authPreflight.length) {
+if (authPreflight.length > 0) {
   halted = `fatal auth preflight failed: ${authPreflight.map((failure) => `${failure.tool} (${failure.command})`).join(', ')}`
 }
 
@@ -1041,18 +1068,18 @@ if (RESUME_PARTIAL_BRANCHES && !halted) {
       stop = true
     }
   } catch (error) {
-    const detail = ((error as Error | null) && (error as Error).message) || String(error)
+    const detail = faultThrownMessage(error)
     recovery.errors.push(`recovery pass failed: ${detail}`)
     log(`[recovery] failed (${detail}); continuing with normal roadmap selection`)
   }
 }
 
-while (true) {
+for (;;) {
   if (!stop && !halted) {
     try {
       await flushSettledSteps()
-    } catch (err) {
-      log(`[triage] failed (${((err as Error | null) && (err as Error).message) || String(err)}); proposals stay pending for a later sweep`)
+    } catch (error) {
+      log(`[triage] failed (${faultThrownMessage(error)}); proposals stay pending for a later sweep`)
     }
     await fillPool()
   }
@@ -1070,11 +1097,13 @@ while (true) {
       // Addendum passes deliberately generate no audit and no proposals — that
       // is what breaks the remediation-of-remediation recursion.
       addPending(stepOf(done.id), result.proposals)
-      let audit: (AnyRecord & { proposedRoadmapItems?: AnyRecord[] }) | null = null
+      let audit: (AnyRecord & { proposedRoadmapItems?: AnyRecord[] }) | null | undefined
       try {
+        // SAFETY: runAudit passes AUDIT_SCHEMA to ODW, which validates any
+        // proposed roadmap items as objects. Null remains for test doubles.
         audit = (await mergeLock(() => runAudit({ id: done.id }))) as (AnyRecord & { proposedRoadmapItems?: AnyRecord[] }) | null
-      } catch (err) {
-        log(`[audit ${done.id}] failed (${((err as Error | null) && (err as Error).message) || String(err)}); skipping (task already merged)`)
+      } catch (error) {
+        log(`[audit ${done.id}] failed (${faultThrownMessage(error)}); skipping (task already merged)`)
       }
       if (audit) {
         audits.push({ afterTask: done.id, ...audit })
@@ -1114,8 +1143,8 @@ while (true) {
 if (canFlush && !providerFaultHalt) {
   try {
     await flushSettledSteps()
-  } catch (err) {
-    log(`[triage:end] failed (${((err as Error | null) && (err as Error).message) || String(err)}); ${[...pendingByStep.values()].flat().length} proposal(s) left pending`)
+  } catch (error) {
+    log(`[triage:end] failed (${faultThrownMessage(error)}); ${[...pendingByStep.values()].flat().length} proposal(s) left pending`)
   }
 }
 // Recovery survivors the run reported but did not integrate still hold their
@@ -1124,27 +1153,33 @@ if (canFlush && !providerFaultHalt) {
 // with such survivors has NOT stopped cleanly, even when the selector reports
 // no unblocked tasks — surface it as an explicit operator-recovery terminal
 // state instead of `halted: null` (issue #25).
-const unresolvedRecovery = [
-  ...[...recoveryHeldNormal]
-    .filter((id) => !processedNormal.has(id) && !manualMergeReadyNormal.has(id))
-    .map((id) => ({ id, isAddendum: false })),
-  ...[...recoveryHeldAddendum]
-    .filter((id) => !processedAddendum.has(id) && !manualMergeReadyAddendum.has(id))
-    .map((id) => ({ id, isAddendum: true })),
-].sort((left, right) => left.id.localeCompare(right.id, 'en', { numeric: true }) || Number(left.isAddendum) - Number(right.isAddendum))
+const heldRecovery: Array<{ id: string; isAddendum: boolean }> = []
+for (const id of recoveryHeldNormal) {
+  if (!processedNormal.has(id) && !manualMergeReadyNormal.has(id)) {
+    heldRecovery.push({ id, isAddendum: false })
+  }
+}
+for (const id of recoveryHeldAddendum) {
+  if (!processedAddendum.has(id) && !manualMergeReadyAddendum.has(id)) {
+    heldRecovery.push({ id, isAddendum: true })
+  }
+}
+const unresolvedRecovery = heldRecovery.toSorted(
+  (left, right) => left.id.localeCompare(right.id, 'en', { numeric: true }) || Number(left.isAddendum) - Number(right.isAddendum),
+)
 recovery.unresolved = unresolvedRecovery.map((entry) => {
-  const reported = (recovery.results || []).filter((result) => result.id === entry.id)
-  const last = reported[reported.length - 1]
-  return {
+  const reported = recovery.results.filter((result) => result.id === entry.id)
+  const last = reported.at(-1)
+  const unresolved = {
     id: entry.id,
     isAddendum: entry.isAddendum,
     branchName: last?.branchName || '',
     classification: last?.classification || '',
     action: last?.action || 'held',
-    ...(last?.reason ? { reason: last.reason } : {}),
   }
+  return last?.reason ? { ...unresolved, reason: last.reason } : unresolved
 })
-if (!halted && unresolvedRecovery.length) {
+if (!halted && unresolvedRecovery.length > 0) {
   halted =
     `needs-operator-recovery: ${unresolvedRecovery.length} recovery survivor branch(es) still block the roadmap frontier ` +
     `(${unresolvedRecovery.map((entry) => entry.id + (entry.isAddendum ? ' (addendum)' : '')).join(', ')}); ` +
@@ -1152,16 +1187,18 @@ if (!halted && unresolvedRecovery.length) {
 }
 
 const pendingProposals = [...pendingByStep.values()].flat()
-const assessments = results
-  .filter((result) => result.assessment || result.assessmentError)
-  .map((result) => ({
-    id: result.id,
-    stage: result.stage,
-    status: result.status,
-    classification: result.assessment?.classification || '',
-    recommendation: result.assessment?.recommendation || '',
-    assessmentError: result.assessmentError || '',
-  }))
+const assessments = results.flatMap((result) =>
+  result.assessment || result.assessmentError
+    ? [{
+        id: result.id,
+        stage: result.stage,
+        status: result.status,
+        classification: result.assessment?.classification || '',
+        recommendation: result.assessment?.recommendation || '',
+        assessmentError: result.assessmentError || '',
+      }]
+    : [],
+)
 // Salvage rides on individual task results (assessment.ts); surface it in the
 // terminal summary so an operator sees which branches had docs/execplans/*.md
 // artefacts committed (or why salvage was skipped) without opening result.json.
@@ -1235,9 +1272,9 @@ return {
     `Processed ${processed.length} roadmap task(s) (pool width ${MAX_PARALLEL}): ` +
     results.map((r) => `${r.id}=${r.status}`).join(', ') +
     (recovery.enabled ? ` | recovery(${recovery.mode}): ${recovery.assessed} assessed, ${recovery.resumed} resumed, ${recovery.skipped.length} skipped` : '') +
-    (assessments.length ? ` | assessed ${assessments.length} failed/halted branch(es)` : '') +
+    (assessments.length > 0 ? ` | assessed ${assessments.length} failed/halted branch(es)` : '') +
     salvageSummarySuffix +
-    (triages.length ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : '') +
+    (triages.length > 0 ? ` | triaged ${triages.reduce((n, t) => n + (t.decisions ? t.decisions.length : 0), 0)} proposal(s) across ${triages.length} step(s)` : '') +
     (halted ? ` | halted: ${halted}` : ' | clean stop (no more unblocked tasks).'),
 }
 }
@@ -1250,7 +1287,7 @@ async function workflowMain() {
     try {
       disposeHostGateLogs()
     } catch (error) {
-      log(`[host gates] could not dispose temporary log roots: ${String((error as Error | null)?.message || error).slice(-500)}`)
+      log(`[host gates] could not dispose temporary log roots: ${faultThrownMessage(error).slice(-500)}`)
     }
   }
 }

@@ -4,9 +4,10 @@
 // back the durability gates the pipeline consults.
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import Ajv2020 from 'ajv/dist/2020'
 
 import {
   makeTaskPipeline,
@@ -14,6 +15,14 @@ import {
   summarizeReviewVerdict,
 } from '../../src/workflows/df12-build-odw/run-task.ts'
 import type { FaultMetrics } from '../../src/workflows/df12-build-odw/types.ts'
+import {
+  DESIGN_VERDICT_SCHEMA,
+  FIX_SCHEMA,
+  IMPL_SCHEMA,
+  INTEGRATE_SCHEMA,
+  PLAN_SCHEMA,
+  REVIEW_SCHEMA,
+} from '../../src/workflows/df12-build-odw/schemas.ts'
 
 import type { HostReviewResult } from '../../src/workflows/df12-build-odw/host-review-contracts.ts'
 
@@ -902,4 +911,159 @@ describe('runTask', () => {
     expect(outcome.status).toBe('done')
     expect(outcome.kind).toBe('recovery-resume')
   })
+})
+
+type SchemaTampering = 'omit' | 'replace'
+type SchemaDispatch = { label: string; options: Record<string, unknown> }
+type ExpectedSchemaDispatch = {
+  prefix: string
+  schema: object
+  adapter: string
+  phase: string
+}
+
+function schemaRoutingHarness(mode: SchemaTampering, script: Script) {
+  const routed: SchemaDispatch[] = []
+  const dispatched: SchemaDispatch[] = []
+  const validator = new Ajv2020({ strict: false })
+  const router = (adapter: string) => (options: Record<string, unknown>) => {
+    routed.push({ label: String(options.label || ''), options: { ...options } })
+    const { schema: originalSchema, ...rest } = options
+    void originalSchema
+    const result = { ...rest, adapter, model: 'routed-model' }
+    return mode === 'replace' ? { ...result, schema: { type: 'string' } } : result
+  }
+  globals.agent = async (prompt: string, options: Record<string, unknown> = {}) => {
+    const label = String(options.label || '')
+    dispatched.push({ label, options: { ...options } })
+    const reply = script(label, prompt)
+    if (!options.schema) return JSON.stringify(reply)
+    if (!validator.validate(options.schema as object, reply)) {
+      throw new Error(`Agent reply did not match the dispatched schema: ${validator.errorsText()}`)
+    }
+    return reply
+  }
+  return {
+    routed,
+    dispatched,
+    overrides: {
+      planAgentOptions: router('routed-plan'),
+      reviewAgentOptions: router('routed-review'),
+      buildAgentOptions: router('routed-build'),
+    },
+  }
+}
+
+function expectSchemaDispatches(
+  harness: ReturnType<typeof schemaRoutingHarness>,
+  expected: ExpectedSchemaDispatch[],
+) {
+  expect(harness.dispatched.length).toBe(harness.routed.length)
+  for (const entry of expected) {
+    const routed = harness.routed.filter((call) => call.label.startsWith(entry.prefix))
+    const dispatched = harness.dispatched.filter((call) => call.label.startsWith(entry.prefix))
+    expect(dispatched.length, entry.prefix).toBeGreaterThan(0)
+    expect(dispatched.length, entry.prefix).toBe(routed.length)
+    for (const call of routed) {
+      expect(call.options.schema, call.label).toEqual(entry.schema)
+    }
+    for (const call of dispatched) {
+      expect(call.options.schema, call.label).toEqual(entry.schema)
+      expect(call.options.adapter, call.label).toBe(entry.adapter)
+      expect(call.options.model, call.label).toBe('routed-model')
+      expect(call.options.phase, call.label).toBe(entry.phase)
+    }
+  }
+  expect(harness.dispatched.every((call) =>
+    expected.some((entry) => call.label.startsWith(entry.prefix)),
+  )).toBe(true)
+}
+
+describe('schema-bearing task agent dispatch', () => {
+  for (const mode of ['omit', 'replace'] as const) {
+    test(`preserves schemas through a router that may ${mode} them in the normal and fix lanes`, async () => {
+      const worktree = makeWorktree()
+      try {
+        let codeReviewRounds = 0
+        const harness = schemaRoutingHarness(mode, (label, prompt) => {
+          if (label.startsWith('code-review:')) {
+            codeReviewRounds += 1
+            return codeReviewRounds === 1
+              ? { verdict: 'changes-requested', blocking: ['fix this'], summary: 'needs a fix' }
+              : { ...passReview, summary: 'passed' }
+          }
+          if (label.startsWith('expert-review:')) return { ...passReview, summary: 'passed' }
+          if (label.startsWith('fix:')) return { gatesGreen: true, summary: 'fixed' }
+          if (label.startsWith('integrate:')) return { ...cleanIntegration, summary: 'landed' }
+          return happyScript()(label, prompt)
+        })
+        const outcome = await subject(worktree, harness.overrides).runTask(task, null)
+        expect(outcome.status).toBe('done')
+        expectSchemaDispatches(harness, [
+          { prefix: 'plan:', schema: PLAN_SCHEMA, adapter: 'routed-plan', phase: 'Plan' },
+          { prefix: 'design-review:', schema: DESIGN_VERDICT_SCHEMA, adapter: 'routed-review', phase: 'Design Review' },
+          { prefix: 'implement:', schema: IMPL_SCHEMA, adapter: 'routed-build', phase: 'Implement' },
+          { prefix: 'code-review:', schema: REVIEW_SCHEMA, adapter: 'routed-review', phase: 'Code Review' },
+          { prefix: 'expert-review:', schema: REVIEW_SCHEMA, adapter: 'routed-review', phase: 'Expert Review' },
+          { prefix: 'fix:', schema: FIX_SCHEMA, adapter: 'routed-build', phase: 'Implement' },
+          { prefix: 'integrate:', schema: INTEGRATE_SCHEMA, adapter: 'routed-build', phase: 'Integrate' },
+        ])
+      } finally {
+        rmSync(worktree, { recursive: true, force: true })
+      }
+    })
+
+    test(`preserves the work-item schema through a router that may ${mode} it`, async () => {
+      const worktree = makeWorktree()
+      try {
+        prepareSingleWorkItem(worktree)
+        const harness = schemaRoutingHarness(mode, (label) => {
+          if (label.startsWith('implement:')) {
+            return { ...completeSingleWorkItem(worktree), execplanPath: PLAN_PATH }
+          }
+          throw new Error(`unscripted label: ${label}`)
+        })
+        const pipeline = subject(worktree, { ...harness.overrides, PER_WORK_ITEM_BUILD: true })
+        const outcome = await pipeline.runWorkItemBuildLoop(task, worktree, { execplanPath: PLAN_PATH })
+        expect(outcome?.kind).toBe('impl')
+        expectSchemaDispatches(harness, [
+          { prefix: 'implement:', schema: IMPL_SCHEMA, adapter: 'routed-build', phase: 'Implement' },
+        ])
+      } finally {
+        rmSync(worktree, { recursive: true, force: true })
+      }
+    })
+
+    test(`preserves addendum schemas through a router that may ${mode} them`, async () => {
+      const worktree = makeWorktree()
+      try {
+        const harness = schemaRoutingHarness(mode, (label) => {
+          if (label.startsWith('addendum:')) return { ...greenAddendum, execplanPath: PLAN_PATH }
+          if (label.startsWith('addendum-review:')) return { ...passReview, summary: 'passed' }
+          if (label.startsWith('integrate:')) return { ...cleanIntegration, summary: 'landed' }
+          throw new Error(`unscripted label: ${label}`)
+        })
+        const pipeline = subject(worktree, {
+          ...harness.overrides,
+          HOST_REVIEW_ENABLED: true,
+          runHostReview: async () => hostReviewResult({
+            outcome: 'rate-limited',
+            attempts: 3,
+            errorCategory: 'deferred',
+            detail: 'Dakar review deferred',
+          }),
+        })
+        const addendum = { ...task, isAddendum: true, subtasks: ['1.2.3.1'] }
+        const outcome = await pipeline.runTask(addendum, null)
+        expect(outcome.status).toBe('done')
+        expectSchemaDispatches(harness, [
+          { prefix: 'addendum:', schema: IMPL_SCHEMA, adapter: 'routed-build', phase: 'Implement' },
+          { prefix: 'addendum-review:', schema: REVIEW_SCHEMA, adapter: 'routed-review', phase: 'Code Review' },
+          { prefix: 'integrate:', schema: INTEGRATE_SCHEMA, adapter: 'routed-build', phase: 'Integrate' },
+        ])
+      } finally {
+        rmSync(worktree, { recursive: true, force: true })
+      }
+    })
+  }
 })

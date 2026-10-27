@@ -168,6 +168,46 @@ export interface RawWorkflowArgs {
   commitGates?: unknown
 }
 
+// The compatibility reader must accept legacy keys while the public input
+// contract continues to mark those keys as deprecated for callers.
+type CompatibilityWorkflowArgs = Omit<RawWorkflowArgs,
+  'coderabbitBetweenWorkItems' | 'coderabbitAttempts' | 'coderabbitBackoffMinutes' | 'coderabbitFindingsFile' | 'resumePartialBranches'
+> & {
+  resumePartialBranches?: unknown
+  coderabbitBetweenWorkItems?: boolean
+  coderabbitAttempts?: number | string
+  coderabbitBackoffMinutes?: unknown
+  coderabbitFindingsFile?: string
+}
+
+// Validate the compatibility boundary before treating dynamic ODW arguments
+// as documented options. Unknown keys remain available to future versions.
+function isCompatibilityWorkflowArgs(value: Record<string, unknown>): value is CompatibilityWorkflowArgs {
+  const strings = [
+    'projectRoot', 'base', 'roadmap', 'designDocs', 'researchNote', 'taskId', 'resumeMode',
+    'writeProbeEffort', 'searchBackend', 'codeSearchBackend', 'grepaiWorkspace', 'grepaiProject',
+    'project', 'memtraceRepoId', 'buildAdapter', 'planAdapter', 'reviewAdapter', 'auditAdapter',
+    'triageAdapter', 'assessmentAdapter', 'buildModel', 'planModel', 'reviewModel', 'auditModel',
+    'auditEffort', 'triageModel', 'triageEffort', 'triageEscalationModel', 'assessmentModel',
+    'assessmentEscalationModel', 'reviewTool', 'dakarCommand', 'coderabbitReviewCommand',
+    'coderabbitFindingsFile', 'hostReviewFindingsFile', 'csCheckCommand',
+  ]
+  const numbers = ['maxTasks', 'maxParallel', 'maxPlanningParallel', 'maxPlanParallel', 'maxBuildParallel', 'maxDesignRounds', 'maxReviewRounds']
+  const numericStrings = [
+    'stageAttempts', 'maxWorkItemRounds', 'resumeTaskId', 'resumeMaxCandidates', 'reviewTimeoutSeconds',
+    'dakarTimeoutSeconds', 'dakarBudgetGbp', 'coderabbitAttempts', 'hostReviewAttempts', 'commitGateTimeoutSeconds',
+  ]
+  const booleans = [
+    'perWorkItemBuild', 'autoMerge', 'documentAudit', 'dryRun', 'authPreflight', 'requireCoderabbitAuth',
+    'assessPartialBranches', 'worktreeWritePreflight', 'coderabbitHostReview',
+    'coderabbitBetweenWorkItems', 'hostReviewBetweenWorkItems', 'hostCommitGates', 'csCheck', 'hostGatesBetweenWorkItems',
+  ]
+  const valid = (keys: string[], types: string[]) => keys.every((key) => value[key] === undefined || types.includes(typeof value[key]))
+  if (!valid(strings, ['string']) || !valid(numbers, ['number']) || !valid(numericStrings, ['number', 'string']) || !valid(booleans, ['boolean'])) return false
+  const models = value.writeProbeModelByAdapter
+  return models === undefined || (models !== null && typeof models === 'object' && !Array.isArray(models) && Object.values(models).every((model) => typeof model === 'string'))
+}
+
 /** Supported host-review adapters after configuration normalization. */
 export type ReviewTool = 'dakar' | 'coderabbit'
 const REVIEW_TOOLS = ['dakar', 'coderabbit'] as const
@@ -350,7 +390,8 @@ export interface WorkflowConfig {
  * `resumeMode` is not one of `assess`, `review`, or `continue`.
  */
 export function makeConfig(rawArgs: Record<string, unknown> | null | undefined): WorkflowConfig {
-  const cfg = (rawArgs || {}) as RawWorkflowArgs
+  const cfg = rawArgs || {}
+  if (!isCompatibilityWorkflowArgs(cfg)) throw new Error('Invalid workflow argument type')
   const PROJECT_ROOT = cfg.projectRoot || process.cwd()
   const BASE = cfg.base || 'main' // integration branch: rebase + squash-merge target, roadmap source of truth
   const ROADMAP = cfg.roadmap || 'docs/roadmap.md'
@@ -453,7 +494,8 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   const REVIEW_TOOL = reviewToolInput
   const HOST_REVIEWER_NAME = reviewerDisplayName(REVIEW_TOOL)
   const DAKAR_COMMAND = String(cfg.dakarCommand || 'dakar-review')
-  const REVIEW_TIMEOUT_SECONDS = Math.min(7200, Math.max(60, Math.trunc(Number(cfg.reviewTimeoutSeconds ?? cfg.dakarTimeoutSeconds) || 3600)))
+  const reviewTimeoutInput = Number(cfg.reviewTimeoutSeconds ?? cfg.dakarTimeoutSeconds) || 3600
+  const REVIEW_TIMEOUT_SECONDS = Math.min(7200, Math.max(60, Math.trunc(reviewTimeoutInput)))
   const DAKAR_BUDGET_GBP_RAW = Number(cfg.dakarBudgetGbp)
   const DAKAR_BUDGET_GBP = Number.isFinite(DAKAR_BUDGET_GBP_RAW) ? Math.min(10, Math.max(0, DAKAR_BUDGET_GBP_RAW)) : 0
   // LEGACY (agent-run) mode ONLY: the command the build/fix prompts tell the
@@ -475,7 +517,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   const attemptsInput = Number(cfg.hostReviewAttempts ?? cfg.coderabbitAttempts)
   // NaN deliberately reaches the established default fallback; only infinities reject.
   if (!Number.isFinite(attemptsInput) && !Number.isNaN(attemptsInput)) {
-    throw new Error('hostReviewAttempts must be finite')
+    throw new TypeError('hostReviewAttempts must be finite')
   }
   const HOST_REVIEW_ATTEMPTS = Math.min(10, Math.max(1, Math.trunc(attemptsInput || 3))) // total attempts per host review when rate limited
   const HOST_REVIEW_BACKOFF_MINUTES: [number, number] = (() => {
@@ -498,9 +540,9 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   // is the df12 house default, but it is NOT universal: some projects alias
   // `all` to a release build, so operators must be able to name the authoritative
   // gate targets (e.g. sequential check-fmt/typecheck/lint/test) via args.
-  const COMMIT_GATES = (Array.isArray(cfg.commitGates) && cfg.commitGates.length
+  const COMMIT_GATES = (Array.isArray(cfg.commitGates) && cfg.commitGates.length > 0
     ? cfg.commitGates
-    : ['make all']).map((command) => String(command))
+    : ['make all']).map(String)
   const COMMIT_GATE_TEXT = COMMIT_GATES.map((command) => `\`${command}\``).join(' then ')
   // Host-run commit gates: the control loop re-runs the configured gate
   // commands against committed HEAD before review and integration, so a
@@ -546,6 +588,15 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
   const SCRUTINEER_DELEGATION_GUIDANCE = CODERABBIT_HOST_REVIEW
     ? `Delegate deterministic gate execution to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until the gates are green. ${CODERABBIT_REVIEW_GUIDANCE}`
     : `Delegate deterministic gate execution and CodeRabbit invocation to the \`scrutineer\` sub-agent: ask it to run the repository commit gates/test suites and, only after those pass, to run \`${CODERABBIT_REVIEW_COMMAND}\` from inside the worktree. The scrutineer must not edit tracked files; use its structured failure report to make fixes yourself, then summon it again until gates and CodeRabbit are green or a documented rate-limit/deferred-review open issue remains. ${CODERABBIT_REVIEW_GUIDANCE}`
+
+  // Keep the deprecated output keys for existing consumers while deriving
+  // their values from the canonical host-review settings.
+  const legacyHostReviewAliases = {
+    CODERABBIT_BETWEEN_WORK_ITEMS: HOST_REVIEW_BETWEEN_WORK_ITEMS,
+    CODERABBIT_ATTEMPTS: HOST_REVIEW_ATTEMPTS,
+    CODERABBIT_BACKOFF_MINUTES: HOST_REVIEW_BACKOFF_MINUTES,
+    CODERABBIT_FINDINGS_FILE: HOST_REVIEW_FINDINGS_FILE,
+  }
 
   return {
     PROJECT_ROOT,
@@ -618,10 +669,7 @@ export function makeConfig(rawArgs: Record<string, unknown> | null | undefined):
     COMMIT_GATE_GUIDANCE,
     CS_CHECK_GUIDANCE,
     CODERABBIT_REVIEW_GUIDANCE,
-    CODERABBIT_BETWEEN_WORK_ITEMS: HOST_REVIEW_BETWEEN_WORK_ITEMS,
-    CODERABBIT_ATTEMPTS: HOST_REVIEW_ATTEMPTS,
-    CODERABBIT_BACKOFF_MINUTES: HOST_REVIEW_BACKOFF_MINUTES,
-    CODERABBIT_FINDINGS_FILE: HOST_REVIEW_FINDINGS_FILE,
+    ...legacyHostReviewAliases,
     SPARK_DELEGATION_GUIDANCE,
     SCRUTINEER_DELEGATION_GUIDANCE,
   }
