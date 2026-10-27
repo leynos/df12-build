@@ -689,6 +689,14 @@ CodeScene, then Dakar, and only then dispatches the reviewer agents. Set
 `reviewTool` to `coderabbit` to select the retained CodeRabbit adapter; its
 CLI-specific behaviour is documented next.
 
+Dakar output is accepted only when its terminal JSON document matches a known
+review shape. A `changes-requested` verdict needs at least one finding with a
+supported severity and string `path`, `title`, `detail`, and `evidence` fields;
+an optional `line` must be a positive integer. A `pass` verdict or a result with
+`skipped: true` must not carry findings. Unparsable, malformed, contradictory,
+or unrecognized output becomes a host-review `error` with error category
+`invalid-output`, rather than a clean review.
+
 ## Host-run CodeRabbit review
 
 > **Applies to `reviewTool: 'coderabbit'` only.** The host review tool defaults
@@ -820,11 +828,23 @@ Assessment is report-only. It never marks roadmap checkboxes, pushes, merges,
 or cherry-picks. Use it to decide whether to preserve, manually finish, park,
 or discard the branch before relaunching from `origin/<base>`.
 
-If the assessment agent returns no structured result or a malformed one, the
-workflow leaves the task's existing outcome intact and reports
-`assessmentError` with host-collected evidence. Recovery results use
-`assessment: null` when no classification was produced; assessment failure does
-not make a branch eligible for adoption.
+If an in-run assessment agent returns no structured result or a malformed one,
+the workflow leaves the task's existing outcome intact and reports
+`assessmentError` with host-collected `assessmentEvidence`. For a branch found
+during fresh-run recovery, the recovery result records
+`action: assessment-error` and the error, and the candidate is marked skipped.
+It remains unresolved and blocks the roadmap frontier until an operator handles
+it; authentication or provider failures halt the run as fatal errors. No failed
+assessment supplies a classification for adoption.
+
+The worker pool validates optional task-result fields before consuming them:
+`integration.pushed` must be boolean when present; `kind` and `assessmentError`
+must be strings; `proposals` must be an array of records; `assessment` a
+record; and `salvage` must contain string `classification`, `sha`, and `detail`
+fields, string `committed` entries, and `skipped` records with string `path` and
+`reason`. `integration` may be `null`. A malformed result becomes a failed
+task with `stage: error` and detail `Invalid task outcome`; inspect the task
+entry in `result.json` and the run's `halted` summary for the detail.
 
 After an `adopt-partial` or `continue-manual` verdict — and also after an
 infrastructure fault such as schema-retry exhaustion — the workflow commits any

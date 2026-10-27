@@ -416,7 +416,7 @@ async function createWorktree(task: SelectedTask) {
   }
 }
 
-/** Read the canonical roadmap, falling back to local state when necessary. */
+/** Read the canonical roadmap ref, reporting failures without using local state. */
 async function readRoadmapForSelection(root: string = process.cwd()) {
   const canonicalRef = `origin/${BASE}:${ROADMAP}`
   try {
@@ -709,11 +709,10 @@ function writeProbeTargets() {
     const routing = model ? { adapter: realAdapter, model } : { adapter: realAdapter }
     return { ...routing, effort: WRITE_PROBE_EFFORT, ...options }
   }
-  // Normalize each adapter once (lowercase, matching AUTH_REQUIRED_ADAPTERS)
-  // and reuse the single value for both the dedup key and the agent() adapter,
-  // so a mixed-case config cannot make them diverge.
-  const planAdapter = String(PLAN_ADAPTER).toLowerCase()
-  const buildAdapter = String(BUILD_ADAPTER).toLowerCase()
+  // Probe the exact adapter names used by the task agents; only model lookup
+  // is case-insensitive. Distinct spellings may route to different adapters.
+  const planAdapter = String(PLAN_ADAPTER)
+  const buildAdapter = String(BUILD_ADAPTER)
   const targets = [
     { role: 'plan', adapter: planAdapter, options: probeOptions(planAdapter) },
     { role: 'build', adapter: buildAdapter, options: probeOptions(buildAdapter) },

@@ -4723,8 +4723,8 @@ function writeProbeTargets() {
     const routing = model ? { adapter: realAdapter, model } : { adapter: realAdapter };
     return { ...routing, effort: WRITE_PROBE_EFFORT, ...options };
   };
-  const planAdapter = String(PLAN_ADAPTER).toLowerCase();
-  const buildAdapter = String(BUILD_ADAPTER).toLowerCase();
+  const planAdapter = String(PLAN_ADAPTER);
+  const buildAdapter = String(BUILD_ADAPTER);
   const targets = [
     { role: "plan", adapter: planAdapter, options: probeOptions(planAdapter) },
     { role: "build", adapter: buildAdapter, options: probeOptions(buildAdapter) }

@@ -108,6 +108,7 @@ return {
   runHostReview,
   runDualReviewAndIntegration,
   runRecovery,
+  writeProbeTargets,
 }
 `,
   )
@@ -152,6 +153,19 @@ test('recovery configuration accepts explicit operator overrides', async () => {
   assert.equal(surface.RESUME_MODE, 'review')
   assert.equal(surface.RESUME_TASK_ID, '1.2.3')
   assert.equal(surface.RESUME_MAX_CANDIDATES, 2)
+})
+
+test('write probes preserve configured adapter spelling and deduplicate exact names', async () => {
+  const surface = await loadRecoverySurface({
+    planAdapter: 'Claude', buildAdapter: 'claude',
+    writeProbeModelByAdapter: { CLAUDE: 'probe-model' },
+  })
+  const targets = surface.writeProbeTargets()
+  assert.deepEqual(targets.map((target) => target.adapter), ['Claude', 'claude'])
+  assert.deepEqual(targets.map((target) => target.options({}).adapter), ['Claude', 'claude'])
+  assert.deepEqual(targets.map((target) => target.options({}).model), ['probe-model', 'probe-model'])
+  const shared = await loadRecoverySurface({ planAdapter: 'Claude', buildAdapter: 'Claude' })
+  assert.equal(shared.writeProbeTargets().length, 1)
 })
 
 test('recovery discovery is opt-in: truthy but non-true values stay disabled', async () => {

@@ -467,11 +467,13 @@ burn review quota; the pipeline seam is covered by a fake NDJSON-emitting
 `runCoderabbitHostReview`.
 
 The adapter validates consumed fields in known finding, error, and completion
-events. Malformed known events produce an `invalid_output` error; valid finding
-events remain available to the pipeline, while valid error events and
-recognizable authentication evidence retain their classification. The task
-pipeline handles valid blocking findings before it applies the invalid-output
-deferral or halt, so malformed output cannot erase a known blocker.
+events. It synthesizes an `errorType: invalid_output` event only when a known
+event is malformed and no valid error event was parsed; a valid error event is
+retained instead of being overwritten by the synthetic error. Rate-limit
+classification keeps priority, and recognizable authentication text from a
+malformed error event is checked separately. Valid finding events remain
+available to the pipeline, which handles blocking findings before an
+invalid-output deferral or halt.
 
 Every fix round — gate fix, dual-review fix, and between-item fix — is followed
 by `verifyWorktreeCommitted`; a fix that leaves the worktree dirty fails the
