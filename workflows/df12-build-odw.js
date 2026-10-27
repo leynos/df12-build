@@ -1998,7 +1998,9 @@ function isProbeSymlinkError(error) {
 }
 function writeProbePath(worktree, adapter) {
   const path = process.getBuiltinModule("node:path");
-  return path.join(worktree, `.df12-write-probe-${String(adapter).replaceAll(/[^0-9a-zA-Z._-]+/g, "-")}`);
+  const digest = process.getBuiltinModule("node:crypto").createHash("sha256").update(adapter).digest("hex");
+  const readable = adapter.replaceAll(/[^0-9a-zA-Z._-]+/g, "-").slice(0, 40);
+  return path.join(worktree, `.df12-write-probe-${readable}-${digest}`);
 }
 function writeProbeToken(tag, adapter) {
   return `df12-write-probe v1 task=${tag} adapter=${adapter}`;

@@ -38,8 +38,14 @@ const TARGETS = () => [
 ]
 
 describe('probe construction', () => {
+  test('probe paths distinguish adapter names on case-insensitive filesystems', () => {
+    for (const [left, right] of [['Claude', 'claude'], ['codex medium', 'codex!medium']] as const) {
+      expect(writeProbePath('/wt', left).toLowerCase()).not.toBe(writeProbePath('/wt', right).toLowerCase())
+    }
+  })
+
   test('paths sanitize the adapter and prompts carry the file and token markers', () => {
-    expect(writeProbePath('/wt', 'codex medium!')).toBe('/wt/.df12-write-probe-codex-medium-')
+    expect(writeProbePath('/wt', 'codex medium!')).toMatch(/^\/wt\/\.df12-write-probe-codex-medium--[0-9a-f]{64}$/)
     const token = writeProbeToken('1.2.3', 'codex')
     expect(token).toBe('df12-write-probe v1 task=1.2.3 adapter=codex')
     const prompt = writeProbePrompt('/wt/.probe', token)

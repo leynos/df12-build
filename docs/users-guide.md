@@ -690,12 +690,15 @@ CodeScene, then Dakar, and only then dispatches the reviewer agents. Set
 CLI-specific behaviour is documented next.
 
 Dakar output is accepted only when its terminal JSON document matches a known
-review shape. A `changes-requested` verdict needs at least one finding with a
-supported severity and string `path`, `title`, `detail`, and `evidence` fields;
-an optional `line` must be a positive integer. A `pass` verdict or a result with
-`skipped: true` must not carry findings. Unparsable, malformed, contradictory,
-or unrecognized output becomes a host-review `error` with error category
-`invalid-output`, rather than a clean review.
+review shape. A non-skipped `changes-requested` verdict needs at least one
+finding with a supported severity and string `path`, `title`, `detail`, and
+`evidence` fields; an optional `line` must be a positive integer. With
+`ok: true`, either `skipped: true` or `verdict: "pass"` is treated as a clean
+result when findings are absent or empty. This means `skipped: true` takes
+precedence even if the document also says `verdict: "changes-requested"`; any
+non-empty findings on that path are rejected. Unparsable, malformed, or
+otherwise unrecognized output becomes a host-review `error` with error category
+`invalid-output`, not a clean review.
 
 ## Host-run CodeRabbit review
 

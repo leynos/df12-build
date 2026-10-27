@@ -92,12 +92,14 @@ function isProbeSymlinkError(error: unknown): boolean {
 
 /**
  * Path for one adapter's probe file inside a task worktree. The adapter
- * name is sanitized so it can never escape the intended directory or
- * collide with an unrelated dotfile.
+ * name is sanitized and paired with a digest of its exact bytes, keeping
+ * case-distinct and differently sanitized names separate on every filesystem.
  */
 export function writeProbePath(worktree: string, adapter: string): string {
   const path = process.getBuiltinModule('node:path')
-  return path.join(worktree, `.df12-write-probe-${String(adapter).replaceAll(/[^0-9a-zA-Z._-]+/g, '-')}`)
+  const digest = process.getBuiltinModule('node:crypto').createHash('sha256').update(adapter).digest('hex')
+  const readable = adapter.replaceAll(/[^0-9a-zA-Z._-]+/g, '-').slice(0, 40)
+  return path.join(worktree, `.df12-write-probe-${readable}-${digest}`)
 }
 
 /**

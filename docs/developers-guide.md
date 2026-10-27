@@ -195,11 +195,15 @@ but only literal `true` enables recovery. The user guide lists the documented
 field types and the fields that accept numbers or strings.
 
 Assessment and write-preflight agent calls retain their required JSON Schemas
-after adapter option routing. If an assessment reply is absent or malformed,
-the workflow does not use a classification: the original task result carries
-`assessmentError` and the collected `assessmentEvidence`; fresh-run recovery
-returns `assessment: null`, `assessmentError`, and host-collected `evidence`.
-Assessment remains report-only.
+after adapter option routing. For an in-run assessment reply that is absent or
+malformed, `attachAssessment` leaves the task result intact and adds
+`assessmentError` with `assessmentEvidence`. At the assessment-module boundary,
+`assessRecoveryCandidate` returns `evidence`, `assessment: null`, and
+`assessmentError` when no classification is produced. `runRecovery` records
+`action: assessment-error`, the error, and the skipped candidate in
+`recovery.results`; it does not copy the evidence into that summary entry.
+Authentication or provider failures also produce a fatal run result. Assessment
+remains report-only.
 
 The write-preflight schema requires a boolean `ok` and permits an optional
 string `detail`. The host checks the probe file itself for the exact token in a
