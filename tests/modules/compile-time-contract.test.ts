@@ -102,6 +102,12 @@ const CHANGED_EXPORTS_PRELUDE = [
   `import type { HostGateSurface } from '${path.join(ODW_SRC, 'host-gates.ts')}'`,
   `import type { OnlyTaskCandidate, taskMatchesOnlyTask } from '${path.join(ODW_SRC, 'roadmap.ts')}'`,
   `import type { TaskOutcome, checkedTaskOutcome } from '${path.join(ODW_SRC, 'task-outcome.ts')}'`,
+  `import type { makeConfig, WorkflowConfig } from '${path.join(ODW_SRC, 'config.ts')}'`,
+  `import type { execplanRelPath, ExecplanPathResolution } from '${path.join(ODW_SRC, 'execplan-durability.ts')}'`,
+  `import type { gitEvidence, GitEvidenceValue } from '${path.join(ODW_SRC, 'git-evidence.ts')}'`,
+  `import type { parseRoadmap } from '${path.join(ODW_SRC, 'roadmap.ts')}'`,
+  `import type { summarizeFixReport, FixReportSummary } from '${path.join(ODW_SRC, 'run-task.ts')}'`,
+  `import type { DakarDocument, DakarFinding, DakarFindingValidation, parseDakarDocument } from '${path.join(ODW_SRC, 'dakar-review.ts')}'`,
 ].join('\n')
 
 function typecheckFaultMetrics(body: string): { ok: boolean; output: string } {
@@ -160,7 +166,35 @@ describe('changed workflow consumer contracts', () => {
       const checked: TaskOutcome = (null as unknown as typeof checkedTaskOutcome)(outcome)
       // @ts-expect-error pushed is a boolean
       const badOutcome: TaskOutcome = { id: '1.2', status: 'done', integration: { pushed: 'yes' } }
-      void [summary, summaryResult, badSummary, event, parsed, events, badEvent, badLines, gateResult, candidate, matches, badCandidate, outcome, checked, badOutcome]
+      const config: WorkflowConfig = (null as unknown as typeof makeConfig)({ maxTasks: 2 })
+      const rawConfig: Parameters<typeof makeConfig>[0] = 42
+      // @ts-expect-error workflow config has a numeric task limit
+      const badLimit: string = config.MAX_TASKS
+      const pathResult: ExecplanPathResolution = (null as unknown as typeof execplanRelPath)('/work', 42)
+      // @ts-expect-error worktree path must be a string
+      ;(null as unknown as typeof execplanRelPath)(42, 'docs/execplans/a.md')
+      const git = null as unknown as typeof gitEvidence
+      const plain: Promise<GitEvidenceValue<string>> = git('/work', ['status'])
+      const structured: Promise<GitEvidenceValue<number>> = git('/work', ['status'], (text) => text.length)
+      // @ts-expect-error the parser result is a number, not a string
+      const wrongParsed: Promise<GitEvidenceValue<string>> = git('/work', ['status'], (text) => text.length)
+      // @ts-expect-error git command arguments must be strings
+      git('/work', [42])
+      const roadmap = (null as unknown as typeof parseRoadmap)('')
+      const completed: Set<string> = roadmap.completed
+      // @ts-expect-error roadmap parser requires text
+      ;(null as unknown as typeof parseRoadmap)(42)
+      const fix: FixReportSummary | null = (null as unknown as typeof summarizeFixReport)({ gatesGreen: true })
+      // @ts-expect-error a number is not a fix report
+      ;(null as unknown as typeof summarizeFixReport)(42)
+      const document: DakarDocument | null = (null as unknown as typeof parseDakarDocument)('{}')
+      const finding: DakarFinding = { severity: 'high', line: null }
+      const validated: DakarFindingValidation = { ok: true, findings: [finding] }
+      // @ts-expect-error Dakar finding lines are numeric or null
+      const badFinding: DakarFinding = { line: '12' }
+      // @ts-expect-error successful validation requires findings
+      const badValidation: DakarFindingValidation = { ok: true }
+      void [summary, summaryResult, badSummary, event, parsed, events, badEvent, badLines, gateResult, candidate, matches, badCandidate, outcome, checked, badOutcome, config, rawConfig, badLimit, pathResult, plain, structured, wrongParsed, roadmap, completed, fix, document, validated, badFinding, badValidation]
     `, 'cs-changed-exports-')
     expect(result.ok, result.output).toBe(true)
   }, HOST_REVIEW_TYPECHECK_TIMEOUT_MS)

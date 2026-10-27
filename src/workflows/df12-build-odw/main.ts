@@ -350,16 +350,19 @@ const runAuthPreflight = makeAuthPreflight(
 // Deterministic roadmap selection
 // ---------------------------------------------------------------------------
 
+/** Derive a stable branch slug, distinguishing an addendum pass from its parent. */
 function slugForTask(task: SelectedTask): string {
   return `roadmap-${roadmapIdSlug(task.id)}${task.isAddendum ? '-addendum' : ''}`
 }
 
+/** Locate the sibling directory used for isolated task worktrees. */
 function worktreeParentPath() {
   const path = process.getBuiltinModule('node:path')
   const cwd = process.cwd()
   return path.join(path.dirname(cwd), `${path.basename(cwd)}.worktrees`)
 }
 
+/** Prepare an isolated task worktree and return setup failures as task evidence. */
 async function createWorktree(task: SelectedTask) {
   const fs = process.getBuiltinModule('node:fs/promises')
   const path = process.getBuiltinModule('node:path')
@@ -413,6 +416,7 @@ async function createWorktree(task: SelectedTask) {
   }
 }
 
+/** Read the canonical roadmap, falling back to local state when necessary. */
 async function readRoadmapForSelection(root: string = process.cwd()) {
   const canonicalRef = `origin/${BASE}:${ROADMAP}`
   try {
@@ -460,6 +464,7 @@ type RecoveryReportedResult = {
   assessment?: AnyRecord
 }
 
+/** Re-enter a surviving task at its selected stage and classify pipeline failures. */
 async function executeResume(
   task: SelectedTask,
   resume: ResumeContext,
@@ -693,6 +698,7 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
   return { summary, taskResults, held, fatal: null }
 }
 
+/** Build write-probe targets for each adapter used by the task pipeline. */
 function writeProbeTargets() {
   // The probe keeps the real adapter (it tests THAT adapter's launch/sandbox
   // write permission) but right-sizes the model: minimal effort, an optional
@@ -723,6 +729,7 @@ function writeProbeTargets() {
 // ---------------------------------------------------------------------------
 // Post-step audit
 // ---------------------------------------------------------------------------
+/** Audit a completed task for follow-up roadmap work. */
 async function runAudit(task: { id: string }) {
   phase('Audit')
   const audit = await agent(auditPrompt(task, null), auditAgentOptions({ phase: 'Audit', label: `audit:after-${task.id}`, schema: AUDIT_SCHEMA }))
@@ -778,6 +785,7 @@ function mutex() {
 }
 const mergeLock = mutex()
 
+/** Bound concurrent stage calls while preserving each call’s result or rejection. */
 function semaphore(limit: number) {
   const max = Math.max(1, limit)
   const queue: Array<() => void> = []
@@ -864,6 +872,7 @@ const {
 })
 
 let selectSeq = 0
+/** Select the next unclaimed roadmap task using the current canonical roadmap. */
 async function doSelect(taken: { normal: string[]; addendum: string[] }) {
   phase('Select')
   const label = `select#${++selectSeq}`
@@ -921,6 +930,7 @@ function markDryRun(task: SelectedTask) {
   dryRunSet.add(task.id)
 }
 
+/** Accumulate proposals until their roadmap step is ready for triage. */
 function addPending(step: string, items: AnyRecord[] | undefined) {
   if (!items || items.length === 0) return
   if (!pendingByStep.has(step)) pendingByStep.set(step, [])

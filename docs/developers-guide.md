@@ -184,6 +184,30 @@ loader would reject. Within the src tree, keep the ODW script contract intact:
 Changes to workflow behaviour must update all relevant prompts, schemas, docs,
 and validation notes in the same branch.
 
+### Runtime input and structured-output boundaries
+
+`makeConfig` accepts a record of workflow arguments, or `null`/`undefined` to
+use defaults. It rejects arrays, primitives, and wrong types for documented
+fields with `Invalid workflow argument type`; `writeProbeModelByAdapter` must
+be a record of string values. Unknown keys remain accepted for forward
+compatibility. The legacy `resumePartialBranches` key is deliberately untyped,
+but only literal `true` enables recovery. The user guide lists the documented
+field types and the fields that accept numbers or strings.
+
+Assessment and write-preflight agent calls retain their required JSON Schemas
+after adapter option routing. If an assessment reply is absent or malformed,
+the workflow does not use a classification: the original task result carries
+`assessmentError` and the collected `assessmentEvidence`; fresh-run recovery
+returns `assessment: null`, `assessmentError`, and host-collected `evidence`.
+Assessment remains report-only.
+
+The write-preflight schema requires a boolean `ok` and permits an optional
+string `detail`. The host checks the probe file itself for the exact token in a
+regular, non-symlink file; the agent's `ok` claim is not proof of write access.
+A malformed reply is treated as an agent error, and when host verification also
+fails its detail appears in the probe failure. A failed host-verified probe
+fails the task at `stage: worktree-write`.
+
 ## Submodule architecture and composition
 
 `workflows/df12-build-odw.js` is compiled from the module tree under
@@ -305,15 +329,15 @@ writes. Never wrap the integration agent in `withInfraRetry` — its push to
 sites as unwrapped.
 
 `checkedTaskOutcome` in `task-outcome.ts` validates the optional result fields
-read by recovery and the worker pool before those consumers use them. It allows
-`integration` to be null or a record, and checks that `integration.pushed` is
-boolean when present; `kind` and `assessmentError` are strings; `proposals` is
-an array of records; and `assessment` is a record. A `salvage` value must
-contain string `classification`, `sha`, and `detail` fields, string `committed`
-entries, and `skipped` records with string `path` and `reason` fields.
-Unrelated result data is preserved. Invalid shapes throw
-`Invalid task outcome`, which the normal and recovery paths turn into a task
-failure instead of consuming malformed data.
+read by recovery and the worker pool before those consumers use them. The
+validator accepts `integration` as `null` or a record, and checks that
+`integration.pushed` is boolean when present; `kind` and `assessmentError` are
+strings; `proposals` is an array of records; and `assessment` is a record. A
+`salvage` value must contain string `classification`, `sha`, and `detail`
+fields, `committed` as an array of strings, and `skipped` records with string
+`path` and `reason` fields. Unrelated result data is preserved. Invalid shapes
+throw `Invalid task outcome`, which the normal and recovery paths turn into a
+task failure instead of consuming malformed data.
 
 Recovery assessment carries two distinct evidence channels, typed by
 `RecoveryAssessmentFields` in `recovery-decision.ts`: blocking

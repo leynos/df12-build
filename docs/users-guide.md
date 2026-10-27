@@ -442,14 +442,14 @@ for ODW launches.
 Arguments must be an object. Missing or `null` arguments use the defaults;
 arrays, primitives, and values of the wrong type for a documented field fail at
 launch with `Invalid workflow argument type`. String fields require strings,
-numeric fields numbers, and boolean fields booleans. These number-or-string
-fields also accept strings: `stageAttempts`, `maxWorkItemRounds`,
-`resumeTaskId`, `resumeMaxCandidates`, `reviewTimeoutSeconds`,
-`dakarTimeoutSeconds`, `dakarBudgetGbp`, `coderabbitAttempts`,
-`hostReviewAttempts`, and `commitGateTimeoutSeconds`. Unknown object keys are
-ignored by this version and remain available for future options. The legacy
-`resumePartialBranches` key accepts any value, but only literal `true` enables
-recovery.
+numeric fields require numbers, and boolean fields require booleans. These
+number-or-string fields also accept strings: `stageAttempts`,
+`maxWorkItemRounds`, `resumeTaskId`, `resumeMaxCandidates`,
+`reviewTimeoutSeconds`, `dakarTimeoutSeconds`, `dakarBudgetGbp`,
+`coderabbitAttempts`, `hostReviewAttempts`, and `commitGateTimeoutSeconds`.
+Unknown object keys are ignored by this version and remain available for future
+options. The legacy `resumePartialBranches` key accepts any value, but only
+literal `true` enables recovery.
 
 Common arguments:
 
@@ -621,7 +621,8 @@ Common arguments:
 - `worktreeWritePreflight`: when `false`, skip the once-per-run probe that
   proves the planning and build adapters can write into sibling task worktrees.
   Defaults to enabled; a failed probe fails the task at stage `worktree-write`
-  as an environment fault.
+  as an environment fault. The host verifies the exact token in the probe file;
+  it does not rely on the agent's reported `ok` value.
 - `buildAdapter` and `buildModel`: adapter and model for worktree creation,
   implementation, integration, and remediation agents.
 - `planAdapter` and `planModel`: adapter and model for planning agents.
@@ -818,6 +819,12 @@ classification is one of:
 Assessment is report-only. It never marks roadmap checkboxes, pushes, merges,
 or cherry-picks. Use it to decide whether to preserve, manually finish, park,
 or discard the branch before relaunching from `origin/<base>`.
+
+If the assessment agent returns no structured result or a malformed one, the
+workflow leaves the task's existing outcome intact and reports
+`assessmentError` with host-collected evidence. Recovery results use
+`assessment: null` when no classification was produced; assessment failure does
+not make a branch eligible for adoption.
 
 After an `adopt-partial` or `continue-manual` verdict — and also after an
 infrastructure fault such as schema-retry exhaustion — the workflow commits any
