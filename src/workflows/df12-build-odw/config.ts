@@ -180,6 +180,10 @@ type CompatibilityWorkflowArgs = Omit<RawWorkflowArgs,
   coderabbitFindingsFile?: string
 }
 
+function isConfigRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
 // Validate the compatibility boundary before treating dynamic ODW arguments
 // as documented options. Unknown keys remain available to future versions.
 function isCompatibilityWorkflowArgs(value: Record<string, unknown>): value is CompatibilityWorkflowArgs {
@@ -389,8 +393,11 @@ export interface WorkflowConfig {
  * or missing argument yields the full default configuration. Throws when
  * `resumeMode` is not one of `assess`, `review`, or `continue`.
  */
-export function makeConfig(rawArgs: Record<string, unknown> | null | undefined): WorkflowConfig {
-  const cfg = rawArgs || {}
+export function makeConfig(rawArgs: unknown): WorkflowConfig {
+  if (rawArgs !== null && rawArgs !== undefined && !isConfigRecord(rawArgs)) {
+    throw new Error('Invalid workflow argument type')
+  }
+  const cfg: Record<string, unknown> = rawArgs ?? {}
   if (!isCompatibilityWorkflowArgs(cfg)) throw new Error('Invalid workflow argument type')
   const PROJECT_ROOT = cfg.projectRoot || process.cwd()
   const BASE = cfg.base || 'main' // integration branch: rebase + squash-merge target, roadmap source of truth

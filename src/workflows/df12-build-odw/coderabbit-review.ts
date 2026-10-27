@@ -125,9 +125,20 @@ export function parseCoderabbitAgentOutput(stdout: string): CoderabbitParsedOutp
   return { events, rawLines, findings, complete, error }
 }
 
+/** Preserve actionable authentication evidence even when its event is malformed. */
+function malformedCoderabbitAuthEvidence(parsed: CoderabbitParsedOutput): string {
+  for (const event of parsed.events) {
+    if (event.type === 'error' && !isCoderabbitError(event) && typeof event.message === 'string') {
+      const detail = authFailureDetail(event.message)
+      if (detail) return detail
+    }
+  }
+  return ''
+}
+
 /** Classify parsed CodeRabbit events into the shared outcome vocabulary. */
 export function classifyCoderabbitOutcome(execResult: { ok?: boolean; stderr?: string; message?: string }, parsed: CoderabbitParsedOutput): ReviewOutcome {
-  const errorText = [parsed.error?.message || '', execResult.stderr || '', execResult.message || ''].join('\n')
+  const errorText = [parsed.error?.message || '', malformedCoderabbitAuthEvidence(parsed), execResult.stderr || '', execResult.message || ''].join('\n')
   if (parsed.error?.errorType === 'rate_limit' || /\brate.?limit|review limit reached/i.test(errorText)) return 'rate-limited'
   if (authFailureDetail(errorText)) return 'auth'
   if (parsed.error || (!execResult.ok && !parsed.complete)) return 'error'
@@ -169,7 +180,8 @@ export function makeCoderabbitAttempt(config: Pick<HostReviewConfig, 'base' | 'r
     }
     const parsed = parseCoderabbitAgentOutput(result.stdout)
     const outcome = classifyCoderabbitOutcome(result, parsed)
-    const detail = outcome === 'clean' || outcome === 'findings' ? '' : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join('; ') || 'coderabbit produced no parsable outcome').trim()
+    const authEvidence = outcome === 'auth' ? malformedCoderabbitAuthEvidence(parsed) : ''
+    const detail = outcome === 'clean' || outcome === 'findings' ? '' : (authEvidence || parsed.error?.message || result.message || result.stderr || parsed.rawLines.join('; ') || 'coderabbit produced no parsable outcome').trim()
     const errorCategory = coderabbitErrorCategory(result, outcome, parsed)
     span.end({ reviewer: 'coderabbit', attempt: deps.attempt || 1, outcome, errorCategory, timeout: errorCategory === 'timeout', elapsedMs: elapsedSince(startedMs) })
     return { outcome, findings: parsed.findings, detail: boundedTail(detail), errorCategory }

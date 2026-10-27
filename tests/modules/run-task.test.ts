@@ -382,6 +382,46 @@ describe('runTask', () => {
     expect(runFaultMetrics.authFaults).toBe(1)
   })
 
+  test('malformed dual review retains valid blocking findings', async () => {
+    const worktree = makeWorktree()
+    try {
+      scriptAgent(happyScript())
+      const outcome = await subject(worktree, {
+        HOST_REVIEW_ENABLED: true,
+        MAX_REVIEW_ROUNDS: 1,
+        runHostReview: async () => hostReviewResult({
+          outcome: 'error', errorCategory: 'invalid-output', detail: 'malformed event',
+          findings: [{ severity: 'major', comment: 'Do not lose this finding' }],
+        }),
+      }).runDualReviewAndIntegration(task, worktree, { execplanPath: PLAN_PATH }, greenImpl, null)
+      expect(outcome.status).not.toBe('done')
+      expect(JSON.stringify(outcome)).toContain('Do not lose this finding')
+      expect(labels.some((label) => label.startsWith('integrate:'))).toBe(false)
+    } finally {
+      rmSync(worktree, { recursive: true, force: true })
+    }
+  })
+
+  test('malformed between-item review retains valid blocking findings', async () => {
+    const worktree = makeWorktree()
+    try {
+      prepareSingleWorkItem(worktree)
+      scriptAgent((label, prompt) => label.startsWith('implement:') ? completeSingleWorkItem(worktree) : happyScript()(label, prompt))
+      const outcome = await subject(worktree, {
+        PER_WORK_ITEM_BUILD: true, HOST_REVIEW_ENABLED: true, HOST_REVIEW_BETWEEN_WORK_ITEMS: true,
+        runHostReview: async () => hostReviewResult({
+          outcome: 'error', errorCategory: 'invalid-output', detail: 'malformed event',
+          findings: [{ severity: 'major', comment: 'Do not lose this finding' }],
+        }),
+      }).runTask(task, null)
+      expect(outcome.status).not.toBe('done')
+      expect(JSON.stringify(outcome)).toContain('Do not lose this finding')
+      expect(labels.some((label) => label.startsWith('integrate:'))).toBe(false)
+    } finally {
+      rmSync(worktree, { recursive: true, force: true })
+    }
+  })
+
   test('an addendum implementation auth failure increments authFaults', async () => {
     const worktree = makeWorktree()
     const addendum = { ...task, isAddendum: true, subtasks: ['1.2.3.1'] }

@@ -439,6 +439,18 @@ Set project-specific behaviour in `args.json`. The workflow also has matching
 top-of-file defaults, but the sidecar `args.json` is the normal retuning point
 for ODW launches.
 
+Arguments must be an object. Missing or `null` arguments use the defaults;
+arrays, primitives, and values of the wrong type for a documented field fail at
+launch with `Invalid workflow argument type`. String fields require strings,
+numeric fields numbers, and boolean fields booleans. These number-or-string
+fields also accept strings: `stageAttempts`, `maxWorkItemRounds`,
+`resumeTaskId`, `resumeMaxCandidates`, `reviewTimeoutSeconds`,
+`dakarTimeoutSeconds`, `dakarBudgetGbp`, `coderabbitAttempts`,
+`hostReviewAttempts`, and `commitGateTimeoutSeconds`. Unknown object keys are
+ignored by this version and remain available for future options. The legacy
+`resumePartialBranches` key accepts any value, but only literal `true` enables
+recovery.
+
 Common arguments:
 
 - `base`: integration branch. Defaults to `main`.
@@ -691,6 +703,14 @@ ExecPlan durability contract doubles as the review contract. The host parses
 the CLI's structured findings; `critical` and `major` severities join the
 reviewers' blocking items and drive the ordinary fix rounds, while lower
 severities are captured without gating integration.
+
+The adapter validates the consumed fields in known `finding`, `error`, and
+`complete` events. Wrong field types make the review an `invalid_output` error
+instead of allowing a malformed event stream to count as clean; non-object JSON
+values and non-JSON lines remain diagnostic text. Valid error events remain
+authoritative, including rate-limit handling, and recognizable authentication
+errors still halt the task as `fatal-auth`. Valid blocking findings are
+retained and handled even when the same stream also contains malformed output.
 
 Rate limits are absorbed by the host: a rate-limited review waits a
 deterministic 45–90 minutes (`hostReviewBackoffMinutes`) and retries, up to

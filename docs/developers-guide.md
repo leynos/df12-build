@@ -58,9 +58,10 @@ Relevant paths:
   and CodeScene), `host-review-contracts.ts` (neutral review contracts), and
   `host-review.ts` (neutral composition facade), `shell-command.ts` (a
   non-evaluating parser for configured shell-command words and assignment
-  spans), and `run-task.ts`, with the injected ODW primitives declared in
-  `odw-globals.d.ts`. TypeScript is restricted to erasable syntax by compiler
-  flags (`erasableSyntaxOnly`, `verbatimModuleSyntax`).
+  spans), `run-task.ts`, and `task-outcome.ts` (validated task result fields),
+  with the injected ODW primitives declared in `odw-globals.d.ts`. TypeScript
+  is restricted to erasable syntax by compiler flags (`erasableSyntaxOnly`,
+  `verbatimModuleSyntax`).
 - `workflows/df12-build-odw.js`: GENERATED ODW/Codex workflow artefact, built
   by `make workflow-build` (see `scripts/build-workflow.mjs`); this is the
   single file the sidecar copies and ODW loads.
@@ -303,6 +304,17 @@ writes. Never wrap the integration agent in `withInfraRetry` — its push to
 `origin/<base>` is not idempotent, and a source-invariant test pins both call
 sites as unwrapped.
 
+`checkedTaskOutcome` in `task-outcome.ts` validates the optional result fields
+read by recovery and the worker pool before those consumers use them. It allows
+`integration` to be null or a record, and checks that `integration.pushed` is
+boolean when present; `kind` and `assessmentError` are strings; `proposals` is
+an array of records; and `assessment` is a record. A `salvage` value must
+contain string `classification`, `sha`, and `detail` fields, string `committed`
+entries, and `skipped` records with string `path` and `reason` fields.
+Unrelated result data is preserved. Invalid shapes throw
+`Invalid task outcome`, which the normal and recovery paths turn into a task
+failure instead of consuming malformed data.
+
 Recovery assessment carries two distinct evidence channels, typed by
 `RecoveryAssessmentFields` in `recovery-decision.ts`: blocking
 `missingEvidence` and advisory `residualRisk` (read via the
@@ -429,6 +441,13 @@ is a real gate, not a label. Test loaders and the simulation driver force
 burn review quota; the pipeline seam is covered by a fake NDJSON-emitting
 `coderabbit` on `PATH`, and the between-item gate by an injected
 `runCoderabbitHostReview`.
+
+The adapter validates consumed fields in known finding, error, and completion
+events. Malformed known events produce an `invalid_output` error; valid finding
+events remain available to the pipeline, while valid error events and
+recognizable authentication evidence retain their classification. The task
+pipeline handles valid blocking findings before it applies the invalid-output
+deferral or halt, so malformed output cannot erase a known blocker.
 
 Every fix round — gate fix, dual-review fix, and between-item fix — is followed
 by `verifyWorktreeCommitted`; a fix that leaves the worktree dirty fails the

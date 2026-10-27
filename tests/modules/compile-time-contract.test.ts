@@ -96,6 +96,14 @@ function typecheckHostReview(body: string): { ok: boolean; output: string } {
 
 const FAULT_METRICS_PRELUDE = `import type { FaultMetrics } from '${path.join(ODW_SRC, 'types.ts')}'`
 
+const CHANGED_EXPORTS_PRELUDE = [
+  `import type { SalvageSummary, summarizeSalvages } from '${path.join(ODW_SRC, 'assessment.ts')}'`,
+  `import type { CoderabbitJsonObject, CoderabbitParsedOutput, parseCoderabbitAgentOutput } from '${path.join(ODW_SRC, 'coderabbit-review.ts')}'`,
+  `import type { HostGateSurface } from '${path.join(ODW_SRC, 'host-gates.ts')}'`,
+  `import type { OnlyTaskCandidate, taskMatchesOnlyTask } from '${path.join(ODW_SRC, 'roadmap.ts')}'`,
+  `import type { TaskOutcome, checkedTaskOutcome } from '${path.join(ODW_SRC, 'task-outcome.ts')}'`,
+].join('\n')
+
 function typecheckFaultMetrics(body: string): { ok: boolean; output: string } {
   return typecheckWithPrelude(FAULT_METRICS_PRELUDE, body, 'cs-fault-metrics-')
 }
@@ -123,6 +131,39 @@ describe('compile-time contract', () => {
     const result = typecheck('export type Id = string\nexport const make = (id: Id): Id => id\n')
     expect(result.ok).toBe(true)
   }, 30_000)
+})
+
+describe('changed workflow consumer contracts', () => {
+  test('exported shapes and signatures accept valid consumers and reject invalid ones', () => {
+    const result = typecheckWithPrelude(CHANGED_EXPORTS_PRELUDE, `
+      const summary: SalvageSummary = { salvages: [], salvagedBranches: 0, summarySuffix: '' }
+      const summaryResult: SalvageSummary = (null as unknown as typeof summarizeSalvages)([])
+      // @ts-expect-error salvagedBranches is a count, not a string
+      const badSummary: SalvageSummary = { salvages: [], salvagedBranches: 'zero', summarySuffix: '' }
+      const event: CoderabbitJsonObject = { type: 'finding', nested: [true, { count: 1 }] }
+      const parsed: CoderabbitParsedOutput = (null as unknown as typeof parseCoderabbitAgentOutput)('')
+      const events: CoderabbitJsonObject[] = parsed.events
+      // @ts-expect-error event payloads must be JSON values
+      const badEvent: CoderabbitJsonObject = { value: () => 1 }
+      // @ts-expect-error raw lines are strings
+      const badLines: string[] = parsed.events
+      const surface = null as unknown as HostGateSurface
+      const gateResult = surface.runHostCommitGates('/work', 'task', 'round')
+      surface.disposeHostGateLogs()
+      // @ts-expect-error gate arguments are strings
+      surface.runHostCommitGates(1, 'task', 'round')
+      const candidate: OnlyTaskCandidate = { task: { id: '1.2', subtasks: ['1.2.1'] } }
+      const matches: boolean = (null as unknown as typeof taskMatchesOnlyTask)(candidate, null)
+      // @ts-expect-error task identity must be a string
+      const badCandidate: OnlyTaskCandidate = { task: { id: 12 } }
+      const outcome: TaskOutcome = { id: '1.2', status: 'done', integration: { pushed: true } }
+      const checked: TaskOutcome = (null as unknown as typeof checkedTaskOutcome)(outcome)
+      // @ts-expect-error pushed is a boolean
+      const badOutcome: TaskOutcome = { id: '1.2', status: 'done', integration: { pushed: 'yes' } }
+      void [summary, summaryResult, badSummary, event, parsed, events, badEvent, badLines, gateResult, candidate, matches, badCandidate, outcome, checked, badOutcome]
+    `, 'cs-changed-exports-')
+    expect(result.ok, result.output).toBe(true)
+  }, HOST_REVIEW_TYPECHECK_TIMEOUT_MS)
 })
 
 describe('fault metrics public type contract', () => {

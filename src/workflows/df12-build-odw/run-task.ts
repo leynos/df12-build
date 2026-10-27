@@ -819,7 +819,9 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
         return { fail: { id: tag, status: 'fatal-auth', stage: 'auth', detail: `${hostReviewerDisplayName} host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } }
       }
       if (review.outcome === 'rate-limited' || review.outcome === 'error') {
-        return { fail: { id: tag, status: 'halted', stage: 'code-review', detail: `${hostReviewerDisplayName} between-item review could not complete for ${itemLabel} (${review.outcome} after ${review.attempts} attempt(s), ${review.errorCategory}): ${review.detail}; the work is committed but unreviewed — resolve the host-review fault and relaunch with resumeMode: "continue"`, worktree, proposals: [], ...extra } }
+        const blocking = reviewBlockingItems(hostReviewerDisplayName, review.findings)
+        const findingsDetail = blocking.length > 0 ? `; blocking findings: ${blocking.join('; ')}` : ''
+        return { fail: { id: tag, status: 'halted', stage: 'code-review', detail: `${hostReviewerDisplayName} between-item review could not complete for ${itemLabel} (${review.outcome} after ${review.attempts} attempt(s), ${review.errorCategory}): ${review.detail}${findingsDetail}; the work is committed but unreviewed — resolve the host-review fault and relaunch with resumeMode: "continue"`, worktree, proposals: [], ...extra } }
       }
       const blocking = reviewBlockingItems(hostReviewerDisplayName, review.findings)
       log(`[task ${tag}] between-item ${hostReviewerDisplayName} ${itemLabel} attempt ${attempt}: ${review.findings.length} finding(s), ${blocking.length} blocking`)
@@ -1093,14 +1095,14 @@ export function makeTaskPipeline(deps: TaskPipelineDeps): TaskPipelineSurface {
           faultMetrics.authFaults += 1
           return { id: tag, status: 'fatal-auth', stage: 'review', detail: `${hostReviewerDisplayName} host review is not authenticated: ${hostReview.detail}`, reviewRounds, worktree, proposals, ...kindExtra }
         }
-        if (hostReview.outcome === 'rate-limited' || hostReview.outcome === 'error') {
+        const hostReviewBlocking = reviewBlockingItems(hostReviewerDisplayName, hostReview.findings)
+        if ((hostReview.outcome === 'rate-limited' || hostReview.outcome === 'error') && hostReviewBlocking.length === 0) {
           // Deferred: the host reviewer could not complete, so fall through to the
           // reviewer agents — they remain the decisive review.
           const deferral = hostReviewDeferral(hostReview)
           if (deferral) deferredHostReviews.push(deferral)
           log(`[task ${tag}] ${hostReviewerDisplayName} host review deferred in round ${round}: ${hostReview.outcome} (${hostReview.errorCategory}: ${hostReview.detail})`)
         } else {
-          const hostReviewBlocking = reviewBlockingItems(hostReviewerDisplayName, hostReview.findings)
           log(`[task ${tag}] ${hostReviewerDisplayName} host review round ${round}: ${hostReview.findings.length} finding(s), ${hostReviewBlocking.length} blocking`)
           if (hostReviewBlocking.length > 0) {
             // Short-circuit before the reviewer agents: fix the host-review

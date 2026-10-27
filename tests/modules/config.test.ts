@@ -278,3 +278,10 @@ test('recovery discovery requires literal true even for truthy legacy input', ()
   expect(makeConfig({ resumePartialBranches: 'yes' }).RESUME_PARTIAL_BRANCHES).toBe(false)
   expect(makeConfig({ resumePartialBranches: true }).RESUME_PARTIAL_BRANCHES).toBe(true)
 })
+
+test('rejects non-object top-level arguments', () => {
+  for (const input of [[], 'text', 0, false]) {
+    expect(() => makeConfig(input)).toThrow('Invalid workflow argument type')
+  }
+  expect(makeConfig(null).BASE).toBe('main')
+})

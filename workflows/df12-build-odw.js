@@ -1199,6 +1199,9 @@ function makeHostReviewMetrics() {
 }
 
 // src/workflows/df12-build-odw/config.ts
+function isConfigRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 function isCompatibilityWorkflowArgs(value) {
   const strings = [
     "projectRoot",
@@ -1277,7 +1280,10 @@ function isReviewTool(value) {
   return REVIEW_TOOLS.some((tool) => tool === value);
 }
 function makeConfig(rawArgs) {
-  const cfg = rawArgs || {};
+  if (rawArgs !== null && rawArgs !== void 0 && !isConfigRecord(rawArgs)) {
+    throw new Error("Invalid workflow argument type");
+  }
+  const cfg = rawArgs ?? {};
   if (!isCompatibilityWorkflowArgs(cfg)) throw new Error("Invalid workflow argument type");
   const PROJECT_ROOT2 = cfg.projectRoot || process.cwd();
   const BASE2 = cfg.base || "main";
@@ -2779,8 +2785,17 @@ function parseCoderabbitAgentOutput(stdout) {
   if (invalidReason && !error) error = { type: "error", errorType: "invalid_output", message: invalidReason };
   return { events, rawLines, findings, complete, error };
 }
+function malformedCoderabbitAuthEvidence(parsed) {
+  for (const event of parsed.events) {
+    if (event.type === "error" && !isCoderabbitError(event) && typeof event.message === "string") {
+      const detail = authFailureDetail(event.message);
+      if (detail) return detail;
+    }
+  }
+  return "";
+}
 function classifyCoderabbitOutcome(execResult, parsed) {
-  const errorText = [parsed.error?.message || "", execResult.stderr || "", execResult.message || ""].join("\n");
+  const errorText = [parsed.error?.message || "", malformedCoderabbitAuthEvidence(parsed), execResult.stderr || "", execResult.message || ""].join("\n");
   if (parsed.error?.errorType === "rate_limit" || /\brate.?limit|review limit reached/i.test(errorText)) return "rate-limited";
   if (authFailureDetail(errorText)) return "auth";
   if (parsed.error || !execResult.ok && !parsed.complete) return "error";
@@ -2816,7 +2831,8 @@ function makeCoderabbitAttempt(config) {
     }
     const parsed = parseCoderabbitAgentOutput(result.stdout);
     const outcome = classifyCoderabbitOutcome(result, parsed);
-    const detail = outcome === "clean" || outcome === "findings" ? "" : (parsed.error?.message || result.message || result.stderr || parsed.rawLines.join("; ") || "coderabbit produced no parsable outcome").trim();
+    const authEvidence = outcome === "auth" ? malformedCoderabbitAuthEvidence(parsed) : "";
+    const detail = outcome === "clean" || outcome === "findings" ? "" : (authEvidence || parsed.error?.message || result.message || result.stderr || parsed.rawLines.join("; ") || "coderabbit produced no parsable outcome").trim();
     const errorCategory = coderabbitErrorCategory(result, outcome, parsed);
     span.end({ reviewer: "coderabbit", attempt: deps.attempt || 1, outcome, errorCategory, timeout: errorCategory === "timeout", elapsedMs: elapsedSince(startedMs) });
     return { outcome, findings: parsed.findings, detail: boundedTail(detail), errorCategory };
@@ -3747,7 +3763,9 @@ function makeTaskPipeline(deps) {
         return { fail: { id: tag, status: "fatal-auth", stage: "auth", detail: `${hostReviewerDisplayName} host review is not authenticated: ${review.detail}`, worktree, proposals: [], ...extra } };
       }
       if (review.outcome === "rate-limited" || review.outcome === "error") {
-        return { fail: { id: tag, status: "halted", stage: "code-review", detail: `${hostReviewerDisplayName} between-item review could not complete for ${itemLabel} (${review.outcome} after ${review.attempts} attempt(s), ${review.errorCategory}): ${review.detail}; the work is committed but unreviewed \u2014 resolve the host-review fault and relaunch with resumeMode: "continue"`, worktree, proposals: [], ...extra } };
+        const blocking2 = reviewBlockingItems(hostReviewerDisplayName, review.findings);
+        const findingsDetail = blocking2.length > 0 ? `; blocking findings: ${blocking2.join("; ")}` : "";
+        return { fail: { id: tag, status: "halted", stage: "code-review", detail: `${hostReviewerDisplayName} between-item review could not complete for ${itemLabel} (${review.outcome} after ${review.attempts} attempt(s), ${review.errorCategory}): ${review.detail}${findingsDetail}; the work is committed but unreviewed \u2014 resolve the host-review fault and relaunch with resumeMode: "continue"`, worktree, proposals: [], ...extra } };
       }
       const blocking = reviewBlockingItems(hostReviewerDisplayName, review.findings);
       log(`[task ${tag}] between-item ${hostReviewerDisplayName} ${itemLabel} attempt ${attempt}: ${review.findings.length} finding(s), ${blocking.length} blocking`);
@@ -3967,12 +3985,12 @@ function makeTaskPipeline(deps) {
           faultMetrics2.authFaults += 1;
           return { id: tag, status: "fatal-auth", stage: "review", detail: `${hostReviewerDisplayName} host review is not authenticated: ${hostReview2.detail}`, reviewRounds, worktree, proposals, ...kindExtra };
         }
-        if (hostReview2.outcome === "rate-limited" || hostReview2.outcome === "error") {
+        const hostReviewBlocking = reviewBlockingItems(hostReviewerDisplayName, hostReview2.findings);
+        if ((hostReview2.outcome === "rate-limited" || hostReview2.outcome === "error") && hostReviewBlocking.length === 0) {
           const deferral = hostReviewDeferral(hostReview2);
           if (deferral) deferredHostReviews.push(deferral);
           log(`[task ${tag}] ${hostReviewerDisplayName} host review deferred in round ${round}: ${hostReview2.outcome} (${hostReview2.errorCategory}: ${hostReview2.detail})`);
         } else {
-          const hostReviewBlocking = reviewBlockingItems(hostReviewerDisplayName, hostReview2.findings);
           log(`[task ${tag}] ${hostReviewerDisplayName} host review round ${round}: ${hostReview2.findings.length} finding(s), ${hostReviewBlocking.length} blocking`);
           if (hostReviewBlocking.length > 0) {
             reviewRounds.push(withHostGateEvidence({ round, codeReview: null, expertReview: null, blocking: hostReviewBlocking, fix: null }, hostGates));
@@ -4541,7 +4559,7 @@ async function executeResume(task, resume, mergeLock2) {
     if (stage === "plan" || stage === "implement") {
       if (stage === "plan") {
         const planned = await runPlanDesignLoop(task, worktree, { resume: true, extra });
-        if (planned.kind === "failure") return planned.fail;
+        if (planned.kind === "failure") return checkedTaskOutcome(planned.fail);
         plan = planned.plan;
       } else {
         plan = {
@@ -4551,17 +4569,17 @@ async function executeResume(task, resume, mergeLock2) {
         };
       }
       const built = await runImplementationStage(task, worktree, plan, { resume: stage === "implement", extra });
-      if (built.kind === "failure") return built.fail;
+      if (built.kind === "failure") return checkedTaskOutcome(built.fail);
       impl = built.impl;
     } else {
       const synthetic = await syntheticRecoveryImpl(enriched, evidence, residualRisk);
       impl = synthetic;
       plan = { execplanPath: synthetic.execplanPath, workItems: [], summary: synthetic.summary };
     }
-    return await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock2, { kind: "recovery-resume" });
+    return checkedTaskOutcome(await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock2, { kind: "recovery-resume" }));
   } catch (error) {
     const detail = `unhandled agent error: ${faultThrownMessage(error)}`;
-    return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: "recovery-resume" }, runFaultMetrics);
+    return checkedTaskOutcome(resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: "recovery-resume" }, runFaultMetrics));
   }
 }
 async function runRecovery(root, mergeLock2 = null) {
@@ -4680,7 +4698,7 @@ async function runRecovery(root, mergeLock2 = null) {
     const residualRisk = advisoryResidualRisk(assessment);
     log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline (advisory residualRisk: ${residualRisk.length})`);
     const resume = { candidate, enriched, evidence, stage, residualRisk };
-    const outcome = checkedTaskOutcome(await executeResume(task, resume, mergeLock2));
+    const outcome = await executeResume(task, resume, mergeLock2);
     if (outcome.status === "fatal-auth" || outcome.status === "provider-fault" || outcome.status === "infra-fault") {
       summary.results.push({ ...resultBase, resumeStage: stage, action: "resume-failed", reason: outcome.detail || outcome.status, residualRisk });
       return { summary, taskResults, held, fatal: outcome };
@@ -4938,17 +4956,14 @@ async function fillPool() {
       // A thrown agent error (e.g. a subagent that completes without emitting
       // structured output) must NOT reject through Promise.race and crash the
       // whole run — convert it to a failed result the control loop drains.
-      runTask(task, mergeLock).then(
-        (result) => ({ id: task.id, task, result: checkedTaskOutcome(result) }),
-        (error) => {
-          const detail = `unhandled agent error: ${faultThrownMessage(error)}`;
-          return {
-            id: task.id,
-            task,
-            result: resultFromUnhandledAgentError(task.id, detail, {}, runFaultMetrics)
-          };
-        }
-      )
+      runTask(task, mergeLock).then((result) => ({ id: task.id, task, result: checkedTaskOutcome(result) })).catch((error) => {
+        const detail = `unhandled agent error: ${faultThrownMessage(error)}`;
+        return {
+          id: task.id,
+          task,
+          result: resultFromUnhandledAgentError(task.id, detail, {}, runFaultMetrics)
+        };
+      })
     );
   }
 }

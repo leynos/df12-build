@@ -72,6 +72,34 @@ describe('CodeRabbit event validation', () => {
     expect(classifyCoderabbitOutcome({ ok: true }, parsed)).toBe('rate-limited')
   })
 
+  test('retains malformed authentication evidence regardless of event order', async () => {
+    const malformed = { type: 'error', errorType: 7, message: 'Run coderabbit auth login' }
+    const otherError = { type: 'error', errorType: 'execution', message: 'Review failed' }
+    const attempt = makeCoderabbitAttempt({ base: 'main', reviewTimeoutSeconds: 60 })
+    for (const events of [[malformed, otherError], [otherError, malformed], [malformed]]) {
+      const stdout = events.map((event) => JSON.stringify(event)).join('\n')
+      const parsed = parseCoderabbitAgentOutput(stdout)
+      const result = await attempt('/worktree', async () => ({ ok: true, stdout, stderr: '' }))
+
+      expect(parsed.error?.errorType).toBe(events.length === 1 ? 'invalid_output' : 'execution')
+      expect(result.outcome).toBe('auth')
+      expect(result.errorCategory).toBe('auth')
+      expect(result.detail).toContain('Run coderabbit auth login')
+    }
+  })
+
+  test('retains validated findings in order when other events are malformed', () => {
+    const first = { type: 'finding', severity: 'major', comment: 'First' }
+    const second = { type: 'finding', severity: 'critical', comment: 'Second' }
+    const malformed = { type: 'finding', severity: 3 }
+    for (const events of [[first, malformed, second], [malformed, first, second], [first, second, malformed]]) {
+      const parsed = parseCoderabbitAgentOutput(events.map((event) => JSON.stringify(event)).join('\n'))
+      expect(parsed.error?.errorType).toBe('invalid_output')
+      expect(parsed.findings).toEqual([first, second])
+      expect(classifyCoderabbitOutcome({ ok: true }, parsed)).toBe('error')
+    }
+  })
+
   test('retains non-object JSON and non-JSON lines as diagnostics', () => {
     const stdout = ['[]', '42', 'noise', JSON.stringify(successfulCompletion)].join('\n')
     const parsed = parseCoderabbitAgentOutput(stdout)

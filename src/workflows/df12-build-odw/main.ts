@@ -83,7 +83,7 @@ import { DAKAR_COMMAND_VALIDATION_ERROR, dakarInvocationFromCommand, redactedShe
 import type { AssessmentEvidence } from './git-evidence.ts'
 import type { ExecplanState, RecoveryAssessmentFields } from './recovery-decision.ts'
 import type { SelectionResult } from './roadmap.ts'
-import type { StagePlan, StageResult } from './run-task.ts'
+import type { StagePlan } from './run-task.ts'
 import type { RecoveryCandidate, SelectedTask } from './types.ts'
 import { checkedTaskOutcome, type TaskOutcome } from './task-outcome.ts'
 
@@ -464,7 +464,7 @@ async function executeResume(
   task: SelectedTask,
   resume: ResumeContext,
   mergeLock: MergeLockFn,
-): Promise<StageResult> {
+): Promise<TaskOutcome> {
   const { candidate, enriched, evidence, stage, residualRisk } = resume
   const worktree = candidate.worktreePath
   const extra = { kind: 'recovery-resume' }
@@ -479,7 +479,7 @@ async function executeResume(
     if (stage === 'plan' || stage === 'implement') {
       if (stage === 'plan') {
         const planned = await runPlanDesignLoop(task, worktree, { resume: true, extra })
-        if (planned.kind === 'failure') return planned.fail
+        if (planned.kind === 'failure') return checkedTaskOutcome(planned.fail)
         plan = planned.plan
       } else {
         plan = {
@@ -489,7 +489,7 @@ async function executeResume(
         }
       }
       const built = await runImplementationStage(task, worktree, plan, { resume: stage === 'implement', extra })
-      if (built.kind === 'failure') return built.fail
+      if (built.kind === 'failure') return checkedTaskOutcome(built.fail)
       impl = built.impl
     } else {
       // Carry the ADR 002 assessment's advisory residual risk forward into the
@@ -499,10 +499,10 @@ async function executeResume(
       impl = synthetic
       plan = { execplanPath: synthetic.execplanPath, workItems: [], summary: synthetic.summary }
     }
-    return await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock, { kind: 'recovery-resume' })
+    return checkedTaskOutcome(await runDualReviewAndIntegration(task, candidate.worktreePath, plan, impl, mergeLock, { kind: 'recovery-resume' }))
   } catch (error) {
     const detail = `unhandled agent error: ${faultThrownMessage(error)}`
-    return resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: 'recovery-resume' }, runFaultMetrics)
+    return checkedTaskOutcome(resultFromUnhandledAgentError(candidate.taskId, detail, { worktree, kind: 'recovery-resume' }, runFaultMetrics))
   }
 }
 
@@ -669,7 +669,7 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
     const residualRisk = advisoryResidualRisk(assessment)
     log(`[recovery] resuming ${candidate.branchName} at the ${stage} stage through the ordinary pipeline (advisory residualRisk: ${residualRisk.length})`)
     const resume = { candidate, enriched, evidence, stage, residualRisk }
-    const outcome = checkedTaskOutcome(await executeResume(task, resume, mergeLock))
+    const outcome = await executeResume(task, resume, mergeLock)
     if (outcome.status === 'fatal-auth' || outcome.status === 'provider-fault' || outcome.status === 'infra-fault') {
       summary.results.push({ ...resultBase, resumeStage: stage, action: 'resume-failed', reason: outcome.detail || outcome.status, residualRisk })
       return { summary, taskResults, held, fatal: outcome }
@@ -990,9 +990,9 @@ async function fillPool() {
       // A thrown agent error (e.g. a subagent that completes without emitting
       // structured output) must NOT reject through Promise.race and crash the
       // whole run — convert it to a failed result the control loop drains.
-      runTask(task, mergeLock).then(
-        (result) => ({ id: task.id, task, result: checkedTaskOutcome(result) }),
-        (error) => {
+      runTask(task, mergeLock)
+        .then((result) => ({ id: task.id, task, result: checkedTaskOutcome(result) }))
+        .catch((error) => {
           const detail = `unhandled agent error: ${faultThrownMessage(error)}`
           // SAFETY: Empty extra cannot override the task fields or the empty
           // proposals returned by resultFromUnhandledAgentError.
@@ -1001,8 +1001,7 @@ async function fillPool() {
             task,
             result: resultFromUnhandledAgentError(task.id, detail, {}, runFaultMetrics) as TaskOutcome,
           }
-        },
-      ),
+        }),
     )
   }
 }

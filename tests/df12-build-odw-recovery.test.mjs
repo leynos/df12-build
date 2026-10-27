@@ -837,6 +837,26 @@ test('review-mode resume routes an eligible branch through review and integratio
   )
 })
 
+test('malformed integration outcome is reported as a recovery failure', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review' },
+    reviewModeAgent(calls, {
+      integrate: async () => ({
+        ok: true, roadmapMarkedDone: true, rebased: true, squashMerged: true,
+        mergeSha: 'feedfeed', pushed: 'yes', conflicts: '', summary: 'invalid push flag',
+      }),
+    }),
+  )
+  const repo = makeRecoveryRepo()
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  assert.equal(outcome.summary.results[0].action, 'resume-failed')
+  assert.match(outcome.summary.results[0].reason, /Invalid task outcome/)
+  assert.equal(outcome.taskResults[0].result.status, 'failed')
+})
+
 test('review-mode resume carries advisory residualRisk into the review and integration prompts', async () => {
   const calls = []
   const prompts = { codeReview: '', expertReview: '', integrate: '' }
