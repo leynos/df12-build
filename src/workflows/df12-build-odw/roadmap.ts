@@ -36,7 +36,7 @@ export const ROADMAP_ID_RE = /\b\d+(?:\.\d+)+\b/g
  * integrate-* temp branches).
  */
 export function roadmapIdSlug(id: unknown): string {
-  return String(id).replace(/[^0-9a-zA-Z]+/g, '-')
+  return String(id).replaceAll(/[^0-9a-zA-Z]+/g, '-')
 }
 
 /** The parent id of a dotted roadmap id (`1.2.3` -> `1.2`), or `''` for a top-level id. */
@@ -62,7 +62,7 @@ export function extractRoadmapIds(text: string): string[] {
     const end = match[2]
     if (start === undefined || end === undefined) continue
     const expanded = expandStepRange(start, end)
-    if (expanded.length) {
+    if (expanded.length > 0) {
       ids.delete(start)
       ids.delete(end)
       for (const id of expanded) ids.add(id)
@@ -78,7 +78,7 @@ export function extractRoadmapIds(text: string): string[] {
  * 1,000-id maximum is inclusive.
  */
 export function expandStepRange(start: string, end: string): string[] {
-  const MAX_STEP_RANGE_LENGTH = 1_000
+  const MAX_STEP_RANGE_LENGTH = 1000
   if (!/^\d+\.\d+$/.test(start) || !/^\d+\.\d+$/.test(end)) return []
   const [startPhase, startStep] = start.split('.')
   const [endPhase, endStep] = end.split('.')
@@ -94,6 +94,14 @@ export function expandStepRange(start: string, end: string): string[] {
   return Array.from({ length: rangeLength }, (_, index) => `${phaseId}.${firstStep + index}`)
 }
 
+/** Parsed roadmap tasks and the identifiers already complete. */
+interface ParsedRoadmap {
+  /** Top-level tasks in roadmap order; addendum sub-tasks are nested under their parent, not listed here. */
+  tasks: RoadmapTask[]
+  /** IDs treated as complete: fully-ticked tasks, ticked addendum sub-tasks, and prefix ids whose whole subtree is complete. */
+  completed: Set<string>
+}
+
 /**
  * Parse the roadmap markdown into an ordered task list and the set of
  * completed ids. An addendum sub-task is nested under its parent's
@@ -101,15 +109,10 @@ export function expandStepRange(start: string, end: string): string[] {
  * complete and the sub-task line is indented deeper than it — the convention
  * for post-completion follow-up work.
  */
-export function parseRoadmap(text: string): {
-  /** Top-level tasks in roadmap order; addendum sub-tasks are nested under their parent, not listed here. */
-  tasks: RoadmapTask[]
-  /** IDs treated as complete: fully-ticked tasks, ticked addendum sub-tasks, and prefix ids whose whole subtree is complete. */
-  completed: Set<string>
-} {
+export function parseRoadmap(text: string): ParsedRoadmap {
   const tasks: RoadmapTask[] = []
   const byId = new Map<string, RoadmapTask>()
-  let currentTask: RoadmapTask | null = null
+  let currentTask: RoadmapTask | undefined
 
   for (const [index, line] of text.split(/\r?\n/).entries()) {
     const taskMatch = line.match(TASK_LINE_RE)
@@ -171,19 +174,19 @@ export function completedIds(tasks: readonly RoadmapTask[]): Set<string> {
   const postOrder: RoadmapTask[] = []
   const pending = [...tasks]
 
-  while (pending.length) {
+  while (pending.length > 0) {
     const task = pending.pop()!
     postOrder.push(task)
     pending.push(...task.subtasks)
   }
 
-  for (const task of postOrder.reverse()) {
+  for (const task of postOrder.toReversed()) {
     completionByTask.set(task, isComplete(task) && task.subtasks.every((subtask) => completionByTask.get(subtask)))
   }
 
   const recordCompletedSubtasks = (task: RoadmapTask) => {
     const pendingSubtasks = [task]
-    while (pendingSubtasks.length) {
+    while (pendingSubtasks.length > 0) {
       const subtask = pendingSubtasks.pop()!
       if (completionByTask.get(subtask)) completed.add(subtask.id)
       pendingSubtasks.push(...subtask.subtasks)
@@ -201,7 +204,7 @@ export function completedIds(tasks: readonly RoadmapTask[]): Set<string> {
   }
 
   for (const [prefix, groupedTasks] of prefixes.entries()) {
-    if (groupedTasks.length && groupedTasks.every((task) => completionByTask.get(task))) completed.add(prefix)
+    if (groupedTasks.length > 0 && groupedTasks.every((task) => completionByTask.get(task))) completed.add(prefix)
   }
 
   return completed
@@ -210,12 +213,23 @@ export function completedIds(tasks: readonly RoadmapTask[]): Set<string> {
 /** A task is fully complete only when its own checkbox and every addendum descendant are ticked. */
 export function isTaskFullyComplete(task: RoadmapTask): boolean {
   const pending = [task]
-  while (pending.length) {
+  while (pending.length > 0) {
     const current = pending.pop()!
     if (!isComplete(current)) return false
     pending.push(...current.subtasks)
   }
   return true
+}
+
+/** The identity and optional addendum IDs consulted by the task filter. */
+export interface OnlyTaskCandidate {
+  /** The selected task's identity and optional addendum IDs. */
+  task: {
+    /** The task's roadmap identifier. */
+    id: string
+    /** Addendum identifiers, when supplied by the caller. */
+    subtasks?: readonly string[] | null
+  }
 }
 
 /**
@@ -224,7 +238,7 @@ export function isTaskFullyComplete(task: RoadmapTask): boolean {
  * subtask ids must match, so `--only` on a parent still surfaces its open
  * addendum work.
  */
-export function taskMatchesOnlyTask(candidate: { task: SelectedTask }, onlyTask: string | null): boolean {
+export function taskMatchesOnlyTask(candidate: OnlyTaskCandidate, onlyTask: string | null): boolean {
   if (!onlyTask) return true
   if (candidate.task.id === onlyTask) return true
   return Boolean(candidate.task.subtasks?.includes(onlyTask))
@@ -232,7 +246,7 @@ export function taskMatchesOnlyTask(candidate: { task: SelectedTask }, onlyTask:
 
 /** Render up to five blocked-task reasons plus an overflow count; `''` when nothing is blocked. */
 export function blockedSummary(blocked: readonly string[]): string {
-  if (!blocked.length) return ''
+  if (blocked.length === 0) return ''
   const sample = blocked.slice(0, 5).join('; ')
   const suffix = blocked.length > 5 ? `; ${blocked.length - 5} more` : ''
   return `${blocked.length} blocked task(s): ${sample}${suffix}`
@@ -258,7 +272,7 @@ export function selectRoadmapTask(
 
   for (const task of tasks) {
     const openSubtasks = task.subtasks.filter((subtask) => !isTaskFullyComplete(subtask))
-    if (isComplete(task) && openSubtasks.length && !addendumTaken.has(task.id)) {
+    if (isComplete(task) && openSubtasks.length > 0 && !addendumTaken.has(task.id)) {
       candidates.push({
         order: task.line,
         kind: 'addendum',
@@ -275,7 +289,7 @@ export function selectRoadmapTask(
 
     if (!isComplete(task) && !normalTaken.has(task.id)) {
       const missing = task.requires.filter((id) => !completed.has(id))
-      if (missing.length) {
+      if (missing.length > 0) {
         blocked.push(`${task.id} requires ${missing.join(', ')}`)
       } else {
         candidates.push({
@@ -285,7 +299,7 @@ export function selectRoadmapTask(
             id: task.id,
             title: task.title,
             requires: task.requires,
-            rationale: task.requires.length
+            rationale: task.requires.length > 0
               ? `Every declared dependency is complete: ${task.requires.join(', ')}.`
               : 'The task has no declared dependencies.',
             isAddendum: false,
@@ -298,7 +312,7 @@ export function selectRoadmapTask(
 
   const matchingCandidates = candidates
     .filter((candidate) => taskMatchesOnlyTask(candidate, onlyTask))
-    .sort((left, right) => left.order - right.order)
+    .toSorted((left, right) => left.order - right.order)
   const selected = matchingCandidates[0]
   if (!selected) {
     const reason = onlyTask
@@ -321,7 +335,7 @@ export function roadmapTaskIndex(roadmapText: string): Map<string, RoadmapTask> 
   const byId = new Map<string, RoadmapTask>()
   for (const task of tasks) {
     byId.set(task.id, task)
-    for (const subtask of task.subtasks || []) byId.set(subtask.id, subtask)
+    for (const subtask of task.subtasks) byId.set(subtask.id, subtask)
   }
   return byId
 }

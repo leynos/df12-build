@@ -36,12 +36,12 @@ The repository contains workflow scripts, skill documentation, docs, operator
 scripts, focused test suites, a project roadmap with ExecPlans, and a small
 validation `Makefile`. Development dependencies (`esbuild`, `fast-check`,
 `@aboviq/bun-test-cucumber`, `ajv`, `lemmascript`, `typescript`, `@types/bun`,
-`markdownlint-cli2`, `typedoc`, and `yaml`) are managed with `bun` via
-`package.json`. `yaml` is at `^2.9.0` and parses the CI workflow in
-`tests/modules/ci-workflow-gate.test.ts`, which runs under the module test
-gates; that contract must parse the workflow rather than search its text, so
-the parser is a direct dependency rather than one reached through another
-package's tree.
+`markdownlint-cli2`, `oxlint`, `oxlint-tsgolint`, `ai-deslop`, `typedoc`, and
+`yaml`) are managed with `bun` via `package.json`. `yaml` is at `^2.9.0` and
+parses the CI workflow in `tests/modules/ci-workflow-gate.test.ts`, which runs
+under the module test gates; that contract must parse the workflow rather than
+search its text, so the parser is a direct dependency rather than one reached
+through another package's tree.
 
 Relevant paths:
 
@@ -58,9 +58,10 @@ Relevant paths:
   and CodeScene), `host-review-contracts.ts` (neutral review contracts), and
   `host-review.ts` (neutral composition facade), `shell-command.ts` (a
   non-evaluating parser for configured shell-command words and assignment
-  spans), and `run-task.ts`, with the injected ODW primitives declared in
-  `odw-globals.d.ts`. TypeScript is restricted to erasable syntax by compiler
-  flags (`erasableSyntaxOnly`, `verbatimModuleSyntax`).
+  spans), `run-task.ts`, and `task-outcome.ts` (validated task result fields),
+  with the injected ODW primitives declared in `odw-globals.d.ts`. TypeScript
+  is restricted to erasable syntax by compiler flags (`erasableSyntaxOnly`,
+  `verbatimModuleSyntax`).
 - `workflows/df12-build-odw.js`: GENERATED ODW/Codex workflow artefact, built
   by `make workflow-build` (see `scripts/build-workflow.mjs`); this is the
   single file the sidecar copies and ODW loads.
@@ -116,6 +117,10 @@ loader would reject. Within the src tree, keep the ODW script contract intact:
 - Do not import ODW primitives. `args`, `agent`, `parallel`, `phase`, `log`,
   and `budget` are injected by ODW.
 - Use schemas where JavaScript consumes agent output as structured data.
+- When routing options for assessment, write-preflight, or task-dispatch agent
+  calls, retain the call's required schema even if the router replaces the
+  options or omits `schema`; ODW uses it to validate structured replies at the
+  agent boundary.
 - Keep phase and label names explicit enough to make the dashboard useful.
 - Keep target-project mutation inside agent prompts and real git worktrees;
   ODW copy isolation is not a persistent handoff mechanism for this workflow.
@@ -178,6 +183,34 @@ loader would reject. Within the src tree, keep the ODW script contract intact:
 
 Changes to workflow behaviour must update all relevant prompts, schemas, docs,
 and validation notes in the same branch.
+
+### Runtime input and structured-output boundaries
+
+`makeConfig` accepts a record of workflow arguments, or `null`/`undefined` to
+use defaults. It rejects arrays, primitives, and wrong types for documented
+fields with `Invalid workflow argument type`; `writeProbeModelByAdapter` must
+be a record of string values. Unknown keys remain accepted for forward
+compatibility. The legacy `resumePartialBranches` key is deliberately untyped,
+but only literal `true` enables recovery. The user guide lists the documented
+field types and the fields that accept numbers or strings.
+
+Assessment and write-preflight agent calls retain their required JSON Schemas
+after adapter option routing. For an in-run assessment reply that is absent or
+malformed, `attachAssessment` leaves the task result intact and adds
+`assessmentError` with `assessmentEvidence`. At the assessment-module boundary,
+`assessRecoveryCandidate` returns `evidence`, `assessment: null`, and
+`assessmentError` when no classification is produced. `runRecovery` records
+`action: assessment-error`, the error, and the skipped candidate in
+`recovery.results`; it does not copy the evidence into that summary entry.
+Authentication or provider failures also produce a fatal run result. Assessment
+remains report-only.
+
+The write-preflight schema requires a boolean `ok` and permits an optional
+string `detail`. The host checks the probe file itself for the exact token in a
+regular, non-symlink file; the agent's `ok` claim is not proof of write access.
+A malformed reply is treated as an agent error, and when host verification also
+fails its detail appears in the probe failure. A failed host-verified probe
+fails the task at `stage: worktree-write`.
 
 ## Submodule architecture and composition
 
@@ -298,6 +331,17 @@ terminates as `infra-fault` with no assessment agent and no remediation triage
 writes. Never wrap the integration agent in `withInfraRetry` — its push to
 `origin/<base>` is not idempotent, and a source-invariant test pins both call
 sites as unwrapped.
+
+`checkedTaskOutcome` in `task-outcome.ts` validates the optional result fields
+read by recovery and the worker pool before those consumers use them. The
+validator accepts `integration` as `null` or a record, and checks that
+`integration.pushed` is boolean when present; `kind` and `assessmentError` are
+strings; `proposals` is an array of records; and `assessment` is a record. A
+`salvage` value must contain string `classification`, `sha`, and `detail`
+fields, `committed` as an array of strings, and `skipped` records with string
+`path` and `reason` fields. Unrelated result data is preserved. Invalid shapes
+throw `Invalid task outcome`, which the normal and recovery paths turn into a
+task failure instead of consuming malformed data.
 
 Recovery assessment carries two distinct evidence channels, typed by
 `RecoveryAssessmentFields` in `recovery-decision.ts`: blocking
@@ -425,6 +469,15 @@ is a real gate, not a label. Test loaders and the simulation driver force
 burn review quota; the pipeline seam is covered by a fake NDJSON-emitting
 `coderabbit` on `PATH`, and the between-item gate by an injected
 `runCoderabbitHostReview`.
+
+The adapter validates consumed fields in known finding, error, and completion
+events. It synthesizes an `errorType: invalid_output` event only when a known
+event is malformed and no valid error event was parsed; a valid error event is
+retained instead of being overwritten by the synthetic error. Rate-limit
+classification keeps priority, and recognizable authentication text from a
+malformed error event is checked separately. Valid finding events remain
+available to the pipeline, which handles blocking findings before an
+invalid-output deferral or halt.
 
 Every fix round — gate fix, dual-review fix, and between-item fix — is followed
 by `verifyWorktreeCommitted`; a fix that leaves the worktree dirty fails the
@@ -731,6 +784,19 @@ carry a condition. A condition is how a gate is disarmed without the command
 changing, so the assertion is that the `if` key is absent rather than that it
 holds any particular value. The same suite pins the strict Dafny step, which is
 what stops `make all`'s lenient verification quietly skipping in CI.
+
+`make lint` runs the pinned Oxlint rules over the authored module tree in
+`src/`, after Markdown linting and workflow parsing. The configuration in
+`oxlint.config.mjs` applies the supported Unicorn recommended rules and the
+recommended `ai-deslop` rules with type-aware checks. Its exact dependency
+pins, the Unicorn/deslop rule conflict, and scoped ODW rule exceptions are
+recorded in `docs/adr-004-linting-strategy.md`.
+
+The workflow artefacts in `workflows/` are excluded from Oxlint. They are
+object code: `make workflow-parse` checks their workflow syntax and
+`make workflow-freshness` checks that the generated ODW artefact matches its
+TypeScript source. Tests are also outside the application source lint target;
+`make test` remains their behavioural gate.
 
 `make markdownlint` is the separate Markdown gate. It runs the pinned
 `markdownlint-cli2` configuration over maintained Markdown and then runs the

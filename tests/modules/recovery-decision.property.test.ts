@@ -8,6 +8,7 @@ import fc from 'fast-check'
 import {
   EXECPLAN_STATUS_MAP,
   TASK_BRANCH_RE,
+  advisoryResidualRisk,
   branchToRoadmapId,
   parseExecplanState,
   parseWorktreeList,
@@ -40,6 +41,16 @@ const assessmentArb = fc.record({
 })
 
 const flagsArb = fc.record({ dryRun: fc.boolean() })
+
+describe('advisoryResidualRisk', () => {
+  test('preserves valid strings and rejects malformed arrays', () => {
+    const valid = ['reviewed API', 'pending deployment']
+    expect(advisoryResidualRisk({ residualRisk: valid })).toBe(valid)
+    expect(advisoryResidualRisk({ residualRisk: ['reviewed API', 42] })).toEqual([])
+    expect(advisoryResidualRisk({ residualRisk: 'not an array' })).toEqual([])
+    expect(advisoryResidualRisk(undefined)).toEqual([])
+  })
+})
 
 describe('branchToRoadmapId', () => {
   test('parses every well-formed task branch back to its roadmap id', () => {
@@ -92,6 +103,12 @@ describe('parseWorktreeList', () => {
 })
 
 describe('parseExecplanState', () => {
+  test('treats inherited prototype property names as unknown statuses', () => {
+    for (const status of ['constructor', 'CONSTRUCTOR', 'toString', 'valueOf']) {
+      expect(parseExecplanState(`Status: ${status}\n`).status).toBe('unknown')
+    }
+  })
+
   test('maps every documented status token regardless of case and padding', () => {
     fc.assert(
       fc.property(

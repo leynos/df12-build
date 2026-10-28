@@ -48,6 +48,7 @@ check-fmt:
 	$(MDTABLEFIX) --check $(MDTABLEFIX_SELECT) $(MDTABLEFIX_RULES)
 
 lint: markdownlint workflow-parse
+	node_modules/.bin/oxlint --config oxlint.config.mjs src
 
 # The src tree is TypeScript restricted to erasable syntax; tsc enforces the
 # restriction (erasableSyntaxOnly, verbatimModuleSyntax in tsconfig.json).

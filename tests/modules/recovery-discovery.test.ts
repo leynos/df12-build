@@ -4,9 +4,10 @@
 import { chmodSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 
 import { makeRecoveryRepo, RECOVERY_ROADMAP } from '../fixtures/recovery-repo.mjs'
+import * as gitEvidence from '../../src/workflows/df12-build-odw/git-evidence.ts'
 import {
   RECOVERY_HOLD_REASONS,
   makeRecoveryDiscovery,
@@ -90,6 +91,24 @@ describe('makeRecoveryDiscovery', () => {
 })
 
 describe('readExecplanState', () => {
+  test('classifies error records and reports non-object failures', async () => {
+    const cases = [
+      { failure: { code: 'ENOENT', message: 'not found' }, status: 'missing', error: undefined },
+      { failure: { code: 'EACCES', message: 'permission denied' }, status: 'unreadable', error: 'docs/plan.md: permission denied' },
+      { failure: 'unexpected failure', status: 'unreadable', error: 'docs/plan.md: unexpected failure' },
+    ] as const
+    for (const { failure, status, error } of cases) {
+      const spy = spyOn(gitEvidence, 'readFileText').mockImplementation(async () => { throw failure })
+      try {
+        const result = await readExecplanState({ worktreePath: '/worktree', execplanPath: 'docs/plan.md' })
+        expect(result.status).toBe(status)
+        expect(result.error).toBe(error)
+      } finally {
+        spy.mockRestore()
+      }
+    }
+  })
+
   test('reads the committed plan status from the worktree', async () => {
     const repo = makeRecoveryRepo({ parserExecplanStatus: 'IN PROGRESS' })
     try {

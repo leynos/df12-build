@@ -439,6 +439,18 @@ Set project-specific behaviour in `args.json`. The workflow also has matching
 top-of-file defaults, but the sidecar `args.json` is the normal retuning point
 for ODW launches.
 
+Arguments must be an object. Missing or `null` arguments use the defaults;
+arrays, primitives, and values of the wrong type for a documented field fail at
+launch with `Invalid workflow argument type`. String fields require strings,
+numeric fields require numbers, and boolean fields require booleans. These
+number-or-string fields also accept strings: `stageAttempts`,
+`maxWorkItemRounds`, `resumeTaskId`, `resumeMaxCandidates`,
+`reviewTimeoutSeconds`, `dakarTimeoutSeconds`, `dakarBudgetGbp`,
+`coderabbitAttempts`, `hostReviewAttempts`, and `commitGateTimeoutSeconds`.
+Unknown object keys are ignored by this version and remain available for future
+options. The legacy `resumePartialBranches` key accepts any value, but only
+literal `true` enables recovery.
+
 Common arguments:
 
 - `base`: integration branch. Defaults to `main`.
@@ -609,7 +621,8 @@ Common arguments:
 - `worktreeWritePreflight`: when `false`, skip the once-per-run probe that
   proves the planning and build adapters can write into sibling task worktrees.
   Defaults to enabled; a failed probe fails the task at stage `worktree-write`
-  as an environment fault.
+  as an environment fault. The host verifies the exact token in the probe file;
+  it does not rely on the agent's reported `ok` value.
 - `buildAdapter` and `buildModel`: adapter and model for worktree creation,
   implementation, integration, and remediation agents.
 - `planAdapter` and `planModel`: adapter and model for planning agents.
@@ -676,6 +689,17 @@ CodeScene, then Dakar, and only then dispatches the reviewer agents. Set
 `reviewTool` to `coderabbit` to select the retained CodeRabbit adapter; its
 CLI-specific behaviour is documented next.
 
+Dakar output is accepted only when its terminal JSON document matches a known
+review shape. A non-skipped `changes-requested` verdict needs at least one
+finding with a supported severity and string `path`, `title`, `detail`, and
+`evidence` fields; an optional `line` must be a positive integer. With
+`ok: true`, either `skipped: true` or `verdict: "pass"` is treated as a clean
+result when findings are absent or empty. This means `skipped: true` takes
+precedence even if the document also says `verdict: "changes-requested"`; any
+non-empty findings on that path are rejected. Unparsable, malformed, or
+otherwise unrecognized output becomes a host-review `error` with error category
+`invalid-output`, not a clean review.
+
 ## Host-run CodeRabbit review
 
 > **Applies to `reviewTool: 'coderabbit'` only.** The host review tool defaults
@@ -691,6 +715,14 @@ ExecPlan durability contract doubles as the review contract. The host parses
 the CLI's structured findings; `critical` and `major` severities join the
 reviewers' blocking items and drive the ordinary fix rounds, while lower
 severities are captured without gating integration.
+
+The adapter validates the consumed fields in known `finding`, `error`, and
+`complete` events. Wrong field types make the review an `invalid_output` error
+instead of allowing a malformed event stream to count as clean; non-object JSON
+values and non-JSON lines remain diagnostic text. Valid error events remain
+authoritative, including rate-limit handling, and recognizable authentication
+errors still halt the task as `fatal-auth`. Valid blocking findings are
+retained and handled even when the same stream also contains malformed output.
 
 Rate limits are absorbed by the host: a rate-limited review waits a
 deterministic 45–90 minutes (`hostReviewBackoffMinutes`) and retries, up to
@@ -798,6 +830,24 @@ classification is one of:
 Assessment is report-only. It never marks roadmap checkboxes, pushes, merges,
 or cherry-picks. Use it to decide whether to preserve, manually finish, park,
 or discard the branch before relaunching from `origin/<base>`.
+
+If an in-run assessment agent returns no structured result or a malformed one,
+the workflow leaves the task's existing outcome intact and reports
+`assessmentError` with host-collected `assessmentEvidence`. For a branch found
+during fresh-run recovery, the recovery result records
+`action: assessment-error` and the error, and the candidate is marked skipped.
+It remains unresolved and blocks the roadmap frontier until an operator handles
+it; authentication or provider failures halt the run as fatal errors. No failed
+assessment supplies a classification for adoption.
+
+The worker pool validates optional task-result fields before consuming them:
+`integration.pushed` must be boolean when present; `kind` and `assessmentError`
+must be strings; `proposals` must be an array of records; `assessment` a
+record; and `salvage` must contain string `classification`, `sha`, and `detail`
+fields, string `committed` entries, and `skipped` records with string `path` and
+`reason`. `integration` may be `null`. A malformed result becomes a failed
+task with `stage: error` and detail `Invalid task outcome`; inspect the task
+entry in `result.json` and the run's `halted` summary for the detail.
 
 After an `adopt-partial` or `continue-manual` verdict — and also after an
 infrastructure fault such as schema-retry exhaustion — the workflow commits any

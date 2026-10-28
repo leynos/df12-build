@@ -49,7 +49,7 @@ export interface PromptImpl {
 // escapes quotes, backslashes, and ordinary line breaks; escape ECMAScript's
 // two additional line separators as well so an item cannot forge the fence.
 function encodeUntrustedLine(value: string): string {
-  return JSON.stringify(value).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029')
+  return JSON.stringify(value).replaceAll('\u2028', String.raw`\u2028`).replaceAll('\u2029', String.raw`\u2029`)
 }
 
 // Residual risk is advisory data from an assessment agent, not downstream
@@ -57,7 +57,7 @@ function encodeUntrustedLine(value: string): string {
 // creating a prompt-injection path. Emit nothing when no caveats were reported.
 function residualRiskLines(impl: PromptImpl | null | undefined): string[] {
   const items = impl?.residualRisk || []
-  if (!items.length) return []
+  if (items.length === 0) return []
   return [
     '',
     'Advisory residual risk (non-blocking — weigh during review, do not treat as an automatic block).',

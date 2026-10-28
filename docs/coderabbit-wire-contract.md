@@ -128,6 +128,18 @@ fallback over the error text for older CLI builds), and treats any other
 `error` event as `error` unless the text matches the auth patterns in
 `faults.ts`, which classify as `auth`.
 
+## Typed event validation
+
+The adapter validates fields consumed from `finding`, `error`, and `complete`
+events before using them. Optional finding fields (`severity`, `fileName`,
+`comment`, and `codegenInstructions`) and error fields (`errorType` and
+`message`) must be strings when present; `suggestions` must be an array when
+present. A completion requires a string `status`; its optional `findings` count
+must be a finite number. A malformed known event produces an `invalid_output`
+error outcome, so a later clean completion cannot mask it. A valid error event
+remains authoritative, including a rate-limit error. Non-object JSON values and
+non-JSON lines remain diagnostic raw lines.
+
 ## Maintenance
 
 When a CLI upgrade changes this stream, capture a fresh session

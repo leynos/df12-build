@@ -51,6 +51,16 @@ export interface FileState {
 
 type ExecError = Error & { stdout?: string; stderr?: string }
 
+/** The child-process options derived from the workflow's execution settings. */
+interface ChildProcessExecOptions {
+  /** Working directory for the child process. */
+  cwd: string
+  /** Maximum size of the captured output, in bytes. */
+  maxBuffer: number
+  /** Optional timeout for terminating the child, in milliseconds. */
+  timeout?: number
+}
+
 /**
  * Run a host command and resolve with its stdout, or reject with the
  * captured error (stdout/stderr attached) on a non-zero exit, timeout, or
@@ -59,13 +69,17 @@ type ExecError = Error & { stdout?: string; stderr?: string }
  */
 export async function execFileText(command: string, commandArgs: readonly string[], options: ExecOptions = {}): Promise<string> {
   const { execFile } = process.getBuiltinModule('node:child_process')
+  const execOptions: ChildProcessExecOptions = {
+    cwd: options.cwd || process.cwd(),
+    maxBuffer: 16 * 1024 * 1024,
+  }
+  if (options.timeoutMs) execOptions.timeout = options.timeoutMs
   return await new Promise((resolve, reject) => {
-    execFile(command, [...commandArgs], { cwd: options.cwd || process.cwd(), maxBuffer: 16 * 1024 * 1024, ...(options.timeoutMs ? { timeout: options.timeoutMs } : {}) }, (error, stdout, stderr) => {
+    execFile(command, [...commandArgs], execOptions, (error, stdout, stderr) => {
       if (error) {
-        const failure = error as ExecError
-        failure.stdout = stdout
-        failure.stderr = stderr
-        reject(failure)
+        error.stdout = stdout
+        error.stderr = stderr
+        reject(error)
         return
       }
       resolve(stdout)
@@ -83,6 +97,8 @@ export async function execFileStatus(command: string, commandArgs: readonly stri
   try {
     return { ok: true, stdout: await execFileText(command, commandArgs, options), stderr: '' }
   } catch (error) {
+    // SAFETY: execFileText rejects with Node child-process errors; the stream
+    // fields are optional because a synchronous spawn failure may omit them.
     const failure = error as (ExecError & { killed?: boolean; signal?: string }) | null
     return {
       ok: false,
@@ -103,7 +119,7 @@ export async function execFileStatus(command: string, commandArgs: readonly stri
  * `String()` first.
  */
 export function shellQuote(value: unknown): string {
-  return `'${String(value).replace(/'/g, "'\\''")}'`
+  return `'${String(value).replaceAll('\'', String.raw`'\''`)}'`
 }
 
 /**
@@ -131,6 +147,8 @@ export async function fileState(pathValue: unknown, baseDir: string = process.cw
     const stat = await fs.lstat(candidate)
     return { ok: true, exists: stat.isFile(), detail: '' }
   } catch (error) {
+    // SAFETY: Node filesystem promises reject with errors whose errno code is
+    // optional; the null check preserves the fallback for a nullish throw.
     const failure = error as (Error & { code?: string }) | null
     if (failure && (failure.code === 'ENOENT' || failure.code === 'ENOTDIR')) {
       return { ok: true, exists: false, detail: '' }

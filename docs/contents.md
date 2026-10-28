@@ -49,6 +49,9 @@ workflow assets, or understanding why the system is shaped the way it is.
 - [ADR 003: Correlation-first OpenTelemetry observability](adr-003-opentelemetry-observability.md):
   records the accepted decision to correlate workflow nodes and agent telemetry
   through dispatch-time identity, a local OTLP collector, and a SQLite store.
+- [ADR 004: Oxlint source rules](adr-004-linting-strategy.md): records the
+  pinned Unicorn and deslop profiles for authored ODW source and the workflow
+  artefact exclusion.
 
 ## Plans
 

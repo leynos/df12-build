@@ -96,6 +96,20 @@ function typecheckHostReview(body: string): { ok: boolean; output: string } {
 
 const FAULT_METRICS_PRELUDE = `import type { FaultMetrics } from '${path.join(ODW_SRC, 'types.ts')}'`
 
+const CHANGED_EXPORTS_PRELUDE = [
+  `import type { SalvageSummary, summarizeSalvages } from '${path.join(ODW_SRC, 'assessment.ts')}'`,
+  `import type { CoderabbitJsonObject, CoderabbitParsedOutput, parseCoderabbitAgentOutput } from '${path.join(ODW_SRC, 'coderabbit-review.ts')}'`,
+  `import type { HostGateSurface } from '${path.join(ODW_SRC, 'host-gates.ts')}'`,
+  `import type { OnlyTaskCandidate, taskMatchesOnlyTask } from '${path.join(ODW_SRC, 'roadmap.ts')}'`,
+  `import type { TaskOutcome, checkedTaskOutcome } from '${path.join(ODW_SRC, 'task-outcome.ts')}'`,
+  `import type { makeConfig, WorkflowConfig } from '${path.join(ODW_SRC, 'config.ts')}'`,
+  `import type { execplanRelPath, ExecplanPathResolution } from '${path.join(ODW_SRC, 'execplan-durability.ts')}'`,
+  `import type { gitEvidence, GitEvidenceValue } from '${path.join(ODW_SRC, 'git-evidence.ts')}'`,
+  `import type { parseRoadmap } from '${path.join(ODW_SRC, 'roadmap.ts')}'`,
+  `import type { summarizeFixReport, FixReportSummary } from '${path.join(ODW_SRC, 'run-task.ts')}'`,
+  `import type { DakarDocument, DakarFinding, DakarFindingValidation, parseDakarDocument } from '${path.join(ODW_SRC, 'dakar-review.ts')}'`,
+].join('\n')
+
 function typecheckFaultMetrics(body: string): { ok: boolean; output: string } {
   return typecheckWithPrelude(FAULT_METRICS_PRELUDE, body, 'cs-fault-metrics-')
 }
@@ -123,6 +137,67 @@ describe('compile-time contract', () => {
     const result = typecheck('export type Id = string\nexport const make = (id: Id): Id => id\n')
     expect(result.ok).toBe(true)
   }, 30_000)
+})
+
+describe('changed workflow consumer contracts', () => {
+  test('exported shapes and signatures accept valid consumers and reject invalid ones', () => {
+    const result = typecheckWithPrelude(CHANGED_EXPORTS_PRELUDE, `
+      const summary: SalvageSummary = { salvages: [], salvagedBranches: 0, summarySuffix: '' }
+      const summaryResult: SalvageSummary = (null as unknown as typeof summarizeSalvages)([])
+      // @ts-expect-error salvagedBranches is a count, not a string
+      const badSummary: SalvageSummary = { salvages: [], salvagedBranches: 'zero', summarySuffix: '' }
+      const event: CoderabbitJsonObject = { type: 'finding', nested: [true, { count: 1 }] }
+      const parsed: CoderabbitParsedOutput = (null as unknown as typeof parseCoderabbitAgentOutput)('')
+      const events: CoderabbitJsonObject[] = parsed.events
+      // @ts-expect-error event payloads must be JSON values
+      const badEvent: CoderabbitJsonObject = { value: () => 1 }
+      // @ts-expect-error raw lines are strings
+      const badLines: string[] = parsed.events
+      const surface = null as unknown as HostGateSurface
+      const gateResult = surface.runHostCommitGates('/work', 'task', 'round')
+      surface.disposeHostGateLogs()
+      // @ts-expect-error gate arguments are strings
+      surface.runHostCommitGates(1, 'task', 'round')
+      const candidate: OnlyTaskCandidate = { task: { id: '1.2', subtasks: ['1.2.1'] } }
+      const matches: boolean = (null as unknown as typeof taskMatchesOnlyTask)(candidate, null)
+      // @ts-expect-error task identity must be a string
+      const badCandidate: OnlyTaskCandidate = { task: { id: 12 } }
+      const outcome: TaskOutcome = { id: '1.2', status: 'done', integration: { pushed: true } }
+      const checked: TaskOutcome = (null as unknown as typeof checkedTaskOutcome)(outcome)
+      // @ts-expect-error pushed is a boolean
+      const badOutcome: TaskOutcome = { id: '1.2', status: 'done', integration: { pushed: 'yes' } }
+      const config: WorkflowConfig = (null as unknown as typeof makeConfig)({ maxTasks: 2 })
+      const rawConfig: Parameters<typeof makeConfig>[0] = 42
+      // @ts-expect-error workflow config has a numeric task limit
+      const badLimit: string = config.MAX_TASKS
+      const pathResult: ExecplanPathResolution = (null as unknown as typeof execplanRelPath)('/work', 42)
+      // @ts-expect-error worktree path must be a string
+      ;(null as unknown as typeof execplanRelPath)(42, 'docs/execplans/a.md')
+      const git = null as unknown as typeof gitEvidence
+      const plain: Promise<GitEvidenceValue<string>> = git('/work', ['status'])
+      const structured: Promise<GitEvidenceValue<number>> = git('/work', ['status'], (text) => text.length)
+      // @ts-expect-error the parser result is a number, not a string
+      const wrongParsed: Promise<GitEvidenceValue<string>> = git('/work', ['status'], (text) => text.length)
+      // @ts-expect-error git command arguments must be strings
+      git('/work', [42])
+      const roadmap = (null as unknown as typeof parseRoadmap)('')
+      const completed: Set<string> = roadmap.completed
+      // @ts-expect-error roadmap parser requires text
+      ;(null as unknown as typeof parseRoadmap)(42)
+      const fix: FixReportSummary | null = (null as unknown as typeof summarizeFixReport)({ gatesGreen: true })
+      // @ts-expect-error a number is not a fix report
+      ;(null as unknown as typeof summarizeFixReport)(42)
+      const document: DakarDocument | null = (null as unknown as typeof parseDakarDocument)('{}')
+      const finding: DakarFinding = { severity: 'high', line: null }
+      const validated: DakarFindingValidation = { ok: true, findings: [finding] }
+      // @ts-expect-error Dakar finding lines are numeric or null
+      const badFinding: DakarFinding = { line: '12' }
+      // @ts-expect-error successful validation requires findings
+      const badValidation: DakarFindingValidation = { ok: true }
+      void [summary, summaryResult, badSummary, event, parsed, events, badEvent, badLines, gateResult, candidate, matches, badCandidate, outcome, checked, badOutcome, config, rawConfig, badLimit, pathResult, plain, structured, wrongParsed, roadmap, completed, fix, document, validated, badFinding, badValidation]
+    `, 'cs-changed-exports-')
+    expect(result.ok, result.output).toBe(true)
+  }, HOST_REVIEW_TYPECHECK_TIMEOUT_MS)
 })
 
 describe('fault metrics public type contract', () => {

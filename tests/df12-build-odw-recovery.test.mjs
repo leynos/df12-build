@@ -108,6 +108,7 @@ return {
   runHostReview,
   runDualReviewAndIntegration,
   runRecovery,
+  writeProbeTargets,
 }
 `,
   )
@@ -152,6 +153,19 @@ test('recovery configuration accepts explicit operator overrides', async () => {
   assert.equal(surface.RESUME_MODE, 'review')
   assert.equal(surface.RESUME_TASK_ID, '1.2.3')
   assert.equal(surface.RESUME_MAX_CANDIDATES, 2)
+})
+
+test('write probes preserve configured adapter spelling and deduplicate exact names', async () => {
+  const surface = await loadRecoverySurface({
+    planAdapter: 'Claude', buildAdapter: 'claude',
+    writeProbeModelByAdapter: { CLAUDE: 'probe-model' },
+  })
+  const targets = surface.writeProbeTargets()
+  assert.deepEqual(targets.map((target) => target.adapter), ['Claude', 'claude'])
+  assert.deepEqual(targets.map((target) => target.options({}).adapter), ['Claude', 'claude'])
+  assert.deepEqual(targets.map((target) => target.options({}).model), ['probe-model', 'probe-model'])
+  const shared = await loadRecoverySurface({ planAdapter: 'Claude', buildAdapter: 'Claude' })
+  assert.equal(shared.writeProbeTargets().length, 1)
 })
 
 test('recovery discovery is opt-in: truthy but non-true values stay disabled', async () => {
@@ -835,6 +849,26 @@ test('review-mode resume routes an eligible branch through review and integratio
     ['code-review:1.2.3 r1', 'expert-review:1.2.3 r1', 'integrate:1.2.3'],
     'resume then uses the ordinary review labels and integration agent',
   )
+})
+
+test('malformed integration outcome is reported as a recovery failure', async () => {
+  const calls = []
+  const surface = await loadRecoverySurface(
+    { resumePartialBranches: true, resumeMode: 'review' },
+    reviewModeAgent(calls, {
+      integrate: async () => ({
+        ok: true, roadmapMarkedDone: true, rebased: true, squashMerged: true,
+        mergeSha: 'feedfeed', pushed: 'yes', conflicts: '', summary: 'invalid push flag',
+      }),
+    }),
+  )
+  const repo = makeRecoveryRepo()
+  const outcome = await surface.runRecovery(repo.dir)
+
+  assert.equal(outcome.summary.resumed, 0)
+  assert.equal(outcome.summary.results[0].action, 'resume-failed')
+  assert.match(outcome.summary.results[0].reason, /Invalid task outcome/)
+  assert.equal(outcome.taskResults[0].result.status, 'failed')
 })
 
 test('review-mode resume carries advisory residualRisk into the review and integration prompts', async () => {

@@ -81,19 +81,22 @@ export interface RecoveryAssessmentFields {
 /**
  * Read the ADVISORY residual risk off an assessment record, tolerating the
  * continue-mode case where there is no assessment at all. Defensively reads
- * untrusted agent-produced JSON: an absent or non-array `residualRisk` field
- * yields an empty list rather than throwing. Kept here beside the
- * `residualRisk` contract so the resume caller stays a plain field read
+ * untrusted agent-produced JSON: an absent, non-array, or non-string array
+ * `residualRisk` field yields an empty list rather than throwing. Kept beside
+ * the `residualRisk` contract so the resume caller stays a plain field read
  * rather than repeating the shape guard inline (issue #23).
  *
  * @param assessment - The (possibly absent or malformed) assessment record.
  * @returns The reported residual-risk strings, or an empty array when the
- *   field is missing or not an array.
+ *   field is missing, not an array, or contains a non-string entry.
  */
 export function advisoryResidualRisk(
   assessment: { residualRisk?: unknown } | null | undefined,
 ): string[] {
-  return Array.isArray(assessment?.residualRisk) ? (assessment.residualRisk as string[]) : []
+  const residualRisk = assessment?.residualRisk
+  if (!Array.isArray(residualRisk)) return []
+  const entries: unknown[] = residualRisk
+  return entries.every((entry): entry is string => typeof entry === 'string') ? entries : []
 }
 
 /**
@@ -205,10 +208,10 @@ export function branchToRoadmapId(branch: unknown): {
   isAddendum: boolean
 } | null {
   const match = TASK_BRANCH_RE.exec(String(branch || ''))
-  if (!match) return null
+  if (!match) return match
   const id = match[1]
   if (id === undefined) return null
-  return { id: id.replace(/-/g, '.'), isAddendum: Boolean(match[2]) }
+  return { id: id.replaceAll('-', '.'), isAddendum: Boolean(match[2]) }
 }
 
 /**
@@ -221,11 +224,11 @@ export function branchToRoadmapId(branch: unknown): {
  */
 export function parseWorktreeList(output: unknown): WorktreeEntry[] {
   const entries: WorktreeEntry[] = []
-  let current: WorktreeEntry | null = null
+  let current: WorktreeEntry | undefined
   for (const line of String(output || '').split(/\r?\n/)) {
     if (!line.trim()) {
       if (current) entries.push(current)
-      current = null
+      current = undefined
       continue
     }
     const spaceIndex = line.indexOf(' ')
@@ -292,9 +295,9 @@ export function recoveryResumeEligibility(
   assessment: RecoveryAssessmentFields | null | undefined,
 ): string {
   if (candidate?.isAddendum) return 'addendum-branch'
-  if ((evidence?.collectionErrors || []).length) return 'evidence-collection-error'
+  if ((evidence?.collectionErrors || []).length > 0) return 'evidence-collection-error'
   if (evidence?.dirtyState !== 'clean') return 'dirty-worktree'
-  if (!(evidence?.recentCommits || []).length) return 'no-committed-work'
+  if ((evidence.recentCommits || []).length === 0) return 'no-committed-work'
   if (assessment?.taskScoped !== true) return 'not-task-scoped'
   // `missingEvidence` is the SOLE evidence-based downgrade gate (issue #23):
   // callers represent genuinely missing validation or review evidence through
@@ -302,7 +305,7 @@ export function recoveryResumeEligibility(
   // own. Advisory `residualRisk` is deliberately NOT consulted here — it is
   // carried forward to the resumed reviewer/integrator instead of downgrading
   // adopt-complete.
-  if ((assessment?.missingEvidence || []).length) return 'missing-validation-evidence'
+  if ((assessment.missingEvidence || []).length > 0) return 'missing-validation-evidence'
   if (!candidate?.execplanPath) return 'missing-execplan'
   return ''
 }
@@ -363,13 +366,18 @@ export function recoveryDecision(
  * Status field text into an {@link ExecplanStatus}; any value absent from
  * this map (or an unfilled skeleton line) parses as `'unknown'`.
  */
-export const EXECPLAN_STATUS_MAP: Record<string, ExecplanStatus> = {
+export const EXECPLAN_STATUS_MAP = {
+  /** The plan is still being drafted. */
   draft: 'draft',
+  /** The plan is approved for implementation. */
   approved: 'approved',
+  /** Implementation is in progress. */
   'in progress': 'in-progress',
+  /** Work on the plan is blocked. */
   blocked: 'blocked',
+  /** Implementation is complete and ready for review. */
   complete: 'complete',
-}
+} satisfies Record<string, ExecplanStatus>
 
 /**
  * Parse the durable state out of a committed ExecPlan: the `Status` field
@@ -387,8 +395,8 @@ export function parseExecplanState(text: unknown): ExecplanState {
   let status: ExecplanStatus = 'unknown'
   const statusMatch = source.match(/^Status:\s*([A-Za-z ]+?)\s*$/m)
   if (statusMatch?.[1] !== undefined) {
-    const value = statusMatch[1].trim().toLowerCase().replace(/\s+/g, ' ')
-    status = EXECPLAN_STATUS_MAP[value] || 'unknown'
+    const value = statusMatch[1].trim().toLowerCase().replaceAll(/\s+/g, ' ')
+    status = Object.entries(EXECPLAN_STATUS_MAP).find(([key]) => key === value)?.[1] ?? 'unknown'
   }
   let ticked = 0
   let unticked = 0
@@ -406,6 +414,11 @@ export function parseExecplanState(text: unknown): ExecplanState {
     items.push({ text: text.trim(), ticked: isTicked })
   }
   return { status, ticked, unticked, items }
+}
+
+/** Report a recovery candidate without dispatching it. */
+function reportContinueDecision(reason: string): ContinueDecision {
+  return { action: 'report', stage: null, reason, skip: true }
 }
 
 /**
@@ -427,19 +440,18 @@ export function recoveryContinueDecision(
   planState: { status: string; ticked?: number; unticked?: number; error?: string },
   flags: { dryRun?: boolean } = {},
 ): ContinueDecision {
-  const report = (reason: string): ContinueDecision => ({ action: 'report', stage: null, reason, skip: true })
-  if (candidate?.isAddendum) return report('addendum-branch')
-  if ((evidence?.collectionErrors || []).length) return report('evidence-collection-error')
-  if (evidence?.dirtyState !== 'clean') return report('dirty-worktree')
-  if (planState.status === 'unreadable') return report('plan-unreadable')
-  if (planState.status === 'blocked') return report('plan-blocked')
+  if (candidate?.isAddendum) return reportContinueDecision('addendum-branch')
+  if ((evidence?.collectionErrors || []).length > 0) return reportContinueDecision('evidence-collection-error')
+  if (evidence?.dirtyState !== 'clean') return reportContinueDecision('dirty-worktree')
+  if (planState.status === 'unreadable') return reportContinueDecision('plan-unreadable')
+  if (planState.status === 'blocked') return reportContinueDecision('plan-blocked')
   const stage: RecoveryStage =
     planState.status === 'approved' || planState.status === 'in-progress'
       ? 'implement'
-      : planState.status === 'complete'
+      : (planState.status === 'complete'
         ? 'review'
-        : 'plan' // missing, draft, or unknown: (re-)enter planning
-  if (stage === 'review' && !(evidence?.recentCommits || []).length) return report('no-committed-work')
+        : 'plan') // missing, draft, or unknown: (re-)enter planning
+  if (stage === 'review' && (evidence.recentCommits || []).length === 0) return reportContinueDecision('no-committed-work')
   if (flags.dryRun) return { action: 'report', stage, reason: 'dry-run', skip: true }
   return { action: 'resume', stage, reason: '', skip: false }
 }

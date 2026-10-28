@@ -15,6 +15,7 @@ import {
   type HostReviewConfig,
   type HostReviewDeps,
   type HostReviewAttempt,
+  type HostReviewTraceContext,
   type ReviewErrorCategory,
   type ReviewFinding,
 } from './host-review-contracts.ts'
@@ -26,7 +27,7 @@ export interface DakarFinding extends Record<string, unknown> {
   /** Repository-relative path. */
   path?: string
   /** Optional one-based source line. */
-  line?: number
+  line?: number | null
   /** Short finding title. */
   title?: string
   /** Finding explanation. */
@@ -38,27 +39,49 @@ export interface DakarFinding extends Record<string, unknown> {
 /** Dakar's single-document stdout contract before boundary validation. */
 export interface DakarDocument extends Record<string, unknown> {
   /** Whether Dakar completed its review protocol successfully. */
-  ok?: boolean
+  ok?: unknown
   /** Whether Dakar intentionally skipped review. */
-  skipped?: boolean
+  skipped?: unknown
   /** Terminal verdict such as `pass` or `changes-requested`. */
-  verdict?: string
+  verdict?: unknown
   /** Dakar execution stage, including the exact deferred stage. */
-  stage?: string
+  stage?: unknown
   /** Reviewer-supplied error detail. */
-  error?: string
+  error?: unknown
   /** Untrusted findings projection validated at the host boundary. */
-  findings?: DakarFinding[]
+  findings?: unknown
+}
+
+/** String-keyed mapping from Dakar severities to the host-review vocabulary. */
+export interface DakarSeverityMap {
+  /** The host-review severity for a normalized Dakar severity name. */
+  [severity: string]: string
 }
 
 /** Map validated Dakar severities onto the retained blocking vocabulary. */
-export const DAKAR_SEVERITY_MAP: Record<string, string> = {
+export const DAKAR_SEVERITY_MAP: DakarSeverityMap = {
   critical: 'critical', high: 'major', medium: 'minor', low: 'trivial',
 }
 
 const DAKAR_SEVERITIES = new Set(Object.keys(DAKAR_SEVERITY_MAP))
 const DAKAR_REQUIRED_FINDING_FIELDS = ['path', 'title', 'detail', 'evidence'] as const
-const DAKAR_PARENT_TIMEOUT_GRACE_MS = 5_000
+const DAKAR_PARENT_TIMEOUT_GRACE_MS = 5000
+
+/** Read a string property from a thrown value without trusting its shape. */
+function dakarErrorProperty(error: unknown, property: 'message' | 'name'): string | undefined {
+  if (error && (typeof error === 'object' || typeof error === 'function')) {
+    const value = property === 'message'
+      ? ('message' in error ? error.message : undefined)
+      : ('name' in error ? error.name : undefined)
+    if (typeof value === 'string' && value) return value
+  }
+  return undefined
+}
+
+/** Read a monotonic clock only for bounded span durations. */
+function dakarNowMs(): number {
+  return Number(process.hrtime.bigint() / 1_000_000n)
+}
 
 /** Redact explicitly supplied values from untrusted Dakar protocol text. */
 function redactDakarDetail(detail: string, sensitiveValues: readonly string[] = []): string {
@@ -79,14 +102,14 @@ function dakarDiagnosticRedactions(invocation: readonly string[], extraValues: r
     const inlineValue = inlineOption?.[2]
     const assignmentValue = assignment?.[1]
     if (inlineValue !== undefined) values.push(argument, inlineValue)
-    else if (assignmentValue !== undefined) values.push(argument, assignmentValue)
-    else values.push(argument)
+    else if (assignmentValue === undefined) values.push(argument)
+    else values.push(argument, assignmentValue)
   }
   return values
 }
 
 /** Dakar-only state-root lifecycle used by one isolated reviewer attempt. */
-export interface DakarAttemptDeps {
+export interface DakarAttemptDeps extends Pick<HostReviewDeps, 'tracer' | 'traceContext'> {
   /** Optional state-root allocation service used by deterministic tests. */
   dakarStateRoots?: DakarStateRoots
   /** Deprecated cleanup seam retained for compatibility with older callers. */
@@ -145,8 +168,11 @@ export function parseDakarDocument(stdout: unknown): DakarDocument | null {
     const document = text.slice(index, terminalEnd + 1)
     if (document.length > 64_000) return null
     try {
-      const parsed = JSON.parse(document)
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as DakarDocument : null
+      const parsed: unknown = JSON.parse(document)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+      // SAFETY: This is a JSON object; its optional document fields remain
+      // unknown until the outcome-specific checks below validate them.
+      return parsed as DakarDocument
     } catch {
       return null
     }
@@ -156,7 +182,10 @@ export function parseDakarDocument(stdout: unknown): DakarDocument | null {
 
 /** Map one validated Dakar finding onto the retained findings contract. */
 export function mapDakarFinding(finding: DakarFinding, sensitiveValues: readonly string[] = []): ReviewFinding {
-  const severity = DAKAR_SEVERITY_MAP[String(finding.severity || '').toLowerCase()] || 'info'
+  const sourceSeverity = String(finding.severity || '').toLowerCase()
+  const severity = Object.hasOwn(DAKAR_SEVERITY_MAP, sourceSeverity)
+    ? DAKAR_SEVERITY_MAP[sourceSeverity] || 'info'
+    : 'info'
   const filePath = redactDakarDetail(String(finding.path || ''), sensitiveValues).slice(0, 2000)
   const title = redactDakarDetail(String(finding.title || ''), sensitiveValues)
   const detail = redactDakarDetail(String(finding.detail || ''), sensitiveValues)
@@ -168,16 +197,20 @@ export function mapDakarFinding(finding: DakarFinding, sensitiveValues: readonly
 
 /** Validate a non-empty, structurally complete change-requested collection. */
 export function validateChangesRequestedFindings(raw: unknown): DakarFindingValidation | DakarFindingValidationFailure {
-  const findings = Array.isArray(raw) ? raw : null
-  if (!findings || findings.length === 0) return { ok: false, detail: 'Dakar returned changes-requested without any findings; refusing to treat a reviewer rejection as non-blocking' }
+  if (!Array.isArray(raw) || raw.length === 0) return { ok: false, detail: 'Dakar returned changes-requested without any findings; refusing to treat a reviewer rejection as non-blocking' }
+  const findings = raw
   for (const [index, finding] of findings.entries()) {
-    if (finding === null || typeof finding !== 'object' || Array.isArray(finding)) return { ok: false, detail: boundedTail(`Dakar returned a malformed finding at index ${index}; expected an object`) }
+    if (!finding || typeof finding !== 'object' || Array.isArray(finding)) return { ok: false, detail: boundedTail(`Dakar returned a malformed finding at index ${index}; expected an object`) }
+    // SAFETY: The preceding guard establishes a non-null, non-array object;
+    // its untrusted property values are checked individually below.
     const item = finding as Record<string, unknown>
     if (typeof item.severity !== 'string' || !DAKAR_SEVERITIES.has(item.severity.toLowerCase())) return { ok: false, detail: boundedTail(`Dakar returned an invalid finding at index ${index}; unsupported severity`) }
     const invalidField = DAKAR_REQUIRED_FINDING_FIELDS.find((field) => typeof item[field] !== 'string')
     if (invalidField) return { ok: false, detail: boundedTail(`Dakar returned an invalid finding at index ${index}; ${invalidField} must be a string`) }
     if (item.line !== undefined && (!Number.isInteger(item.line) || Number(item.line) < 1)) return { ok: false, detail: boundedTail(`Dakar returned an invalid finding at index ${index}; line must be a positive integer`) }
   }
+  // SAFETY: Every finding is an object with a supported string severity,
+  // string path, title, detail, and evidence, and an optional positive integer line.
   return { ok: true, findings: findings as DakarFinding[] }
 }
 
@@ -228,23 +261,23 @@ export function makeDakarAttempt(config: Pick<HostReviewConfig, 'base' | 'dakarI
     const os = process.getBuiltinModule('node:os')
     const path = process.getBuiltinModule('node:path')
     const stateRoots = deps.dakarStateRoots || { create: () => fs.mkdtempSync(path.join(os.tmpdir(), 'df12-dakar-state-')), remove: deps.removeDakarStateRoot || fs.rmSync }
-    const tracer = (deps as HostReviewDeps).tracer || NOOP_HOST_REVIEW_TRACER
-    const traceContext = (deps as HostReviewDeps).traceContext || { runId: 'host-review' }
-    /** Read a monotonic clock only for bounded span durations. */
-    const nowMs = () => Number(process.hrtime.bigint() / 1_000_000n)
+    const tracer = deps.tracer || NOOP_HOST_REVIEW_TRACER
+    const traceContext = deps.traceContext || { runId: 'host-review' }
     /** Start one Dakar boundary span without propagating paths or diagnostics. */
     const trace = (name: string) => {
-      const startedMs = nowMs()
-      return { startedMs, span: tracer.startSpan(name, { runId: boundedTail(traceContext.runId || 'host-review', 120), ...(traceContext.taskId ? { taskId: boundedTail(traceContext.taskId, 120) } : {}) }, { reviewer: 'dakar', attempt: deps.attempt || 1 }) }
+      const startedMs = dakarNowMs()
+      const spanContext: HostReviewTraceContext = { runId: boundedTail(traceContext.runId || 'host-review', 120) }
+      if (traceContext.taskId) spanContext.taskId = boundedTail(traceContext.taskId, 120)
+      return { startedMs, span: tracer.startSpan(name, spanContext, { reviewer: 'dakar', attempt: deps.attempt || 1 }) }
     }
     let stateRoot: string
     const createSpan = trace('host-review.dakar.state-root.create')
     try {
       stateRoot = stateRoots.create()
-      createSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: 'clean', errorCategory: 'none', timeout: false, elapsedMs: Math.max(0, nowMs() - createSpan.startedMs) })
+      createSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: 'clean', errorCategory: 'none', timeout: false, elapsedMs: Math.max(0, dakarNowMs() - createSpan.startedMs) })
     } catch (error) {
-      createSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: 'error', errorCategory: 'execution', timeout: false, elapsedMs: Math.max(0, nowMs() - createSpan.startedMs) })
-      return { outcome: 'error', findings: [], detail: boundedTail((error as Error | null)?.message || String(error)), errorCategory: 'execution' }
+      createSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: 'error', errorCategory: 'execution', timeout: false, elapsedMs: Math.max(0, dakarNowMs() - createSpan.startedMs) })
+      return { outcome: 'error', findings: [], detail: boundedTail(dakarErrorProperty(error, 'message') || String(error)), errorCategory: 'execution' }
     }
     const args = ['--repo-root', worktree, '--base', config.base, '--state-root', stateRoot, '--timeout', String(config.reviewTimeoutSeconds), ...(config.dakarBudgetGbp > 0 ? ['--budget-gbp', String(config.dakarBudgetGbp)] : [])]
     const processSpan = trace('host-review.dakar.subprocess')
@@ -253,22 +286,22 @@ export function makeDakarAttempt(config: Pick<HostReviewConfig, 'base' | 'dakarI
         cwd: worktree,
         timeoutMs: config.reviewTimeoutSeconds * 1000 + DAKAR_PARENT_TIMEOUT_GRACE_MS,
       }), sensitiveValues)
-      processSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: review.outcome, errorCategory: review.errorCategory, timeout: review.errorCategory === 'timeout', elapsedMs: Math.max(0, nowMs() - processSpan.startedMs) })
+      processSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: review.outcome, errorCategory: review.errorCategory, timeout: review.errorCategory === 'timeout', elapsedMs: Math.max(0, dakarNowMs() - processSpan.startedMs) })
       return review
     } catch (error) {
-      processSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: 'error', errorCategory: 'execution', timeout: false, elapsedMs: Math.max(0, nowMs() - processSpan.startedMs) })
-      const message = boundedTail(redactDakarDetail((error as Error | null)?.message || String(error), sensitiveValues))
+      processSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: 'error', errorCategory: 'execution', timeout: false, elapsedMs: Math.max(0, dakarNowMs() - processSpan.startedMs) })
+      const message = boundedTail(redactDakarDetail(dakarErrorProperty(error, 'message') || String(error), sensitiveValues))
       const redacted = new Error(message)
-      redacted.name = (error as Error | null)?.name || 'Error'
+      redacted.name = dakarErrorProperty(error, 'name') || 'Error'
       throw redacted
     } finally {
       const removeSpan = trace('host-review.dakar.state-root.remove')
       try {
         stateRoots.remove(stateRoot, { recursive: true, force: true })
-        removeSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: 'clean', errorCategory: 'none', timeout: false, elapsedMs: Math.max(0, nowMs() - removeSpan.startedMs) })
+        removeSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: 'clean', errorCategory: 'none', timeout: false, elapsedMs: Math.max(0, dakarNowMs() - removeSpan.startedMs) })
       } catch (error) {
-        removeSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: 'error', errorCategory: 'execution', timeout: false, elapsedMs: Math.max(0, nowMs() - removeSpan.startedMs) })
-        log(`[Dakar] ${boundedTail(traceContext.taskId || 'host-review', 120)} attempt ${deps.attempt || 1} could not remove temporary state root: ${boundedTail((error as Error | null)?.message || String(error), 500)}`)
+        removeSpan.span.end({ reviewer: 'dakar', attempt: deps.attempt || 1, outcome: 'error', errorCategory: 'execution', timeout: false, elapsedMs: Math.max(0, dakarNowMs() - removeSpan.startedMs) })
+        log(`[Dakar] ${boundedTail(traceContext.taskId || 'host-review', 120)} attempt ${deps.attempt || 1} could not remove temporary state root: ${boundedTail(dakarErrorProperty(error, 'message') || String(error), 500)}`)
       }
     }
   }

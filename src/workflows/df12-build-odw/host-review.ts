@@ -8,14 +8,12 @@
  * @module
  */
 import { execFileStatus } from './exec.ts'
-import { makeCoderabbitAttempt, parseCoderabbitAgentOutput, classifyCoderabbitOutcome, type CoderabbitError, type CoderabbitParsedOutput, CODERABBIT_SUCCESS_STATUSES } from './coderabbit-review.ts'
-import { makeDakarAttempt, parseDakarDocument, mapDakarFinding, validateChangesRequestedFindings, validateCleanDakarFindings, classifyDakarReview, DAKAR_SEVERITY_MAP, type DakarAttemptDeps, type DakarDocument, type DakarFinding, type DakarFindingValidation, type DakarFindingValidationFailure, type DakarStateRoots } from './dakar-review.ts'
-import { makeHostGates, hostGateLogPath, codeSceneExecutable, type HostGateDeps } from './host-gates.ts'
+import { makeCoderabbitAttempt } from './coderabbit-review.ts'
+import { makeDakarAttempt, type DakarAttemptDeps } from './dakar-review.ts'
+import { makeHostGates, type HostGateDeps } from './host-gates.ts'
 import { DAKAR_COMMAND_VALIDATION_ERROR, dakarInvocationFromCommand, validateDakarInvocation } from './shell-command.ts'
 import {
   boundedTail,
-  HOST_REVIEW_BLOCKING_SEVERITIES,
-  hostReviewDeferral,
   makeHostReviewMetrics,
   NOOP_HOST_REVIEW_TRACER,
   reviewBlockingItems,
@@ -24,49 +22,45 @@ import {
   type CodeSceneMetrics,
   type HostReviewAttempt,
   type HostGateMetrics,
-  type HostGateResult,
   type HostGateRun,
   type HostReviewConfig,
-  type HostReviewDeferral,
   type HostReviewDeps,
   type HostReviewMetrics,
   type HostReviewMetricsSnapshot,
   type HostReviewRecordingDeps,
   type HostReviewResult,
   type HostReviewTraceContext,
-  type ReviewErrorCategory,
   type ReviewFinding,
-  type ReviewOutcome,
 } from './host-review-contracts.ts'
 
+export { parseCoderabbitAgentOutput, classifyCoderabbitOutcome, CODERABBIT_SUCCESS_STATUSES } from './coderabbit-review.ts'
+export type { CoderabbitError, CoderabbitParsedOutput } from './coderabbit-review.ts'
 export {
-  boundedTail,
-  HOST_REVIEW_BLOCKING_SEVERITIES,
-  hostGateLogPath,
-  codeSceneExecutable,
-  hostReviewDeferral,
-  mapDakarFinding,
-  parseCoderabbitAgentOutput,
   parseDakarDocument,
-  reviewerDisplayName,
+  mapDakarFinding,
   validateChangesRequestedFindings,
   validateCleanDakarFindings,
-  classifyCoderabbitOutcome,
   classifyDakarReview,
   DAKAR_SEVERITY_MAP,
-  CODERABBIT_SUCCESS_STATUSES,
-  reviewBlockingItems,
-}
+} from './dakar-review.ts'
 export type {
-  CodeSceneCheckResult,
   DakarAttemptDeps,
   DakarStateRoots,
-  CoderabbitError,
-  CoderabbitParsedOutput,
   DakarDocument,
   DakarFinding,
   DakarFindingValidation,
   DakarFindingValidationFailure,
+} from './dakar-review.ts'
+export { hostGateLogPath, codeSceneExecutable } from './host-gates.ts'
+export {
+  boundedTail,
+  HOST_REVIEW_BLOCKING_SEVERITIES,
+  hostReviewDeferral,
+  reviewerDisplayName,
+  reviewBlockingItems,
+} from './host-review-contracts.ts'
+export type {
+  CodeSceneCheckResult,
   HostGateRun,
   HostGateResult,
   HostReviewConfig,
@@ -78,7 +72,7 @@ export type {
   ReviewErrorCategory,
   ReviewFinding,
   ReviewOutcome,
-}
+} from './host-review-contracts.ts'
 
 /** Optional composition seams retained outside the workflow configuration shape. */
 export interface HostReviewCompositionDeps {
@@ -86,12 +80,25 @@ export interface HostReviewCompositionDeps {
   hostGates?: HostGateDeps
 }
 
+/**
+ * Runtime input admitted by the compatibility fallback: older JavaScript
+ * callers may provide the CodeRabbit names without the canonical fields.
+ */
+interface HostReviewCompatibilityInput {
+  reviewAttempts?: number
+  reviewBackoffMinutes?: [number, number]
+  reviewFindingsFile?: string
+  coderabbitAttempts?: number
+  coderabbitBackoffMinutes?: [number, number]
+  coderabbitFindingsFile?: string
+}
+
 /** Compatibility alias for integrations compiled against older names. */
-export type CoderabbitFinding = ReviewFinding
+export type { ReviewFinding as CoderabbitFinding } from './host-review-contracts.ts'
 /** Compatibility alias for the former CodeRabbit-specific outcome type. */
-export type CoderabbitOutcome = ReviewOutcome
+export type { ReviewOutcome as CoderabbitOutcome } from './host-review-contracts.ts'
 /** Compatibility alias for the former CodeRabbit-specific result type. */
-export type CoderabbitReview = HostReviewResult
+export type { HostReviewResult as CoderabbitReview } from './host-review-contracts.ts'
 
 /** Compatibility blocking helper that labels findings as CodeRabbit output. */
 export function coderabbitBlockingItems(findings: readonly ReviewFinding[] | null | undefined): string[] {
@@ -100,7 +107,55 @@ export function coderabbitBlockingItems(findings: readonly ReviewFinding[] | nul
 
 /** Sleep for a host-side review backoff without consuming agent tokens. */
 export async function hostSleepMinutes(minutes: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, minutes * 60000))
+  await new Promise((resolve) => setTimeout(resolve, minutes * 60_000))
+}
+
+/** Keep span timing independent from any caller-supplied deterministic clock. */
+function hostReviewSpanNowMs(): number {
+  return Number(process.hrtime.bigint() / 1_000_000n)
+}
+
+/** Bound a host-review attempt duration to a non-negative whole millisecond. */
+function hostReviewAttemptElapsedMs(startedMs: number): number {
+  const elapsedMs = hostReviewSpanNowMs() - startedMs
+  return Math.max(0, Math.trunc(elapsedMs))
+}
+
+/** Bound a findings-sink duration while retaining the monotonic clock value. */
+function hostReviewSinkElapsedMs(startedMs: number): number {
+  const elapsedMs = hostReviewSpanNowMs() - startedMs
+  return Math.max(0, elapsedMs)
+}
+
+/** Bound correlation fields before they cross the tracing boundary. */
+function reviewTraceContext(
+  override: Partial<HostReviewTraceContext> | undefined,
+  fallback: Partial<HostReviewTraceContext> | undefined,
+  label: string,
+): HostReviewTraceContext {
+  const context: HostReviewTraceContext = {
+    runId: boundedTail(override?.runId || fallback?.runId || 'host-review', 120) || 'host-review',
+  }
+  const taskId = override?.taskId || fallback?.taskId || label
+  if (taskId) context.taskId = boundedTail(taskId, 120)
+  return context
+}
+
+/** Keep unknown severity values in the bounded metrics vocabulary. */
+function reviewSeverity(value: string): keyof HostReviewMetrics['bySeverity'] {
+  switch (value) {
+    case 'critical':
+    case 'major':
+    case 'minor':
+    case 'trivial':
+    case 'info':
+    case 'unknown': {
+      return value
+    }
+    default: {
+      return 'unknown'
+    }
+  }
 }
 
 /** Bound host-review operations and retained CodeRabbit compatibility aliases. */
@@ -131,6 +186,7 @@ export interface HostReviewSurface {
 
 /** Bind reviewer dispatch, retry, findings recording, and host-gate execution. */
 export function makeHostReview(config: HostReviewConfig, composition: HostReviewCompositionDeps = {}): HostReviewSurface {
+  const compatibility: HostReviewCompatibilityInput = config
   const dakarCommandInvocation = dakarInvocationFromCommand(config.dakarCommand)
   const dakarInvocation = config.dakarInvocation === undefined
     ? dakarCommandInvocation
@@ -152,14 +208,14 @@ export function makeHostReview(config: HostReviewConfig, composition: HostReview
   /** Return the deterministic retry delay for one review label. */
   function reviewBackoffMinutes(seed: unknown): number {
     let hash = 5381
-    for (const ch of String(seed)) hash = ((hash * 33) ^ (ch.codePointAt(0) as number)) >>> 0
-    const [low, high] = config.reviewBackoffMinutes ?? config.coderabbitBackoffMinutes ?? [45, 90]
+    for (const ch of String(seed)) hash = ((hash * 33) ^ (ch.codePointAt(0) ?? 0)) >>> 0
+    const [low, high] = compatibility.reviewBackoffMinutes ?? compatibility.coderabbitBackoffMinutes ?? [45, 90]
     return low + (hash % (high - low + 1))
   }
 
   /** Map an elapsed duration onto a fixed counter bucket with no dynamic labels. */
   function recordDuration(elapsedMs: number): void {
-    if (elapsedMs < 1_000) hostReviewMetrics.durationBuckets.underOneSecond += 1
+    if (elapsedMs < 1000) hostReviewMetrics.durationBuckets.underOneSecond += 1
     else if (elapsedMs < 10_000) hostReviewMetrics.durationBuckets.oneToTenSeconds += 1
     else if (elapsedMs < 60_000) hostReviewMetrics.durationBuckets.tenToSixtySeconds += 1
     else hostReviewMetrics.durationBuckets.sixtySecondsOrMore += 1
@@ -169,35 +225,30 @@ export function makeHostReview(config: HostReviewConfig, composition: HostReview
   async function runHostReview(worktree: string, label: string, deps: HostReviewDeps & DakarAttemptDeps = {}): Promise<HostReviewResult> {
     const exec = deps.exec || execFileStatus
     const sleep = deps.sleep || hostSleepMinutes
-    const nowMs = deps.nowMs || (() => Number(process.hrtime.bigint() / 1_000_000n))
+    const nowMs = deps.nowMs || hostReviewSpanNowMs
     const reviewer = config.reviewTool
     const displayName = reviewerDisplayName(reviewer)
     const boundedLabel = boundedTail(label, 120)
     const startedMs = nowMs()
-    /** Keep span timing independent from the caller's deterministic result clock. */
-    const spanNowMs = () => Number(process.hrtime.bigint() / 1_000_000n)
-    const traceContext: HostReviewTraceContext = {
-      runId: boundedTail(deps.traceContext?.runId || config.traceContext?.runId || 'host-review', 120) || 'host-review',
-      ...(deps.traceContext?.taskId || config.traceContext?.taskId || boundedLabel ? { taskId: boundedTail(deps.traceContext?.taskId || config.traceContext?.taskId || boundedLabel, 120) } : {}),
-    }
+    const traceContext = reviewTraceContext(deps.traceContext, config.traceContext, boundedLabel)
     const operationSpan = (deps.tracer || config.tracer || NOOP_HOST_REVIEW_TRACER).startSpan('host-review.operation', traceContext, { reviewer, retry: false })
     let terminalAttempt = 1
     try {
       for (let attempt = 1; ; attempt++) {
         terminalAttempt = attempt
-        const attempts = config.reviewAttempts ?? config.coderabbitAttempts ?? 3
+        const attempts = compatibility.reviewAttempts ?? compatibility.coderabbitAttempts ?? 3
         log(`[${boundedLabel}] ${displayName} host review attempt ${attempt} of ${attempts}`)
-        const attemptStartedMs = spanNowMs()
+        const attemptStartedMs = hostReviewSpanNowMs()
         const attemptSpan = (deps.tracer || config.tracer || NOOP_HOST_REVIEW_TRACER).startSpan('host-review.attempt', traceContext, { reviewer, attempt, retry: attempt > 1 })
         const adapterDeps = { ...deps, attempt, tracer: deps.tracer || config.tracer || NOOP_HOST_REVIEW_TRACER, traceContext: { ...traceContext, taskId: boundedLabel } }
         let single: HostReviewAttempt
         try {
           single = reviewer === 'dakar' ? await dakarAttempt(worktree, exec, adapterDeps) : await coderabbitAttempt(worktree, exec, adapterDeps)
         } catch (error) {
-          attemptSpan.end({ reviewer, attempt, outcome: 'error', errorCategory: 'execution', retry: false, timeout: false, elapsedMs: Math.max(0, Math.trunc(spanNowMs() - attemptStartedMs)) })
+          attemptSpan.end({ reviewer, attempt, outcome: 'error', errorCategory: 'execution', retry: false, timeout: false, elapsedMs: hostReviewAttemptElapsedMs(attemptStartedMs) })
           throw error
         }
-        attemptSpan.end({ reviewer, attempt, outcome: single.outcome, errorCategory: single.errorCategory, retry: single.outcome === 'rate-limited' && attempt < attempts, timeout: single.errorCategory === 'timeout', elapsedMs: Math.max(0, Math.trunc(spanNowMs() - attemptStartedMs)) })
+        attemptSpan.end({ reviewer, attempt, outcome: single.outcome, errorCategory: single.errorCategory, retry: single.outcome === 'rate-limited' && attempt < attempts, timeout: single.errorCategory === 'timeout', elapsedMs: hostReviewAttemptElapsedMs(attemptStartedMs) })
         if (single.outcome === 'rate-limited' && attempt < attempts) {
           const minutes = reviewBackoffMinutes(`${boundedLabel}#${attempt}`)
           log(`[${boundedLabel}] ${displayName} rate limited/deferred; host backs off ${minutes} minutes before attempt ${attempt + 1} of ${attempts} (wall-clock only, no agent tokens)`)
@@ -233,15 +284,12 @@ export function makeHostReview(config: HostReviewConfig, composition: HostReview
     for (const finding of review.findings) {
       hostReviewMetrics.findings += 1
       const rawSeverity = String(finding.severity || 'unknown').toLowerCase()
-      const severity = Object.hasOwn(hostReviewMetrics.bySeverity, rawSeverity) ? rawSeverity as keyof typeof hostReviewMetrics.bySeverity : 'unknown'
+      const severity = reviewSeverity(rawSeverity)
       hostReviewMetrics.bySeverity[severity] += 1
     }
-    const findingsFile = config.reviewFindingsFile ?? config.coderabbitFindingsFile ?? ''
-    if (!findingsFile || !review.findings.length) return
-    const traceContext: HostReviewTraceContext = {
-      runId: boundedTail(deps.traceContext?.runId || config.traceContext?.runId || 'host-review', 120) || 'host-review',
-      ...(deps.traceContext?.taskId || config.traceContext?.taskId || label ? { taskId: boundedTail(deps.traceContext?.taskId || config.traceContext?.taskId || label, 120) } : {}),
-    }
+    const findingsFile = compatibility.reviewFindingsFile ?? compatibility.coderabbitFindingsFile ?? ''
+    if (!findingsFile || review.findings.length === 0) return
+    const traceContext = reviewTraceContext(deps.traceContext, config.traceContext, label)
     const sinkStartedMs = Number(process.hrtime.bigint() / 1_000_000n)
     const sinkSpan = (config.tracer || NOOP_HOST_REVIEW_TRACER).startSpan('host-review.findings-sink', traceContext, { reviewer: review.reviewer })
     /** Serialize one bounded JSONL batch without changing review success on sink failure. */
@@ -258,16 +306,18 @@ export function makeHostReview(config: HostReviewConfig, composition: HostReview
           await fs.appendFile(path, data, 'utf8')
         })
         await appendFile(findingsFile, `${lines.join('\n')}\n`)
-        sinkSpan.end({ reviewer: review.reviewer, outcome: 'clean', errorCategory: 'none', timeout: false, elapsedMs: Math.max(0, Number(process.hrtime.bigint() / 1_000_000n) - sinkStartedMs) })
+        sinkSpan.end({ reviewer: review.reviewer, outcome: 'clean', errorCategory: 'none', timeout: false, elapsedMs: hostReviewSinkElapsedMs(sinkStartedMs) })
       } catch (error) {
         hostReviewMetrics.sinkFailures += 1
+        // SAFETY: Optional property access tolerates any thrown non-nullish
+        // value; a missing or falsy message falls back to String(error).
         hostReviewMetrics.sinkError = boundedTail((error as Error | null)?.message || String(error), 500)
         log(`[${boundedTail(label, 120)}] could not append ${reviewerDisplayName(review.reviewer)} host-review findings to ${findingsFile}: ${hostReviewMetrics.sinkError}`)
-        sinkSpan.end({ reviewer: review.reviewer, outcome: 'error', errorCategory: 'execution', timeout: false, elapsedMs: Math.max(0, Number(process.hrtime.bigint() / 1_000_000n) - sinkStartedMs) })
+        sinkSpan.end({ reviewer: review.reviewer, outcome: 'error', errorCategory: 'execution', timeout: false, elapsedMs: hostReviewSinkElapsedMs(sinkStartedMs) })
       }
     }
     const pending = findingsSinkTail.then(append, append)
-    findingsSinkTail = pending.then(() => undefined, () => undefined)
+    findingsSinkTail = pending.then(() => {}, () => {})
     await pending
   }
 
