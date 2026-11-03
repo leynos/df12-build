@@ -13,12 +13,12 @@ Read these before changing launch or workflow behaviour:
   boundaries.
 - `docs/security-and-permissions.md` for runtime permissions, external service
   access, prompt-injection risk, and sandbox recommendations.
-- `docs/adr-001-adopt-odw-sidecar-launches.md` for the accepted sidecar launch
-  decision.
-- `docs/adr-002-assess-partial-task-branches.md` for the accepted partial
-  branch assessment and adoption model.
-- `docs/adr-003-opentelemetry-observability.md` for the accepted
-  correlation-first observability fabric, and
+- `docs/adrs/adr-0001-adopt-odw-sidecar-launches-for-codex-oriented-df12-build-runs.md`
+  for the accepted sidecar launch decision.
+- `docs/adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md` for
+  the accepted partial branch assessment and adoption model.
+- `docs/adrs/adr-0003-correlation-first-opentelemetry-observability-for-workshop-runs.md`
+  for the accepted correlation-first observability fabric, and
   `docs/workflow-observability-contract.md` for the version-1 identity model,
   attribute registry, envelope, and binding schemas that later steps build
   against.
@@ -86,13 +86,14 @@ Relevant paths:
 - `docs/security-and-permissions.md`: runtime permissions and sandbox guide.
 - `docs/developers-guide.md`: contributor-facing maintenance guide.
 - `docs/architecture.md`: design-level sidecar and workflow contract.
-- `docs/adr-001-adopt-odw-sidecar-launches.md`: accepted launch decision.
-- `docs/adr-002-assess-partial-task-branches.md`: accepted recovery assessment
-  decision.
-- `docs/adr-003-opentelemetry-observability.md`: accepted observability
-  decision, with `docs/workflow-observability-contract.md` and
-  `schemas/observability/` as its normative contract and machine-readable
-  schemas.
+- `docs/adrs/adr-0001-adopt-odw-sidecar-launches-for-codex-oriented-df12-build-runs.md`:
+  accepted launch decision.
+- `docs/adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md`:
+  accepted recovery assessment decision.
+- `docs/adrs/adr-0003-correlation-first-opentelemetry-observability-for-workshop-runs.md`:
+  accepted observability decision, with
+  `docs/workflow-observability-contract.md` and `schemas/observability/` as its
+  normative contract and machine-readable schemas.
 
 Tick the matching roadmap task and update the relevant ExecPlan whenever a
 branch lands planned work.
@@ -790,7 +791,7 @@ what stops `make all`'s lenient verification quietly skipping in CI.
 `oxlint.config.mjs` applies the supported Unicorn recommended rules and the
 recommended `ai-deslop` rules with type-aware checks. Its exact dependency
 pins, the Unicorn/deslop rule conflict, and scoped ODW rule exceptions are
-recorded in `docs/adr-004-linting-strategy.md`.
+recorded in `docs/adrs/adr-0004-oxlint-rules-for-odw-source.md`.
 
 The workflow artefacts in `workflows/` are excluded from Oxlint. They are
 object code: `make workflow-parse` checks their workflow syntax and

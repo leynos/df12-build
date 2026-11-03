@@ -1,7 +1,7 @@
 // Shared git fixtures for the recovery test suites: a throwaway repository
 // with an `origin` remote, surviving roadmap-* branches, live worktrees with
 // committed canonical ExecPlans, a durable-state snapshot helper for the
-// no-mutation assertions, and a complete eligible ADR 002 assessment reply.
+// no-mutation assertions, and a complete eligible ADR 0002 assessment reply.
 // Consumed by tests/df12-build-odw-recovery*.test.mjs and
 // tests/df12-build-odw-write-preflight.test.mjs.
 
@@ -155,7 +155,7 @@ export function repoStateSnapshot(repo) {
   }
 }
 
-// A complete, eligible ADR 002 assessment reply; override fields per scenario.
+// A complete, eligible ADR 0002 assessment reply; override fields per scenario.
 export function sampleAssessment(overrides = {}) {
   return {
     classification: 'adopt-complete',

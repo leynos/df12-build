@@ -1,4 +1,4 @@
-# ADR 001: Adopt ODW sidecar launches for Codex-oriented df12-build runs
+# Architectural decision record (ADR) 0001: Adopt ODW sidecar launches for Codex-oriented df12-build runs
 
 ## Status
 

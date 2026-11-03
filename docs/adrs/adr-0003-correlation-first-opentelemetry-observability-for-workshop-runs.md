@@ -1,4 +1,4 @@
-# Architectural decision record (ADR) 003: correlation-first OpenTelemetry observability for workshop runs
+# Architectural decision record (ADR) 0003: Correlation-first OpenTelemetry observability for workshop runs
 
 ## Status
 
