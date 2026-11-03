@@ -1,4 +1,4 @@
-# ADR 002: Assess partial task branches before fresh restart
+# Architectural decision record (ADR) 0002: Assess partial task branches before fresh restart
 
 ## Status
 

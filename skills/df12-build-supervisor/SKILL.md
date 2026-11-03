@@ -700,7 +700,7 @@ reviewer.
      branches, and BLOCKED plans are reported for you instead.
   2. **Assess-first relaunch:** relaunch with `resumePartialBranches=true`
      (default `resumeMode="assess"`). The fresh run discovers surviving
-     `roadmap-*` branches, assesses each against ADR 002, and reports them in
+     `roadmap-*` branches, assesses each against ADR 0002, and reports them in
      the top-level `recovery` object without mutating anything. Read the
      classifications, then decide per branch: enable `resumeMode="review"` on
      a follow-up run to let clean `adopt-complete` branches re-enter review

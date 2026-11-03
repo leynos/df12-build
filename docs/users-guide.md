@@ -655,7 +655,7 @@ Example `args.json`:
   "base": "main",
   "roadmap": "docs/roadmap.md",
   "projectRoot": "/home/example/Projects/example-project",
-  "designDocs": "docs/architecture.md, docs/adr-001-adopt-odw-sidecar-launches.md, docs/users-guide.md, docs/developers-guide.md",
+  "designDocs": "docs/adrs/adr-0001-adopt-odw-sidecar-launches-for-codex-oriented-df12-build-runs.md",
   "searchBackend": "grepai",
   "grepaiWorkspace": "Projects",
   "grepaiProject": "example-project",
@@ -933,7 +933,7 @@ Set `resumePartialBranches=true` and choose the maximum action with
 
 - **Assess-only** (`resumeMode="assess"`, the default): the workflow maps
   surviving `roadmap-*` branches back to roadmap ids, assesses each candidate
-  with the same ADR 002 contract used for in-run failures, and reports the
+  with the same ADR 0002 contract used for in-run failures, and reports the
   outcome in a top-level `recovery` object. Nothing is merged, pushed, ticked,
   or deleted, and `processed` is unchanged. Use this mode first: it guarantees
   the target project is not written to, though recovered branch content still

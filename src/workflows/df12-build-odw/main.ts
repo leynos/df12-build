@@ -267,7 +267,7 @@ const { runTaskAgentWritePreflight, ensureTaskAgentWriteAccess } = makeWritePref
   targets: writeProbeTargets,
 })
 
-// ADR 002 assessment and remediation triage with the run wiring bound once
+// ADR 0002 assessment and remediation triage with the run wiring bound once
 // (see assessment.ts and remediation.ts).
 const {
   assessmentPrompt,
@@ -497,7 +497,7 @@ async function executeResume(
       if (built.kind === 'failure') return checkedTaskOutcome(built.fail)
       impl = built.impl
     } else {
-      // Carry the ADR 002 assessment's advisory residual risk forward into the
+      // Carry the ADR 0002 assessment's advisory residual risk forward into the
       // synthetic implementation report so the resumed reviewer/integrator sees
       // the caveats — without the resume having been blocked for them (#23).
       const synthetic = await syntheticRecoveryImpl(enriched, evidence, residualRisk)
@@ -664,7 +664,7 @@ async function runRecovery(root: string, mergeLock: MergeLockFn = null): Promise
     }
 
     // --- Resume: re-enter the ordinary pipeline at the dispatched stage. The
-    // committed ExecPlan (continue mode) or the ADR 002 assessment (review
+    // committed ExecPlan (continue mode) or the ADR 0002 assessment (review
     // mode) chose the entry point; the pipeline's own gates remain decisive,
     // and integration ticks the roadmap under the merge lock.
     const stage = decision.stage || 'review'

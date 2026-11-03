@@ -52,7 +52,7 @@ export interface StagePlan extends Record<string, unknown> {
 /**
  * The implementation stage's product: the build agent's (or work-item build
  * loop's) report on the committed work. Carries the advisory, non-blocking
- * `residualRisk` list forward from an ADR 002 recovery assessment so the
+ * `residualRisk` list forward from an ADR 0002 recovery assessment so the
  * dual review and integration prompts can render it as context (#23).
  * Extends `Record<string, unknown>` because the implementation agent's
  * structured response may carry additional fields the pipeline does not
@@ -69,7 +69,7 @@ export interface StageImpl extends Record<string, unknown> {
   openIssues?: string[]
   /** Commit subjects reported by the schema-validated implementation agent. */
   commits?: string[]
-  // Advisory, non-blocking residual risk carried forward from an ADR 002
+  // Advisory, non-blocking residual risk carried forward from an ADR 0002
   // recovery assessment; rendered as review/integration context only (#23).
   /** Advisory, non-blocking risks carried into review and integration. */
   residualRisk?: string[]
@@ -250,7 +250,7 @@ export interface TaskPipelineDeps {
   hostGateLock: Lock
   /** Retry infrastructure-classified agent failures. */
   withInfraRetry: <T>(run: () => Promise<T>, label: string) => Promise<T>
-  /** Attach an ADR 002 assessment to a task result. */
+  /** Attach an ADR 0002 assessment to a task result. */
   attachAssessment: (task: SelectedTask, wt: { branch?: string; worktreePath?: string; baseSha?: string }, result: StageResult) => Promise<StageResult>
   /** Verify that configured task agents can write to the worktree. */
   ensureTaskAgentWriteAccess: (worktree: string, tag: string) => Promise<{

@@ -44,7 +44,7 @@ handoff mechanism.
 The workflow follows this high-level sequence:
 
 - Run fresh-run recovery when `resumePartialBranches=true`: discover surviving
-  `roadmap-*` branches from durable Git state, assess them through the ADR 002
+  `roadmap-*` branches from durable Git state, assess them through the ADR 0002
   contract, and either report them (assess mode) or route eligible clean
   `adopt-complete` branches into the ordinary review and integration path
   (review mode). Discovered ids are held out of normal selection for the rest
@@ -289,11 +289,12 @@ The sidecar contract is documented at three levels:
   external services, prompt-injection surface, and sandbox profiles.
 - `docs/developers-guide.md` explains how contributors change the workflow and
   keep documentation synchronized.
-- `docs/adr-001-adopt-odw-sidecar-launches.md` records the architectural
-  decision to use ODW sidecar launches for Codex- and Claude-oriented runs.
-- `docs/adr-002-assess-partial-task-branches.md` records the accepted
-  assessment stage for preserving useful partial task branches without resuming
-  transient agent transcripts.
+- `docs/adrs/adr-0001-adopt-odw-sidecar-launches-for-codex-oriented-df12-build-runs.md`
+  records the architectural decision to use ODW sidecar launches for Codex- and
+  Claude-oriented runs.
+- `docs/adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md`
+  records the accepted assessment stage for preserving useful partial task
+  branches without resuming transient agent transcripts.
 
 Changes to launch behaviour, sidecar artefacts, configuration arguments, or
 agent-routing defaults must update all affected layers in the same branch.

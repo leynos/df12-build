@@ -7,8 +7,8 @@ supervising ODW workshops, and reviewers checking recovery behaviour.
 
 Companion documents:
 
-- `docs/adr-001-adopt-odw-sidecar-launches.md`
-- `docs/adr-002-assess-partial-task-branches.md`
+- `docs/adrs/adr-0001-adopt-odw-sidecar-launches-for-codex-oriented-df12-build-runs.md`
+- `docs/adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md`
 - `docs/architecture.md`
 - `docs/security-and-permissions.md`
 - `docs/users-guide.md`
@@ -16,7 +16,7 @@ Companion documents:
 
 ## Problem
 
-ADR 002 added report-only assessment for task branches that fail or halt after
+ADR 0002 added report-only assessment for task branches that fail or halt after
 a worktree exists. That helps an operator decide what to do with a surviving
 branch, but it does not make a fresh run discover that branch or re-enter the
 workflow at a safe stage.
@@ -51,7 +51,7 @@ References are listed at the end of this document.
 ## Goals
 
 - Discover surviving `roadmap-*` branches and worktrees on a fresh ODW launch.
-- Reuse the ADR 002 assessment schema and evidence collector wherever possible.
+- Reuse the ADR 0002 assessment schema and evidence collector wherever possible.
 - Default to assess-only behaviour, with no writes to the target project.
 - Allow explicit review-mode resume for clean `adopt-complete` branches.
 - Allow explicit accepted-ExecPlan reuse for open, unbuilt roadmap tasks whose
@@ -84,7 +84,7 @@ least powerful recovery action that preserves correctness.
 | Term               | Meaning                                                                                                                                                                                    |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Recovery candidate | A surviving task branch or worktree whose name maps to a roadmap id.                                                                                                                       |
-| Assessment         | The ADR 002 schema-bound classification and evidence summary.                                                                                                                              |
+| Assessment         | The ADR 0002 schema-bound classification and evidence summary.                                                                                                                             |
 | Resume mode        | The maximum action the workflow may take for recovery candidates.                                                                                                                          |
 | Assess-only        | Discovery plus assessment, returning JSON only.                                                                                                                                            |
 | Review resume      | Re-entering the existing review and integration path for an `adopt-complete` branch.                                                                                                       |
@@ -567,5 +567,5 @@ target project.
   `https://github.com/xz1220/open-dynamic-workflows/blob/main/README.md`.
 - Claude Code dynamic workflows:
   `https://code.claude.com/docs/en/workflows`.
-- ADR 002:
-  `docs/adr-002-assess-partial-task-branches.md`.
+- ADR 0002:
+  `docs/adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md`.

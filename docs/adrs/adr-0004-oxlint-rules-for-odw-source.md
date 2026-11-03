@@ -1,4 +1,4 @@
-# Architectural decision record (ADR) 004: Oxlint rules for ODW source
+# Architectural decision record (ADR) 0004: Oxlint rules for ODW source
 
 ## Status
 
@@ -34,7 +34,7 @@ artefacts as if they were authored source.
 ## Decision outcome
 
 `make lint` runs Oxlint against `src/` using
-[`oxlint.config.mjs`](../oxlint.config.mjs). The configuration enables the
+[`oxlint.config.mjs`](../../oxlint.config.mjs). The configuration enables the
 Unicorn plug-in rules supported by the pinned Oxlint release, imports the
 recommended `ai-deslop` rules, enables type-aware linting, and turns the other
 Oxlint categories off. It excludes `workflows/**`. Tests remain outside this
