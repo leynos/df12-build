@@ -55,6 +55,34 @@ lint: markdownlint workflow-parse
 typecheck: workflow-parse
 	node_modules/.bin/tsc -p tsconfig.json --noEmit
 
+# Interrogate scans each target recursively, subject to its default exclusions.
+INTERROGATE_VERSION ?= 1.7.0
+INTERROGATE_TARGETS ?= tests
+# Level 2 prints a MISSED row per undocumented definition, which the
+# `interrogate` recipe below looks for: the rounded percentage alone can pass a
+# lone gap.
+INTERROGATE_FLAGS ?= -vv --fail-under 100
+INTERROGATE ?= uv tool run --python 3.13 --from 'interrogate==$(INTERROGATE_VERSION)' interrogate
+
+# Interrogate rounds its percentage to one decimal, so `--fail-under 100` alone
+# can pass a lone gap. This recipe also fails when `grep` finds a MISSED row in
+# the report on standard output. `grep` reads the whole report (no `-q`), so an
+# early exit cannot break the pipe under `pipefail`.
+.PHONY: interrogate
+interrogate: ## Enforce complete Python docstring coverage
+	@report="$$($(INTERROGATE) $(INTERROGATE_FLAGS) $(INTERROGATE_TARGETS))"; \
+	  status=$$?; \
+	  printf '%s\n' "$$report"; \
+	  test "$$status" -eq 0 || exit "$$status"; \
+	  if printf '%s\n' "$$report" | grep '| *MISSED *|' >/dev/null; then \
+	    printf '%s\n' 'interrogate: undocumented definitions remain; see the MISSED rows above' >&2; \
+	    exit 1; \
+	  fi
+
+# `lint` runs the docstring gate; Make adds this prerequisite to the `lint`
+# rule above.
+lint: interrogate
+
 markdownlint:
 	node_modules/.bin/markdownlint-cli2 $(MARKDOWN_FILES)
 	+$(MAKE) spelling
