@@ -167,7 +167,7 @@ class FilterAndTableTests(unittest.TestCase):
         self.assertEqual([row.run_id for row in rows], ["r2"])
 
     def test_source_and_workflow_substring_filters(self) -> None:
-        """Check case-insensitive substring filtering on source and workflow."""
+        """Check that the source and workflow filters select the matching rows."""
         rows = list_runs.filter_rows(self.rows(), show_all=True, statuses=None, source="/p/a", workflow=None)
         self.assertEqual([row.run_id for row in rows], ["r1", "r3"])
         rows = list_runs.filter_rows(self.rows(), show_all=True, statuses=None, source=None, workflow="RESEARCH")
@@ -254,7 +254,7 @@ class EventParsingTests(unittest.TestCase):
     def test_undecodable_complete_line_warns_and_is_skipped(self) -> None:
         """Check that a complete undecodable line warns and is skipped.
 
-        Decodable lines around it are still returned.
+        The valid line that follows it is still returned.
         """
         with tempfile.TemporaryDirectory() as tmp:
             run = self.run_fixture(Path(tmp))
@@ -344,10 +344,10 @@ class OffsetPruningTests(unittest.TestCase):
 
 
 class EventRenderingTests(unittest.TestCase):
-    """Test the detail text rendered for each event type."""
+    """Test the detail text rendered for selected event types."""
 
     def test_event_detail_snapshots(self) -> None:
-        """Check the text that ``event_detail`` renders for each event type.
+        """Check the text that ``event_detail`` renders for the listed event types.
 
         Unknown types fall back to the remaining payload as JSON, without
         ``ts`` and ``type``.
