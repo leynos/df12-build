@@ -62,6 +62,11 @@ def make_run_dir(
     status: Mapping[str, Any],
     meta: Mapping[str, Any],
 ) -> Path:
+    """Create a run directory with JSON status and meta fixtures.
+
+    The directory is ``<root>/<workflow>/<run_id>`` and must not exist yet,
+    because it is created with ``mkdir(parents=True)``. Returns its path.
+    """
     run_dir = root / workflow / run_id
     run_dir.mkdir(parents=True)
     (run_dir / "status.json").write_text(json.dumps(status), encoding="utf-8")
@@ -70,7 +75,10 @@ def make_run_dir(
 
 
 class ReadJsonTests(unittest.TestCase):
+    """Test the JSON readers in both ODW scripts."""
+
     def test_missing_file_is_silent(self) -> None:
+        """Check that a missing file yields ``{}`` with no stderr output."""
         with tempfile.TemporaryDirectory() as tmp:
             stderr = io.StringIO()
             with contextlib.redirect_stderr(stderr):
@@ -78,6 +86,7 @@ class ReadJsonTests(unittest.TestCase):
             self.assertEqual(stderr.getvalue(), "")
 
     def test_malformed_file_warns_and_returns_empty(self) -> None:
+        """Check that a malformed file yields ``{}`` and a stderr warning."""
         with tempfile.TemporaryDirectory() as tmp:
             broken = Path(tmp) / "broken.json"
             broken.write_text('{"torn": ', encoding="utf-8")
@@ -87,6 +96,11 @@ class ReadJsonTests(unittest.TestCase):
             self.assertIn("warning: skipping unreadable", stderr.getvalue())
 
     def test_watcher_read_json_warns_once_across_varying_parse_errors(self) -> None:
+        """Check that the watcher warns once per path despite changing errors.
+
+        Two different decode errors for the same file produce a single
+        warning, because the dedup key is the path rather than the message.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             broken = Path(tmp) / "status.json"
             stderr = io.StringIO()
@@ -99,6 +113,7 @@ class ReadJsonTests(unittest.TestCase):
             self.assertEqual(len(warnings), 1, "the dedup key must not vary with the exception text")
 
     def test_non_object_payload_returns_empty(self) -> None:
+        """Check that a JSON array, which is not an object, yields ``{}``."""
         with tempfile.TemporaryDirectory() as tmp:
             listy = Path(tmp) / "list.json"
             listy.write_text("[1, 2]", encoding="utf-8")
@@ -106,7 +121,10 @@ class ReadJsonTests(unittest.TestCase):
 
 
 class TimestampTests(unittest.TestCase):
+    """Test timestamp coercion and display formatting in list-runs."""
+
     def test_coerce_timestamp(self) -> None:
+        """Check coercion of None, numbers, numeric and other strings, and objects."""
         self.assertIsNone(list_runs.coerce_timestamp(None))
         self.assertEqual(list_runs.coerce_timestamp(5), 5.0)
         self.assertEqual(list_runs.coerce_timestamp("5.5"), 5.5)
@@ -114,13 +132,17 @@ class TimestampTests(unittest.TestCase):
         self.assertEqual(list_runs.coerce_timestamp({"odd": 1}), "{'odd': 1}")
 
     def test_display_timestamp(self) -> None:
+        """Check epoch formatting, string pass-through, and blank output for None."""
         self.assertEqual(list_runs.display_timestamp(None), "")
         self.assertEqual(list_runs.display_timestamp(0.0), "1970-01-01T00:00:00Z")
         self.assertEqual(list_runs.display_timestamp("raw"), "raw")
 
 
 class FilterAndTableTests(unittest.TestCase):
+    """Test run filtering, collection, and table rendering in list-runs."""
+
     def rows(self) -> list[Any]:
+        """Return four sample rows across several sources, workflows, and states."""
         make = list_runs.RunRow
         return [
             make(source="/p/a", status="running", updated_at=200.0, run_id="r1", workflow_name="build"),
@@ -130,22 +152,29 @@ class FilterAndTableTests(unittest.TestCase):
         ]
 
     def test_default_filter_keeps_running_only_newest_first(self) -> None:
+        """Check that the default filter keeps only running rows, newest first."""
         rows = list_runs.filter_rows(self.rows(), show_all=False, statuses=None, source=None, workflow=None)
         self.assertEqual([row.run_id for row in rows], ["r1", "r3"])
 
     def test_show_all_and_status_filters(self) -> None:
+        """Check that ``show_all`` keeps every status and status filters ignore case.
+
+        Rows with unparseable timestamps sort after numeric ones.
+        """
         rows = list_runs.filter_rows(self.rows(), show_all=True, statuses=None, source=None, workflow=None)
         self.assertEqual([row.run_id for row in rows], ["r2", "r1", "r3", "r4"])
         rows = list_runs.filter_rows(self.rows(), show_all=False, statuses=["DONE"], source=None, workflow=None)
         self.assertEqual([row.run_id for row in rows], ["r2"])
 
     def test_source_and_workflow_substring_filters(self) -> None:
+        """Check that the source and workflow filters select the matching rows."""
         rows = list_runs.filter_rows(self.rows(), show_all=True, statuses=None, source="/p/a", workflow=None)
         self.assertEqual([row.run_id for row in rows], ["r1", "r3"])
         rows = list_runs.filter_rows(self.rows(), show_all=True, statuses=None, source=None, workflow="RESEARCH")
         self.assertEqual([row.run_id for row in rows], ["r3"])
 
     def test_collect_runs_reads_status_and_meta(self) -> None:
+        """Check that ``collect_runs`` builds a row from status and meta files."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             make_run_dir(
@@ -162,6 +191,10 @@ class FilterAndTableTests(unittest.TestCase):
         self.assertEqual(rows[0].workflow_name, "build")
 
     def test_table_snapshot(self) -> None:
+        """Check the exact aligned output of ``table``.
+
+        A missing timestamp renders as a blank cell.
+        """
         rows = [
             list_runs.RunRow(source="/p/a", status="running", updated_at=0.0, run_id="r1", workflow_name="build"),
             list_runs.RunRow(source="/p/bb", status="done", updated_at=None, run_id="r2", workflow_name="w"),
@@ -178,14 +211,22 @@ class FilterAndTableTests(unittest.TestCase):
 
 
 class EventParsingTests(unittest.TestCase):
+    """Test event decoding, offset handling, and the startup tail in odw-watch."""
+
     # -> Any, not object: the value is a dynamically loaded odw_watch.Run,
     # whose attributes (.path, .events_path) object would not promise.
     def run_fixture(self, tmp: Path) -> Any:
+        """Create an empty run directory under ``tmp`` and return its ``Run``."""
         run_dir = tmp / "wf" / "run1"
         run_dir.mkdir(parents=True)
         return odw_watch.Run(path=run_dir, run_id="run1", source=str(tmp / "src"))
 
     def test_parse_event_variants(self) -> None:
+        """Check that ``parse_event`` decodes objects and rejects bad input.
+
+        Non-UTF-8 bytes and non-object JSON yield ``None``, and a missing
+        ``ts`` becomes ``0.0``.
+        """
         run = odw_watch.Run(path=Path("/nowhere"), run_id="x", source="/s")
         good = odw_watch.parse_event(b'{"ts": 5, "type": "log"}\n', sequence=1, run=run)
         self.assertEqual((good.ts, good.sequence), (5.0, 1))
@@ -194,6 +235,11 @@ class EventParsingTests(unittest.TestCase):
         self.assertEqual(odw_watch.parse_event(b'{"type": "log"}\n', sequence=0, run=run).ts, 0.0)
 
     def test_read_events_leaves_torn_line_for_the_next_poll(self) -> None:
+        """Check that a torn trailing line is left for a later read.
+
+        The offset from the first read points at the torn line, so a read
+        from that offset returns the event once the line is complete.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             run = self.run_fixture(Path(tmp))
             run.events_path.write_bytes(b'{"ts": 1, "type": "log", "message": "a"}\n{"ts": 2, "ty')
@@ -206,6 +252,10 @@ class EventParsingTests(unittest.TestCase):
             self.assertEqual([event.data["message"] for event in resumed], ["b"])
 
     def test_undecodable_complete_line_warns_and_is_skipped(self) -> None:
+        """Check that a complete undecodable line warns and is skipped.
+
+        The valid line that follows it is still returned.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             run = self.run_fixture(Path(tmp))
             run.events_path.write_bytes(b'not json\n{"ts": 2, "type": "log", "message": "ok"}\n')
@@ -216,6 +266,11 @@ class EventParsingTests(unittest.TestCase):
             self.assertIn("undecodable event line", stderr.getvalue())
 
     def test_recent_events_seeds_offsets_for_the_startup_poll_gap(self) -> None:
+        """Check that ``recent_events`` offsets resume tailing without a gap.
+
+        An event appended after the startup read is returned exactly once by
+        a read from the seeded offset.
+        """
         # Regression for the discovery-to-first-poll interleaving: an event
         # appended after the initial read must be picked up exactly once by
         # resuming from the returned offsets, never skipped by re-statting.
@@ -233,6 +288,10 @@ class EventParsingTests(unittest.TestCase):
             self.assertEqual([event.data["message"] for event in events], ["appended"])
 
     def test_read_events_bounded_buffer_keeps_the_tail_and_the_offset(self) -> None:
+        """Check that ``max_events`` keeps only the newest events.
+
+        The returned offset still marks the end of the whole file.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             run = self.run_fixture(Path(tmp))
             payload = b"".join(
@@ -245,6 +304,10 @@ class EventParsingTests(unittest.TestCase):
             self.assertEqual(offset, len(payload), "the offset must reflect the full scan, not the buffer")
 
     def test_recent_events_zero_limit_still_returns_offsets(self) -> None:
+        """Check that a zero limit returns no events but still reports offsets.
+
+        The offset is the end of the file, so tailing can resume from there.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             run = self.run_fixture(Path(tmp))
             payload = b'{"ts": 1, "type": "log", "message": "a"}\n'
@@ -255,7 +318,10 @@ class EventParsingTests(unittest.TestCase):
 
 
 class LimitValidationTests(unittest.TestCase):
+    """Test rejection of invalid ``--limit`` values in list-runs."""
+
     def test_negative_limit_is_rejected(self) -> None:
+        """Check that a negative limit exits with status 2 and a stderr message."""
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as caught:
             list_runs.main(limit=-1)
@@ -264,7 +330,10 @@ class LimitValidationTests(unittest.TestCase):
 
 
 class OffsetPruningTests(unittest.TestCase):
+    """Test eviction of offsets for deleted run directories."""
+
     def test_prunes_only_deleted_run_directories(self) -> None:
+        """Check that ``prune_dead_offsets`` evicts only missing run directories."""
         with tempfile.TemporaryDirectory() as tmp:
             alive = Path(tmp) / "alive"
             alive.mkdir()
@@ -275,7 +344,14 @@ class OffsetPruningTests(unittest.TestCase):
 
 
 class EventRenderingTests(unittest.TestCase):
+    """Test the detail text rendered for selected event types."""
+
     def test_event_detail_snapshots(self) -> None:
+        """Check the text that ``event_detail`` renders for the listed event types.
+
+        Unknown types fall back to the remaining payload as JSON, without
+        ``ts`` and ``type``.
+        """
         cases = [
             ({"type": "log", "message": "hello"}, "hello"),
             ({"type": "phase_started", "phase": "Plan"}, "(Plan) phase started"),
@@ -297,7 +373,10 @@ class EventRenderingTests(unittest.TestCase):
 
 
 class DiscoveryTests(unittest.TestCase):
+    """Test discovery of running runs that match the watched source."""
+
     def test_discover_running_runs_matches_source_and_state(self) -> None:
+        """Check that ``discover_running_runs`` keeps only running source matches."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "project"
