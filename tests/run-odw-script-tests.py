@@ -349,8 +349,8 @@ class EventRenderingTests(unittest.TestCase):
     def test_event_detail_snapshots(self) -> None:
         """Check the text that ``event_detail`` renders for the listed event types.
 
-        Unknown types fall back to the remaining payload as JSON, without
-        ``ts`` and ``type``.
+        A ``mystery`` event with an unrecognised type renders its remaining
+        fields as JSON, without ``ts`` and ``type``.
         """
         cases = [
             ({"type": "log", "message": "hello"}, "hello"),
