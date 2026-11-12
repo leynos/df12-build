@@ -229,6 +229,10 @@ name, for example `docs/rstest-bdd-v0-5-0-migration-guide.md`.
 
 #### Migration guide skeleton
 
+Replace the marker identifiers with stable identifiers unique to the published
+guide, and replace the code placeholders with examples exercised by the
+project's test suite.
+
 ````markdown
 # Migration guide: v0.8.0 to v0.9.0
 
@@ -248,12 +252,14 @@ _Table 1: Obligations when moving from v0.8.0 to v0.9.0._
 
 ### Before
 
+<!-- tested-example: migration-guide-before -->
 ```rust,no_run
 <old code>
 ```
 
 ### After
 
+<!-- tested-example: migration-guide-after -->
 ```rust,no_run
 <new code>
 ```
