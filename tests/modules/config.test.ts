@@ -9,6 +9,8 @@ describe('makeConfig defaults', () => {
   test('core run shape', () => {
     expect(config.BASE).toBe('main')
     expect(config.ROADMAP).toBe('docs/roadmap.md')
+    expect(config.DESIGN_DOCS).toContain('`docs/adrs/*.md`')
+    expect(config.DESIGN_DOCS).toContain('legacy `docs/adr-*.md`')
     expect(config.ONLY_TASK).toBeNull()
     expect(config.MAX_TASKS).toBe(12)
     expect(config.MAX_PARALLEL).toBe(16)

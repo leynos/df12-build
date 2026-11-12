@@ -402,7 +402,8 @@ export function makeConfig(rawArgs: unknown): WorkflowConfig {
   const PROJECT_ROOT = cfg.projectRoot || process.cwd()
   const BASE = cfg.base || 'main' // integration branch: rebase + squash-merge target, roadmap source of truth
   const ROADMAP = cfg.roadmap || 'docs/roadmap.md'
-  const DESIGN_DOCS = cfg.designDocs || 'the design document(s) and the ADRs (docs/adrs/*.md) under docs/' // project design sources cited in prompts
+  // Preserve discovery for target projects that still use flat ADR filenames.
+  const DESIGN_DOCS = cfg.designDocs || 'the design document(s) and the ADRs under docs/ (`docs/adrs/*.md` and legacy `docs/adr-*.md`)'
   const RESEARCH_NOTE = cfg.researchNote || null // optional project-specific external-library research note (e.g. a vendored lib source path to verify against)
   const ONLY_TASK = cfg.taskId || null // process exactly one named roadmap id (e.g. "1.2.1")
   const MAX_TASKS = ONLY_TASK ? 1 : cfg.maxTasks || 12 // hard ceiling on roadmap steps per run

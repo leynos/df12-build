@@ -456,6 +456,8 @@ Common arguments:
 - `base`: integration branch. Defaults to `main`.
 - `roadmap`: roadmap path. Defaults to `docs/roadmap.md`.
 - `designDocs`: design document and ADR locations cited in planner prompts.
+  The default includes `docs/adrs/*.md` and legacy `docs/adr-*.md` paths under
+  `docs/`. Set this when the target project uses another layout.
 - `researchNote`: optional external-library research pointer, such as a vendored
   source path.
 - `projectRoot`: target-project checkout to `chdir` into before the workflow

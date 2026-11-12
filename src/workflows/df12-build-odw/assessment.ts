@@ -443,7 +443,7 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
       '',
       'This is a READ-ONLY recovery assessment. Do not edit files, commit, stash, merge, cherry-pick, push, delete worktrees, mark roadmap checkboxes, or run any command that mutates repository state. Do not resume or rely on the failed agent transcript. Inspect only durable state that exists on disk or in Git.',
       '',
-      'Use ADR 0002 (`docs/adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md`) as the classification contract. Return exactly one classification:',
+      'Use ADR 0002 (`docs/adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md`) as the classification contract if that file exists in the worktree. If it is absent, apply the classification rules below. Return exactly one classification:',
       '- `adopt-complete`: the branch satisfies the roadmap task success criterion, has an up-to-date ExecPlan, required gates are green, and can proceed through the ordinary review and integration path.',
       '- `adopt-partial`: the branch contains a coherent useful slice, but the roadmap task must remain unchecked and the work should be preserved only through Git state.',
       '- `continue-manual`: the branch is promising, but scope, roadmap state, validation, or review evidence needs operator judgement before any merge.',
