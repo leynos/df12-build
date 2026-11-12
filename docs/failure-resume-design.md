@@ -202,6 +202,13 @@ Assessment remains skipped for auth failures. A recovered branch is not an auth
 failure merely because the previous run halted under token exhaustion; it is an
 ordinary recovery candidate unless its durable evidence says otherwise.
 
+The default `DESIGN_DOCS` prompt guidance includes both canonical
+`docs/adrs/*.md` and legacy `docs/adr-*.md` paths for target projects. A
+recovery worktree may predate the rename and lack the canonical ADR 0002 file;
+in that case, the assessment prompt directs the agent to use its inline four
+classification rules. This keeps the classification contract stable without
+requiring historical worktrees to be rewritten.
+
 ## Accepted ExecPlan reuse
 
 Accepted plan reuse addresses an open roadmap task that is not yet built, but

@@ -139,7 +139,7 @@ Planned work:
   `schemas.ts`; `types.ts` names `RoadmapTask`, `SelectedTask`,
   `RecoveryCandidate`, and `FaultMetrics`. New direct-import contract suite
   `tests/modules/schemas.test.ts` (red-then-green): closed-object and
-  required-exists checks over every schema, enum ↔ ADR 0002 classification,
+  required-exists checks over every schema, enum ↔ ADR 002 classification,
   mock-satisfiability of `dirtyState`. Milestone 0's CodeRabbit review returned
   zero findings before this milestone began.
 - [x] (2026-07-05 21:05Z) Milestone 2: roadmap parsing and selection peeled
@@ -220,7 +220,7 @@ Planned work:
   guard as direct exports;
   `makeAssessment({ preamble,
   assessPartialBranches, assessmentAgentOptions, withInfraRetry })`
-  returning the two ADR 0002 prompts, `assessRecoveryCandidate`,
+  returning the two ADR 002 prompts, `assessRecoveryCandidate`,
   `shouldAssessFailure`, and `attachAssessment`) and `remediation.ts`
   (`TRIAGE_SCHEMA`, `stepOf` direct;
   `makeRemediation({ preamble, base, roadmap, triageAgentOptions })` returning
@@ -894,3 +894,16 @@ emits bounded reviewer, label, attempts, elapsed time, outcome, and
 error-category fields. Fixed-cardinality metrics cover runs, findings, retries,
 deferrals, timeouts, errors, authentication failures, and serialized JSONL sink
 failures.
+
+## Post-completion addendum
+
+2026-11-12: ADR identifiers and filenames were normalized after this plan was
+completed. The historical entries above retain the identifier and path used
+during implementation. ADR 002 at
+`docs/adr-002-assess-partial-task-branches.md` is now
+[ADR 0002][adr-current-0002]. The current naming scheme is documented in the
+[documentation style guide][adr-naming-guide].
+
+[adr-current-0002]:
+  ../adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md
+[adr-naming-guide]: ../documentation-style-guide.md

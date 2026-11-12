@@ -16,7 +16,7 @@ The first implementation only reports the recommendation; it must not
 automatically merge or cherry-pick partial work.
 
 Success is visible in the ODW result JSON. A task that fails after worktree
-creation has an `assessment` object with a classification from ADR 0002, the
+creation has an `assessment` object with a classification from ADR 002, the
 branch/worktree identity, evidence summaries, missing evidence, and a bounded
 recommendation. Auth failures and pre-worktree failures do not get assessed.
 
@@ -95,7 +95,7 @@ conflict in `Decision Log`, and ask for direction.
 
 ## Progress
 
-- [x] (2026-06-30T15:12:48Z) Read ADR 0002, the ODW workflow, and the repository
+- [x] (2026-06-30T15:12:48Z) Read ADR 002, the ODW workflow, and the repository
   documentation that defines the sidecar, state, validation, and supervisor
   contracts.
 - [x] (2026-06-30T15:12:48Z) Drafted this ExecPlan in `docs/execplans/`.
@@ -113,14 +113,14 @@ conflict in `Decision Log`, and ask for direction.
   collection, result wiring, and top-level `assessments` summary.
 - [x] (2026-06-30T15:35:32Z) Ran the focused green test:
   `node --test tests/df12-build-odw-assessment.test.mjs` passed 4 tests.
-- [x] (2026-06-30T15:35:32Z) Updated ADR 0002, user guide,
+- [x] (2026-06-30T15:35:32Z) Updated ADR 002, user guide,
   architecture, developer guide, security guide, and supervisor skill for the
   report-only assessment behaviour.
 - [x] (2026-06-30T15:47:19Z) Ran `make all`; diff check, Markdown lint, ODW
   wrapper parse, Nixie diagram validation, and Node assessment tests all passed.
 - [x] (2026-06-30T16:11:11Z) Verified three review findings against current
   code: auth-shaped implementation issues were not fatal, assessment evidence
-  fields were optional in the schema, and two docs still called ADR 0002
+  fields were optional in the schema, and two docs still called ADR 002
   proposed.
 - [x] (2026-06-30T16:11:11Z) Patched the still-valid findings and extended
   focused tests for auth-shaped implementation issues, both implementation
@@ -153,7 +153,7 @@ conflict in `Decision Log`, and ask for direction.
   `workflows/df12-build.js`.
 
 - Observation: Claude Code workflows resume only within the same Claude Code
-  session, while ADR 0002 requires fresh restart from durable git state.
+  session, while ADR 002 requires fresh restart from durable git state.
   Evidence: Firecrawl scrape of `https://code.claude.com/docs/en/workflows`.
   Impact: The assessment stage must not use session resume semantics as part of
   recovery, even though Claude Code dynamic workflows expose a same-session
@@ -172,7 +172,7 @@ conflict in `Decision Log`, and ask for direction.
 ## Decision log
 
 - Decision: Implement a report-only assessment stage first.
-  Rationale: ADR 0002 says automatic adoption should wait until the manual
+  Rationale: ADR 002 says automatic adoption should wait until the manual
   recommendation path has been dogfooded. Reporting keeps recovery observable
   without adding a new merge path. Date/Author: 2026-06-30T15:12:48Z / Codex.
 
@@ -198,7 +198,7 @@ conflict in `Decision Log`, and ask for direction.
   than control flow. Date/Author: 2026-06-30T15:12:48Z / Codex.
 
 - Decision: Do not use Claude Code same-session workflow resume as prior art
-  for this recovery path. Rationale: ADR 0002 explicitly chooses git-state
+  for this recovery path. Rationale: ADR 002 explicitly chooses git-state
   recovery after system failure or token exhaustion. Same-session transcript or
   journal resume is a different reliability model and can disappear across
   process/session boundaries. Date/Author: 2026-06-30T15:12:48Z / Codex.
@@ -212,11 +212,11 @@ conflict in `Decision Log`, and ask for direction.
 - Decision: Assess unhandled post-worktree agent errors inside `runTask`.
   Rationale: A thrown agent call after worktree creation is still a failure
   with a durable branch. Catching it inside `runTask` preserves the worktree
-  context so ADR 0002 assessment can run; auth-shaped failures still bypass
+  context so ADR 002 assessment can run; auth-shaped failures still bypass
   assessment. Date/Author: 2026-06-30T15:35:32Z / Codex.
 
 - Decision: Treat auth-shaped implementation issues as fatal before any review
-  or integration fallback. Rationale: ADR 0002 says auth failures remain fatal,
+  or integration fallback. Rationale: ADR 002 says auth failures remain fatal,
   and authentication failures are not useful partial-branch evidence. Both
   normal and addendum implementation results now share the same auth detector
   and return `fatal-auth` before deferred-review handling or mergeability
@@ -226,7 +226,7 @@ conflict in `Decision Log`, and ask for direction.
   the schema. Rationale: The schema is the hard contract between the assessment
   agent and the workflow host. `taskScoped`, `execPlan`, `roadmap`,
   `validation`, `rationale`, and `nextActions` must be present so an operator
-  does not receive a bare classification without the evidence ADR 0002 relies
+  does not receive a bare classification without the evidence ADR 002 relies
   on. Date/Author: 2026-06-30T16:11:11Z / Codex.
 
 ## Outcomes & retrospective
@@ -266,10 +266,9 @@ worktrees for target-project tasks, plans and implements work inside those
 worktrees, reviews the result, and serializes integration with a JavaScript
 merge lock.
 
-ADR 0002,
-`docs/adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md`,
-decides that failed task branches should be assessed through durable git state,
-not through an old agent transcript. It defines four classifications:
+ADR 002, `docs/adr-002-assess-partial-task-branches.md`, decides that failed
+task branches should be assessed through durable git state, not through an old
+agent transcript. It defines four classifications:
 
 - `adopt-complete`: the branch appears to satisfy the task and could continue
   through the ordinary review and integration path after all gates are proven.
@@ -330,7 +329,7 @@ Stage A preserves the existing ODW contract and adds tests first. Create
 and returns only the assessment helpers under test. It must not call `agent()`
 or run the workflow control loop. Add red tests for these behaviours:
 
-- `ASSESSMENT_SCHEMA` contains only the four ADR 0002 classifications.
+- `ASSESSMENT_SCHEMA` contains only the four ADR 002 classifications.
 - `shouldAssessFailure(result, wt)` returns true for `failed` and `halted`
   results that have a branch and worktree after worktree creation.
 - `shouldAssessFailure(result, wt)` returns false for worktree-creation
@@ -395,7 +394,7 @@ operations. It is not a Claude Code workflow portability claim.
 Add `assessmentPrompt(task, wt, result, evidence)`. The prompt must be
 read-only and evidence-first. It must instruct the agent to inspect the
 worktree and git state, read the ExecPlan and roadmap if present, review
-validation evidence, and classify using only the ADR 0002 enum. It must
+validation evidence, and classify using only the ADR 002 enum. It must
 explicitly say not to edit, commit, stash, merge, push, mark roadmap
 checkboxes, or resume the failed agent's transcript.
 
@@ -530,7 +529,7 @@ Red test evidence:
 
 ```plaintext
 $ node --test tests/df12-build-odw-assessment.test.mjs
-not ok 1 - assessment schema exposes only ADR 0002 classifications
+not ok 1 - assessment schema exposes only ADR 002 classifications
 ReferenceError: ASSESSMENT_CLASSIFICATIONS is not defined
 ```
 
@@ -622,7 +621,7 @@ field, but it must stay within the constraints and classifications above.
 
 ## Revision note
 
-Initial draft created from ADR 0002 and the current ODW workflow. It scopes the
+Initial draft created from ADR 002 and the current ODW workflow. It scopes the
 first implementation to report-only partial-branch assessment, defines the
 test-first path, and leaves all automatic adoption behaviour for a later
 approved plan.
@@ -665,3 +664,16 @@ failing branch's own history before cleanup, for `continue-manual`,
 never merges, pushes, or ticks the roadmap, so it stays within this plan's
 report-only, manual-adoption boundary. See `docs/developers-guide.md` and
 `docs/users-guide.md` for the salvage flow.
+
+## Post-completion addendum
+
+2026-11-12: ADR identifiers and filenames were normalized after this plan was
+completed. The historical entries above retain the identifier and path used
+during implementation. ADR 002 at
+`docs/adr-002-assess-partial-task-branches.md` is now
+[ADR 0002][adr-current-0002]. The current naming scheme is documented in the
+[documentation style guide][adr-naming-guide].
+
+[adr-current-0002]:
+  ../adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md
+[adr-naming-guide]: ../documentation-style-guide.md

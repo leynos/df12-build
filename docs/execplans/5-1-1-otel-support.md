@@ -8,17 +8,18 @@ Status: COMPLETE
 
 ## Purpose / big picture
 
-After this change, every producer in the observability design of ADR 0003 — the
-Open Dynamic Workflows (ODW) runtime, the df12-build workflow, the Claude Code
-and Codex command-line interfaces (CLIs), the `workflow-telemetryd` collector,
-and sibling workflows such as Dakar — has one written contract to build
-against: which identifiers exist, who mints them, which attribute names carry
-them, what the context envelope passed between workflows looks like, and which
-correlation headers a collector must validate. The contract is observable as a
-versioned design document plus machine-readable JSON Schemas, with fixture
-tests that fail on non-conforming envelopes and identity keys. Nothing else in
-roadmap phase 5 (steps 5.2 through 5.5) can start safely before this narrow
-waist is fixed, because ODW, the collector, and Dakar all consume it.
+After this change, every producer in the observability design of
+`docs/adr-003-opentelemetry-observability.md` — the Open Dynamic Workflows
+(ODW) runtime, the df12-build workflow, the Claude Code and Codex command-line
+interfaces (CLIs), the `workflow-telemetryd` collector, and sibling workflows
+such as Dakar — has one written contract to build against: which identifiers
+exist, who mints them, which attribute names carry them, what the context
+envelope passed between workflows looks like, and which correlation headers a
+collector must validate. The contract is observable as a versioned design
+document plus machine-readable JSON Schemas, with fixture tests that fail on
+non-conforming envelopes and identity keys. Nothing else in roadmap phase 5
+(steps 5.2 through 5.5) can start safely before this narrow waist is fixed,
+because ODW, the collector, and Dakar all consume it.
 
 This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
 
@@ -27,7 +28,7 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
 - Do not modify `src/workflows/df12-build-odw/`, `workflows/df12-build-odw.js`,
   or `workflows/df12-build.js`; this task defines the contract only.
   Instrumentation lands under later tasks (5.2.1 and 5.3.x).
-- The contract must match ADR 0003 exactly where the ADR is explicit: three
+- The contract must match ADR 003 exactly where the ADR is explicit: three
   distinct identifiers (correlation id, workflow invocation id, node attempt
   id), agent invocation and process ids below them, the three-layer namespace
   (`gen_ai.*`, `leynos.*`, `df12.*`/`dakar.*`), binding confidence levels
@@ -47,12 +48,12 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
   escalate.
 - Dependencies: one JSON Schema validator development dependency (for
   example `ajv`) is expected; any further new dependency requires escalation.
-- Conflict: if writing the contract exposes a contradiction inside ADR 0003
+- Conflict: if writing the contract exposes a contradiction inside ADR 003
   (for example between the identity model and the Dakar envelope), stop, record
   it in the `Decision Log`, and escalate rather than resolving it silently.
 - Iterations: if the fixture tests still fail after three fix attempts, stop
   and escalate.
-- Ambiguity: naming marked "outstanding" in ADR 0003 (namespace and header
+- Ambiguity: naming marked "outstanding" in ADR 003 (namespace and header
   prefixes) is decided provisionally here and recorded; if the choice would
   leak into an external interface beyond documents and schemas, escalate
   instead.
@@ -68,7 +69,7 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
   contract while still in Development status. Severity: low. Likelihood: high.
   Mitigation: the contract names convention fields only in the canonical
   projection section and requires queries to target the projection, exactly as
-  ADR 0003 prescribes.
+  ADR 003 prescribes.
 - Risk: JSON Schema alone cannot express some rules (for example header
   consistency with envelope fields). Severity: low. Likelihood: medium.
   Mitigation: encode such rules as fixture tests beside the schemas and state
@@ -76,7 +77,7 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
 
 ## Progress
 
-- [x] (2026-07-18) ExecPlan drafted alongside ADR 0003 and roadmap phase 5.
+- [x] (2026-07-18) ExecPlan drafted alongside ADR 003 and roadmap phase 5.
 - [x] (2026-07-18) ExecPlan rewritten after the source design conversation
   replaced the events-bridge approach with the correlation-first gateway; task
   5.1.1 re-scoped from "build a bridge" to "define the contract".
@@ -93,7 +94,7 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
   `schemas/observability/`. Contract test passes 31/31; the full module suite
   (397 tests) and `tsc` pass. Two schema-shaping decisions surfaced (union
   scalar types, nanosecond string timestamps) — see Surprises.
-- [x] (2026-07-19) Milestone 4: cross-linked the contract from ADR 0003, the
+- [x] (2026-07-19) Milestone 4: cross-linked the contract from ADR 003, the
   developers' guide, and the contents index; ticked 5.1.1 in the roadmap; ran
   the full gate and a CodeRabbit review.
 - [x] (2026-07-29) Review follow-up: hardened the schemas after review, so
@@ -103,16 +104,16 @@ This delivers roadmap task 5.1.1 (see `docs/roadmap.md` phase 5).
 - [x] (2026-08-01) Second review round: bounded the nanosecond timestamps to
   the signed 64-bit maximum in canonical decimal form, required a non-empty
   well-formed authority on the sink endpoint, and tightened the collector's
-  batch validation to the whole correlation tuple. ADR 0003 moved from Proposed
-  to Accepted, matching how ADR 0001 and ADR 0002 were accepted in the pull
+  batch validation to the whole correlation tuple. ADR 003 moved from Proposed
+  to Accepted, matching how ADR 001 and ADR 002 were accepted in the pull
   request that implemented them. Suite now 54 tests.
 - [x] (2026-08-03) Third review round: gave both test modules `/** @file … */`
   docblocks and added them to the `DOCSTRING_MODULES` gate; added
   `tests/modules/observability-contract.property.test.ts`, a fast-check suite
   that decides accept/reject with oracles computed independently of the schema
-  patterns; refreshed the stale "proposed" references to ADR 0003 and
-  documented the contract artefacts for contributors. Suite now 77 tests across
-  the two modules.
+  patterns; refreshed the stale "proposed" references to ADR 003 and documented
+  the contract artefacts for contributors. Suite now 77 tests across the two
+  modules.
 
 The counts above are the totals at those dates; the current total is in
 `Outcomes & retrospective`.
@@ -221,7 +222,7 @@ consolidated fixture set, and a validation suite
 (`tests/modules/observability-contract.test.ts` and its fast-check companion
 `observability-contract.property.test.ts`, 77 tests) that exercises every
 documented rule — including the sink credential rule, the source-to-confidence
-binding conditional, and the logical node key grammar. ADR 0003, the roadmap,
+binding conditional, and the logical node key grammar. ADR 003, the roadmap,
 the contents index, and the developers' guide now link the contract, and
 roadmap task 5.1.1 is marked complete.
 
@@ -245,8 +246,7 @@ Lessons for the next steps:
 
 `df12-build` ships workflow assets that drive a "workshop": a long multi-agent
 run in which the ODW runtime dispatches Codex and Claude Code processes against
-a target project. ADR 0003
-(`docs/adrs/adr-0003-correlation-first-opentelemetry-observability-for-workshop-runs.md`)
+a target project. ADR 003 (`docs/adr-003-opentelemetry-observability.md`)
 decides how this system becomes observable: ODW mints an opaque agent
 invocation id at dispatch, Claude inherits trace context through the
 `TRACEPARENT` environment variable, Codex carries the identity in OpenTelemetry
@@ -295,7 +295,7 @@ Milestone 3 (green): create `schemas/observability/` containing
 development dependency, exact-pinned) and make the milestone 2 tests pass with
 the smallest schemas that honour the contract document.
 
-Milestone 4 (integrate): cross-link the contract from ADR 0003 and from roadmap
+Milestone 4 (integrate): cross-link the contract from ADR 003 and from roadmap
 step 5.1; update `docs/developers-guide.md` with a short pointer; run the full
 gates; update this plan's living sections and mark 5.1.1 complete in
 `docs/roadmap.md` only when every milestone is checked.
@@ -328,7 +328,7 @@ node keys match the documented pattern and malformed keys fail; and `make all`
 passes, proving the contract document survives the Markdown and spelling gates.
 
 Quality criteria: every identifier, attribute, header, and event field named in
-ADR 0003's decision sections appears in the contract document exactly once as a
+ADR 003's decision sections appears in the contract document exactly once as a
 normative definition, and the schemas carry `schemaVersion` 1.
 
 ## Idempotence and recovery
@@ -358,8 +358,32 @@ to environment references), and an `attributes` map of scalar values.
 ## Revision note
 
 2026-07-18: rewritten in full. The original plan implemented a post-hoc
-`events.jsonl` → OTLP bridge; the source design conversation behind ADR 0003
+`events.jsonl` → OTLP bridge; the source design conversation behind ADR 003
 replaced that approach with a correlation-first gateway, and task 5.1.1 is now
 the contract-definition task that precedes collector, ODW, and Dakar work. All
 sections were rewritten to match; no implementation had started, so no code is
 affected.
+
+## Post-completion addendum
+
+2026-11-12: ADR identifiers and filenames were normalized after this plan was
+completed. The historical entries above retain the identifiers and paths
+current during implementation. The current mappings are:
+
+- ADR 001 (`docs/adr-001-adopt-odw-sidecar-launches.md`) is now
+  [ADR 0001][adr-current-0001].
+- ADR 002 (`docs/adr-002-assess-partial-task-branches.md`) is now
+  [ADR 0002][adr-current-0002].
+- ADR 003 (`docs/adr-003-opentelemetry-observability.md`) is now
+  [ADR 0003][adr-current-0003].
+
+The [documentation style guide][adr-naming-guide] records the current naming
+scheme.
+
+[adr-current-0001]:
+  ../adrs/adr-0001-adopt-odw-sidecar-launches-for-codex-oriented-df12-build-runs.md
+[adr-current-0002]:
+  ../adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md
+[adr-current-0003]:
+  ../adrs/adr-0003-correlation-first-opentelemetry-observability-for-workshop-runs.md
+[adr-naming-guide]: ../documentation-style-guide.md
