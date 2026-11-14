@@ -1,4 +1,4 @@
-// Module tests for the ADR 002 assessment surface (decomposition milestone
+// Module tests for the ADR 0002 assessment surface (decomposition milestone
 // 8): deferred-review classification, the manual-merge handoff guard, the
 // assessment gate, and the attach path with scripted agents over a real
 // fixture repo.
@@ -25,11 +25,14 @@ globals.log = () => {}
 globals.phase = () => {}
 
 // Both assessment entry points (assessmentPrompt and recoveryAssessmentPrompt)
-// share the ADR 002 classification contract via assessmentPromptLines: blocking
+// share the ADR 0002 classification contract via assessmentPromptLines: blocking
 // gaps route to `missingEvidence`, advisory caveats to `residualRisk`, and an
 // eligible adopt-complete is never held back for advisory risk alone (#23).
 // Pin that instructional wording so a regression that weakens it fails loudly.
 function assertClassificationContract(prompt: string): void {
+  expect(prompt).toContain(
+    'Use ADR 0002 (`docs/adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md`) as the classification contract if that file exists in the worktree. If it is absent, apply the classification rules below. Return exactly one classification:',
+  )
   expect(prompt).toContain('Separate blocking evidence gaps from advisory residual risk:')
   expect(prompt).toContain('Put a gap in `missingEvidence` ONLY when it genuinely blocks confidence')
   expect(prompt).toContain('into `residualRisk`. These are non-blocking caveats carried forward')

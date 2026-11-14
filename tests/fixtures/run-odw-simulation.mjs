@@ -11,7 +11,7 @@
  * Scenario: {
  *   args: {...workflow args...},
  *   pathPrefix?: "<dir prepended to PATH before the body runs>",
- *   assessment?: {...overrides for the scripted ADR 002 assessment reply...},
+ *   assessment?: {...overrides for the scripted ADR 0002 assessment reply...},
  *   review?: {...full scripted reply for code-review/expert-review labels...},
  *   fix?: {...full scripted reply for fix: labels...},
  *   failures?: { "<exact label>": { error?: "<message>", times?: N } }

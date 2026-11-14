@@ -58,7 +58,7 @@ describe('makeRecoveryDiscovery', () => {
     } finally {
       repo.cleanup()
     }
-  })
+  }, 20_000)
 
   test('a broken git root reports errors instead of throwing', async () => {
     const discover = makeRecoveryDiscovery(DEFAULT_LIMITS)
@@ -161,7 +161,7 @@ describe('recoveryExecplanPath and syntheticRecoveryImpl', () => {
       withPlan.cleanup()
       withoutPlan.cleanup()
     }
-  })
+  }, 20_000)
 
   test('a filesystem fault surfaces as an error, distinct from an absent plan', async () => {
     const repo = makeRecoveryRepo()

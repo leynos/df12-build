@@ -894,3 +894,16 @@ emits bounded reviewer, label, attempts, elapsed time, outcome, and
 error-category fields. Fixed-cardinality metrics cover runs, findings, retries,
 deferrals, timeouts, errors, authentication failures, and serialized JSONL sink
 failures.
+
+## Post-completion addendum
+
+2026-11-12: ADR identifiers and filenames were normalized after this plan was
+completed. The historical entries above retain the identifier and path used
+during implementation. ADR 002 at
+`docs/adr-002-assess-partial-task-branches.md` is now
+[ADR 0002][adr-current-0002]. The current naming scheme is documented in the
+[documentation style guide][adr-naming-guide].
+
+[adr-current-0002]:
+  ../adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md
+[adr-naming-guide]: ../documentation-style-guide.md

@@ -13,12 +13,12 @@ Read these before changing launch or workflow behaviour:
   boundaries.
 - `docs/security-and-permissions.md` for runtime permissions, external service
   access, prompt-injection risk, and sandbox recommendations.
-- `docs/adr-001-adopt-odw-sidecar-launches.md` for the accepted sidecar launch
-  decision.
-- `docs/adr-002-assess-partial-task-branches.md` for the accepted partial
-  branch assessment and adoption model.
-- `docs/adr-003-opentelemetry-observability.md` for the accepted
-  correlation-first observability fabric, and
+- `docs/adrs/adr-0001-adopt-odw-sidecar-launches-for-codex-oriented-df12-build-runs.md`
+  for the accepted sidecar launch decision.
+- `docs/adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md` for
+  the accepted partial branch assessment and adoption model.
+- `docs/adrs/adr-0003-correlation-first-opentelemetry-observability-for-workshop-runs.md`
+  for the accepted correlation-first observability fabric, and
   `docs/workflow-observability-contract.md` for the version-1 identity model,
   attribute registry, envelope, and binding schemas that later steps build
   against.
@@ -43,56 +43,8 @@ under the module test gates; that contract must parse the workflow rather than
 search its text, so the parser is a direct dependency rather than one reached
 through another package's tree.
 
-Relevant paths:
-
-- `src/workflows/df12-build-odw/`: source of truth for the ODW workflow — a
-  literal `meta.js` banner (plain JavaScript, concatenated verbatim), the typed
-  `main.ts` entry (configuration unpacking, factory bindings, and the
-  worker-pool control loop), and one TypeScript module per subsystem:
-  `config.ts`, `schemas.ts`, `types.ts`, `roadmap.ts`, `exec.ts`, `faults.ts`,
-  `git-evidence.ts`, `recovery-decision.ts`, `recovery-discovery.ts`,
-  `prompts.ts`, `write-preflight.ts`, `execplan-durability.ts`, `assessment.ts`,
-  `remediation.ts`, `auth-preflight.ts` (adapter-aware credential and
-  executable probes), `coderabbit-review.ts` (CodeRabbit NDJSON adapter),
-  `dakar-review.ts` (Dakar JSON adapter), `host-gates.ts` (secure host gates
-  and CodeScene), `host-review-contracts.ts` (neutral review contracts), and
-  `host-review.ts` (neutral composition facade), `shell-command.ts` (a
-  non-evaluating parser for configured shell-command words and assignment
-  spans), `run-task.ts`, and `task-outcome.ts` (validated task result fields),
-  with the injected ODW primitives declared in `odw-globals.d.ts`. TypeScript
-  is restricted to erasable syntax by compiler flags (`erasableSyntaxOnly`,
-  `verbatimModuleSyntax`).
-- `workflows/df12-build-odw.js`: GENERATED ODW/Codex workflow artefact, built
-  by `make workflow-build` (see `scripts/build-workflow.mjs`); this is the
-  single file the sidecar copies and ODW loads.
-- `verify/recovery-decision.model.ts`: LemmaScript-annotated verified twin of
-  the recovery decision tables, checked into Dafny by `make verify-modules`,
-  with its generated `.dfy.gen`/`.dfy` proof files alongside.
-- `workflows/df12-build.js`: baseline workflow.
-- `skills/df12-build-supervisor/SKILL.md`: operator skill.
-- `scripts/blinkentrees`, `scripts/git-commit-feed`, `scripts/odw-list-runs`,
-  and `scripts/odw-watch`: operator monitoring scripts (documented in the user
-  guide's "Monitoring runs" section).
-- `tests/`: Node suites for the ODW workflow plus
-  `tests/run-odw-script-tests.py` for the operator scripts.
-- `tests/modules/`: bun-run suites for the individual src modules — Gherkin
-  features (bun-test-cucumber), fast-check properties, and the differential
-  test pinning the verified twin to production.
-- `docs/roadmap.md`: this repository's own GIST roadmap.
-- `docs/execplans/`: ExecPlans for landed roadmap work.
-- `docs/failure-resume-design.md`: the failure-resume design the recovery
-  phases implement.
-- `docs/users-guide.md`: user-facing launch guide.
-- `docs/security-and-permissions.md`: runtime permissions and sandbox guide.
-- `docs/developers-guide.md`: contributor-facing maintenance guide.
-- `docs/architecture.md`: design-level sidecar and workflow contract.
-- `docs/adr-001-adopt-odw-sidecar-launches.md`: accepted launch decision.
-- `docs/adr-002-assess-partial-task-branches.md`: accepted recovery assessment
-  decision.
-- `docs/adr-003-opentelemetry-observability.md`: accepted observability
-  decision, with `docs/workflow-observability-contract.md` and
-  `schemas/observability/` as its normative contract and machine-readable
-  schemas.
+See [the repository layout](repository-layout.md) for the directory tree and
+responsibilities of the repository's major paths.
 
 Tick the matching roadmap task and update the relevant ExecPlan whenever a
 branch lands planned work.
@@ -790,7 +742,7 @@ what stops `make all`'s lenient verification quietly skipping in CI.
 `oxlint.config.mjs` applies the supported Unicorn recommended rules and the
 recommended `ai-deslop` rules with type-aware checks. Its exact dependency
 pins, the Unicorn/deslop rule conflict, and scoped ODW rule exceptions are
-recorded in `docs/adr-004-linting-strategy.md`.
+recorded in `docs/adrs/adr-0004-oxlint-rules-for-odw-source.md`.
 
 The workflow artefacts in `workflows/` are excluded from Oxlint. They are
 object code: `make workflow-parse` checks their workflow syntax and
