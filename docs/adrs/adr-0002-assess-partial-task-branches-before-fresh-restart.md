@@ -2,11 +2,14 @@
 
 ## Status
 
-Accepted and implemented for the ODW workflow.
+Accepted on 2026-06-30: Assess halted or failed task branches before a fresh
+restart; implemented for the ODW workflow.
+
+Amended by ADR-0005 (2026-11-14).
 
 ## Date
 
-2026-06-30.
+2026-11-14.
 
 ## Context and problem statement
 
@@ -228,3 +231,14 @@ assessment schema, eligibility guard, auth skipping, and git evidence
 collection, plus the repository `make all` gate. A live `odw run` remains
 outside routine verification because it can spawn agents and mutate
 target-project state.
+
+## Amendments
+
+- 2026-11-14: Changed the display identifier from `ADR 002` to `ADR 0002`.
+  The title text is unchanged: Assess partial task branches before a fresh
+  restart. Moved the file from `docs/adr-002-assess-partial-task-branches.md` to
+  `docs/adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md`.
+  The original decision was accepted on 2026-06-30; its decision text is
+  unchanged.
+  [ADR-0005](adr-0005-adopt-documentation-style-guide-for-adr-and-rfc-naming.md)
+  records this naming-policy migration.

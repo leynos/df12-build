@@ -52,6 +52,9 @@ workflow assets, or understanding why the system is shaped the way it is.
 - [ADR 0004: Oxlint source rules](adrs/adr-0004-oxlint-rules-for-odw-source.md):
   records the pinned Unicorn and deslop profiles for authored ODW source and
   the workflow artefact exclusion.
+- [ADR 0005: Adopt the documentation style guide for ADR and RFC naming](adrs/adr-0005-adopt-documentation-style-guide-for-adr-and-rfc-naming.md):
+  adopts the guide's naming conventions while preserving accepted decision
+  history.
 
 ## Plans
 

@@ -2,11 +2,13 @@
 
 ## Status
 
-Accepted.
+Accepted on 2026-06-28: Adopt a `.workshop` sidecar for Codex-oriented runs.
+
+Amended by ADR-0005 (2026-11-14).
 
 ## Date
 
-2026-06-28.
+2026-11-14.
 
 ## Context and problem statement
 
@@ -94,3 +96,15 @@ Changes to the sidecar contract are verified by documentation linting and an
 ODW wrapper parse check for the workflow source. A live `odw run` is not part
 of the default verification contract because it can spawn agents and mutate
 target-project state.
+
+## Amendments
+
+- 2026-11-14: Changed the display identifier from `ADR 001` to `ADR 0001`.
+  The title text is unchanged: Adopt ODW sidecar launches for Codex-oriented
+  df12-build runs. Moved the file from
+  `docs/adr-001-adopt-odw-sidecar-launches.md` to
+  `docs/adrs/adr-0001-adopt-odw-sidecar-launches-for-codex-oriented-df12-build-runs.md`.
+  The original decision was accepted on 2026-06-28; its decision text is
+  unchanged.
+  [ADR-0005](adr-0005-adopt-documentation-style-guide-for-adr-and-rfc-naming.md)
+  records this naming-policy migration.

@@ -2,15 +2,18 @@
 
 ## Status
 
-Accepted. The chosen direction is a correlation-first OTLP gateway (Option C):
-ODW mints an opaque agent invocation id at dispatch, Claude Code inherits
-identity through W3C trace context, Codex is bound through per-invocation OTLP
-exporter headers, and a local `workflow-telemetryd` collector stores raw
-telemetry beside a versioned relational projection in SQLite.
+Accepted on 2026-07-18: The chosen direction is a correlation-first OTLP
+gateway (Option C): ODW mints an opaque agent invocation id at dispatch, Claude
+Code inherits identity through W3C trace context, Codex is bound through
+per-invocation OTLP exporter headers, and a local `workflow-telemetryd`
+collector stores raw telemetry beside a versioned relational projection in
+SQLite.
+
+Amended by ADR-0005 (2026-11-14).
 
 ## Date
 
-2026-07-18.
+2026-11-14.
 
 ## Context and problem statement
 
@@ -268,3 +271,15 @@ the decision above.
 - The shape of a strict `--telemetry-required` mode for benchmarking and
   regulated continuous integration.
 - Ownership and update cadence of the versioned Codex pricing table.
+
+## Amendments
+
+- 2026-11-14: Changed the display identifier from `ADR 003` to `ADR 0003`.
+  The title is now Correlation-first OpenTelemetry observability for workshop
+  runs; it formerly began with lowercase correlation-first. Moved the file from
+  `docs/adr-003-opentelemetry-observability.md` to
+  `docs/adrs/adr-0003-correlation-first-opentelemetry-observability-for-workshop-runs.md`.
+  The original decision was accepted on 2026-07-18; its decision text is
+  unchanged.
+  [ADR-0005](adr-0005-adopt-documentation-style-guide-for-adr-and-rfc-naming.md)
+  records this naming-policy migration.

@@ -2,12 +2,14 @@
 
 ## Status
 
-Accepted. The source lint gate applies the Unicorn and deslop recommended
-profiles to the authored workflow module tree.
+Accepted on 2026-10-27: The source lint gate applies the Unicorn and deslop
+recommended profiles to the authored workflow module tree.
+
+Amended by ADR-0005 (2026-11-14).
 
 ## Date
 
-2026-10-27.
+2026-11-14.
 
 ## Context and problem statement
 
@@ -87,3 +89,13 @@ type assertions.
 - [Oxlint built-in plug-ins](https://oxc.rs/docs/guide/usage/linter/plugins.html)
 - [Deslop recommended configuration](https://github.com/maharshi365/deslop#usage)
 - [Simulacat Core plug-in adoption](https://github.com/leynos/simulacat-core/pull/121)
+
+## Amendments
+
+- 2026-11-14: Changed the display identifier from `ADR 004` to `ADR 0004`.
+  The title text is unchanged: Oxlint rules for ODW source. Moved the file from
+  `docs/adr-004-linting-strategy.md` to
+  `docs/adrs/adr-0004-oxlint-rules-for-odw-source.md`. The original decision
+  was accepted on 2026-10-27; its decision text is unchanged.
+  [ADR-0005](adr-0005-adopt-documentation-style-guide-for-adr-and-rfc-naming.md)
+  records this naming-policy migration.
