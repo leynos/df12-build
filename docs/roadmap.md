@@ -1,6 +1,6 @@
 # df12-build roadmap
 
-This roadmap translates `docs/failure-resume-design.md` and ADR 002 into a
+This roadmap translates `docs/failure-resume-design.md` and ADR 0002 into a
 short delivery sequence for failure resume in the ODW workflow. It does not
 promise dates. Each phase carries one GIST idea, each step answers a delivery
 question, and each task is intended to be review-sized.
@@ -67,7 +67,7 @@ later review-mode resume.
   - Success: an assess-only run reports candidates, skipped branches, and
     assessment outcomes without changing `processed`.
 
-### 1.3. Reuse ADR 002 assessment for recovered candidates
+### 1.3. Reuse ADR 0002 assessment for recovered candidates
 
 This step answers whether fresh-run discovery can share the existing assessment
 contract instead of creating a second recovery classifier.
@@ -76,7 +76,7 @@ contract instead of creating a second recovery classifier.
   evidence collector and schema.
   - Requires 1.2.1.
   - See `docs/failure-resume-design.md` section "Assessment reuse" and
-    `docs/adr-002-assess-partial-task-branches.md`.
+    `docs/adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md`.
   - Note: the assessment feature now also salvages task-scoped
     `docs/execplans/*.md` artefacts for `continue-manual` and `adopt-partial`
     classifications, and for infra-fault handoffs (schema-retry exhaustion)
@@ -271,7 +271,7 @@ collector that stores them beside a versioned relational projection, operators
 can cross-reference workflow nodes and agent telemetry exactly, even under
 parallelism, retries, and recovery.
 
-This phase implements ADR 003. Correlation is identity-first: labels, phases,
+This phase implements ADR 0003. Correlation is identity-first: labels, phases,
 and timestamps are evidence, never primary join keys. Telemetry is advisory and
 must never alter workflow control flow.
 
@@ -283,7 +283,9 @@ df12-build, the providers, and sibling workflows all depend on, so it must
 settle before the substrate work starts.
 
 - [x] 5.1.1. Define the workflow observability contract.
-  - See `docs/adr-003-opentelemetry-observability.md` sections "Identity
+  - See
+    `docs/adrs/adr-0003-correlation-first-opentelemetry-observability-for-workshop-runs.md`
+    sections "Identity
     model", "Attribute namespaces and span model", and "Cross-workflow
     contract".
   - Cover the identity model (correlation id, workflow invocation id, node
@@ -300,7 +302,7 @@ settle before the substrate work starts.
     identity keys deterministically.
 - [ ] 5.1.2. Implement the `workflow-telemetryd` OTLP receiver over SQLite.
   Requires 5.1.1.
-  - See ADR 003 section "Collector and store".
+  - See ADR 0003 section "Collector and store".
   - Accept OTLP/HTTP JSON on `/v1/traces`, `/v1/logs`, and `/v1/metrics`;
     validate correlation headers against registered invocations; store raw
     `otel_*` records in one transaction per batch; spool to JSONL on write
@@ -309,7 +311,7 @@ settle before the substrate work starts.
     the raw tables with their bindings, and a rejected write spools and
     replays without loss.
 - [ ] 5.1.3. Add the canonical relational projection. Requires 5.1.2.
-  - See ADR 003 section "Collector and store".
+  - See ADR 0003 section "Collector and store".
   - Create `correlation`, `workflow_invocation`, `workflow_invocation_edge`,
     `workflow_node_attempt`, `agent_invocation`, `agent_process`,
     `telemetry_binding`, and `artifact`, with confidence-tagged bindings and
@@ -327,7 +329,7 @@ breaking existing workflows.
 
 - [ ] 5.2.1. Extend ODW with dispatch identity and telemetry context.
   Requires 5.1.1.
-  - See ADR 003 sections "Identity model" and "Migration plan".
+  - See ADR 0003 sections "Identity model" and "Migration plan".
   - Generate agent invocation and process ids and CLI attempt numbers; add
     them to `agent_started`, `agent_finished`, and `agent_failed` events;
     add a per-invocation environment layer to the adapter bridge; inject
@@ -344,7 +346,7 @@ exact agent bindings, using the substrate rather than bespoke wiring.
 
 - [ ] 5.3.1. Instrument df12-build nodes with a `withNode` helper.
   Requires 5.2.1.
-  - See ADR 003 section "Migration plan".
+  - See ADR 0003 section "Migration plan".
   - Wrap selection and recovery decisions, worktree creation and
     writable-root checks, plan and design-review rounds, ExecPlan work
     items, host gates, CodeScene and CodeRabbit, review and fix rounds,
@@ -355,7 +357,7 @@ exact agent bindings, using the substrate rather than bespoke wiring.
     stage, with parallel reviewers under one review node.
 - [ ] 5.3.2. Wire provider exporters for exact correlation. Requires 5.2.1
   and 5.1.2.
-  - See ADR 003 section "Propagation".
+  - See ADR 0003 section "Propagation".
   - Claude: enable telemetry and beta traces, direct OTLP to the local
     receiver, inherit trace context, and disable session and account metric
     attributes. Codex: configure OTLP/HTTP JSON exporters with
@@ -371,7 +373,7 @@ id, reach every downstream execution fact without archaeology.
 
 - [ ] 5.4.1. Add query views and the `df12-obs` CLI. Requires 5.1.3 and
   5.3.2.
-  - See ADR 003 section "Migration plan".
+  - See ADR 0003 section "Migration plan".
   - Create `v_task_timeline`, `v_agent_usage`, `v_failure_chain`, and
     `v_recovery_lineage`, plus CLI verbs for runs, tasks, invocations, tool
     calls, commits, failures, and lineage.
@@ -386,7 +388,7 @@ by carrying identity and sink through a Dakar call.
 
 - [ ] 5.5.1. Pass the observability context through Dakar calls.
   Requires 5.1.3.
-  - See ADR 003 section "Cross-workflow contract".
+  - See ADR 0003 section "Cross-workflow contract".
   - Add `--correlation-id`, `--telemetry-sink`, and
     `--observability-context` to the Dakar CLI with the documented
     precedence; propagate identity through workflow arguments and inherited

@@ -4,7 +4,7 @@
  * layer 6). Reads the prompt from stdin, extracts the JSON Schema the ODW
  * bridge appends, and switches on schema fingerprints — never prompt prose:
  *
- *   classification  -> an eligible ADR 002 assessment (clean, scoped, valid)
+ *   classification  -> an eligible ADR 0002 assessment (clean, scoped, valid)
  *   verdict         -> a passing review
  *   roadmapMarkedDone -> a successful integration claim
  *   anything else   -> a minimal valid instance / stub text

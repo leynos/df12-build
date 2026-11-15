@@ -1288,7 +1288,7 @@ function makeConfig(rawArgs) {
   const PROJECT_ROOT2 = cfg.projectRoot || process.cwd();
   const BASE2 = cfg.base || "main";
   const ROADMAP2 = cfg.roadmap || "docs/roadmap.md";
-  const DESIGN_DOCS = cfg.designDocs || "the design document(s) and the ADRs (docs/adr-*.md) under docs/";
+  const DESIGN_DOCS = cfg.designDocs || "the design document(s) and the ADRs under docs/ (`docs/adrs/*.md` and legacy `docs/adr-*.md`)";
   const RESEARCH_NOTE = cfg.researchNote || null;
   const ONLY_TASK2 = cfg.taskId || null;
   const MAX_TASKS2 = ONLY_TASK2 ? 1 : cfg.maxTasks || 12;
@@ -2441,7 +2441,7 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
       "",
       "This is a READ-ONLY recovery assessment. Do not edit files, commit, stash, merge, cherry-pick, push, delete worktrees, mark roadmap checkboxes, or run any command that mutates repository state. Do not resume or rely on the failed agent transcript. Inspect only durable state that exists on disk or in Git.",
       "",
-      "Use ADR 002 (`docs/adr-002-assess-partial-task-branches.md`) as the classification contract. Return exactly one classification:",
+      "Use ADR 0002 (`docs/adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md`) as the classification contract if that file exists in the worktree. If it is absent, apply the classification rules below. Return exactly one classification:",
       "- `adopt-complete`: the branch satisfies the roadmap task success criterion, has an up-to-date ExecPlan, required gates are green, and can proceed through the ordinary review and integration path.",
       "- `adopt-partial`: the branch contains a coherent useful slice, but the roadmap task must remain unchecked and the work should be preserved only through Git state.",
       "- `continue-manual`: the branch is promising, but scope, roadmap state, validation, or review evidence needs operator judgement before any merge.",
@@ -2611,7 +2611,7 @@ function makeAssessment({ preamble: preamble2, assessPartialBranches, assessment
     assessmentPrompt: assessmentPrompt2,
     /** Build the fresh-run recovery-assessment prompt (transcript unavailable by design). */
     recoveryAssessmentPrompt: recoveryAssessmentPrompt2,
-    /** Assess a discovered recovery candidate through the ADR 002 contract. */
+    /** Assess a discovered recovery candidate through the ADR 0002 contract. */
     assessRecoveryCandidate: assessRecoveryCandidate2,
     /** The eligibility gate: whether a failed result's branch reaches model assessment. */
     shouldAssessFailure: shouldAssessFailure2,

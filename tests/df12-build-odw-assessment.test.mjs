@@ -112,7 +112,7 @@ function makeRepo() {
   return { dir, baseSha, branch: 'roadmap-1-2-3' }
 }
 
-test('assessment schema exposes only ADR 002 classifications', async () => {
+test('assessment schema exposes only ADR 0002 classifications', async () => {
   const surface = await loadAssessmentSurface()
 
   assert.deepEqual(surface.ASSESSMENT_CLASSIFICATIONS, [

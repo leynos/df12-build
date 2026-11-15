@@ -6,9 +6,10 @@
 - Audience: implementers of the `workflow-telemetryd` collector, the Open
   Dynamic Workflows (ODW) correlation substrate, the df12-build node
   instrumentation, and sibling workflows such as `leynos/dakar`.
-- Precedence: `docs/adr-003-opentelemetry-observability.md` is the governing
-  decision. Where this contract and the ADR disagree, the ADR wins and this
-  document must be corrected.
+- Precedence:
+  `docs/adrs/adr-0003-correlation-first-opentelemetry-observability-for-workshop-runs.md`
+  is the governing decision. Where this contract and the ADR disagree, the ADR
+  wins and this document must be corrected.
 
 This document fixes the shared identity model, attribute names, span topology,
 cross-workflow envelope, correlation headers, event extensions, binding
@@ -91,7 +92,7 @@ keys hash normalized checklist text rather than relying on index position, so
 an edited execution plan (ExecPlan) cannot silently make "work item 3" refer to
 something else.
 
-Reserved-field rules, restated from ADR 003 so consumers do not reintroduce
+Reserved-field rules, restated from ADR 0003 so consumers do not reintroduce
 them:
 
 - `gen_ai.agent.id` must not carry `agentInvocationId`; the convention
@@ -114,7 +115,7 @@ least one surface.
 - OTel attributes: dotted lower snake within the `leynos.*` namespace
   (`leynos.agent.invocation.id`). This follows OTel attribute conventions.
 - Binding rows: snake_case (`binding_type`). They mirror the SQLite columns
-  in ADR 003.
+  in ADR 0003.
 
 The same logical identifier therefore appears under three spellings —
 `agentInvocationId` in the envelope, `agent_invocation_id` in an event, and
@@ -235,7 +236,7 @@ migrations; a workflow must not open the SQLite store directly.
 - `sink.endpoint` is an OTLP collector uniform resource identifier (URI) with
   the scheme `otlp+http://` or `otlp+https://`. A filesystem path or a
   `file://`, `sqlite:`, or bare `http://` value is invalid. The `otlp+unix://`
-  scheme is reserved for a future transport (ADR 003 outstanding decision) and
+  scheme is reserved for a future transport (ADR 0003 outstanding decision) and
   is not valid in version 1. The endpoint must not carry URI userinfo: a value
   such as `otlp+http://user:password@host:4318` is rejected, because it would
   otherwise smuggle a credential past the rule below. The endpoint must also
@@ -409,7 +410,8 @@ unsupported envelope version without consulting the file name.
 
 ## 14. References _(informative)_
 
-- `docs/adr-003-opentelemetry-observability.md`: the governing decision.
+- `docs/adrs/adr-0003-correlation-first-opentelemetry-observability-for-workshop-runs.md`:
+  the governing decision.
 - `docs/roadmap.md` phase 5: the delivery sequence this contract unblocks.
 - `docs/execplans/5-1-1-otel-support.md`: the plan that produced this
   contract.

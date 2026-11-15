@@ -40,7 +40,7 @@ describe('agent schema contracts', () => {
     }
   })
 
-  test('assessment classification enum matches the ADR 002 contract', () => {
+  test('assessment classification enum matches the ADR 0002 contract', () => {
     expect(ASSESSMENT_SCHEMA.properties.classification.enum).toEqual(ASSESSMENT_CLASSIFICATIONS)
     expect(ASSESSMENT_CLASSIFICATIONS).toEqual([
       'adopt-complete',

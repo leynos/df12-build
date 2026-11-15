@@ -363,3 +363,27 @@ replaced that approach with a correlation-first gateway, and task 5.1.1 is now
 the contract-definition task that precedes collector, ODW, and Dakar work. All
 sections were rewritten to match; no implementation had started, so no code is
 affected.
+
+## Post-completion addendum
+
+2026-11-12: ADR identifiers and filenames were normalized after this plan was
+completed. The historical entries above retain the identifiers and paths
+current during implementation. The current mappings are:
+
+- ADR 001 (`docs/adr-001-adopt-odw-sidecar-launches.md`) is now
+  [ADR 0001][adr-current-0001].
+- ADR 002 (`docs/adr-002-assess-partial-task-branches.md`) is now
+  [ADR 0002][adr-current-0002].
+- ADR 003 (`docs/adr-003-opentelemetry-observability.md`) is now
+  [ADR 0003][adr-current-0003].
+
+The [documentation style guide][adr-naming-guide] records the current naming
+scheme.
+
+[adr-current-0001]:
+  ../adrs/adr-0001-adopt-odw-sidecar-launches-for-codex-oriented-df12-build-runs.md
+[adr-current-0002]:
+  ../adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md
+[adr-current-0003]:
+  ../adrs/adr-0003-correlation-first-opentelemetry-observability-for-workshop-runs.md
+[adr-naming-guide]: ../documentation-style-guide.md

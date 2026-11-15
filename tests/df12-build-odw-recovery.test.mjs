@@ -1,5 +1,5 @@
 // Tests for fresh-run recovery (failure-resume phases 1-2): configuration,
-// candidate discovery, ADR 002 assessment reuse, the resumeMode decision
+// candidate discovery, ADR 0002 assessment reuse, the resumeMode decision
 // table (including an exhaustive domain sweep), review-mode resume wiring,
 // and the assess-only no-mutation guarantee, against throwaway git fixtures
 // from tests/fixtures/recovery-repo.mjs.
@@ -305,7 +305,7 @@ function sampleCandidate(repo) {
   }
 }
 
-test('recovery and failure assessments share one ADR 002 prompt contract', async () => {
+test('recovery and failure assessments share one ADR 0002 prompt contract', async () => {
   const surface = await loadRecoverySurface({})
   const task = { id: '1.2.3', title: 'Implement the parser state machine.' }
   const evidence = { taskId: '1.2.3' }
@@ -322,9 +322,9 @@ test('recovery and failure assessments share one ADR 002 prompt contract', async
   )
 
   const contractOf = (prompt) => {
-    const start = prompt.indexOf('Use ADR 002')
+    const start = prompt.indexOf('Use ADR 0002')
     const end = prompt.indexOf('Host-collected git evidence:')
-    assert.ok(start !== -1 && end > start, 'prompt should carry the ADR 002 contract block')
+    assert.ok(start !== -1 && end > start, 'prompt should carry the ADR 0002 contract block')
     return prompt.slice(start, end)
   }
   assert.equal(contractOf(recoveryPrompt), contractOf(failurePrompt))
@@ -345,7 +345,7 @@ test('recovered candidates reuse the assessment evidence collector and schema', 
   const outcome = await surface.assessRecoveryCandidate(candidate)
 
   assert.equal(calls.length, 1)
-  assert.equal(calls[0].opts.schema, surface.ASSESSMENT_SCHEMA, 'recovery must reuse the ADR 002 schema object')
+  assert.equal(calls[0].opts.schema, surface.ASSESSMENT_SCHEMA, 'recovery must reuse the ADR 0002 schema object')
   assert.equal(calls[0].opts.label, 'recover-assess:1.2.3')
   assert.equal(calls[0].opts.phase, 'Recovery')
   assert.equal(outcome.assessmentError, '')

@@ -1,5 +1,5 @@
 /**
- * ADR 002 partial-branch assessment: deferred-review classification, the
+ * ADR 0002 partial-branch assessment: deferred-review classification, the
  * manual-merge handoff guard, the assessment gate, and the report-only
  * assessment agents. Assessment output NEVER merges, pushes, or ticks the
  * roadmap; classification is advice for the operator, and host-collected
@@ -24,7 +24,7 @@ import type { RecoveryCandidate } from './types.ts'
 // States in which the assessed branch is KEPT (not fully adopted), so any
 // untracked task-scoped ExecPlan/review artefact is worth durably committing
 // onto the branch before later cleanup:
-//   - `adopt-partial`  — ADR 002 preserves work "only through Git state", which
+//   - `adopt-partial`  — ADR 0002 preserves work "only through Git state", which
 //     is exactly a branch-local commit;
 //   - `continue-manual` — hands the branch to an operator who needs the planning
 //     artefacts intact;
@@ -134,7 +134,7 @@ export interface ImplementationReport {
   openIssues?: readonly string[]
 }
 
-/** A task result eligible for ADR 002 assessment: its status, stage, detail, and open issues. */
+/** A task result eligible for ADR 0002 assessment: its status, stage, detail, and open issues. */
 export interface AssessableResult extends Record<string, unknown> {
   /** Terminal task status; only 'failed'/'halted' branches are assessment candidates. */
   status?: string
@@ -416,7 +416,7 @@ function assessmentModelTier(evidence: Pick<PartialAssessmentEvidence, 'changedF
 }
 
 /**
- * Bind the ADR 002 assessment run wiring once (preamble, adapter routing,
+ * Bind the ADR 0002 assessment run wiring once (preamble, adapter routing,
  * escalation model, retry, enable switch) and return the assessment surface:
  * prompt builders, the recovery-candidate assessor, the assessment-eligibility
  * gate, and `attachAssessment`, which also drives artefact salvage. Assessment
@@ -426,7 +426,7 @@ function assessmentModelTier(evidence: Pick<PartialAssessmentEvidence, 'changedF
  * @returns `{ assessmentPrompt, recoveryAssessmentPrompt, assessRecoveryCandidate, shouldAssessFailure, attachAssessment }`.
  */
 export function makeAssessment({ preamble, assessPartialBranches, assessmentAgentOptions, assessmentEscalationModel, withInfraRetry }: AssessmentDeps) {
-  // Shared ADR 002 assessment prompt body — the classification contract is ONE
+  // Shared ADR 0002 assessment prompt body — the classification contract is ONE
   // contract: in-run failure assessment and fresh-run recovery assessment feed
   // the same schema, enum, and evidence expectations. Only the task header and
   // the context block differ between the two entry points.
@@ -443,7 +443,7 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
       '',
       'This is a READ-ONLY recovery assessment. Do not edit files, commit, stash, merge, cherry-pick, push, delete worktrees, mark roadmap checkboxes, or run any command that mutates repository state. Do not resume or rely on the failed agent transcript. Inspect only durable state that exists on disk or in Git.',
       '',
-      'Use ADR 002 (`docs/adr-002-assess-partial-task-branches.md`) as the classification contract. Return exactly one classification:',
+      'Use ADR 0002 (`docs/adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md`) as the classification contract if that file exists in the worktree. If it is absent, apply the classification rules below. Return exactly one classification:',
       '- `adopt-complete`: the branch satisfies the roadmap task success criterion, has an up-to-date ExecPlan, required gates are green, and can proceed through the ordinary review and integration path.',
       '- `adopt-partial`: the branch contains a coherent useful slice, but the roadmap task must remain unchecked and the work should be preserved only through Git state.',
       '- `continue-manual`: the branch is promising, but scope, roadmap state, validation, or review evidence needs operator judgement before any merge.',
@@ -532,7 +532,7 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     return { ...assessment, assessmentTier: tier }
   }
 
-  // Route a discovered candidate through the SAME ADR 002 assessment contract as
+  // Route a discovered candidate through the SAME ADR 0002 assessment contract as
   // in-run failures: same evidence collector, same schema, same adapter routing.
   async function assessRecoveryCandidate(candidate: RecoveryCandidate) {
     const task = { id: candidate.taskId, title: candidate.taskTitle }
@@ -676,7 +676,7 @@ export function makeAssessment({ preamble, assessPartialBranches, assessmentAgen
     assessmentPrompt,
     /** Build the fresh-run recovery-assessment prompt (transcript unavailable by design). */
     recoveryAssessmentPrompt,
-    /** Assess a discovered recovery candidate through the ADR 002 contract. */
+    /** Assess a discovered recovery candidate through the ADR 0002 contract. */
     assessRecoveryCandidate,
     /** The eligibility gate: whether a failed result's branch reaches model assessment. */
     shouldAssessFailure,

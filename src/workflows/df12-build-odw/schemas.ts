@@ -1,7 +1,7 @@
 /**
  * JSON Schema contracts for every structured agent hand-off in the
  * df12-build-odw workflow: plan, design verdict, implementation, dual review,
- * fix rounds, integration, post-merge audit, and the ADR 002 partial-branch
+ * fix rounds, integration, post-merge audit, and the ADR 0002 partial-branch
  * assessment. Downstream JavaScript dereferences `required` fields without
  * optional chaining, and iterates keys assuming `additionalProperties` is
  * false, so treat these as contracts, not documentation;
@@ -204,7 +204,7 @@ export const AUDIT_SCHEMA = {
 }
 
 /**
- * The enum of allowed classification strings for an ADR 002 partial-branch
+ * The enum of allowed classification strings for an ADR 0002 partial-branch
  * assessment: `adopt-complete`, `adopt-partial`, `continue-manual`, and
  * `discard`. Referenced by `ASSESSMENT_SCHEMA`'s `classification` property,
  * so treat this as a contract, not documentation.
@@ -218,7 +218,7 @@ export const ASSESSMENT_CLASSIFICATIONS = [
 ]
 
 /**
- * The ADR 002 partial-branch assessment: the resume `classification`,
+ * The ADR 0002 partial-branch assessment: the resume `classification`,
  * branch/worktree identity, and two carry-forward channels — the
  * `missingEvidence` BLOCKING channel (genuinely missing validation/review
  * evidence that must prevent an adopt-complete resume) and the
