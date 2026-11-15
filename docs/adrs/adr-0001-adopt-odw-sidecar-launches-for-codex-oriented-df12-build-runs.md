@@ -106,5 +106,5 @@ target-project state.
   `docs/adrs/adr-0001-adopt-odw-sidecar-launches-for-codex-oriented-df12-build-runs.md`.
   The original decision was accepted on 2026-06-28; its decision text is
   unchanged.
-  [ADR-0005](adr-0005-adopt-documentation-style-guide-for-adr-and-rfc-naming.md)
+  [ADR-0005](adr-0005-adopt-the-documentation-style-guide-for-adr-and-rfc-naming.md)
   records this naming-policy migration.

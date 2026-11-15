@@ -240,5 +240,5 @@ target-project state.
   `docs/adrs/adr-0002-assess-partial-task-branches-before-fresh-restart.md`.
   The original decision was accepted on 2026-06-30; its decision text is
   unchanged.
-  [ADR-0005](adr-0005-adopt-documentation-style-guide-for-adr-and-rfc-naming.md)
+  [ADR-0005](adr-0005-adopt-the-documentation-style-guide-for-adr-and-rfc-naming.md)
   records this naming-policy migration.

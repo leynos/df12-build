@@ -281,5 +281,5 @@ the decision above.
   `docs/adrs/adr-0003-correlation-first-opentelemetry-observability-for-workshop-runs.md`.
   The original decision was accepted on 2026-07-18; its decision text is
   unchanged.
-  [ADR-0005](adr-0005-adopt-documentation-style-guide-for-adr-and-rfc-naming.md)
+  [ADR-0005](adr-0005-adopt-the-documentation-style-guide-for-adr-and-rfc-naming.md)
   records this naming-policy migration.

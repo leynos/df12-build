@@ -97,5 +97,5 @@ type assertions.
   `docs/adr-004-linting-strategy.md` to
   `docs/adrs/adr-0004-oxlint-rules-for-odw-source.md`. The original decision
   was accepted on 2026-10-27; its decision text is unchanged.
-  [ADR-0005](adr-0005-adopt-documentation-style-guide-for-adr-and-rfc-naming.md)
+  [ADR-0005](adr-0005-adopt-the-documentation-style-guide-for-adr-and-rfc-naming.md)
   records this naming-policy migration.
