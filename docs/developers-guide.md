@@ -651,6 +651,10 @@ configuration by hand.
 `typos-config-builder` release the gate runs (currently `v0.1.3`). Raise it
 together with the regenerated `typos.toml`, never on its own.
 
+The builder requires Python 3.14, so the `Makefile` runs it with
+`uv tool run --python 3.14`. `uv` downloads that interpreter when it is
+missing; environments that forbid downloads must provide Python 3.14.
+
 Run the module suites (bun) or the whole-workflow suites (node, against a fresh
 artefact) separately when iterating:
 
